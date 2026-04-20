@@ -1,0 +1,16 @@
+[project]
+name = "dlt-saga-example"
+version = "0.1.0"
+description = "Example dlt-saga consumer project"
+requires-python = ">=3.11"
+dependencies = ["dlt-saga"]
+
+[tool.uv.sources]
+dlt-saga = { path = ".." }
+
+[tool.setuptools.packages.find]
+include = []
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

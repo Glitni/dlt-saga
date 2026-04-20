@@ -1,0 +1,9 @@
+# saga Project Configuration
+
+config_source:
+  type: file
+  path: configs
+
+pipelines:
+  filesystem:
+    adapter: dlt_saga.filesystem

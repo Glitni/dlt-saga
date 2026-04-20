@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened            # when first opened
+      - synchronize       # when commits are pushed
+      - reopened          # when reopened (if closed)
+      - ready_for_review  # when moved out of draft mode
+
+jobs:
+  lint:
+    name: Lint & type check
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Check linting
+        run: uv run ruff check .
+
+      - name: Cache mypy
+        uses: actions/cache@v5
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('**/*.py') }}
+          restore-keys: |
+            mypy-${{ runner.os }}-
+
+      - name: Type check
+        run: uv run mypy dlt_saga/
+
+  test:
+    name: Test / py${{ matrix.python-version }} / dlt-${{ matrix.dlt-version }}
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+        dlt-version: ["latest", "min"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Pin minimum dlt version
+        if: matrix.dlt-version == 'min'
+        run: uv pip install --force-reinstall "dlt[duckdb,filesystem,parquet,sftp]==1.18.0"
+
+      - name: Run unit tests
+        run: uv run pytest -m unit --tb=short
+
+      - name: Run integration tests
+        run: uv run pytest -m integration --tb=short
+
+      - name: Upload coverage report
+        if: matrix.python-version == '3.12' && matrix.dlt-version == 'latest'
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          files: coverage.xml

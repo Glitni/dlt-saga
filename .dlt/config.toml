@@ -1,0 +1,13 @@
+# dlt configuration overrides
+#
+# Performance defaults (normalize workers, load workers, etc.) are shipped by
+# the dlt-saga package in dlt_saga/defaults.py. You only need entries here to
+# override those defaults for local development.
+#
+# Priority order (highest wins):
+#   1. Environment variables (e.g. NORMALIZE__WORKERS=8)
+#   2. This file (.dlt/config.toml)
+#   3. Package defaults (dlt_saga/defaults.py)
+#
+# Provider secrets are configured in saga_project.yml.
+# Destination settings (project, location) come from profiles.yml.

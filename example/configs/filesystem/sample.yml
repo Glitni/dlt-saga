@@ -1,0 +1,7 @@
+tags: [daily]
+write_disposition: append
+
+filesystem_type: file
+bucket_name: data
+file_glob: "*.csv"
+file_type: csv

@@ -1,0 +1,68 @@
+name: Plugin submission
+description: Request to list a community plugin in the README
+labels: ["community-plugin"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to request that your published dlt-saga plugin be listed in the README.
+        Please make sure your plugin is on PyPI and has a README before submitting.
+
+  - type: input
+    id: name
+    attributes:
+      label: Plugin name
+      placeholder: "e.g. dlt-saga-snowflake"
+    validations:
+      required: true
+
+  - type: input
+    id: pypi
+    attributes:
+      label: PyPI URL
+      placeholder: "https://pypi.org/project/dlt-saga-snowflake/"
+    validations:
+      required: true
+
+  - type: input
+    id: repo
+    attributes:
+      label: Repository URL
+      placeholder: "https://github.com/org/dlt-saga-snowflake"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Plugin type
+      options:
+        - Pipeline source (new ingestion source)
+        - Destination
+        - Config source
+        - Hooks / lifecycle
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: One-sentence description
+      description: What does the plugin do?
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: Published on PyPI and installable with pip install
+          required: true
+        - label: Has a README with usage instructions
+          required: true
+        - label: Has tests
+          required: false
+        - label: CI is configured
+          required: false

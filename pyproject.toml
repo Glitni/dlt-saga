@@ -1,0 +1,146 @@
+[project]
+name = "dlt-saga"
+version = "0.1.0"
+description = "Reusable dlt ingestion framework"
+authors = [
+    {name="Sindre Grindheim", email="sindre.grindheim@glitni.no"}
+]
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11.0,<3.13.0"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+keywords = [
+    "dlt",
+    "data-pipeline",
+    "etl",
+    "scd2",
+    "historization",
+    "data-engineering",
+    "bigquery",
+    "duckdb",
+    "pipeline",
+    "config-driven",
+]
+dependencies = [
+    # Core framework
+    "dlt[duckdb,filesystem,parquet,sftp]>=1.18.0,<2.0.0",
+    "pydantic>=2.11.7",
+    "pyyaml>=6.0.2",
+    "typer>=0.16.0",
+    # Source dependencies (lightweight, commonly needed)
+    "connectorx>=0.4.4",
+    "pandas>=2.3.1",
+    "polars>=1.37.1",
+    "pyarrow>=21.0.0",
+]
+
+[project.optional-dependencies]
+gcp = [
+    "dlt[bigquery]>=1.18.0,<2.0.0",
+    "google-api-python-client>=2.177.0",
+    "google-auth-oauthlib>=1.2.2",
+    "google-cloud-bigquery-storage>=2.32.0",
+    "google-cloud-secret-manager>=2.24.0",
+    "google-cloud-storage>=3.2.0",
+    "google-cloud-run>=0.12.0",
+    # gcsfs>=2026.3 is safe — normalize pool_type="thread" in defaults.py avoids fork()
+    "gcsfs>=2026.1.0",
+]
+databricks = [
+    # Databricks SQL Warehouse via dlt (pulls in databricks-sdk transitively)
+    "dlt[databricks]>=1.18.0,<2.0.0",
+]
+azure = [
+    # Azure Blob Storage / Azure Data Lake Gen2 filesystem source
+    "adlfs>=2024.7.0",
+    # Azure Key Vault secret provider (azure-identity also satisfies adlfs auth)
+    "azure-identity>=1.21.0",
+    "azure-keyvault-secrets>=4.9.0",
+    # SharePoint pipeline — HTTP client and Excel parsing
+    "requests>=2.32.0",
+    "openpyxl>=3.1.0",
+]
+dev = [
+    "dlt-saga[gcp,databricks,azure]",
+    "ruff>=0.14.14",
+    "mypy>=1.19.1",
+    "types-PyYAML>=6.0.0",
+    "types-requests>=2.31.0",
+    "pre-commit>=4.3.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Glitni/dlt-saga"
+Documentation = "https://github.com/Glitni/dlt-saga/tree/main/docs"
+Source = "https://github.com/Glitni/dlt-saga"
+Tracker = "https://github.com/Glitni/dlt-saga/issues"
+Changelog = "https://github.com/Glitni/dlt-saga/blob/main/CHANGELOG.md"
+
+[project.scripts]
+saga = "dlt_saga.cli:main_saga"
+
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["dlt_saga*"]
+
+[tool.setuptools.package-data]
+dlt_saga = ["schemas/*.json", "report/*.css", "report/*.js", "report/*.svg"]
+
+[tool.ruff]
+line-length = 88
+lint.select = ["E", "F", "W", "C90"]
+lint.ignore = ["E501"]
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = false
+ignore_missing_imports = true
+strict_optional = false
+
+# Exclude files with complex third-party library type issues
+# TODO: Fix these gradually
+[[tool.mypy.overrides]]
+module = [
+    "dlt_saga.pipelines.database.pipeline",  # dlt.resource overload typing issue (1 error)
+]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--cov=dlt_saga",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-report=xml"
+]
+markers = [
+    "unit: Unit tests that don't require external dependencies",
+    "integration: Integration tests that may require external services"
+]

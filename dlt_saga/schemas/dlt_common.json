@@ -1,0 +1,259 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Glitni/dlt-saga/schemas/dlt_common.json",
+  "title": "DLT Common Configuration Definitions",
+  "description": "Shared definitions for dlt pipeline configurations",
+
+  "$defs": {
+    "string_or_array_of_strings": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+
+    "access_list": {
+      "type": "array",
+      "description": "List of BigQuery access entries (group:email@domain.com, user:email@domain.com or serviceAccount:email@domain.com)",
+      "items": {
+        "type": "string",
+        "pattern": "^(group|user|serviceAccount):.+@.+\\..+$"
+      }
+    },
+
+    "dataset_access_list": {
+      "type": "array",
+      "description": "List of BigQuery dataset access entries. Supports IAM entries (ROLE:entity_type:email), authorized datasets (AUTHORIZED_DATASET:project.dataset), and authorized views (AUTHORIZED_VIEW:project.dataset.view)",
+      "items": {
+        "type": "string",
+        "pattern": "^((OWNER|WRITER|READER):(serviceAccount|user|group):.+@.+\\..+|(AUTHORIZED_DATASET|AUTHORIZED_VIEW):.+\\..+)$"
+      }
+    },
+
+    "write_disposition": {
+      "type": "string",
+      "enum": ["replace", "append", "merge"],
+      "description": "How to write data to the destination table"
+    },
+
+    "merge_strategy": {
+      "type": "string",
+      "enum": ["delete-insert", "scd2", "upsert"],
+      "description": "Strategy to use when write_disposition is 'merge'"
+    },
+
+    "replace_strategy": {
+      "type": "string",
+      "enum": ["truncate-and-insert", "insert-from-staging", "staging-optimized"],
+      "description": "Strategy to use when write_disposition is 'replace'"
+    },
+
+    "dedup_sort": {
+      "type": "string",
+      "enum": ["asc", "desc"],
+      "description": "Sort order for deduplication (asc = oldest wins, desc = newest wins)"
+    },
+
+    "column_hint": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Column name"
+        },
+        "data_type": {
+          "type": "string",
+          "enum": ["text", "bigint", "double", "bool", "timestamp", "date", "time", "decimal", "binary", "complex", "wei"],
+          "description": "Data type (text, bigint, double, bool, timestamp, date, time, decimal, binary, complex, wei)"
+        },
+        "nullable": {
+          "type": "boolean",
+          "description": "Whether column can be null"
+        },
+        "unique": {
+          "type": "boolean",
+          "description": "Whether column values must be unique"
+        },
+        "primary_key": {
+          "type": "boolean",
+          "description": "Whether column is part of primary key"
+        },
+        "precision": {
+          "type": "integer",
+          "description": "Precision for decimal types"
+        },
+        "scale": {
+          "type": "integer",
+          "description": "Scale for decimal types"
+        },
+        "default": {
+          "description": "Default value to use when column is NULL or empty (for handling SCD2 merge key nulls)",
+          "oneOf": [
+            {"type": "string"},
+            {"type": "number"},
+            {"type": "boolean"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+
+    "target_config": {
+      "type": "object",
+      "description": "Common configuration for data loading and BigQuery destination",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether this pipeline is enabled",
+          "default": true
+        },
+
+        "tags": {
+          "$ref": "#/$defs/string_or_array_of_strings",
+          "description": "Tags for filtering pipelines (e.g., daily, hourly, critical)"
+        },
+
+        "task_group": {
+          "type": "string",
+          "description": "Optional group name for pipelines that should run together in the same Cloud Run task (e.g., 'livewrapped' to share authentication)"
+        },
+
+        "adapter": {
+          "type": "string",
+          "description": "Pipeline adapter to use. Format: <namespace>.<path> (e.g., 'dlt_saga.api.genesyscloud', 'local.api.my_custom'). If omitted, falls back to folder-structure-based resolution."
+        },
+
+        "access": {
+          "$ref": "#/$defs/access_list",
+          "description": "BigQuery access control list (only applied in production)"
+        },
+
+        "table_format": {
+          "type": "string",
+          "enum": ["native", "iceberg"],
+          "description": "Table format for BigQuery: 'native' for standard BigQuery tables, 'iceberg' for BigLake Iceberg tables",
+          "default": "native"
+        },
+
+        "gcp_project_id": {
+          "type": "string",
+          "description": "GCP project ID for BigQuery destination (defaults to config.toml or env var)"
+        },
+
+        "dataset_name": {
+          "type": "string",
+          "description": "BigQuery dataset name (defaults to config.toml or env var)",
+          "pattern": "^[a-zA-Z0-9_]+$"
+        },
+
+        "location": {
+          "type": "string",
+          "description": "BigQuery location/region (defaults to EU)",
+          "default": "EU"
+        },
+
+        "write_disposition": {
+          "$ref": "#/$defs/write_disposition",
+          "default": "replace"
+        },
+
+        "replace_strategy": {
+          "$ref": "#/$defs/replace_strategy",
+          "description": "Strategy when using write_disposition: replace"
+        },
+
+        "merge_strategy": {
+          "$ref": "#/$defs/merge_strategy",
+          "description": "Strategy when using write_disposition: merge"
+        },
+
+        "primary_key": {
+          "$ref": "#/$defs/string_or_array_of_strings",
+          "description": "Primary key column(s) for merge operations"
+        },
+
+        "merge_key": {
+          "$ref": "#/$defs/string_or_array_of_strings",
+          "description": "Merge key column(s) (alternative to primary_key)"
+        },
+
+        "valid_from_column": {
+          "type": "string",
+          "description": "Column name for SCD2 valid_from timestamp",
+          "default": "_dlt_valid_from"
+        },
+
+        "valid_to_column": {
+          "type": "string",
+          "description": "Column name for SCD2 valid_to timestamp",
+          "default": "_dlt_valid_to"
+        },
+
+        "active_record_timestamp": {
+          "type": "string",
+          "description": "Timestamp to use for active records in SCD2"
+        },
+
+        "boundary_timestamp": {
+          "type": "string",
+          "description": "Boundary timestamp for SCD2 merge operations"
+        },
+
+        "row_version_column_name": {
+          "type": "string",
+          "description": "Column name for row version tracking"
+        },
+
+        "deduplicate": {
+          "type": "boolean",
+          "description": "Whether to deduplicate rows based on primary_key",
+          "default": true
+        },
+
+        "dedup_sort": {
+          "$ref": "#/$defs/dedup_sort",
+          "description": "Sort order for deduplication when deduplicate is true"
+        },
+
+        "dedup_sort_column": {
+          "type": "string",
+          "description": "Column to use for deduplication sorting"
+        },
+
+        "hard_delete_column": {
+          "type": "string",
+          "description": "Column indicating rows should be hard deleted"
+        },
+
+        "partition_column": {
+          "type": "string",
+          "description": "Column to partition BigQuery table by (must be DATE or TIMESTAMP)"
+        },
+
+        "cluster_columns": {
+          "type": "array",
+          "description": "Columns to cluster BigQuery table by (max 4)",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4
+        },
+
+        "columns": {
+          "type": "object",
+          "description": "Column type hints for explicit schema definition. Keys can be either the original source column name (e.g., 'Oppty_TargetAmount') or the dlt-normalized snake_case name (e.g., 'oppty_target_amount'). dlt normalizes identifiers by splitting CamelCase on word boundaries: 'TargetAmount' becomes 'target_amount', not 'targetamount'. Using a key that matches neither form silently creates a ghost column in the destination with all NULL values.",
+          "additionalProperties": {
+            "$ref": "#/$defs/column_hint"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+[tools]
+"git-cliff" = "2.12.0"
+
+[tasks.release]
+description = "Prepare a release PR. Usage: mise run release X.Y.Z"
+run = "uv run python scripts/release.py"
+
+[tasks.tag]
+description = "Push the release tag after the release PR is merged. Usage: mise run tag X.Y.Z"
+run = "uv run python scripts/tag.py"

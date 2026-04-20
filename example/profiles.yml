@@ -1,0 +1,8 @@
+default:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      database_path: local.duckdb
+      schema: dlt_dev
+      environment: dev
