@@ -28,43 +28,7 @@ config layer you are building.
 
 ## Architecture
 
-```mermaid
-graph LR
-    subgraph Sources
-        API[REST APIs]
-        DB[Databases]
-        FS[Filesystem / GCS]
-        GS[Google Sheets]
-        SP[SharePoint]
-    end
-
-    subgraph "dlt-saga"
-        direction TB
-        CFG[Pipeline Configs<br/><i>configs/*.yml</i>]
-        INGEST[Ingest<br/><i>pipelines/*</i>]
-        HIST[Historize<br/><i>historize/*</i>]
-    end
-
-    subgraph Destinations
-        BQ[BigQuery]
-        DBX[Databricks]
-        DDB[DuckDB<br/><i>local dev</i>]
-    end
-
-    API --> INGEST
-    DB --> INGEST
-    FS --> INGEST
-    GS --> INGEST
-    SP --> INGEST
-    CFG -.-> INGEST
-    CFG -.-> HIST
-    INGEST --> BQ
-    INGEST --> DBX
-    INGEST --> DDB
-    INGEST -->|snapshot tables| HIST
-    HIST -->|SCD2 tables| BQ
-    HIST -->|SCD2 tables| DBX
-    HIST -->|SCD2 tables| DDB
+![Architecture](docs/images/architecture.svg)
 ```
 
 ## Quick Start
@@ -96,21 +60,7 @@ saga ingest --select "example__sample"
 All commands are subcommands under the `saga` entry point and share common options:
 `--select`, `--verbose`, `--profile`, `--target`.
 
-```mermaid
-graph TD
-    SAGA[saga]
-    SAGA --> LIST[list]
-    SAGA --> INGEST[ingest]
-    SAGA --> HISTORIZE[historize]
-    SAGA --> RUN[run]
-    SAGA --> UA[update-access]
-
-    LIST -.- L1["Show matching pipelines"]
-    INGEST -.- I1["Extract & load data"]
-    HISTORIZE -.- H1["Build SCD2 tables from snapshots"]
-    RUN -.- R1["Ingest → then historize"]
-    UA -.- U1["Update BigQuery IAM policies"]
-```
+![CLI commands](docs/images/cli-commands.svg)
 
 ### Selectors (dbt-style)
 
@@ -315,19 +265,7 @@ grant_type=client_credentials&client_id=<app-id>@<tenant-id>&client_secret=<secr
 
 The `write_disposition` field controls what operations are enabled for a pipeline:
 
-```mermaid
-graph LR
-    subgraph "write_disposition values"
-        A["append / merge / replace"]
-        B["append+historize"]
-        C["historize"]
-    end
-
-    A -->|ingest only| I[Ingest]
-    B -->|ingest + historize| I
-    B -->|ingest + historize| H[Historize]
-    C -->|historize only| H
-```
+![Write disposition](docs/images/write-disposition.svg)
 
 | Value | Ingest | Historize | Use Case |
 |-------|--------|-----------|----------|
