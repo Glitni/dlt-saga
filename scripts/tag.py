@@ -22,7 +22,7 @@ def main() -> None:
         print("Error: version must be X.Y.Z (e.g. 0.2.5)")
         sys.exit(1)
 
-    run("git", "checkout", "master")
+    run("git", "checkout", "main")
     run("git", "pull")
 
     pyproject = open("pyproject.toml").read()
@@ -38,9 +38,7 @@ def main() -> None:
     run("git", "tag", tag)
     run("git", "push", "origin", tag)
 
-    print(
-        f"Pushed {tag} — CI will publish to Artifact Registry and create the GitHub Release."
-    )
+    print(f"Pushed {tag} — CI will publish to PyPI and create the GitHub Release.")
 
 
 if __name__ == "__main__":

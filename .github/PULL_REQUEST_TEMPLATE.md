@@ -26,5 +26,4 @@ Closes #
 
 - [ ] Tests added or updated for changed behaviour
 - [ ] Docs updated (if user-facing behaviour changed)
-- [ ] `CHANGELOG.md` updated under `## Unreleased`
 - [ ] Breaking change documented above (if applicable)
