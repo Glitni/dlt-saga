@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from dataclasses import fields
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 from urllib.parse import urljoin
 
 if TYPE_CHECKING:
@@ -478,6 +478,7 @@ class BaseApiPipeline(BasePipeline):
         Returns:
             List of tuples containing (dlt.resource, description)
         """
+        data: Iterable[Any]
         if self.api_config.pagination:
             data = self._fetch_all_pages()
         else:
