@@ -32,7 +32,7 @@ def main() -> None:
         print("Error: uncommitted changes — commit or stash before releasing")
         sys.exit(1)
 
-    run("git", "checkout", "master")
+    run("git", "checkout", "main")
     run("git", "pull")
 
     print(f"--- Changelog preview for {tag} ---")
@@ -70,7 +70,7 @@ def main() -> None:
         "--body",
         f"Release preparation for {tag}. Merge when ready, then run `mise run tag {version}` to trigger the release.",
         "--base",
-        "master",
+        "main",
     )
 
     print(f"\nPR created. After it is merged, run:\n  mise run tag {version}")
