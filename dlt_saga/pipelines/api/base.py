@@ -4,7 +4,17 @@ import logging
 import os
 import time
 from dataclasses import fields
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 from urllib.parse import urljoin
 
 if TYPE_CHECKING:
