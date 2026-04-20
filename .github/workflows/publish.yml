@@ -1,124 +1,124 @@
-# name: Release
+name: Release
 
-# # Triggers:
-# #   - Push a version tag (v1.2.3) → publish to PyPI + create GitHub Release
-# #   - Push to a release/** branch  → publish to TestPyPI (smoke-test the build)
-# #
-# # Setup required (one-time, in GitHub UI):
-# #   1. PyPI Trusted Publishing:
-# #        PyPI → dlt-saga → Publishing → Add publisher
-# #        GitHub owner: Glitni, repo: dlt-saga, workflow: publish.yml, env: pypi
-# #   2. TestPyPI Trusted Publishing (same steps, env: testpypi)
-# #   3. Add GitHub Environments "pypi" and "testpypi" with appropriate protection rules
+# Triggers:
+#   - Push a version tag (v1.2.3) → publish to PyPI + create GitHub Release
+#   - Push to a release/** branch  → publish to TestPyPI (smoke-test the build)
+#
+# Setup required (one-time, in GitHub UI):
+#   1. PyPI Trusted Publishing:
+#        PyPI → dlt-saga → Publishing → Add publisher
+#        GitHub owner: Glitni, repo: dlt-saga, workflow: publish.yml, env: pypi
+#   2. TestPyPI Trusted Publishing (same steps, env: testpypi)
+#   3. Add GitHub Environments "pypi" and "testpypi" with appropriate protection rules
 
-# on:
-#   push:
-#     tags:
-#       - 'v[0-9]+.[0-9]+.[0-9]+'
-#     branches:
-#       - 'release/**'
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+    branches:
+      - 'release/**'
 
-# permissions:
-#   contents: write  # required to create GitHub Releases
-#   id-token: write  # required for PyPI Trusted Publishing
+permissions:
+  contents: write  # required to create GitHub Releases
+  id-token: write  # required for PyPI Trusted Publishing
 
-# jobs:
-#   build:
-#     name: Build distribution
-#     runs-on: ubuntu-latest
-#     outputs:
-#       version: ${{ steps.version.outputs.version }}
-#     steps:
-#       - uses: actions/checkout@v6
-#         with:
-#           fetch-depth: 0  # git-cliff needs full history to find the previous tag
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # git-cliff needs full history to find the previous tag
 
-#       - name: Resolve version
-#         id: version
-#         run: |
-#           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-#             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-#           else
-#             VERSION=$(python3 -c "import re; m=re.search(r'^version = \"(.+)\"', open('pyproject.toml').read(), re.M); print(m.group(1))")
-#             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-#           fi
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(python3 -c "import re; m=re.search(r'^version = \"(.+)\"', open('pyproject.toml').read(), re.M); print(m.group(1))")
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
 
-#       - name: Validate tag matches pyproject.toml
-#         if: github.ref_type == 'tag'
-#         run: |
-#           TAG="${GITHUB_REF_NAME}"
-#           VERSION="${TAG#v}"
-#           PYPROJECT_VERSION=$(python3 -c "import re; m=re.search(r'^version = \"(.+)\"', open('pyproject.toml').read(), re.M); print(m.group(1))")
-#           if [ "$VERSION" != "$PYPROJECT_VERSION" ]; then
-#             echo "Tag $TAG does not match pyproject.toml version $PYPROJECT_VERSION — update pyproject.toml before tagging"
-#             exit 1
-#           fi
+      - name: Validate tag matches pyproject.toml
+        if: github.ref_type == 'tag'
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          PYPROJECT_VERSION=$(python3 -c "import re; m=re.search(r'^version = \"(.+)\"', open('pyproject.toml').read(), re.M); print(m.group(1))")
+          if [ "$VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "Tag $TAG does not match pyproject.toml version $PYPROJECT_VERSION — update pyproject.toml before tagging"
+            exit 1
+          fi
 
-#       - name: Install uv
-#         uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
-#         with:
-#           enable-cache: true
+      - name: Install uv
+        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          enable-cache: true
 
-#       - name: Build package
-#         run: uv build
+      - name: Build package
+        run: uv build
 
-#       - name: Upload distribution artifacts
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: dist
-#           path: dist/
-#           retention-days: 7
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
 
-#   publish-testpypi:
-#     name: Publish to TestPyPI
-#     needs: build
-#     if: github.ref_type == 'branch'
-#     runs-on: ubuntu-latest
-#     environment: testpypi
-#     steps:
-#       - name: Download distribution artifacts
-#         uses: actions/download-artifact@v4
-#         with:
-#           name: dist
-#           path: dist/
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    environment: testpypi
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
 
-#       - name: Publish to TestPyPI
-#         uses: pypa/gh-action-pypi-publish@release/v1
-#         with:
-#           repository-url: https://test.pypi.org/legacy/
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
 
-#   release:
-#     name: Publish to PyPI & create GitHub Release
-#     needs: build
-#     if: github.ref_type == 'tag'
-#     runs-on: ubuntu-latest
-#     environment: pypi
-#     steps:
-#       - uses: actions/checkout@v6
-#         with:
-#           fetch-depth: 0
+  release:
+    name: Publish to PyPI & create GitHub Release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-#       - name: Download distribution artifacts
-#         uses: actions/download-artifact@v4
-#         with:
-#           name: dist
-#           path: dist/
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
 
-#       - name: Install git-cliff
-#         run: |
-#           curl -sfL "https://github.com/orhun/git-cliff/releases/download/v2.12.0/git-cliff-2.12.0-x86_64-unknown-linux-gnu.tar.gz" \
-#             | tar -xz --wildcards --strip-components=1 -C /usr/local/bin '*/git-cliff'
+      - name: Install git-cliff
+        run: |
+          curl -sfL "https://github.com/orhun/git-cliff/releases/download/v2.12.0/git-cliff-2.12.0-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz --wildcards --strip-components=1 -C /usr/local/bin '*/git-cliff'
 
-#       - name: Generate release notes
-#         run: git cliff --latest --strip all --output RELEASE_NOTES.md
+      - name: Generate release notes
+        run: git cliff --latest --strip all --output RELEASE_NOTES.md
 
-#       - name: Publish to PyPI
-#         uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
 
-#       - name: Create GitHub Release
-#         env:
-#           GH_TOKEN: ${{ github.token }}
-#         run: |
-#           gh release create "$GITHUB_REF_NAME" \
-#             --title "dlt-saga $GITHUB_REF_NAME" \
-#             --notes-file RELEASE_NOTES.md
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "dlt-saga $GITHUB_REF_NAME" \
+            --notes-file RELEASE_NOTES.md
