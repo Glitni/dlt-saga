@@ -17,6 +17,7 @@ Resolution order:
 import importlib
 import logging
 import threading
+import types
 from typing import Dict, Optional, Type
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ def register_namespace(
 # ---------------------------------------------------------------------------
 
 
-def _find_pipeline_class(module) -> Type:
+def _find_pipeline_class(module: types.ModuleType) -> Type:
     """Find the Pipeline class in *module* by ``BasePipeline`` inheritance.
 
     Only considers classes **defined** in the module (``__module__`` check)

@@ -6,6 +6,7 @@ resolution, source config instantiation, and historize config.
 
 import importlib
 import logging
+import types
 from dataclasses import dataclass, field
 from typing import List, Optional, Type
 
@@ -38,7 +39,7 @@ class ValidationResult:
         return len(self.errors) == 0
 
 
-def _find_config_class(pipeline_module) -> Optional[Type]:
+def _find_config_class(pipeline_module: types.ModuleType) -> Optional[Type]:
     """Find the BaseConfig subclass in the sibling config.py module.
 
     Mirrors the pattern from registry._find_pipeline_class() — looks for
