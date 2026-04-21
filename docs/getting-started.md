@@ -90,6 +90,16 @@ saga doctor
 
 This validates your profiles, project config, pipeline discovery, and destination connectivity. If something is wrong, the output tells you exactly what to fix.
 
+### Optional: set up AI assistance
+
+If you use an AI coding assistant (Claude Code, Cursor, Copilot, etc.), run:
+
+```bash
+saga ai-setup
+```
+
+This generates `saga_ai_context.md` in your project root with framework patterns and pipeline implementation guidance. Add the one-line instruction it prints to your AI tool's context file — your assistant will then understand dlt-saga's conventions when helping you build custom pipelines.
+
 ---
 
 ## 5. Explore your project

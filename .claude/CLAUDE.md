@@ -161,6 +161,13 @@ saga report --select "tag:daily" --target prod      # Filtered by selector
 saga report --select "group:google_sheets" -o gs.html  # Single group
 ```
 
+### AI Setup Command
+```bash
+saga ai-setup                                       # Generate saga_ai_context.md
+```
+
+Writes `saga_ai_context.md` to the project root with framework patterns and guidance for AI coding assistants. Content hash is embedded; `saga doctor` warns if outdated after a package upgrade.
+
 ### Configuration Files
 
 **profiles.yml** (repo root, with `.dlt/profiles.yml` as legacy fallback)

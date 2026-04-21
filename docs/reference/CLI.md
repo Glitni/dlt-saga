@@ -239,6 +239,36 @@ saga doctor [OPTIONS]
 
 ---
 
+## saga ai-setup
+
+Generate an AI context file for the current project.
+
+Writes `saga_ai_context.md` to the current directory. This file contains framework patterns, pipeline implementation guidance, and config reference that AI coding assistants (Claude Code, Cursor, Copilot, Windsurf, etc.) can use when helping you build custom pipelines.
+
+Add the following to your AI assistant's context file (location varies by tool):
+
+```
+When working with dlt-saga pipelines, pipeline configs, or the saga CLI,
+read ./saga_ai_context.md for framework patterns and guidance.
+```
+
+| Tool | Context file |
+|------|-------------|
+| Claude Code | `.claude/CLAUDE.md` |
+| Cursor | `.cursorrules` |
+| GitHub Copilot | `.github/copilot-instructions.md` |
+| Windsurf | `.windsurfrules` |
+
+The generated file is version-stamped. `saga doctor` will warn if it becomes outdated after a package upgrade.
+
+```bash
+saga ai-setup [OPTIONS]
+```
+
+No options.
+
+---
+
 ## saga generate-schemas
 
 Generate JSON schemas for pipeline config files and project files. Enables IDE autocomplete and inline validation.
