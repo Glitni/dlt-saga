@@ -28,7 +28,7 @@ config layer you are building.
 
 ## Architecture
 
-<img src="docs/images/architecture.png" width="700" alt="Architecture">
+<img src="https://raw.githubusercontent.com/Glitni/dlt-saga/main/docs/images/architecture.png" width="700" alt="Architecture">
 ```
 
 ## Quick Start
@@ -60,7 +60,7 @@ saga ingest --select "example__sample"
 All commands are subcommands under the `saga` entry point and share common options:
 `--select`, `--verbose`, `--profile`, `--target`.
 
-<img src="docs/images/cli-commands.png" width="800" alt="CLI commands">
+<img src="https://raw.githubusercontent.com/Glitni/dlt-saga/main/docs/images/cli-commands.png" width="800" alt="CLI commands">
 
 ### Selectors (dbt-style)
 
@@ -265,7 +265,7 @@ grant_type=client_credentials&client_id=<app-id>@<tenant-id>&client_secret=<secr
 
 The `write_disposition` field controls what operations are enabled for a pipeline:
 
-<img src="docs/images/write-disposition.png" width="500" alt="Write disposition">
+<img src="https://raw.githubusercontent.com/Glitni/dlt-saga/main/docs/images/write-disposition.png" width="500" alt="Write disposition">
 
 | Value | Ingest | Historize | Use Case |
 |-------|--------|-----------|----------|
