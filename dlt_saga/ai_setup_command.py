@@ -105,29 +105,19 @@ def run_ai_setup(project_dir: Path | None = None) -> None:
 
     typer.echo(f"Generated {AI_CONTEXT_FILENAME} (dlt-saga v{version})")
     typer.echo("")
-    typer.echo("Add one of the following to your AI assistant's context file:")
-    typer.echo("")
-    typer.echo("  Claude Code (.claude/CLAUDE.md):")
-    typer.echo(
-        "    When working with dlt-saga pipelines, pipeline configs, or the saga CLI,"
-    )
-    typer.echo("    read saga_ai_context.md for framework patterns and guidance.")
-    typer.echo("")
-    typer.echo("  Cursor (.cursorrules):")
-    typer.echo(
-        "    When working with dlt-saga pipelines, pipeline configs, or the saga CLI,"
-    )
-    typer.echo("    read saga_ai_context.md for framework patterns and guidance.")
-    typer.echo("")
-    typer.echo("  GitHub Copilot (.github/copilot-instructions.md):")
-    typer.echo(
-        "    When working with dlt-saga pipelines, pipeline configs, or the saga CLI,"
-    )
-    typer.echo("    read saga_ai_context.md for framework patterns and guidance.")
+    typer.echo("Add this to your AI assistant's context file:")
     typer.echo("")
     typer.echo(
-        "The instruction is the same for all tools — only the file location differs."
+        "  When working with dlt-saga pipelines, pipeline configs, or the saga CLI,"
     )
+    typer.echo("  read ./saga_ai_context.md for framework patterns and guidance.")
+    typer.echo("")
+    typer.echo("Where to place it depends on your tool:")
+    typer.echo("  - Claude Code:     .claude/CLAUDE.md")
+    typer.echo("  - Cursor:          .cursorrules")
+    typer.echo("  - GitHub Copilot:  .github/copilot-instructions.md")
+    typer.echo("  - Windsurf:        .windsurfrules")
+    typer.echo("")
     typer.echo(
         "Re-run `saga ai-setup` after upgrading dlt-saga to keep the context current."
     )
