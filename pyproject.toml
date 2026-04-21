@@ -1,6 +1,6 @@
 [project]
 name = "dlt-saga"
-version = "0.1.0"
+version = "0.1.1"
 description = "Reusable dlt ingestion framework"
 authors = [
     {name="Sindre Grindheim", email="sindre.grindheim@glitni.no"}
