@@ -5,7 +5,7 @@ Config-driven data ingestion and historization framework, built on [dlt](https:/
 [![PyPI version](https://img.shields.io/pypi/v/dlt-saga.svg)](https://pypi.org/project/dlt-saga/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/Glitni/dlt-saga/actions/workflows/ci.yml/badge.svg)](https://github.com/Glitni/dlt-saga/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/Glitni/dlt-saga/branch/main/graph/badge.svg)](https://codecov.io/gh/Glitni/dlt-saga)
+[![codecov](https://codecov.io/gh/Glitni/dlt-saga/graph/badge.svg)](https://codecov.io/gh/Glitni/dlt-saga)
 [![Python](https://img.shields.io/pypi/pyversions/dlt-saga.svg)](https://pypi.org/project/dlt-saga/)
 
 ## Why dlt-saga?
