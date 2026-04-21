@@ -101,7 +101,7 @@ build-backend = "setuptools.build_meta"
 include = ["dlt_saga*"]
 
 [tool.setuptools.package-data]
-dlt_saga = ["schemas/*.json", "report/*.css", "report/*.js", "report/*.svg"]
+dlt_saga = ["schemas/*.json", "report/*.css", "report/*.js", "report/*.svg", "templates/*.md"]
 
 [tool.ruff]
 line-length = 88

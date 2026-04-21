@@ -2132,12 +2132,46 @@ def doctor(
             if not _doctor_check(f"  {ep.name} ({base_module})", base_module):
                 ok = False
 
+    # AI context staleness check (non-blocking)
+    try:
+        from dlt_saga.ai_setup_command import check_staleness
+
+        ai_warning = check_staleness(Path.cwd())
+        if ai_warning:
+            typer.echo("")
+            _emit("!", "AI context", ai_warning)
+    except Exception:
+        pass
+
     typer.echo("")
     if ok:
         typer.echo("All checks passed.")
     else:
         typer.echo("One or more checks failed. Run with --verbose for details.")
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# AI setup command
+# ---------------------------------------------------------------------------
+
+
+@app.command("ai-setup")
+def ai_setup():
+    """Generate an AI context file for this project.
+
+    Writes saga_ai_context.md to the current directory, containing framework
+    patterns and implementation guidance that AI coding assistants can use.
+
+    The generated file is version-stamped. Re-run after upgrading dlt-saga to
+    keep it current.
+
+    Examples:
+        saga ai-setup
+    """
+    from dlt_saga.ai_setup_command import run_ai_setup
+
+    run_ai_setup()
 
 
 # ---------------------------------------------------------------------------
