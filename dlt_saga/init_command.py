@@ -599,6 +599,11 @@ def _print_next_steps(destination_type: str, config: dict) -> None:
         typer.echo("  3. Add pipeline configs under configs/.")
         typer.echo("  4. Run `saga list` to see discovered pipelines.")
 
+    typer.echo("")
+    typer.echo(
+        "Optional: run `saga ai-setup` to generate an AI assistant context file."
+    )
+
 
 # ---------------------------------------------------------------------------
 # Main entry point
