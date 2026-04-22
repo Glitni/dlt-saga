@@ -41,8 +41,8 @@ pip install dlt-saga                    # DuckDB only (no cloud dependencies)
 mkdir my-pipelines && cd my-pipelines
 saga init                               # prompts for destination and credentials
 
-# 2. Authenticate (GCP — skip for DuckDB)
-gcloud auth application-default login
+# 2. Authenticate to your destination (skip for DuckDB)
+#    See: wiki/Getting-Started.md
 
 # 3. List available pipelines
 saga list
