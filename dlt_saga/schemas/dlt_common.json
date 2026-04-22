@@ -5,6 +5,57 @@
   "description": "Shared definitions for dlt pipeline configurations",
 
   "$defs": {
+    "tag_item": {
+      "defaultSnippets": [
+        {"label": "daily", "body": "daily"},
+        {"label": "hourly", "body": "hourly"},
+        {"label": "critical", "body": "critical"},
+        {"label": "weekly", "body": "weekly"},
+        {"label": "monthly", "body": "monthly"},
+        {"label": "daily: [monday]", "body": {"daily": ["monday"]}},
+        {"label": "daily: [monday, wednesday, friday]", "body": {"daily": ["monday", "wednesday", "friday"]}},
+        {"label": "hourly: [1]", "body": {"hourly": [1]}},
+        {"label": "hourly: [1, 10, 14]", "body": {"hourly": [1, 10, 14]}}
+      ],
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Simple tag (e.g., daily, hourly, critical)"
+        },
+        {
+          "type": "object",
+          "description": "Tag with schedule values (e.g., {daily: [monday]} or {hourly: [1, 10]})",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "integer" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+
+    "tags": {
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Single tag as a string"
+        },
+        {
+          "type": "array",
+          "description": "List of tags",
+          "items": {
+            "$ref": "#/$defs/tag_item"
+          }
+        }
+      ]
+    },
+
     "string_or_array_of_strings": {
       "oneOf": [
         {
@@ -116,7 +167,7 @@
         },
 
         "tags": {
-          "$ref": "#/$defs/string_or_array_of_strings",
+          "$ref": "#/$defs/tags",
           "description": "Tags for filtering pipelines (e.g., daily, hourly, critical)"
         },
 
