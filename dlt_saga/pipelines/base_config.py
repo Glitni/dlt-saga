@@ -35,20 +35,8 @@ class BaseConfig:
     tags: List[str] = field(
         default_factory=list,
         metadata={
-            "description": "Tags for filtering and scheduling pipelines. Simple tags (e.g., 'daily') run at all times. Schedule tags with values (e.g., 'hourly: [1, 10]') run only at specified times.",
-            "type": "array",
-            "items": {
-                "oneOf": [
-                    {"type": "string"},
-                    {
-                        "type": "object",
-                        "additionalProperties": {
-                            "type": "array",
-                            "items": {"type": "integer"},
-                        },
-                    },
-                ]
-            },
+            "description": "Tags for filtering and scheduling pipelines. Simple tags (e.g., 'daily') run at all times. Schedule tags with values (e.g., 'hourly: [1, 10]', 'daily: [monday]') run only at specified times.",
+            "$ref": "dlt_common.json#/$defs/tags",
         },
     )
 
