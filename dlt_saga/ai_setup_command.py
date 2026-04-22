@@ -113,10 +113,13 @@ def run_ai_setup(project_dir: Path | None = None) -> None:
     typer.echo("  read ./saga_ai_context.md for framework patterns and guidance.")
     typer.echo("")
     typer.echo("Where to place it depends on your tool:")
-    typer.echo("  - Claude Code:     .claude/CLAUDE.md")
-    typer.echo("  - Cursor:          .cursorrules")
-    typer.echo("  - GitHub Copilot:  .github/copilot-instructions.md")
-    typer.echo("  - Windsurf:        .windsurfrules")
+    typer.echo(
+        "  - AGENTS.md            (recommended — works with Claude Code, Copilot, Cursor, Windsurf, and 20+ others)"
+    )
+    typer.echo("  - Claude Code only:    .claude/CLAUDE.md")
+    typer.echo("  - Cursor only:         .cursorrules")
+    typer.echo("  - GitHub Copilot only: .github/copilot-instructions.md")
+    typer.echo("  - Windsurf only:       .windsurfrules")
     typer.echo("")
     typer.echo(
         "Re-run `saga ai-setup` after upgrading dlt-saga to keep the context current."
