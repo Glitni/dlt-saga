@@ -26,32 +26,32 @@ If you are already using dlt directly and finding yourself re-implementing incre
 state management, environment switching, or SCD2 transforms — dlt-saga is the
 config layer you are building.
 
-## Architecture
+## Installation
 
-<img src="https://raw.githubusercontent.com/Glitni/dlt-saga/main/docs/images/architecture.png" width="700" alt="Architecture">
+```bash
+pip install dlt-saga[bigquery]          # BigQuery
+pip install dlt-saga[databricks,azure]  # Databricks on Azure
+pip install dlt-saga                    # DuckDB only (no cloud dependencies)
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Install
-pip install dlt-saga[bigquery]          # or dlt-saga[databricks,azure], dlt-saga
-
-# 2. Scaffold a new project
+# 1. Create and scaffold a project
 mkdir my-pipelines && cd my-pipelines
 saga init                               # prompts for destination and credentials
 
-# 3. Authenticate (GCP — skip for DuckDB)
-gcloud auth application-default login
+# 2. Authenticate to your destination (skip for DuckDB)
+#    See: wiki/Getting-Started.md
 
-# 4. List available pipelines
+# 3. List available pipelines
 saga list
 
-# 5. Run a pipeline
+# 4. Run a pipeline
 saga ingest --select "example__sample"
 ```
 
-> See the **[Getting Started guide](docs/getting-started.md)** for a full walkthrough, or browse [`example/`](example/) for a minimal runnable setup.
+> See the **[Getting Started guide](wiki/Getting-Started.md)** for a full walkthrough, or browse [`example/`](example/) for a minimal runnable setup.
 
 > Local execution is the default. Use `--orchestrate` to fan out to parallel workers (requires `orchestration:` configured in `saga_project.yml`).
 
@@ -59,8 +59,6 @@ saga ingest --select "example__sample"
 
 All commands are subcommands under the `saga` entry point and share common options:
 `--select`, `--verbose`, `--profile`, `--target`.
-
-<img src="https://raw.githubusercontent.com/Glitni/dlt-saga/main/docs/images/cli-commands.png" width="800" alt="CLI commands">
 
 ### Selectors (dbt-style)
 
@@ -108,164 +106,13 @@ saga ingest --target prod --select "tag:daily"   # production (with impersonatio
 
 Create a YAML config file in `configs/<source_type>/` — that's it. The framework auto-discovers configs.
 
-<details>
-<summary><b>API</b></summary>
+Supported source types out of the box: **API**, **Database** (PostgreSQL, MySQL, SQL Server, and more via ConnectorX), **Filesystem** (GCS, SFTP, local), **Google Sheets**, and **SharePoint**.
 
-Create a config in `configs/api/<api_name>/` and optionally a custom pipeline implementation in `pipelines/api/<api_name>/`.
-
-The framework uses polymorphic pipeline loading — it resolves implementations from most specific to least specific:
-
-1. `pipelines/api/<api_name>/<endpoint>/pipeline.py` (config-specific)
-2. `pipelines/api/<api_name>/pipeline.py` (API-specific)
-3. `pipelines/api/pipeline.py` (base API pipeline)
-
-```yaml
-# configs/api/myservice/users.yml
-base_url: "https://api.example.com"
-endpoint: "/users"
-auth_type: "bearer"
-auth_token: "googlesecretmanager::project::api-token"
-response_path: "data"           # JSON path to the records array
-
-write_disposition: "append"
-tags: ["daily"]
-```
-
-**With pagination** (offset, page, cursor, or next_url):
-
-```yaml
-# configs/api/myservice/events.yml
-base_url: "https://api.example.com"
-endpoint: "/events"
-auth_type: "bearer"
-auth_token: "googlesecretmanager::project::api-token"
-response_path: "data"
-
-pagination:
-  type: cursor                  # offset, page, cursor, next_url
-  cursor_path: "meta.next_cursor"
-  cursor_param: "cursor"
-  limit: 100
-  limit_param: "per_page"
-
-page_delay: 0.2                 # seconds between requests (rate limiting)
-
-write_disposition: "append"
-tags: ["daily"]
-```
-</details>
-
-<details>
-<summary><b>Database (PostgreSQL, MySQL, SQL Server, etc.)</b></summary>
-
-Uses [ConnectorX](https://github.com/sfu-db/connector-x) with Apache Arrow for high-performance extraction.
-
-```yaml
-# configs/database/mydb/customers.yml
-# Connection (option 1: connection string)
-connection_string: "postgresql://user:pass@host:5432/mydb"
-
-# Connection (option 2: individual components)
-database_type: "postgres"  # postgres, mysql, mssql, oracle, etc.
-host: "db.example.com"
-port: 5432
-source_database: "mydb"
-username: "googlesecretmanager::project::db-user"
-password: "googlesecretmanager::project::db-password"
-
-# What to extract
-source_table: "customers"
-# OR: query: "SELECT * FROM customers WHERE active = true"
-
-# Incremental loading (optional)
-incremental: true
-incremental_key: "updated_at"
-initial_value: "2025-01-01"
-
-write_disposition: "merge"
-primary_key: "customer_id"
-tags: ["daily"]
-```
-
-**Supported databases**: PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, SQLite, Redshift, ClickHouse, BigQuery, Trino
-</details>
-
-<details>
-<summary><b>Filesystem (GCS, SFTP)</b></summary>
-
-```yaml
-# configs/filesystem/mybucket/events.yml
-filesystem_type: "gs"  # or "sftp", "file"
-bucket_name: "my-bucket"
-file_glob: "data/events/*.parquet"
-file_type: "parquet"  # csv, json, jsonl, parquet
-
-# CSV-specific
-csv_separator: ","
-
-# Incremental loading
-incremental: true
-incremental_column: "modification_date"
-initial_value: "2024-01-01"
-
-write_disposition: "append"
-tags: ["hourly"]
-```
-</details>
-
-<details>
-<summary><b>Google Sheets</b></summary>
-
-```yaml
-# configs/google_sheets/my_sheet.yml
-spreadsheet_id: "YOUR_SPREADSHEET_ID"  # From the URL
-sheet_name: "Sheet1"
-range: "A:Z"
-
-write_disposition: "replace"
-tags: ["daily"]
-```
-
-Grant Viewer access to the service account configured in `providers.google_secrets` in `saga_project.yml`.
-</details>
-
-<details>
-<summary><b>SharePoint</b></summary>
-
-Downloads a file from SharePoint using the app-only OAuth 2.0 flow. Requires `pip install "dlt-saga[azure]"`.
-
-```yaml
-# configs/sharepoint/my_report.yml
-adapter: dlt_saga.sharepoint
-
-# Authentication (SharePoint app-only OAuth2 form body stored in a secrets provider)
-auth_secret: "azurekeyvault::https://my-vault.vault.azure.net::MY-SP-AUTH-SECRET"
-tenant_id: "<azure-ad-tenant-id>"
-
-# File location
-site_url: "https://contoso.sharepoint.com/sites/MyTeam"
-file_path: "/sites/MyTeam/Shared Documents/reports/weekly.xlsx"
-file_type: xlsx      # xlsx, csv, json, jsonl
-
-# Excel-specific (optional)
-sheet_name: "Data"
-header_row: 1
-
-write_disposition: "replace"
-tags: ["daily"]
-```
-
-The `auth_secret` must resolve to a URL-encoded OAuth2 form body:
-```
-grant_type=client_credentials&client_id=<app-id>@<tenant-id>&client_secret=<secret>&resource=00000003-0000-0ff1ce00-000000000000/<host>@<tenant-id>
-```
-</details>
+See the **[Pipeline Types guide](wiki/Pipeline-Types.md)** for config examples for each source type, and the **[Configuration reference](wiki/Configuration.md)** for all available fields.
 
 ## Write Dispositions and Historize
 
 The `write_disposition` field controls what operations are enabled for a pipeline:
-
-<img src="https://raw.githubusercontent.com/Glitni/dlt-saga/main/docs/images/write-disposition.png" width="500" alt="Write disposition">
 
 | Value | Ingest | Historize | Use Case |
 |-------|--------|-----------|----------|
@@ -275,141 +122,7 @@ The `write_disposition` field controls what operations are enabled for a pipelin
 | `append+historize` | Yes | Yes | Snapshot → SCD2 |
 | `historize` | No | Yes | External data → SCD2 |
 
-### Historize (SCD2)
-
-Historize transforms raw snapshot data into [Slowly Changing Dimension Type 2](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_2:_add_new_row) tables.
-
-**Output columns:**
-
-| Column | Description |
-|--------|-------------|
-| `_dlt_valid_from` | When this version became active (snapshot timestamp) |
-| `_dlt_valid_to` | When this version was superseded (`NULL` = current) |
-| `_dlt_is_deleted` | `TRUE` on deletion marker rows, `FALSE` on all change rows |
-
-Validity uses half-open intervals: a row is active when `ts >= _dlt_valid_from AND (ts < _dlt_valid_to OR _dlt_valid_to IS NULL)`.
-
-**Deletion tracking:** When `track_deletions: true`, a key disappearing from the source produces a **separate deletion marker row** (`_dlt_is_deleted = TRUE`) rather than flagging the closed row. The deletion marker has `_dlt_valid_to = NULL` (open-ended) until the key reappears, at which point it is closed like any other row. This cleanly separates "this version ended" from "this record was deleted."
-
-```yaml
-# configs/filesystem/proffdata/companies.yml
-write_disposition: "append+historize"
-primary_key: [orgnr]
-
-# Snapshot date extraction from file paths (filesystem only)
-snapshot_date_regex: "\\d{4}-\\d{2}-\\d{2}"
-snapshot_date_format: "%Y-%m-%d"
-
-historize:
-  # snapshot_column: _dlt_ingested_at  # default
-  exclude_columns: [_dlt_source_file_name]
-  partition_column: "_dlt_valid_from"
-  cluster_columns: [orgnr]
-  track_deletions: true
-```
-
-Historize runs **incrementally** by default (only new snapshots). Use `--full-refresh` to rebuild from scratch.
-
-## Common Configuration Options
-
-<details>
-<summary><b>BigQuery Table Options</b></summary>
-
-```yaml
-partition_column: "date"                        # Partition by date column
-cluster_columns: ["user_id", "region"]          # Cluster (max 4)
-dataset_name: "custom_dataset"                  # Override default dataset
-```
-</details>
-
-<details>
-<summary><b>Tags and Scheduling</b></summary>
-
-```yaml
-tags: ["daily", "critical"]
-# Run with: saga ingest --select "tag:daily"
-```
-</details>
-
-<details>
-<summary><b>Hierarchical Config Defaults</b></summary>
-
-Use `configs/dlt_project.yml` to set defaults that apply across multiple pipelines:
-
-```yaml
-# configs/dlt_project.yml
-project:
-  tags: ["production"]
-
-  google_sheets:
-    +tags: ["sheets"]           # Inherits "production", adds "sheets"
-    write_disposition: "replace"
-```
-
-Syntax: `+key:` merges with parent, `key:` overrides. See [Configuration Guide](docs/reference/CONFIGURATION.md).
-</details>
-
-<details>
-<summary><b>Access Control</b></summary>
-
-```yaml
-access:
-  - "group:analytics-team@org.com"
-  - "user:someone@org.com"
-```
-
-Apply with `saga update-access`.
-</details>
-
-## Local Development
-
-<details>
-<summary><b>Environment Variables</b></summary>
-
-- `SAGA_SCHEMA_NAME` — Override the default dataset/schema name for dev targets
-- `SAGA_PROFILES_DIR` — Override the directory where `profiles.yml` is searched
-
-Use **profiles** for environment switching — see [Profiles Guide](docs/reference/PROFILES.md).
-</details>
-
-<details>
-<summary><b>DuckDB (Local Testing)</b></summary>
-
-Use DuckDB as a lightweight local destination — no GCP credentials needed:
-
-```yaml
-# profiles.yml
-default:
-  target: local
-  outputs:
-    local:
-      type: duckdb
-      database_path: "./dev.duckdb"
-      schema: my_dataset
-      environment: dev
-```
-
-```bash
-saga ingest --target local --select "my_pipeline"
-```
-</details>
-
-<details>
-<summary><b>Managing Dependencies</b></summary>
-
-```bash
-# Install all dependencies for development (includes GCP + dev tools)
-uv sync --extra dev
-
-# Update lock file
-uv lock --upgrade
-
-# Add a new dependency
-# 1. Add to pyproject.toml under [project.dependencies] or [project.optional-dependencies]
-# 2. Regenerate the lock file and sync
-uv lock && uv sync --extra dev
-```
-</details>
+Historize transforms raw snapshot data into [SCD2](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_2:_add_new_row) tables with `_dlt_valid_from`, `_dlt_valid_to`, and `_dlt_is_deleted` columns. See the **[Historize guide](wiki/Historize.md)** for the full reference.
 
 ## Community
 
@@ -420,14 +133,16 @@ uv lock && uv sync --extra dev
 
 ## Further Reading
 
-- **[Getting Started](docs/getting-started.md)** — Full walkthrough: install, init, first pipeline
-- **[Architecture](docs/architecture.md)** — Three-layer design, plugin system, execution flow
-- **[CLI Reference](docs/reference/CLI.md)** — All commands, flags, and the programmatic API
-- **[Configuration Guide](docs/reference/CONFIGURATION.md)** — Hierarchical config, all options reference
-- **[Profiles Guide](docs/reference/PROFILES.md)** — Multi-environment setup, service account impersonation
-- **[Deployment Guide](docs/reference/DEPLOYMENT.md)** — Orchestration, Cloud Run, worker setup
-- **[Performance Tuning](docs/reference/PERFORMANCE.md)** — Parallel execution, worker tuning
-- **[Plugin Development Guide](docs/plugin-development-guide.md)** — Custom sources, destinations, hooks
+- **[Getting Started](wiki/Getting-Started.md)** — Full walkthrough: install, init, first pipeline
+- **[Architecture](wiki/Architecture.md)** — Three-layer design, plugin system, execution flow
+- **[Pipeline Types](wiki/Pipeline-Types.md)** — Config reference for API, Database, Filesystem, Sheets, SharePoint
+- **[Configuration](wiki/Configuration.md)** — Hierarchical config, all options reference
+- **[Profiles](wiki/Profiles.md)** — Multi-environment setup, service account impersonation
+- **[Historize (SCD2)](wiki/Historize.md)** — Snapshot tables → slowly changing dimensions
+- **[CLI Reference](wiki/CLI-Reference.md)** — All commands, flags, and the programmatic API
+- **[Deployment](wiki/Deployment.md)** — Orchestration, Cloud Run, worker setup
+- **[Performance](wiki/Performance.md)** — Parallel execution, worker tuning, backfill
+- **[Plugin Development](wiki/Plugin-Development.md)** — Custom sources, destinations, hooks
 
 ## Project Structure
 
@@ -449,6 +164,6 @@ dlt-saga/
 │   ├── schemas/          #   Bundled static schemas (dlt_common.json)
 │   └── utility/          #   Shared utilities (CLI, naming, orchestration)
 ├── example/              # Minimal runnable consumer project (DuckDB)
-├── .dlt/                 # dlt runtime config overrides
-└── docs/                 # Reference documentation
+├── wiki/                 # Documentation (synced to GitHub wiki)
+└── .dlt/                 # dlt runtime config overrides
 ```

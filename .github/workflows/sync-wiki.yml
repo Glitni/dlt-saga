@@ -1,0 +1,34 @@
+name: Sync wiki
+
+# This workflow syncs wiki/ to the GitHub wiki.
+# The push trigger is disabled while the repository is private (GitHub wiki
+# requires the repo to be public or have wiki access enabled).
+# Re-enable the push trigger once the wiki is enabled:
+#
+#   on:
+#     push:
+#       branches: [main]
+#       paths: ["wiki/**"]
+
+on:
+  workflow_dispatch:            # Manual trigger only for now
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push wiki to GitHub wiki
+        run: |
+          git clone "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki_repo
+
+          # Copy all .md files from wiki/ to the wiki root (flattened)
+          find wiki -name "*.md" -exec cp {} wiki_repo/ \;
+
+          cd wiki_repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --staged --quiet || git commit -m "Sync wiki from main repo @ ${{ github.sha }}"
+          git push

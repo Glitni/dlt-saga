@@ -14,7 +14,7 @@ We welcome:
 - **Tests** — unit, integration, or performance tests
 
 > **Scope note.** New source or destination *types* are best contributed as plugin
-> packages (see [Plugin Development](docs/plugin-development-guide.md)) rather than
+> packages (see [Plugin Development](wiki/Plugin-Development.md)) rather than
 > as PRs to this repo, unless they are widely applicable and come with tests.
 
 ## Development setup
@@ -42,8 +42,7 @@ Local DuckDB-backed integration tests run without any cloud credentials:
 uv run pytest -m integration
 ```
 
-See [`docs/testing/DUCKDB_INTEGRATION_TEST.md`](docs/testing/DUCKDB_INTEGRATION_TEST.md)
-for details.
+See [`tests/README.md`](tests/README.md) for details.
 
 ## Opening an issue
 
@@ -116,7 +115,7 @@ packages:
     path: ./my_pipelines  # Python package with pipeline.py modules
 ```
 
-Full guide: [docs/plugin-development-guide.md](docs/plugin-development-guide.md).
+Full guide: [wiki/Plugin-Development.md](wiki/Plugin-Development.md).
 
 ## Release process
 
