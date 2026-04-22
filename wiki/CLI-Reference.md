@@ -145,7 +145,7 @@ saga init [OPTIONS]
 |--------|-------------|
 | `--no-input` | Skip all prompts; use defaults (DuckDB, schema `dlt_dev`, current directory) |
 
-See [Getting Started](../getting-started.md) for a full walkthrough.
+See [Getting Started](Getting-Started) for a full walkthrough.
 
 ---
 

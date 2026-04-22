@@ -188,7 +188,7 @@ jobs:
         run: saga ingest --target prod
 ```
 
-The `profiles.yml` (committed to the repo) references the connection env vars via `{{ env_var('...') }}` and sets `auth_mode: azure_default`. No credentials are stored in the profile file. See [Profiles Guide](PROFILES.md#databricks-authentication) for the full Databricks profile reference.
+The `profiles.yml` (committed to the repo) references the connection env vars via `{{ env_var('...') }}` and sets `auth_mode: azure_default`. No credentials are stored in the profile file. See [Profiles Guide](Profiles#databricks-authentication) for the full Databricks profile reference.
 
 ### GCP / BigQuery
 
@@ -219,7 +219,7 @@ default:
 
 Pass `--target prod` when triggering production runs, or set it as the profile default.
 
-Impersonation is entirely in-process — no `gcloud` config files are modified. See the [Profiles Guide](PROFILES.md) for details.
+Impersonation is entirely in-process — no `gcloud` config files are modified. See the [Profiles Guide](Profiles) for details.
 
 ---
 

@@ -289,7 +289,7 @@ orchestration:
   schema: dlt_orchestration
 ```
 
-See the [Deployment Guide](DEPLOYMENT.md) for full setup.
+See the [Deployment Guide](Deployment) for full setup.
 
 ### Hooks
 
@@ -303,7 +303,7 @@ hooks:
     - mypackage.hooks:send_alert
 ```
 
-See the [Plugin Development Guide](../plugin-development-guide.md) for writing hooks.
+See the [Plugin Development Guide](Plugin-Development) for writing hooks.
 
 ### Log Tables
 

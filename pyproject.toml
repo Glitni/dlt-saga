@@ -84,7 +84,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://github.com/Glitni/dlt-saga"
-Documentation = "https://github.com/Glitni/dlt-saga/tree/main/docs"
+Documentation = "https://github.com/Glitni/dlt-saga/wiki"
 Source = "https://github.com/Glitni/dlt-saga"
 Tracker = "https://github.com/Glitni/dlt-saga/issues"
 Changelog = "https://github.com/Glitni/dlt-saga/blob/main/CHANGELOG.md"
