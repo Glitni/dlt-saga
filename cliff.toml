@@ -20,7 +20,7 @@ body = """
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group }}
 {% for commit in commits %}\
-- {{ commit.message | split(pat="\n") | first | replace(from="Feature: ", to="") | replace(from="Fix: ", to="") | replace(from="Refactor: ", to="") | replace(from="Perf: ", to="") | replace(from="Performance: ", to="") | trim | upper_first }}
+- {{ commit.message | split(pat="\n") | first | replace(from="Feature: ", to="") | replace(from="Fix: ", to="") | replace(from="Refactor: ", to="") | replace(from="Perf: ", to="") | replace(from="Performance: ", to="") | replace(from="Security: ", to="") | trim | upper_first }}
 {% endfor %}
 {% endfor %}
 """
@@ -32,9 +32,10 @@ conventional_commits = false
 filter_unconventional = false
 split_commits = false
 commit_parsers = [
-  { message = "^Feature", group = "Added" },
-  { message = "^Fix",     group = "Fixed" },
-  { message = "^Perf",    group = "Performance" },
+  { message = "^Feature",  group = "Added" },
+  { message = "^Fix",      group = "Fixed" },
+  { message = "^Security", group = "Security" },
+  { message = "^Perf",     group = "Performance" },
   { message = "^Refactor", group = "Changed" },
   { message = "^(Docs|CI|Chore|Config|Bump|Test|Debug)", skip = true },
   { message = ".*", skip = true },
