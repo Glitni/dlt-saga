@@ -329,6 +329,9 @@ class DuckDBDestination(Destination):
     def quote_identifier(self, name: str) -> str:
         return f'"{name}"'
 
+    def timestamp_n_days_ago(self, days: int) -> str:
+        return f"now() - INTERVAL '{days}' DAY"
+
     def get_full_table_id(self, dataset: str, table: str) -> str:
         return f'"{dataset}"."{table}"'
 
