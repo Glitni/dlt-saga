@@ -266,6 +266,11 @@ class HistorizeRunner:
         self, value_columns: List[str], replace: bool = False
     ) -> None:
         """Create the historized target table."""
+        if replace:
+            # DROP first — BigQuery/Databricks rejects CREATE OR REPLACE TABLE
+            # when the new spec changes partitioning or clustering.
+            drop_sql = self.sql_builder.build_drop_target_table_sql()
+            self.destination.execute_sql(drop_sql, self.schema)
         sql = self.sql_builder.build_create_target_table_sql(
             value_columns, replace=replace
         )

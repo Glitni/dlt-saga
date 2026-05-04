@@ -14,6 +14,21 @@ from dlt_saga.destinations.databricks.config import DatabricksDestinationConfig
 logger = logging.getLogger(__name__)
 
 
+def _resolve_partition_cluster(spec: Any) -> tuple[bool, bool]:
+    """Return (has_partition, has_cluster), warning and preferring CLUSTER BY when both are set."""
+    has_partition = bool(spec.partition_column)
+    has_cluster = bool(spec.cluster_columns)
+    if has_partition and has_cluster:
+        logger.warning(
+            "Both partition_column and cluster_columns are set for %s. "
+            "Databricks does not support both on the same table. "
+            "Using CLUSTER BY (Liquid Clustering) only.",
+            spec.target_table,
+        )
+        has_partition = False
+    return has_partition, has_cluster
+
+
 class DatabricksDestination(Destination):
     """Databricks Unity Catalog destination.
 
@@ -439,8 +454,8 @@ class DatabricksDestination(Destination):
         parts = ", ".join(f"COALESCE(CAST(`{c}` AS STRING), '')" for c in columns)
         return f"xxhash64(concat_ws('|', {parts}))"
 
-    def partition_ddl(self, column: str) -> str:
-        return f"PARTITIONED BY ({column})"
+    def partition_ddl(self, column: str, col_type: Optional[str] = None) -> str:
+        return f"PARTITIONED BY ({column})"  # col_type ignored on Databricks
 
     def cluster_ddl(self, columns: list) -> str:
         return f"CLUSTER BY ({', '.join(columns)})"
@@ -470,6 +485,297 @@ class DatabricksDestination(Destination):
               AND table_name     = '{safe_table}'
             ORDER BY ordinal_position
         """
+
+    # -------------------------------------------------------------------------
+    # Native-load contract
+    # -------------------------------------------------------------------------
+
+    def supports_native_load(self) -> bool:
+        return True
+
+    def supported_native_load_uri_schemes(self) -> set:
+        return {"gs", "s3", "abfss"}
+
+    def native_load_file_name_expr(self) -> str:
+        return "_metadata.file_path"
+
+    def parse_filename_timestamp_expr(
+        self, file_name_expr: str, regex_literal: str, format_literal: str
+    ) -> str:
+        return (
+            f"try_to_timestamp("
+            f"regexp_extract({file_name_expr}, '{regex_literal}', 1), "
+            f"'{format_literal}')"
+        )
+
+    def table_exists(self, dataset: str, table: str) -> bool:
+        try:
+            self.execute_sql(f"DESCRIBE TABLE {self.get_full_table_id(dataset, table)}")
+            return True
+        except Exception:
+            return False
+
+    def drop_table(self, dataset: str, table: str) -> None:
+        self.execute_sql(
+            f"DROP TABLE IF EXISTS {self.get_full_table_id(dataset, table)}"
+        )
+
+    def list_table_columns(self, dataset: str, table: str) -> list:
+        rows = self.execute_sql(self.columns_query(self.config.catalog, dataset, table))
+        return [(r[0], r[1]) for r in rows]
+
+    def add_column(self, dataset: str, table: str, column: str, type_name: str) -> None:
+        table_id = self.get_full_table_id(dataset, table)
+        self.execute_sql(
+            f"ALTER TABLE {table_id} ADD COLUMNS ({self.quote_identifier(column)} {type_name})"
+        )
+
+    def execute_sql_with_job(self, sql: str, schema: Optional[str] = None) -> tuple:
+        """Execute SQL and return (rows, job_id) using databricks-sql-connector."""
+        conn = self._get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute(sql)
+            try:
+                desc = cursor.description or []
+                cols = [d[0] for d in desc]
+                raw_rows = cursor.fetchall()
+
+                class _R:
+                    def __init__(self, c: list, v: tuple) -> None:
+                        self._c, self._v = c, v
+
+                    def __getattr__(self, n: str) -> Any:
+                        try:
+                            return self._v[self._c.index(n)]
+                        except ValueError:
+                            raise AttributeError(n)
+
+                    def __getitem__(self, i: int) -> Any:
+                        return self._v[i]
+
+                rows: list = [_R(cols, r) for r in raw_rows]
+            except Exception:
+                rows = []
+            job_id: str = getattr(cursor, "query_id", "") or ""
+        return rows, job_id
+
+    def native_load_chunk(self, spec: "Any") -> "Any":
+        """Load one chunk via COPY INTO with mergeSchema."""
+        from dlt_saga.destinations.base import NativeLoadResult
+
+        target_id = self.get_full_table_id(spec.target_dataset, spec.target_table)
+
+        if not spec.target_exists:
+            self._native_load_create_empty_target(spec, target_id)
+        else:
+            self._native_load_reconcile_schema(spec, target_id)
+
+        sql = self._build_copy_into(spec, target_id)
+        rows, job_id = self.execute_sql_with_job(sql, spec.target_dataset)
+        affected = self._extract_copy_into_affected_rows(rows)
+        rows_by_uri = self._native_load_rowcounts(spec, target_id)
+        return NativeLoadResult(
+            rows_loaded=affected, job_id=job_id, rows_by_uri=rows_by_uri
+        )
+
+    def drop_table_external(self, dataset: str, table: str) -> None:
+        """DROP TABLE PURGE for external tables — removes catalog entry AND files at LOCATION."""
+        table_id = self.get_full_table_id(dataset, table)
+        self.execute_sql(f"DROP TABLE IF EXISTS {table_id} PURGE")
+
+    def _native_load_create_empty_target(self, spec: "Any", target_id: str) -> None:
+        """CREATE TABLE with framework-managed columns, format DDL, and optional LOCATION.
+
+        Clause order follows Databricks convention:
+        USING ... [PARTITIONED BY|CLUSTER BY] ... [LOCATION] ... [TBLPROPERTIES].
+        For replace disposition: managed tables use CREATE OR REPLACE TABLE;
+        external tables (target_location set) use TRUNCATE TABLE when the table
+        already exists (preserves files and Delta time travel) or CREATE TABLE on
+        first run.  DROP TABLE PURGE is reserved for --full-refresh only.
+        """
+        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
+
+        derived_ddl = ", ".join(
+            f"{self.quote_identifier(c.name)} {c.sql_type}"
+            for c in spec.derived_columns
+        )
+        table_format = getattr(spec, "table_format", "delta")
+        target_location = getattr(spec, "target_location", None)
+        is_replace = getattr(spec, "write_disposition", "append") == "replace"
+
+        if is_replace and target_location:
+            # External Delta tables: CREATE OR REPLACE TABLE is metadata-only and
+            # does not reset the Delta log, so old data would persist.  Instead,
+            # TRUNCATE clears the current state without deleting physical files
+            # (preserving Delta time travel and storage-retention requirements).
+            # On first run the table doesn't exist yet, so fall through to CREATE.
+            if self.table_exists(spec.target_dataset, spec.target_table):
+                self.execute_sql(f"TRUNCATE TABLE {target_id}")
+                return
+            create_clause = "CREATE TABLE IF NOT EXISTS"
+        elif is_replace:
+            create_clause = "CREATE OR REPLACE TABLE"
+        else:
+            create_clause = "CREATE TABLE IF NOT EXISTS"
+
+        if table_format == "iceberg":
+            parts = [f"{create_clause} {target_id} ({derived_ddl}) USING ICEBERG"]
+            if spec.partition_column:
+                parts.append(self.partition_ddl(spec.partition_column))
+        else:
+            # delta and delta_uniform both use USING DELTA storage
+            has_partition, has_cluster = _resolve_partition_cluster(spec)
+            parts = [f"{create_clause} {target_id} ({derived_ddl}) USING DELTA"]
+            if has_partition:
+                parts.append(self.partition_ddl(spec.partition_column))
+            if has_cluster:
+                parts.append(self.cluster_ddl(spec.cluster_columns))
+
+        if target_location:
+            parts.append(f"LOCATION '{esc_sql_literal(target_location)}'")
+
+        if table_format == "delta_uniform":
+            parts.append(
+                "TBLPROPERTIES ("
+                "'delta.universalFormat.enabledFormats' = 'iceberg', "
+                "'delta.enableIcebergCompatV2' = 'true'"
+                ")"
+            )
+
+        self.execute_sql(" ".join(parts))
+
+    def _native_load_reconcile_schema(self, spec: "Any", target_id: str) -> None:
+        """Ensure framework columns exist; let COPY INTO mergeSchema handle data cols."""
+        target_cols = self.list_table_columns(spec.target_dataset, spec.target_table)
+        target_col_map = {n: t for n, t in target_cols}
+
+        for dc in spec.derived_columns:
+            if dc.name not in target_col_map:
+                self.add_column(
+                    spec.target_dataset, spec.target_table, dc.name, dc.sql_type
+                )
+                logger.info(
+                    "Added framework column %r to %s", dc.name, spec.target_table
+                )
+
+    def _build_copy_into(self, spec: "Any", target_id: str) -> str:
+        """Build COPY INTO SQL with derived column SELECT transformation."""
+        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
+
+        # Prefer the immediate parent dir so the FILES list uses short basenames.
+        # Fall back to the configured source_uri root when URIs span multiple dirs
+        # (e.g. cross-partition chunks) — Databricks resolves FILES relative to FROM.
+        parents = {uri.rsplit("/", 1)[0] for uri in spec.source_uris}
+        if len(parents) == 1:
+            source_prefix = next(iter(parents)) + "/"
+        elif hasattr(spec, "_source_uri"):
+            source_prefix = spec._source_uri  # type: ignore[attr-defined]
+        else:
+            source_prefix = spec.source_uris[0].rsplit("/", 1)[0] + "/"
+
+        file_format = spec.file_type.upper()
+        if file_format == "JSONL":
+            file_format = "JSON"
+
+        derived_select = ", ".join(
+            f"{c.sql_expr} AS {self.quote_identifier(c.name)}"
+            for c in spec.derived_columns
+        )
+        if file_format == "JSON":
+            data_select = "SELECT * EXCEPT (_rescued_data)"
+        else:
+            data_select = "SELECT *"
+
+        if derived_select:
+            select_clause = f"{data_select}, {derived_select}"
+        else:
+            select_clause = data_select
+
+        # FILES basenames relative to source_prefix
+        file_items = []
+        for uri in spec.source_uris:
+            rel = (
+                uri[len(source_prefix) :]
+                if uri.startswith(source_prefix)
+                else uri.split("/")[-1]
+            )
+            file_items.append(f"'{esc_sql_literal(rel)}'")
+        files_list = ", ".join(file_items)
+
+        format_options_str = self._format_databricks_copy_options(spec)
+
+        return (
+            f"COPY INTO {target_id} "
+            f"FROM ({select_clause} FROM '{esc_sql_literal(source_prefix)}') "
+            f"FILEFORMAT = {file_format} "
+            f"FILES = ({files_list}) "
+            f"FORMAT_OPTIONS ({format_options_str}) "
+            f"COPY_OPTIONS ('mergeSchema' = 'true')"
+        )
+
+    def _format_databricks_copy_options(self, spec: "Any") -> str:
+        """Build FORMAT_OPTIONS string for Databricks COPY INTO from spec.format_options."""
+        opts = dict(spec.format_options or {})
+        parts = []
+        if "field_delimiter" in opts:
+            delim = opts["field_delimiter"].replace("'", "\\'")
+            parts.append(f"'delimiter' = '{delim}'")
+        if opts.get("skip_leading_rows", 0):
+            parts.append("'header' = 'true'")
+        if "encoding" in opts:
+            enc = opts["encoding"].replace("'", "\\'")
+            parts.append(f"'encoding' = '{enc}'")
+        if "quote_character" in opts:
+            q = opts["quote_character"].replace("'", "\\'")
+            parts.append(f"'quote' = '{q}'")
+        if "null_marker" in opts:
+            nm = opts["null_marker"].replace("'", "\\'")
+            parts.append(f"'nullValue' = '{nm}'")
+        return ", ".join(parts) if parts else "'mergeSchema' = 'true'"
+
+    def _extract_copy_into_affected_rows(self, rows: list) -> int:
+        """Extract num_inserted_rows from COPY INTO result set."""
+        if not rows:
+            return 0
+        try:
+            return int(getattr(rows[0], "num_inserted_rows", None) or 0)
+        except Exception:
+            try:
+                return int(rows[0][0] or 0)
+            except Exception:
+                return 0
+
+    def _native_load_rowcounts(self, spec: "Any", target_id: str) -> dict:
+        """Query per-file row counts from the target after COPY INTO."""
+        from dlt_saga.pipelines.native_load.pipeline import (
+            NativeLoadPipeline as _NLP,
+        )
+
+        file_col = _NLP._FILE_NAME_COLUMN
+        at_col = _NLP._INGESTED_AT_COLUMN
+
+        has_file_col = any(c.name == file_col for c in spec.derived_columns)
+        if not has_file_col:
+            return {}
+
+        at_expr = next(
+            (c.sql_expr for c in spec.derived_columns if c.name == at_col), None
+        )
+        if not at_expr:
+            return {}
+
+        sql = (
+            f"SELECT {self.quote_identifier(file_col)} AS uri, COUNT(*) AS cnt "
+            f"FROM {target_id} "
+            f"WHERE {self.quote_identifier(at_col)} = {at_expr} "
+            f"GROUP BY {self.quote_identifier(file_col)}"
+        )
+        try:
+            rows = self.execute_sql(sql, spec.target_dataset)
+            return {r.uri: int(r.cnt) for r in rows}
+        except Exception as exc:
+            logger.warning("Could not derive per-file row counts: %s", exc)
+            return {}
 
     def json_type_name(self) -> str:
         return "STRING"

@@ -47,15 +47,23 @@ def get_impersonated_credentials(service_account: str):
     return credentials
 
 
+_PATCH_SENTINEL = "_dlt_saga_patched"
+
+
 def patch_google_auth_default():
     """Monkey-patch google.auth.default() to return impersonated credentials.
 
-    This makes all libraries that use google.auth.default() automatically use
-    impersonated credentials when GOOGLE_IMPERSONATE_SERVICE_ACCOUNT is set.
+    Safe to call multiple times — patches only once per process. Re-patching
+    would capture the already-patched wrapper as _original_default, causing
+    doubly-impersonated credentials that fail with 403 on the second call.
     """
     import google.auth
 
-    # Store the original default function
+    if getattr(google.auth.default, _PATCH_SENTINEL, False):
+        logger.debug("google.auth.default() already patched, skipping re-patch")
+        return
+
+    # Capture the real original BEFORE any wrapping
     _original_default = google.auth.default
     _cached_credentials = {}
 
@@ -102,6 +110,7 @@ def patch_google_auth_default():
             return _original_default(*args, **kwargs)
 
     # Replace google.auth.default with our wrapper
+    setattr(impersonating_default, _PATCH_SENTINEL, True)
     google.auth.default = impersonating_default
     logger.debug("Patched google.auth.default() to support impersonation")
 

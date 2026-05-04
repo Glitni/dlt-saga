@@ -39,6 +39,11 @@ class DatabricksDestinationConfig(DestinationConfig):
     staging_volume_name: Optional[str] = None
     # Named Unity Catalog storage credential to use in COPY INTO (optional).
     staging_credentials_name: Optional[str] = None
+    # Base ADLS location for external Delta/Iceberg tables.
+    # When set, native_load creates external tables at
+    # <storage_root>/<pipeline_group>/<table_name>/ unless overridden per pipeline.
+    # Example: abfss://lake@account.dfs.core.windows.net/raw/
+    storage_root: Optional[str] = None
 
     @property
     def database(self) -> str:
@@ -92,6 +97,7 @@ class DatabricksDestinationConfig(DestinationConfig):
             client_secret=data.get("client_secret"),
             staging_volume_name=data.get("staging_volume_name"),
             staging_credentials_name=data.get("staging_credentials_name"),
+            storage_root=data.get("storage_root"),
         )
 
     @classmethod
@@ -145,4 +151,5 @@ class DatabricksDestinationConfig(DestinationConfig):
             client_secret=client_secret,
             staging_volume_name=dc.get("staging_volume_name"),
             staging_credentials_name=dc.get("staging_credentials_name"),
+            storage_root=dc.get("storage_root"),
         )

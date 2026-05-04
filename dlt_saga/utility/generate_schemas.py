@@ -91,11 +91,20 @@ def _handle_union_type(field_type):
     """Handle Union types (not Optional)."""
     schema = {"oneOf": []}
     args = get_args(field_type)
+    _primitive_map = {str: "string", int: "integer", float: "number", bool: "boolean"}
     for arg in args:
         if arg is type(None):
             continue
-        if arg is str:
-            schema["oneOf"].append({"type": "string"})
+        if arg in _primitive_map:
+            schema["oneOf"].append({"type": _primitive_map[arg]})
+        elif get_origin(arg) is list:
+            item_args = get_args(arg)
+            if item_args and item_args[0] in _primitive_map:
+                schema["oneOf"].append(
+                    {"type": "array", "items": {"type": _primitive_map[item_args[0]]}}
+                )
+            else:
+                schema["oneOf"].append({"type": "array"})
         elif arg is dict or get_origin(arg) is dict:
             schema["oneOf"].append({"type": "object"})
         else:

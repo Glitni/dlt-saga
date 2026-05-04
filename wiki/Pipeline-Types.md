@@ -193,6 +193,33 @@ grant_type=client_credentials&client_id=<app-id>@<tenant-id>&client_secret=<secr
 
 ---
 
+## Native cloud-storage loader
+
+Bulk-loads Parquet, CSV, or JSONL files from cloud storage directly into the warehouse using destination-native mechanics (BigQuery external tables, Databricks `COPY INTO`). Designed for sources with >1 000 files or >1 GB per run where dlt's extract/normalize overhead would be prohibitive.
+
+See the **[Native Cloud-Storage Loader](Native-Load)** page for full documentation.
+
+```yaml
+# configs/native_load/my_bucket/orders.yml
+adapter: dlt_saga.native_load
+tags: [daily]
+
+source_uri: gs://my-bucket/exports/orders/
+file_type: parquet                     # parquet | csv | jsonl
+
+write_disposition: append+historize
+primary_key: [order_id]
+
+historize:
+  partition_column: _dlt_valid_from
+  cluster_columns: [order_id]
+  track_deletions: true
+```
+
+Supported destinations: **BigQuery** (`gs://`) and **Databricks** (`gs://`, `abfss://`).
+
+---
+
 ## Custom pipeline implementations
 
 For sources not covered by built-in types, write a custom `BasePipeline` subclass and register it via `packages.yml`. See [Plugin Development](Plugin-Development).

@@ -25,11 +25,11 @@ def _mock_context(**kwargs):
 @pytest.fixture(autouse=True)
 def _reset_naming_module():
     """Reset the cached naming module between tests."""
-    import dlt_saga.pipeline_config.file_config as fc_mod
+    import dlt_saga.pipeline_config.naming as naming_mod
 
-    fc_mod._naming_module = None
+    naming_mod._naming_module = None
     yield
-    fc_mod._naming_module = None
+    naming_mod._naming_module = None
 
 
 @pytest.mark.unit
@@ -98,29 +98,23 @@ class TestGetDevSchema:
 
 @pytest.mark.unit
 class TestFileConfigSchemaName:
-    """Test schema name resolution via FilePipelineConfig."""
+    """Test schema name resolution via the segment-based naming defaults."""
 
     @pytest.mark.parametrize(
-        "config_path, environment, expected",
+        "segments, environment, expected",
         [
-            # Prod: dlt_{first_segment}
-            ("configs/google_sheets/salgsmal.yml", "prod", "dlt_google_sheets"),
-            ("configs/filesystem/data.yml", "prod", "dlt_filesystem"),
-            ("configs/api/livewrapped/stats.yml", "prod", "dlt_api"),
+            # Prod: dlt_{segments[0]}
+            (["google_sheets", "salgsmal"], "prod", "dlt_google_sheets"),
+            (["filesystem", "data"], "prod", "dlt_filesystem"),
+            (["api", "livewrapped", "stats"], "prod", "dlt_api"),
         ],
     )
-    def test_prod_schema(self, config_path, environment, expected):
-        from dlt_saga.pipeline_config.file_config import _default_generate_schema_name
+    def test_prod_schema(self, segments, environment, expected):
+        from dlt_saga.pipeline_config.naming import default_generate_schema_name
 
         # For prod, default_schema is ignored
         assert (
-            _default_generate_schema_name(
-                # Strip "configs/" prefix since the function expects relative path
-                config_path.replace("configs/", "", 1),
-                environment,
-                "dlt_dev",
-            )
-            == expected
+            default_generate_schema_name(segments, environment, "dlt_dev") == expected
         )
 
     @pytest.mark.parametrize(
@@ -131,12 +125,17 @@ class TestFileConfigSchemaName:
         ],
     )
     def test_dev_schema_uses_default(self, default_schema, expected):
-        from dlt_saga.pipeline_config.file_config import _default_generate_schema_name
+        from dlt_saga.pipeline_config.naming import default_generate_schema_name
 
         assert (
-            _default_generate_schema_name("google_sheets/x.yml", "dev", default_schema)
+            default_generate_schema_name(["google_sheets", "x"], "dev", default_schema)
             == expected
         )
+
+    def test_empty_segments_prod_falls_back_to_default_group(self):
+        from dlt_saga.pipeline_config.naming import default_generate_schema_name
+
+        assert default_generate_schema_name([], "prod", "dlt_dev") == "dlt_default"
 
     def test_custom_naming_module(self):
         """Custom naming module is delegated to when configured."""
@@ -147,7 +146,7 @@ class TestFileConfigSchemaName:
 
         fpc = FilePipelineConfig()
         with patch(
-            "dlt_saga.pipeline_config.file_config._load_naming_module",
+            "dlt_saga.pipeline_config.file_config.load_naming_module",
             return_value=custom_module,
         ):
             result = fpc.resolve_schema_name("configs/google_sheets/x.yml")
@@ -162,7 +161,7 @@ class TestFileConfigSchemaName:
 
         fpc = FilePipelineConfig()
         with patch(
-            "dlt_saga.pipeline_config.file_config._load_naming_module",
+            "dlt_saga.pipeline_config.file_config.load_naming_module",
             return_value=custom_module,
         ):
             with patch(
@@ -178,7 +177,7 @@ class TestFileConfigSchemaName:
 
         fpc = FilePipelineConfig()
         with patch(
-            "dlt_saga.pipeline_config.file_config._load_naming_module",
+            "dlt_saga.pipeline_config.file_config.load_naming_module",
             return_value=False,
         ):
             with patch(
@@ -191,25 +190,38 @@ class TestFileConfigSchemaName:
 
 @pytest.mark.unit
 class TestFileConfigTableName:
-    """Test table name resolution via file_config defaults."""
+    """Test table name resolution via segment-based naming defaults."""
 
     @pytest.mark.parametrize(
-        "config_path, environment, expected",
+        "segments, environment, expected",
         [
             # Prod: base_name (no prefix)
-            ("google_sheets/asm/salgsmal.yml", "prod", "asm__salgsmal"),
-            ("filesystem/di_avvik_hourly.yml", "prod", "di_avvik_hourly"),
-            ("api/livewrapped/stats.yml", "prod", "livewrapped__stats"),
+            (["google_sheets", "asm", "salgsmal"], "prod", "asm__salgsmal"),
+            (["filesystem", "di_avvik_hourly"], "prod", "di_avvik_hourly"),
+            (["api", "livewrapped", "stats"], "prod", "livewrapped__stats"),
             # Dev: first_segment__base_name
-            ("google_sheets/asm/salgsmal.yml", "dev", "google_sheets__asm__salgsmal"),
-            ("filesystem/di_avvik_hourly.yml", "dev", "filesystem__di_avvik_hourly"),
-            ("api/livewrapped/stats.yml", "dev", "api__livewrapped__stats"),
+            (
+                ["google_sheets", "asm", "salgsmal"],
+                "dev",
+                "google_sheets__asm__salgsmal",
+            ),
+            (
+                ["filesystem", "di_avvik_hourly"],
+                "dev",
+                "filesystem__di_avvik_hourly",
+            ),
+            (["api", "livewrapped", "stats"], "dev", "api__livewrapped__stats"),
         ],
     )
-    def test_table_name(self, config_path, environment, expected):
-        from dlt_saga.pipeline_config.file_config import _default_generate_table_name
+    def test_table_name(self, segments, environment, expected):
+        from dlt_saga.pipeline_config.naming import default_generate_table_name
 
-        assert _default_generate_table_name(config_path, environment) == expected
+        assert default_generate_table_name(segments, environment) == expected
+
+    def test_empty_segments_returns_default(self):
+        from dlt_saga.pipeline_config.naming import default_generate_table_name
+
+        assert default_generate_table_name([], "prod") == "default_data"
 
     def test_custom_naming_module(self):
         """Custom naming module is delegated to when configured."""
@@ -220,11 +232,88 @@ class TestFileConfigTableName:
 
         fpc = FilePipelineConfig()
         with patch(
-            "dlt_saga.pipeline_config.file_config._load_naming_module",
+            "dlt_saga.pipeline_config.file_config.load_naming_module",
             return_value=custom_module,
         ):
             result = fpc.resolve_table_name("configs/google_sheets/x.yml")
             assert result == "custom_table"
+
+
+@pytest.mark.unit
+class TestDefaultGenerateTargetLocation:
+    """Test default_generate_target_location — the public default exposed for
+    users to copy or wrap inside a custom naming module."""
+
+    def test_no_storage_root_returns_none(self):
+        from dlt_saga.pipeline_config import default_generate_target_location
+
+        assert default_generate_target_location(["g", "t"], "prod", None) is None
+        assert default_generate_target_location(["g", "t"], "prod", "") is None
+
+    def test_default_segment_shape_prod(self):
+        from dlt_saga.pipeline_config import default_generate_target_location
+
+        result = default_generate_target_location(
+            ["google_sheets", "asm", "salgsmal"],
+            "prod",
+            "abfss://lake@a.dfs.core.windows.net/raw/",
+        )
+        # group=google_sheets, table=asm__salgsmal (default_generate_table_name prod shape)
+        assert (
+            result
+            == "abfss://lake@a.dfs.core.windows.net/raw/google_sheets/asm__salgsmal/"
+        )
+
+    def test_strips_trailing_slash_on_root(self):
+        from dlt_saga.pipeline_config import default_generate_target_location
+
+        result = default_generate_target_location(
+            ["g", "t"],
+            "prod",
+            "abfss://lake/raw",  # no trailing slash
+        )
+        assert result == "abfss://lake/raw/g/t/"
+
+    def test_pipeline_group_kwarg_overrides_segment_derivation(self):
+        from dlt_saga.pipeline_config import default_generate_target_location
+
+        result = default_generate_target_location(
+            ["g", "t"],
+            "prod",
+            "abfss://lake/raw/",
+            pipeline_group="custom_group",
+        )
+        assert result == "abfss://lake/raw/custom_group/t/"
+
+    def test_table_name_kwarg_overrides_segment_derivation(self):
+        from dlt_saga.pipeline_config import default_generate_target_location
+
+        result = default_generate_target_location(
+            ["g", "t"],
+            "prod",
+            "abfss://lake/raw/",
+            table_name="resolved_via_custom_hook",
+        )
+        assert result == "abfss://lake/raw/g/resolved_via_custom_hook/"
+
+    def test_both_kwargs_passed_through(self):
+        from dlt_saga.pipeline_config import default_generate_target_location
+
+        result = default_generate_target_location(
+            ["anything"],
+            "prod",
+            "abfss://lake/raw/",
+            pipeline_group="grp",
+            table_name="tbl",
+        )
+        assert result == "abfss://lake/raw/grp/tbl/"
+
+    def test_empty_segments_uses_default_group(self):
+        from dlt_saga.pipeline_config import default_generate_target_location
+
+        result = default_generate_target_location([], "prod", "abfss://lake/raw/")
+        # Empty segments → "default" group, table = default_data
+        assert result == "abfss://lake/raw/default/default_data/"
 
 
 @pytest.mark.unit
@@ -269,21 +358,21 @@ class TestNamingIntegration:
     """Test that default resolve functions produce expected output."""
 
     def test_prod_naming_consistency(self):
-        from dlt_saga.pipeline_config.file_config import (
-            _default_generate_schema_name,
-            _default_generate_table_name,
+        from dlt_saga.pipeline_config.naming import (
+            default_generate_schema_name,
+            default_generate_table_name,
         )
 
         assert (
-            _default_generate_schema_name("google_sheets/x.yml", "prod", "dlt_dev")
+            default_generate_schema_name(["google_sheets", "x"], "prod", "dlt_dev")
             == "dlt_google_sheets"
         )
         assert (
-            _default_generate_schema_name("filesystem/x.yml", "prod", "dlt_dev")
+            default_generate_schema_name(["filesystem", "x"], "prod", "dlt_dev")
             == "dlt_filesystem"
         )
         assert (
-            _default_generate_table_name("google_sheets/my_table.yml", "prod")
+            default_generate_table_name(["google_sheets", "my_table"], "prod")
             == "my_table"
         )
         from dlt_saga.project_config import OrchestrationConfig
@@ -296,22 +385,22 @@ class TestNamingIntegration:
                 assert get_execution_plan_schema() == "dlt_orchestration"
 
     def test_dev_naming_consistency(self):
-        from dlt_saga.pipeline_config.file_config import (
-            _default_generate_schema_name,
-            _default_generate_table_name,
+        from dlt_saga.pipeline_config.naming import (
+            default_generate_schema_name,
+            default_generate_table_name,
         )
         from dlt_saga.project_config import OrchestrationConfig
 
         assert (
-            _default_generate_schema_name("google_sheets/x.yml", "dev", "dlt_developer")
+            default_generate_schema_name(["google_sheets", "x"], "dev", "dlt_developer")
             == "dlt_developer"
         )
         assert (
-            _default_generate_schema_name("filesystem/x.yml", "dev", "dlt_developer")
+            default_generate_schema_name(["filesystem", "x"], "dev", "dlt_developer")
             == "dlt_developer"
         )
         assert (
-            _default_generate_table_name("google_sheets/my_table.yml", "dev")
+            default_generate_table_name(["google_sheets", "my_table"], "dev")
             == "google_sheets__my_table"
         )
 
@@ -332,26 +421,26 @@ class TestNamingIntegration:
 class TestLoadNamingModule:
     def test_no_naming_module_key(self):
         """When project config has no naming_module key, returns False."""
-        from dlt_saga.pipeline_config.file_config import _load_naming_module
+        from dlt_saga.pipeline_config.naming import load_naming_module
 
-        result = _load_naming_module({"pipelines": {"foo": "bar"}})
+        result = load_naming_module({"pipelines": {"foo": "bar"}})
         assert result is False
 
     def test_empty_project_config(self):
         """When project config is empty, returns False."""
-        from dlt_saga.pipeline_config.file_config import _load_naming_module
+        from dlt_saga.pipeline_config.naming import load_naming_module
 
-        result = _load_naming_module({})
+        result = load_naming_module({})
         assert result is False
 
     def test_invalid_module_warns(self, caplog):
         """When naming module can't be imported, warns and returns False."""
         import logging
 
-        from dlt_saga.pipeline_config.file_config import _load_naming_module
+        from dlt_saga.pipeline_config.naming import load_naming_module
 
         with caplog.at_level(logging.WARNING):
-            result = _load_naming_module({"naming_module": "nonexistent.module"})
+            result = load_naming_module({"naming_module": "nonexistent.module"})
         assert result is False
         assert "Failed to load custom naming module" in caplog.text
 

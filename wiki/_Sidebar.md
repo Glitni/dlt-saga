@@ -6,6 +6,7 @@
 
 **Usage**
 - [Pipeline Types](Pipeline-Types)
+- [Native Cloud-Storage Loader](Native-Load)
 - [Configuration](Configuration)
 - [Profiles](Profiles)
 - [Historize (SCD2)](Historize)

@@ -150,6 +150,10 @@ class HistorizeSqlBuilder:
             WHERE column_name NOT IN ({exclude_list})
         """
 
+    def build_drop_target_table_sql(self) -> str:
+        """DROP TABLE IF EXISTS for the historized target table."""
+        return f"DROP TABLE IF EXISTS {self.target_table_id}"
+
     def build_create_target_table_sql(
         self, value_columns: List[str], replace: bool = False
     ) -> str:

@@ -85,6 +85,9 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
 - **api**: Base HTTP API pipeline with pagination support
 - **sharepoint**: Extract files from SharePoint
 
+### Bulk loaders
+- **native_load** (`adapter: dlt_saga.native_load`): Bypasses dlt extract/normalize and loads Parquet/CSV/JSONL directly into the warehouse via destination-native bulk mechanics (BigQuery external tables → INSERT, Databricks COPY INTO). Use for >1 000 files or >1 GB per run. Supports `append`, `replace`, `append+historize`, and `replace+historize` write dispositions. File-level dedup across runs requires `incremental: true` (opt-in, mirrors dlt's split between write_disposition and `dlt.sources.incremental`). `replace` rewrites the target table on every run (no state needed). Fully compatible with the historize layer — no extra config needed. State tracked in `_saga_native_load_log` (only when `incremental: true`). Supports BigQuery (`gs://`) and Databricks (`gs://`, `abfss://`). Column names always normalized to snake_case (BigQuery); explicit type hints via `columns:`; date-partition filtering via `partition_prefix_pattern` (requires `incremental: true`). Databricks supports external Delta/Iceberg/DeltaUniform tables via `table_format` + `target_location`.
+
 ### Destinations
 - **bigquery**: Full implementation with partitioning, clustering, IAM management
 - **databricks**: Full implementation with Unity Catalog, volume staging, DEEP CLONE
