@@ -319,9 +319,19 @@ class BasePipeline:
             if file_name:
                 match = compiled_regex.search(str(file_name))
                 if match:
-                    return datetime.strptime(
-                        match.group(1), snapshot_date_format
-                    ).replace(tzinfo=timezone.utc)
+                    try:
+                        return datetime.strptime(
+                            match.group(1), snapshot_date_format
+                        ).replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        logger.warning(
+                            "snapshot_date_regex matched '%s' in file '%s' but it "
+                            "does not match snapshot_date_format '%s' — "
+                            "falling back to file modification date / extraction timestamp.",
+                            match.group(1),
+                            file_name,
+                            snapshot_date_format,
+                        )
 
         # Priority 2: File modification date
         mod_date = item.get("_dlt_source_modification_date")

@@ -1,5 +1,4 @@
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Optional
 
@@ -20,9 +19,11 @@ class FilesystemClient:
             None  # Lazy-loaded cache
         )
 
-        # Ensure ADC is used for GCS when no credentials provided
-        if config.filesystem_type == "gs" and not config.credentials:
-            os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+        # When no explicit credentials are provided for GCS, gcsfs / fsspec
+        # will use Application Default Credentials (ADC) automatically.
+        # We intentionally do NOT remove GOOGLE_APPLICATION_CREDENTIALS here —
+        # a user may have set it deliberately to point at a service-account key
+        # file, and removing it would silently switch them to a different identity.
 
     def _build_filesystem_url(self) -> str:
         """Construct filesystem URL from configuration."""

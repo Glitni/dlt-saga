@@ -1,8 +1,8 @@
 # git-cliff configuration — https://git-cliff.org/docs/configuration
 #
-# Commit messages use capitalised prefixes (Feature:, Fix:, etc.).
-# commit_parsers match on these prefixes to assign groups and skip noise.
-# The template strips the prefix from commit.message using replace filters.
+# Commit messages may use any case or abbreviation for prefixes:
+# feat/feature/Feature, fix/Fix, refactor/Refactor, perf/Perf/Performance, etc.
+# commit_parsers use case-insensitive regex; the body template strips the prefix.
 
 [changelog]
 header = """
@@ -20,7 +20,7 @@ body = """
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group }}
 {% for commit in commits %}\
-- {{ commit.message | split(pat="\n") | first | replace(from="Feature: ", to="") | replace(from="Fix: ", to="") | replace(from="Refactor: ", to="") | replace(from="Perf: ", to="") | replace(from="Performance: ", to="") | replace(from="Security: ", to="") | trim | upper_first }}
+- {{ commit.message | split(pat="\n") | first | regexreplace(pat="^(?i)(feat(ure)?|fix|sec(urity)?|perf(ormance)?|refactor)[:\s]\s*", rep="") | trim | upper_first }}
 {% endfor %}
 {% endfor %}
 """
@@ -32,12 +32,12 @@ conventional_commits = false
 filter_unconventional = false
 split_commits = false
 commit_parsers = [
-  { message = "^Feature",  group = "Added" },
-  { message = "^Fix",      group = "Fixed" },
-  { message = "^Security", group = "Security" },
-  { message = "^Perf",     group = "Performance" },
-  { message = "^Refactor", group = "Changed" },
-  { message = "^(Docs|CI|Chore|Config|Bump|Test|Debug)", skip = true },
+  { message = "^(?i)feat(ure)?[:\\s]",     group = "Added" },
+  { message = "^(?i)fix[:\\s]",            group = "Fixed" },
+  { message = "^(?i)sec(urity)?[:\\s]",    group = "Security" },
+  { message = "^(?i)perf(ormance)?[:\\s]", group = "Performance" },
+  { message = "^(?i)refactor[:\\s]",       group = "Changed" },
+  { message = "^(?i)(docs?|ci|chore|config|bump|test|debug)[:\\s]", skip = true },
   { message = ".*", skip = true },
 ]
 filter_commits = true

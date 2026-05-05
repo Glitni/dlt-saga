@@ -28,7 +28,7 @@ cloud-agnostic dlt companion with a first-class SCD2 historization story.
 
 **Plugin packages** (new pipeline sources, destination types, config sources) are
 strongly encouraged and can be developed and published independently — no core
-changes needed. See [docs/plugin-development-guide.md](docs/plugin-development-guide.md).
+changes needed. See [Plugin Development](wiki/Plugin-Development.md).
 
 **Core contributions** require a PR approved by at least one maintainer. Large
 features should be discussed in an issue or Discussion first to avoid wasted effort.

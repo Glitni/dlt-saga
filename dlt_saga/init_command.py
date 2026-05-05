@@ -49,7 +49,7 @@ default:
       environment: dev
 
 # Add a prod target here when you're ready to deploy.
-# See: https://dlt-saga.readthedocs.io/en/latest/reference/configuration/
+# See: https://github.com/Glitni/dlt-saga/wiki/Profiles
 """
 
 
@@ -100,7 +100,7 @@ default:
       # staging_volume_name: "my_catalog.my_schema.ingest_volume"
 
 # Add a prod target here when you're ready to deploy.
-# See: https://dlt-saga.readthedocs.io/en/latest/reference/configuration/
+# See: https://github.com/Glitni/dlt-saga/wiki/Profiles
 """
 
 
@@ -558,8 +558,14 @@ def _scaffold(
 
             generate_schemas(schemas_dir)
             created.append(str(schemas_dir) + "/")
-        except Exception:
-            pass  # Non-critical — skip silently if schema generation fails
+        except Exception as exc:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "Schema generation failed: %s. IDE autocomplete will be unavailable. "
+                "Run 'saga generate-schemas' manually to retry.",
+                exc,
+            )
 
     return created, skipped
 

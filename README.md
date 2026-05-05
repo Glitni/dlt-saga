@@ -42,7 +42,7 @@ mkdir my-pipelines && cd my-pipelines
 saga init                               # prompts for destination and credentials
 
 # 2. Authenticate to your destination (skip for DuckDB)
-#    See: wiki/Getting-Started.md
+#    See: https://github.com/Glitni/dlt-saga/wiki/Getting-Started
 
 # 3. List available pipelines
 saga list
@@ -51,7 +51,7 @@ saga list
 saga ingest --select "example__sample"
 ```
 
-> See the **[Getting Started guide](wiki/Getting-Started.md)** for a full walkthrough, or browse [`example/`](example/) for a minimal runnable setup.
+> See the **[Getting Started guide](https://github.com/Glitni/dlt-saga/wiki/Getting-Started)** for a full walkthrough, or browse [`example/`](example/) for a minimal runnable setup.
 
 > Local execution is the default. Use `--orchestrate` to fan out to parallel workers (requires `orchestration:` configured in `saga_project.yml`).
 
@@ -108,7 +108,7 @@ Create a YAML config file in `configs/<source_type>/` — that's it. The framewo
 
 Supported source types out of the box: **API**, **Database** (PostgreSQL, MySQL, SQL Server, and more via ConnectorX), **Filesystem** (GCS, SFTP, local), **Google Sheets**, and **SharePoint**.
 
-See the **[Pipeline Types guide](wiki/Pipeline-Types.md)** for config examples for each source type, and the **[Configuration reference](wiki/Configuration.md)** for all available fields.
+See the **[Pipeline Types guide](https://github.com/Glitni/dlt-saga/wiki/Pipeline-Types)** for config examples for each source type, and the **[Configuration reference](https://github.com/Glitni/dlt-saga/wiki/Configuration)** for all available fields.
 
 ## Write Dispositions and Historize
 
@@ -122,7 +122,7 @@ The `write_disposition` field controls what operations are enabled for a pipelin
 | `append+historize` | Yes | Yes | Snapshot → SCD2 |
 | `historize` | No | Yes | External data → SCD2 |
 
-Historize transforms raw snapshot data into [SCD2](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_2:_add_new_row) tables with `_dlt_valid_from`, `_dlt_valid_to`, and `_dlt_is_deleted` columns. See the **[Historize guide](wiki/Historize.md)** for the full reference.
+Historize transforms raw snapshot data into [SCD2](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_2:_add_new_row) tables with `_dlt_valid_from`, `_dlt_valid_to`, and `_dlt_is_deleted` columns. See the **[Historize guide](https://github.com/Glitni/dlt-saga/wiki/Historize)** for the full reference.
 
 ## Community
 
@@ -133,16 +133,16 @@ Historize transforms raw snapshot data into [SCD2](https://en.wikipedia.org/wiki
 
 ## Further Reading
 
-- **[Getting Started](wiki/Getting-Started.md)** — Full walkthrough: install, init, first pipeline
-- **[Architecture](wiki/Architecture.md)** — Three-layer design, plugin system, execution flow
-- **[Pipeline Types](wiki/Pipeline-Types.md)** — Config reference for API, Database, Filesystem, Sheets, SharePoint
-- **[Configuration](wiki/Configuration.md)** — Hierarchical config, all options reference
-- **[Profiles](wiki/Profiles.md)** — Multi-environment setup, service account impersonation
-- **[Historize (SCD2)](wiki/Historize.md)** — Snapshot tables → slowly changing dimensions
-- **[CLI Reference](wiki/CLI-Reference.md)** — All commands, flags, and the programmatic API
-- **[Deployment](wiki/Deployment.md)** — Orchestration, Cloud Run, worker setup
-- **[Performance](wiki/Performance.md)** — Parallel execution, worker tuning, backfill
-- **[Plugin Development](wiki/Plugin-Development.md)** — Custom sources, destinations, hooks
+- **[Getting Started](https://github.com/Glitni/dlt-saga/wiki/Getting-Started)** — Full walkthrough: install, init, first pipeline
+- **[Architecture](https://github.com/Glitni/dlt-saga/wiki/Architecture)** — Three-layer design, plugin system, execution flow
+- **[Pipeline Types](https://github.com/Glitni/dlt-saga/wiki/Pipeline-Types)** — Config reference for API, Database, Filesystem, Sheets, SharePoint
+- **[Configuration](https://github.com/Glitni/dlt-saga/wiki/Configuration)** — Hierarchical config, all options reference
+- **[Profiles](https://github.com/Glitni/dlt-saga/wiki/Profiles)** — Multi-environment setup, service account impersonation
+- **[Historize (SCD2)](https://github.com/Glitni/dlt-saga/wiki/Historize)** — Snapshot tables → slowly changing dimensions
+- **[CLI Reference](https://github.com/Glitni/dlt-saga/wiki/CLI-Reference)** — All commands, flags, and the programmatic API
+- **[Deployment](https://github.com/Glitni/dlt-saga/wiki/Deployment)** — Orchestration, Cloud Run, worker setup
+- **[Performance](https://github.com/Glitni/dlt-saga/wiki/Performance)** — Parallel execution, worker tuning, backfill
+- **[Plugin Development](https://github.com/Glitni/dlt-saga/wiki/Plugin-Development)** — Custom sources, destinations, hooks
 
 ## Project Structure
 

@@ -145,6 +145,10 @@ def _mtime_to_generation(mtime: object) -> int:
 
         if isinstance(mtime, datetime.datetime):
             return int(mtime.timestamp() * 1000)
-    except Exception:
-        pass
+    except Exception as exc:
+        import logging as _logging
+
+        _logging.getLogger(__name__).debug(
+            "Could not convert mtime %r to milliseconds: %s", mtime, exc
+        )
     return 0
