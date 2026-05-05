@@ -501,3 +501,69 @@ class TestPipelineName:
             schema_name="dlt_filesystem",
         )
         assert config.pipeline_name == "filesystem__query_balance_view"
+
+
+@pytest.mark.unit
+class TestSanitizeSegment:
+    def test_lowercase(self):
+        from dlt_saga.pipeline_config.naming import _sanitize_segment
+
+        assert _sanitize_segment("Google") == "google"
+
+    def test_hyphen_to_underscore(self):
+        from dlt_saga.pipeline_config.naming import _sanitize_segment
+
+        assert _sanitize_segment("my-segment") == "my_segment"
+
+    def test_space_to_underscore(self):
+        from dlt_saga.pipeline_config.naming import _sanitize_segment
+
+        assert _sanitize_segment("my segment") == "my_segment"
+
+    def test_combined(self):
+        from dlt_saga.pipeline_config.naming import _sanitize_segment
+
+        assert _sanitize_segment("My-Segment Name") == "my_segment_name"
+
+    def test_no_change_already_clean(self):
+        from dlt_saga.pipeline_config.naming import _sanitize_segment
+
+        assert _sanitize_segment("my_segment") == "my_segment"
+
+
+@pytest.mark.unit
+class TestSingleSegmentTableName:
+    """len(segments) == 1 is a distinct code path in default_generate_table_name."""
+
+    def test_single_segment_prod(self):
+        from dlt_saga.pipeline_config.naming import default_generate_table_name
+
+        assert default_generate_table_name(["only_group"], "prod") == "only_group"
+
+    def test_single_segment_dev(self):
+        from dlt_saga.pipeline_config.naming import default_generate_table_name
+
+        # dev: f"{first_segment}__{base_name}" where both are the same segment
+        assert (
+            default_generate_table_name(["only_group"], "dev")
+            == "only_group__only_group"
+        )
+
+    def test_single_segment_with_hyphen_sanitized(self):
+        from dlt_saga.pipeline_config.naming import default_generate_table_name
+
+        assert default_generate_table_name(["my-group"], "prod") == "my_group"
+
+
+@pytest.mark.unit
+class TestLoadNamingModuleCaching:
+    def test_cached_result_returned_on_second_call(self):
+        """After the first call sets _naming_module=False, subsequent calls hit the cache."""
+        from dlt_saga.pipeline_config.naming import load_naming_module
+
+        result1 = load_naming_module({})
+        assert result1 is False
+        # Second call within same test: _naming_module is now False (not None),
+        # so the early-return cache branch fires.
+        result2 = load_naming_module({})
+        assert result2 is False

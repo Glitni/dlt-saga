@@ -408,3 +408,78 @@ class TestRemovedFields:
         )
         assert cfg.filename_date_regex is None
         assert cfg.filename_date_format is None
+
+
+@pytest.mark.unit
+class TestCsvFieldWarnings:
+    """CSV-specific options emit a warning when used with a non-CSV file_type."""
+
+    def test_csv_separator_warns_on_parquet(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _make(file_type="parquet", csv_separator=";")
+        assert any("csv_separator" in str(warning.message) for warning in w)
+
+    def test_encoding_warns_on_parquet(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _make(file_type="parquet", encoding="ISO-8859-1")
+        assert any("encoding" in str(warning.message) for warning in w)
+
+    def test_csv_quote_character_warns_on_jsonl(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _make(file_type="jsonl", csv_quote_character='"')
+        assert any("csv_quote_character" in str(warning.message) for warning in w)
+
+    def test_csv_null_marker_warns_on_parquet(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _make(file_type="parquet", csv_null_marker="NULL")
+        assert any("csv_null_marker" in str(warning.message) for warning in w)
+
+    def test_csv_skip_leading_rows_warns_on_parquet(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _make(file_type="parquet", csv_skip_leading_rows=1)
+        assert any("csv_skip_leading_rows" in str(warning.message) for warning in w)
+
+    def test_no_warnings_when_file_type_is_csv(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            cfg = _make(
+                file_type="csv",
+                csv_separator=";",
+                encoding="UTF-8",
+                csv_skip_leading_rows=1,
+                csv_quote_character='"',
+                csv_null_marker="\\N",
+            )
+        csv_field_warnings = [
+            x
+            for x in w
+            if any(
+                name in str(x.message)
+                for name in (
+                    "csv_separator",
+                    "encoding",
+                    "csv_quote_character",
+                    "csv_null_marker",
+                    "csv_skip_leading_rows",
+                )
+            )
+        ]
+        assert csv_field_warnings == []
+        assert cfg.csv_separator == ";"

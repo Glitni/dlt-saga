@@ -256,6 +256,56 @@ class TestExtractLevelConfig:
 
 
 @pytest.mark.unit
+class TestGetNamingSegments:
+    @pytest.mark.parametrize(
+        "path, expected",
+        [
+            (
+                "configs/google_sheets/asm/salgsmal.yml",
+                ["google_sheets", "asm", "salgsmal"],
+            ),
+            ("configs/filesystem/data.yml", ["filesystem", "data"]),
+            ("configs/api/service.yaml", ["api", "service"]),
+        ],
+    )
+    def test_segments_from_path(self, path, expected):
+        assert FilePipelineConfig().get_naming_segments(path) == expected
+
+    def test_empty_path_returns_empty(self):
+        assert FilePipelineConfig().get_naming_segments("") == []
+
+
+@pytest.mark.unit
+class TestMultipleRootDirs:
+    def test_list_constructor_stores_all_roots(self):
+        fpc = FilePipelineConfig(root_dir=["configs", "extra_configs"])
+        assert fpc._root_dirs == ["configs", "extra_configs"]
+        assert fpc.root_dir == "configs"
+
+    def test_empty_list_falls_back_to_default(self):
+        fpc = FilePipelineConfig(root_dir=[])
+        assert fpc._root_dirs == ["configs"]
+
+    def test_single_string_constructor(self):
+        fpc = FilePipelineConfig(root_dir="my_configs")
+        assert fpc._root_dirs == ["my_configs"]
+        assert fpc.root_dir == "my_configs"
+
+
+@pytest.mark.unit
+class TestDiscoverNonExistentDirectory:
+    def test_warns_and_returns_empty_on_missing_dir(self, caplog):
+        import logging
+
+        fpc = FilePipelineConfig(root_dir="__nonexistent_dir_xyz__")
+        with caplog.at_level(logging.WARNING):
+            enabled, disabled = fpc.discover()
+        assert enabled == {}
+        assert disabled == {}
+        assert any("__nonexistent_dir_xyz__" in m for m in caplog.messages)
+
+
+@pytest.mark.unit
 class TestFilePipelineConfigIntegration:
     def test_inheritance_chain(self):
         config = FilePipelineConfig()
