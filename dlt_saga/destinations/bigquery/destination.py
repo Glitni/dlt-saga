@@ -2,12 +2,46 @@
 
 import logging
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from dlt_saga.destinations.bigquery.base import BigQueryBaseDestination
 from dlt_saga.destinations.bigquery.config import BigQueryDestinationConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_ext_cols(
+    ext_cols: List[Tuple[str, str]], spec: Any
+) -> List[Tuple[str, str, str, str]]:
+    """Return (raw, norm, detected_type, target_type) for each source column.
+
+    norm = snake_case(raw) always (column names are always normalized).
+    target_type = spec.column_hints.get(normalized_key, detected_type).
+    Hint lookup always uses the normalized key so config key format doesn't matter.
+    """
+    from dlt.common.normalizers.naming.snake_case import NamingConvention
+
+    _normalize = NamingConvention().normalize_identifier
+    result = []
+    for raw, detected in ext_cols:
+        norm = _normalize(raw)
+        target = spec.column_hints.get(norm.lower(), detected)
+        result.append((raw, norm, detected, target))
+    return result
+
+
+def _fmt_col_select(
+    raw: str, norm: str, detected: str, target: str, quote: Callable[[str], str]
+) -> str:
+    """Build the SELECT expression for one source column.
+
+    Emits SAFE_CAST when the target type differs from detected.
+    Adds an AS alias when the name changes (normalization or cast).
+    """
+    cast_needed = target.upper() != detected.upper()
+    inner = f"SAFE_CAST({quote(raw)} AS {target})" if cast_needed else quote(raw)
+    alias_needed = cast_needed or (raw != norm)
+    return f"{inner} AS {quote(norm)}" if alias_needed else inner
 
 
 class BigQueryDestination(BigQueryBaseDestination):
@@ -527,7 +561,9 @@ class BigQueryDestination(BigQueryBaseDestination):
         cols = ", ".join(columns)
         return f"FARM_FINGERPRINT(TO_JSON_STRING(STRUCT({cols})))"
 
-    def partition_ddl(self, column: str) -> str:
+    def partition_ddl(self, column: str, col_type: Optional[str] = None) -> str:
+        if col_type and col_type.upper() == "DATE":
+            return f"PARTITION BY {column}"
         return f"PARTITION BY DATE({column})"
 
     def cluster_ddl(self, columns: list[str]) -> str:
@@ -725,6 +761,408 @@ class BigQueryDestination(BigQueryBaseDestination):
         except Exception as e:
             logger.debug(f"No schema version in staging dataset to clean: {e}")
 
+    # -------------------------------------------------------------------------
+    # Native-load contract
+    # -------------------------------------------------------------------------
+
+    def supports_native_load(self) -> bool:
+        return True
+
+    def supported_native_load_uri_schemes(self) -> set:
+        return {"gs"}
+
+    def native_load_file_name_expr(self) -> str:
+        return "_FILE_NAME"
+
+    def parse_filename_timestamp_expr(
+        self, file_name_expr: str, regex_literal: str, format_literal: str
+    ) -> str:
+        return (
+            f"SAFE.PARSE_TIMESTAMP('{format_literal}', "
+            f"REGEXP_EXTRACT({file_name_expr}, '{regex_literal}'))"
+        )
+
+    def table_exists(self, dataset: str, table: str) -> bool:
+        from google.cloud import bigquery
+        from google.cloud.exceptions import NotFound
+
+        client = bigquery.Client(
+            project=self.config.job_project_id, location=self.config.location
+        )
+        try:
+            client.get_table(f"{self.config.project_id}.{dataset}.{table}")
+            return True
+        except NotFound:
+            return False
+
+    def drop_table(self, dataset: str, table: str) -> None:
+        full_id = f"{self.config.project_id}.{dataset}.{table}"
+        self._drop_table(full_id)
+
+    def list_table_columns(self, dataset: str, table: str) -> list:
+        sql = self.columns_query(self.config.project_id, dataset, table)
+        rows = self.execute_sql(sql)
+        return [(r.column_name, r.data_type) for r in rows]
+
+    def add_column(self, dataset: str, table: str, column: str, type_name: str) -> None:
+        table_id = self.get_full_table_id(dataset, table)
+        self.execute_sql(
+            f"ALTER TABLE {table_id} ADD COLUMN {self.quote_identifier(column)} {type_name}"
+        )
+
+    def execute_sql_with_job(self, sql: str, schema: Optional[str] = None) -> tuple:
+        """Execute SQL and return (rows, job_id). Uses job_project_id for billing."""
+        from google.cloud import bigquery
+
+        client = bigquery.Client(
+            project=self.config.job_project_id, location=self.config.location
+        )
+        job_config = bigquery.QueryJobConfig()
+        if schema:
+            job_config.default_dataset = f"{self.config.project_id}.{schema}"
+        job = client.query(sql, job_config=job_config)
+        rows = list(job.result(timeout=600))
+        return rows, job.job_id
+
+    def list_tables_by_pattern(self, dataset: str, pattern: str) -> list:
+        safe_pattern = pattern.replace("'", "''")
+        sql = (
+            f"SELECT table_name "
+            f"FROM `{self.config.project_id}.{dataset}.INFORMATION_SCHEMA.TABLES` "
+            f"WHERE table_name LIKE '{safe_pattern}'"
+        )
+        try:
+            rows = self.execute_sql(sql)
+            return [r.table_name for r in rows]
+        except Exception as exc:
+            logger.debug("list_tables_by_pattern failed: %s", exc)
+            return []
+
+    def create_external_table(
+        self,
+        dataset: str,
+        name: str,
+        source_uris: list,
+        source_format: str = "PARQUET",
+        autodetect: bool = True,
+        format_options: Optional[dict] = None,
+    ) -> None:
+        """Create a transient external table over GCS URIs."""
+        from google.cloud import bigquery
+
+        client = bigquery.Client(
+            project=self.config.job_project_id, location=self.config.location
+        )
+        table_ref = f"{self.config.project_id}.{dataset}.{name}"
+
+        ext_config = bigquery.ExternalConfig(source_format)
+        ext_config.source_uris = source_uris
+        ext_config.autodetect = autodetect
+
+        if source_format == "CSV" and format_options:
+            csv_opts = bigquery.CSVOptions()
+            if "field_delimiter" in format_options:
+                csv_opts.field_delimiter = format_options["field_delimiter"]
+            if "skip_leading_rows" in format_options:
+                csv_opts.skip_leading_rows = int(format_options["skip_leading_rows"])
+            if "quote_character" in format_options:
+                csv_opts.quote_character = format_options["quote_character"]
+            if "null_marker" in format_options:
+                csv_opts.null_markers = [format_options["null_marker"]]
+            if "encoding" in format_options:
+                csv_opts.encoding = format_options["encoding"].upper()
+            ext_config.csv_options = csv_opts
+
+        table = bigquery.Table(table_ref)
+        table.external_data_configuration = ext_config
+        client.create_table(table)
+
+    def patch_external_table_schema(
+        self, dataset: str, name: str, column_type_overrides: dict
+    ) -> None:
+        """Override column types on an existing external table.
+
+        Patching to STRING before a SAFE_CAST prevents BigQuery from raising
+        "Bad double value" on empty CSV fields for hint-driven columns.
+        """
+        from google.cloud import bigquery
+
+        client = bigquery.Client(
+            project=self.config.job_project_id, location=self.config.location
+        )
+        dataset_ref = bigquery.DatasetReference(self.config.project_id, dataset)
+        table_ref = bigquery.TableReference(dataset_ref, name)
+        table = client.get_table(table_ref)
+        new_schema = [
+            bigquery.SchemaField(
+                f.name,
+                column_type_overrides.get(f.name, f.field_type),
+                mode=f.mode,
+            )
+            for f in table.schema
+        ]
+        table.schema = new_schema
+        client.update_table(table, ["schema"])
+        logger.debug(
+            "Patched ext table %s.%s: %s", dataset, name, column_type_overrides
+        )
+
+    def _patch_ext_for_hints(self, spec: "Any", ext_name: str, ext_cols: list) -> list:
+        """Patch hint-driven columns to STRING in the external table.
+
+        Returns updated ext_cols with STRING substituted for patched columns so
+        that _normalize_ext_cols sees STRING as the detected type and emits the
+        correct SAFE_CAST expression.  No-op (returns ext_cols unchanged) when no
+        hints are configured.
+        """
+        if not spec.column_hints:
+            return ext_cols
+
+        from dlt.common.normalizers.naming.snake_case import NamingConvention
+
+        _normalize = NamingConvention().normalize_identifier
+        derived_names = {c.name for c in spec.derived_columns}
+        overrides: dict = {}
+        for raw, detected in ext_cols:
+            if raw in derived_names:
+                continue
+            # Always normalize for hint lookup so config key format doesn't matter
+            norm = _normalize(raw).lower()
+            if norm in spec.column_hints and detected.upper() != "STRING":
+                overrides[raw] = "STRING"
+        if overrides:
+            logger.debug(
+                "Patching ext table %s: overriding %s to STRING for hint-driven CAST",
+                ext_name,
+                list(overrides.keys()),
+            )
+            self.patch_external_table_schema(spec.staging_dataset, ext_name, overrides)
+
+        return [(raw, overrides.get(raw, detected)) for raw, detected in ext_cols]
+
+    def native_load_chunk(self, spec: "Any") -> "Any":
+        """Load one chunk via external table → INSERT/CTAS → drop external table."""
+        import uuid
+
+        from dlt_saga.destinations.base import NativeLoadResult
+
+        _BQ_FORMAT_MAP = {
+            "parquet": "PARQUET",
+            "csv": "CSV",
+            "jsonl": "NEWLINE_DELIMITED_JSON",
+        }
+        bq_format = _BQ_FORMAT_MAP.get(spec.file_type, "PARQUET")
+
+        ext_name = f"{spec.target_table}__ext_{uuid.uuid4().hex[:8]}"
+
+        try:
+            self.create_external_table(
+                dataset=spec.staging_dataset,
+                name=ext_name,
+                source_uris=spec.source_uris,
+                source_format=bq_format,
+                autodetect=spec.autodetect_schema,
+                format_options=spec.format_options or None,
+            )
+            ext_id = self.get_full_table_id(spec.staging_dataset, ext_name)
+            ext_cols = self.list_table_columns(spec.staging_dataset, ext_name)
+            ext_cols = self._patch_ext_for_hints(spec, ext_name, ext_cols)
+
+            if not spec.target_exists:
+                rows_loaded, job_id = self._native_load_create_target(
+                    spec, ext_id, ext_cols
+                )
+            else:
+                rows_loaded, job_id = self._native_load_insert_into_target(
+                    spec, ext_id, ext_cols
+                )
+
+            rows_by_uri = self._native_load_rowcounts(spec)
+            return NativeLoadResult(
+                rows_loaded=rows_loaded, job_id=job_id, rows_by_uri=rows_by_uri
+            )
+
+        finally:
+            try:
+                self.drop_table(spec.staging_dataset, ext_name)
+            except Exception as exc:
+                logger.warning("Could not drop external table %s: %s", ext_name, exc)
+
+    def _native_load_create_target(
+        self, spec: "Any", ext_id: str, ext_cols: list
+    ) -> tuple:
+        """CTAS on first run. Returns (rows_loaded, job_id)."""
+        if spec.file_type == "csv" and not spec.autodetect_schema:
+            raise ValueError(
+                "Cannot create target table from CSV with autodetect_schema=False: "
+                "schema cannot be inferred. Set autodetect_schema=True or pre-create the target."
+            )
+
+        derived_names = {c.name for c in spec.derived_columns}
+        src_ext_cols = [(n, t) for n, t in ext_cols if n not in derived_names]
+        normalized = _normalize_ext_cols(src_ext_cols, spec)
+        source_select = ", ".join(
+            _fmt_col_select(raw, norm, detected, target, self.quote_identifier)
+            for raw, norm, detected, target in normalized
+        )
+        derived_select = ", ".join(
+            f"{c.sql_expr} AS {self.quote_identifier(c.name)}"
+            for c in spec.derived_columns
+        )
+        all_select = ", ".join(filter(None, [source_select, derived_select]))
+
+        target_id = self.get_full_table_id(spec.target_dataset, spec.target_table)
+        create_clause = (
+            "CREATE OR REPLACE TABLE"
+            if getattr(spec, "write_disposition", "append") == "replace"
+            else "CREATE TABLE"
+        )
+        parts = [f"{create_clause} {target_id}"]
+
+        if spec.partition_column:
+            # Look up partition column type by raw or normalized name
+            col_type = next(
+                (
+                    target
+                    for raw, norm, detected, target in normalized
+                    if norm == spec.partition_column or raw == spec.partition_column
+                ),
+                next(
+                    (
+                        c.sql_type
+                        for c in spec.derived_columns
+                        if c.name == spec.partition_column
+                    ),
+                    None,
+                ),
+            )
+            parts.append(self.partition_ddl(spec.partition_column, col_type))
+
+        if spec.cluster_columns:
+            parts.append(self.cluster_ddl(spec.cluster_columns))
+
+        parts.append(f"AS SELECT {all_select} FROM {ext_id}")
+
+        _, job_id = self.execute_sql_with_job(" ".join(parts), spec.staging_dataset)
+
+        # COUNT(*) to get rows written (CTAS doesn't expose num_dml_affected_rows)
+        count_rows = list(self.execute_sql(f"SELECT COUNT(*) AS cnt FROM {target_id}"))
+        total_rows = int(count_rows[0].cnt) if count_rows else 0
+        return total_rows, job_id
+
+    def _native_load_insert_into_target(
+        self, spec: "Any", ext_id: str, ext_cols: list
+    ) -> tuple:
+        """INSERT INTO existing target. Returns (rows_loaded, job_id)."""
+        from google.cloud import bigquery
+
+        target_id = self.get_full_table_id(spec.target_dataset, spec.target_table)
+        target_cols = self.list_table_columns(spec.target_dataset, spec.target_table)
+        target_col_map = {n: t for n, t in target_cols}
+        derived_names = {c.name for c in spec.derived_columns}
+
+        # 1. Auto-add framework cols missing from target (independent of schema_evolution)
+        for dc in spec.derived_columns:
+            if dc.name not in target_col_map:
+                self.add_column(
+                    spec.target_dataset, spec.target_table, dc.name, dc.sql_type
+                )
+                target_col_map[dc.name] = dc.sql_type
+                logger.info(
+                    "Added framework column %r to %s", dc.name, spec.target_table
+                )
+
+        # 2. Reconcile data columns using normalized names and hint-driven target types
+        src_ext_cols = [(n, t) for n, t in ext_cols if n not in derived_names]
+        normalized = _normalize_ext_cols(src_ext_cols, spec)
+        insert_col_exprs: list = []  # [(target_col_name, select_expr)]
+        for raw, norm, detected, target in normalized:
+            if norm in target_col_map:
+                existing_type = target_col_map[norm]
+                if existing_type.upper() != target.upper():
+                    raise ValueError(
+                        f"Type change for column {norm!r} in {spec.target_table!r}: "
+                        f"existing={existing_type!r}, source={target!r}. "
+                        "Type changes are not supported. Use --full-refresh to rebuild the table."
+                    )
+                insert_col_exprs.append(
+                    (
+                        norm,
+                        _fmt_col_select(
+                            raw, norm, detected, target, self.quote_identifier
+                        ),
+                    )
+                )
+            else:
+                self.add_column(spec.target_dataset, spec.target_table, norm, target)
+                target_col_map[norm] = target
+                insert_col_exprs.append(
+                    (
+                        norm,
+                        _fmt_col_select(
+                            raw, norm, detected, target, self.quote_identifier
+                        ),
+                    )
+                )
+                logger.info("Added new column %r to %s", norm, spec.target_table)
+
+        # 3. Build INSERT
+        all_insert_cols = [norm for norm, _ in insert_col_exprs] + [
+            c.name for c in spec.derived_columns
+        ]
+        col_list = ", ".join(self.quote_identifier(c) for c in all_insert_cols)
+        data_select = ", ".join(expr for _, expr in insert_col_exprs)
+        derived_select = ", ".join(
+            f"{c.sql_expr} AS {self.quote_identifier(c.name)}"
+            for c in spec.derived_columns
+        )
+        full_select = ", ".join(filter(None, [data_select, derived_select]))
+        sql = f"INSERT INTO {target_id} ({col_list}) SELECT {full_select} FROM {ext_id}"
+
+        # Execute and capture affected rows from job stats
+        client = bigquery.Client(
+            project=self.config.job_project_id, location=self.config.location
+        )
+        job_config = bigquery.QueryJobConfig()
+        job_config.default_dataset = f"{self.config.project_id}.{spec.staging_dataset}"
+        job = client.query(sql, job_config=job_config)
+        job.result(timeout=600)
+        rows_loaded = job.num_dml_affected_rows or 0
+        return int(rows_loaded), job.job_id
+
+    def _native_load_rowcounts(self, spec: "Any") -> dict:
+        """Query per-file row counts from the target using _dlt_source_file_name filter."""
+        from dlt_saga.pipelines.native_load.pipeline import (
+            NativeLoadPipeline as _NLP,
+        )
+
+        file_col = _NLP._FILE_NAME_COLUMN
+        at_col = _NLP._INGESTED_AT_COLUMN
+
+        has_file_col = any(c.name == file_col for c in spec.derived_columns)
+        if not has_file_col:
+            return {}
+
+        at_expr = next(
+            (c.sql_expr for c in spec.derived_columns if c.name == at_col), None
+        )
+        if not at_expr:
+            return {}
+
+        target_id = self.get_full_table_id(spec.target_dataset, spec.target_table)
+        sql = (
+            f"SELECT {self.quote_identifier(file_col)} AS uri, COUNT(*) AS cnt "
+            f"FROM {target_id} "
+            f"WHERE {self.quote_identifier(at_col)} = {at_expr} "
+            f"GROUP BY {self.quote_identifier(file_col)}"
+        )
+        try:
+            rows = self.execute_sql(sql)
+            return {r.uri: int(r.cnt) for r in rows}
+        except Exception as exc:
+            logger.warning("Could not derive per-file row counts: %s", exc)
+            return {}
+
     # Iceberg-specific methods
 
     def _get_storage_uri(self, table_name: str) -> str:
@@ -763,6 +1201,10 @@ class BigQueryDestination(BigQueryBaseDestination):
         "complex": "STRING",
         "wei": "BIGNUMERIC",
     }
+
+    def dlt_type_to_native(self, dlt_type: str) -> str:
+        """Convert a dlt logical type to a BigQuery SQL type."""
+        return self.DLT_TO_BIGQUERY_TYPE.get(dlt_type.lower(), dlt_type.upper())
 
     def _build_create_table_ddl(
         self,

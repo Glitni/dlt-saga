@@ -182,11 +182,20 @@ class LogTablesConfig:
         default="_saga_executions",
         metadata={"description": "Name of the executions metadata table."},
     )
+    native_load_log: str = field(
+        default="_saga_native_load_log",
+        metadata={"description": "Name of the native-load state-log table."},
+    )
 
     @property
     def execution_plans_current(self) -> str:
         """View name derived from the execution_plans table name."""
         return f"{self.execution_plans}_current"
+
+    @property
+    def native_load_log_latest(self) -> str:
+        """View name derived from the native_load_log table name."""
+        return f"{self.native_load_log}_latest"
 
     @classmethod
     def from_dict(cls, data: dict) -> "LogTablesConfig":
@@ -196,6 +205,7 @@ class LogTablesConfig:
             historize_log=data.get("historize_log", "_saga_historize_log"),
             execution_plans=data.get("execution_plans", "_saga_execution_plans"),
             executions=data.get("executions", "_saga_executions"),
+            native_load_log=data.get("native_load_log", "_saga_native_load_log"),
         )
 
 
@@ -389,6 +399,24 @@ def get_execution_plans_view_name() -> str:
     Default: ``_saga_execution_plans_current``.
     """
     return get_project_config().log_tables.execution_plans_current
+
+
+def get_native_load_log_table_name() -> str:
+    """Return the configured name for the native-load state-log table.
+
+    Configured via ``log_tables.native_load_log`` in saga_project.yml.
+    Default: ``_saga_native_load_log``.
+    """
+    return get_project_config().log_tables.native_load_log
+
+
+def get_native_load_log_view_name() -> str:
+    """Return the derived name for the native-load state-log latest view.
+
+    Derived as ``{native_load_log}_latest``.
+    Default: ``_saga_native_load_log_latest``.
+    """
+    return get_project_config().log_tables.native_load_log_latest
 
 
 def _reset_cache() -> None:

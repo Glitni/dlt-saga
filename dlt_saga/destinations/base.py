@@ -5,11 +5,59 @@ must follow, enabling support for multiple data warehouses (BigQuery, Snowflake,
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.config import DestinationConfig
+
+
+# ---------------------------------------------------------------------------
+# Native-load contract types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DerivedColumn:
+    """A framework-managed column injected by NativeLoadPipeline."""
+
+    name: str
+    sql_expr: str
+    sql_type: str
+
+
+@dataclass
+class NativeLoadSpec:
+    """Inputs for a single native-load chunk passed to destination.native_load_chunk."""
+
+    target_dataset: str
+    target_table: str
+    source_uris: list
+    file_type: str
+    autodetect_schema: bool
+    derived_columns: list
+    target_exists: bool
+    partition_column: Optional[str]
+    cluster_columns: Optional[list]
+    format_options: dict
+    staging_dataset: str
+    chunk_label: str
+    write_disposition: str = "append"
+    column_hints: Dict[str, str] = field(default_factory=dict)
+    # Databricks-specific: external table LOCATION URI (None = managed table)
+    target_location: Optional[str] = None
+    # Databricks-specific: table format ("delta", "iceberg", "delta_uniform")
+    table_format: str = "delta"
+
+
+@dataclass
+class NativeLoadResult:
+    """Result returned from destination.native_load_chunk."""
+
+    rows_loaded: int
+    job_id: str
+    rows_by_uri: dict = field(default_factory=dict)
 
 
 class Destination(ABC):
@@ -322,8 +370,15 @@ class Destination(ABC):
         cols = ", ".join(columns)
         return f"FARM_FINGERPRINT(TO_JSON_STRING(STRUCT({cols})))"
 
-    def partition_ddl(self, column: str) -> str:
-        """Return DDL clause for table partitioning, or empty string if unsupported."""
+    def partition_ddl(self, column: str, col_type: Optional[str] = None) -> str:
+        """Return DDL clause for table partitioning, or empty string if unsupported.
+
+        Args:
+            column: Partition column name.
+            col_type: Optional SQL type hint. BigQuery uses it to choose between
+                      ``PARTITION BY DATE(col)`` and ``PARTITION BY col``. Other
+                      destinations may ignore it.
+        """
         return ""
 
     def cluster_ddl(self, columns: list[str]) -> str:
@@ -444,6 +499,97 @@ class Destination(ABC):
             table_name: Main table name to drop
         """
         pass
+
+    # -------------------------------------------------------------------------
+    # Native-load contract — override on BigQuery and Databricks
+    # -------------------------------------------------------------------------
+
+    def supports_native_load(self) -> bool:
+        """Return True if destination implements native_load_chunk."""
+        return False
+
+    def supported_native_load_uri_schemes(self) -> set:
+        """Return the set of URI schemes supported for native_load (e.g. {'gs', 's3'})."""
+        return set()
+
+    def native_load_chunk(self, spec: "NativeLoadSpec") -> "NativeLoadResult":
+        """Load one chunk of source URIs directly into the warehouse.
+
+        Raises:
+            NotImplementedError: if the destination does not support native_load.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support native_load. "
+            "Set adapter: dlt_saga.native_load only on bigquery or databricks destinations."
+        )
+
+    def native_load_file_name_expr(self) -> str:
+        """Return the SQL expression that yields the source file path for each row.
+
+        BigQuery: ``_FILE_NAME``.
+        Databricks: ``_metadata.file_path``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement native_load_file_name_expr"
+        )
+
+    def parse_filename_timestamp_expr(
+        self, file_name_expr: str, regex_literal: str, format_literal: str
+    ) -> str:
+        """Return a SQL expression that extracts a TIMESTAMP from a file path string.
+
+        Returns NULL on regex miss — never falls back to CURRENT_TIMESTAMP().
+
+        Args:
+            file_name_expr: SQL expression for the file path (e.g. ``_FILE_NAME``).
+            regex_literal: Already-escaped regex string with one capture group.
+            format_literal: Already-escaped strftime format string.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement parse_filename_timestamp_expr"
+        )
+
+    def table_exists(self, dataset: str, table: str) -> bool:
+        """Return True if the table exists in the given dataset."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement table_exists"
+        )
+
+    def drop_table(self, dataset: str, table: str) -> None:
+        """Drop a table; no-op if it does not exist."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement drop_table"
+        )
+
+    def list_table_columns(self, dataset: str, table: str) -> list:
+        """Return [(column_name, sql_type), ...] for the given table."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement list_table_columns"
+        )
+
+    def add_column(self, dataset: str, table: str, column: str, type_name: str) -> None:
+        """Add a column to an existing table."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement add_column"
+        )
+
+    def execute_sql_with_job(self, sql: str, schema: Optional[str] = None) -> tuple:
+        """Execute SQL and return (rows, job_id) for traceability."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement execute_sql_with_job"
+        )
+
+    def dlt_type_to_native(self, dlt_type: str) -> str:
+        """Convert a dlt logical type (e.g. 'timestamp') to the destination's SQL type.
+
+        Falls back to the input uppercased if not recognized, so native types
+        like 'INT64' or 'FLOAT64' pass through unchanged.
+        """
+        return dlt_type.upper()
+
+    def list_tables_by_pattern(self, dataset: str, pattern: str) -> list:
+        """Return table names matching a SQL LIKE pattern in the given dataset."""
+        return []
 
 
 class AccessManager(ABC):

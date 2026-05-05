@@ -1,14 +1,12 @@
 """File-based pipeline configuration with hierarchical resolution.
 
-This module implements file-based pipeline discovery with dbt-style configuration
-inheritance using dlt_project.yml for project-wide defaults.
-
-Naming resolution (schema and table names) is handled here because it depends
-on the config file path — the natural identifier for file-based configs.
-Custom naming modules can override defaults via naming_module in saga_project.yml.
+Implements file-based pipeline discovery with dbt-style configuration
+inheritance via ``dlt_project.yml``. Naming resolution is delegated to
+:mod:`dlt_saga.pipeline_config.naming`, which holds the framework's default
+``generate_*`` implementations and the custom-module loader; users
+overriding naming behaviour should import the defaults from there.
 """
 
-import importlib
 import logging
 import os
 from pathlib import Path
@@ -21,123 +19,14 @@ from dlt_saga.pipeline_config.base_config import (
     PipelineConfig,
     parse_tags,
 )
+from dlt_saga.pipeline_config.naming import (
+    default_generate_schema_name,
+    default_generate_table_name,
+    load_naming_module,
+)
 from dlt_saga.utility.naming import get_dev_schema, get_environment
 
 logger = logging.getLogger(__name__)
-
-# Cached custom naming module (None = not loaded, False = no custom module)
-_naming_module: Any = None
-
-
-def _load_naming_module(project_config: Dict[str, Any]) -> Any:
-    """Load custom naming module from project config if configured.
-
-    The naming_module field in saga_project.yml points to a Python module
-    that can override schema and table name generation. The module should
-    provide:
-    - generate_schema_name(config_path: str, environment: str, default_schema: str) -> str
-    - generate_table_name(config_path: str, environment: str) -> str
-
-    Where config_path is the relative path from the configs root
-    (e.g., "google_sheets/asm/salgsmal.yml").
-
-    Args:
-        project_config: Parsed saga_project.yml contents
-
-    Returns:
-        The imported module, or False if no custom module configured.
-    """
-    global _naming_module
-    if _naming_module is not None:
-        return _naming_module
-
-    try:
-        module_name = project_config.get("naming_module")
-        if not module_name:
-            _naming_module = False
-            return _naming_module
-
-        _naming_module = importlib.import_module(module_name)
-        logger.debug(f"Loaded custom naming module: {module_name}")
-
-        # Validate expected functions
-        for fn_name in ("generate_schema_name", "generate_table_name"):
-            if not hasattr(_naming_module, fn_name):
-                logger.warning(
-                    f"Custom naming module '{module_name}' missing {fn_name}(), "
-                    f"will use default for that function"
-                )
-
-        return _naming_module
-
-    except Exception as e:
-        logger.warning(f"Failed to load custom naming module: {e}, using defaults")
-        _naming_module = False
-        return _naming_module
-
-
-def _default_generate_schema_name(
-    config_path: str, environment: str, default_schema: str
-) -> str:
-    """Default schema name generation from relative config path.
-
-    Prod: dlt_{first_path_segment} (e.g., dlt_google_sheets)
-    Dev: default_schema (from profile or SAGA_SCHEMA_NAME)
-
-    Args:
-        config_path: Relative path from configs root (e.g., "google_sheets/asm/salgsmal.yml")
-        environment: Current environment ('prod' or 'dev')
-        default_schema: Dev schema name from profile/env var
-    """
-    if environment == "prod":
-        first_segment = (
-            Path(config_path).parts[0] if Path(config_path).parts else "default"
-        )
-        return f"dlt_{first_segment}"
-    else:
-        return default_schema
-
-
-def _default_generate_table_name(config_path: str, environment: str) -> str:
-    """Default table name generation from relative config path.
-
-    Prod: base_name (no prefix, e.g., "asm__salgsmal")
-    Dev: {first_segment}__{base_name} (e.g., "google_sheets__asm__salgsmal")
-
-    Args:
-        config_path: Relative path from configs root (e.g., "google_sheets/asm/salgsmal.yml")
-        environment: Current environment ('prod' or 'dev')
-    """
-    path = Path(config_path)
-    parts = list(path.parts)
-
-    # Remove file extension from last part
-    if parts:
-        last = parts[-1]
-        for ext in (".yml", ".yaml"):
-            if last.endswith(ext):
-                parts[-1] = last[: -len(ext)]
-                break
-
-    if not parts:
-        return "default_data"
-
-    first_segment = parts[0]
-
-    if len(parts) == 1:
-        base_name = parts[0].lower().replace("-", "_").replace(" ", "_")
-    elif len(parts) == 2:
-        base_name = parts[1].lower().replace("-", "_").replace(" ", "_")
-    else:
-        name_parts = parts[1:]
-        base_name = "__".join(
-            p.lower().replace("-", "_").replace(" ", "_") for p in name_parts
-        )
-
-    if environment == "prod":
-        return base_name
-    else:
-        return f"{first_segment}__{base_name}"
 
 
 class FilePipelineConfig(ConfigSource):
@@ -224,50 +113,57 @@ class FilePipelineConfig(ConfigSource):
         # Fallback: return as-is if we can't resolve
         return config_path
 
+    def get_naming_segments(self, config_path: str) -> List[str]:
+        """Convert a config file path into the segment list used by naming.
+
+        Returns ``[group, sub_1, ..., name]`` with the file extension stripped
+        from the leaf — e.g. ``configs/google_sheets/asm/salgsmal.yml`` becomes
+        ``["google_sheets", "asm", "salgsmal"]``. Other config sources produce
+        their own segments from whatever identifier shape they expose; the
+        naming defaults in :mod:`dlt_saga.pipeline_config.naming` take only the
+        segment list and don't care where it came from.
+        """
+        relative = self._get_relative_config_path(config_path)
+        if relative is None:
+            return []
+        parts = list(relative.parts)
+        if not parts:
+            return []
+        last = parts[-1]
+        for ext in (".yml", ".yaml"):
+            if last.endswith(ext):
+                parts[-1] = last[: -len(ext)]
+                break
+        return parts
+
     def resolve_schema_name(self, config_path: str) -> str:
         """Resolve schema name for a config file.
 
-        Uses custom naming module if configured in saga_project.yml,
-        otherwise uses default logic:
-          prod: dlt_{first_path_segment}
-          dev: profile schema or dlt_dev
-
-        Args:
-            config_path: Path to config file (absolute or relative)
-
-        Returns:
-            Schema name
+        Uses the custom naming module if one is configured; otherwise falls
+        back to :func:`default_generate_schema_name`.
         """
-        rel_path = self._get_relative_config_path_str(config_path)
+        segments = self.get_naming_segments(config_path)
         environment = get_environment()
         default_schema = get_dev_schema()
 
-        module = _load_naming_module(self.project_config)
+        module = load_naming_module(self.project_config)
         if module and hasattr(module, "generate_schema_name"):
-            return module.generate_schema_name(rel_path, environment, default_schema)
-        return _default_generate_schema_name(rel_path, environment, default_schema)
+            return module.generate_schema_name(segments, environment, default_schema)
+        return default_generate_schema_name(segments, environment, default_schema)
 
     def resolve_table_name(self, config_path: str) -> str:
         """Resolve table name for a config file.
 
-        Uses custom naming module if configured in saga_project.yml,
-        otherwise uses default logic:
-          prod: base_name (no prefix)
-          dev: {first_segment}__{base_name}
-
-        Args:
-            config_path: Path to config file (absolute or relative)
-
-        Returns:
-            Table name
+        Uses the custom naming module if one is configured; otherwise falls
+        back to :func:`default_generate_table_name`.
         """
-        rel_path = self._get_relative_config_path_str(config_path)
+        segments = self.get_naming_segments(config_path)
         environment = get_environment()
 
-        module = _load_naming_module(self.project_config)
+        module = load_naming_module(self.project_config)
         if module and hasattr(module, "generate_table_name"):
-            return module.generate_table_name(rel_path, environment)
-        return _default_generate_table_name(rel_path, environment)
+            return module.generate_table_name(segments, environment)
+        return default_generate_table_name(segments, environment)
 
     # =========================================================================
     # Discovery

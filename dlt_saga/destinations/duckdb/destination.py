@@ -341,7 +341,7 @@ class DuckDBDestination(Destination):
         )
         return f"md5(concat({cast_cols}))"
 
-    def partition_ddl(self, column: str) -> str:
+    def partition_ddl(self, column: str, col_type: Optional[str] = None) -> str:
         return ""  # DuckDB doesn't support partitioning
 
     def cluster_ddl(self, columns: list[str]) -> str:
