@@ -22,32 +22,103 @@ class HistorizeConfig:
     source_table fields (shared with ingest config).
     """
 
-    # Snapshot identification
-    snapshot_column: str = "_dlt_ingested_at"
+    snapshot_column: str = field(
+        default="_dlt_ingested_at",
+        metadata={
+            "description": (
+                "Column that identifies each snapshot in the source table. "
+                "Rows sharing the same value are treated as one point-in-time view. "
+                "Defaults to '_dlt_ingested_at', which is injected automatically for append pipelines."
+            )
+        },
+    )
 
-    # Primary key for change detection (inherited from top-level if None)
-    primary_key: Optional[List[str]] = None
+    primary_key: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Column(s) that uniquely identify a business entity across snapshots. "
+                "Inherited from the top-level pipeline primary_key if not set here."
+            )
+        },
+    )
 
-    # Columns to exclude from change detection (beyond system columns)
-    exclude_columns: List[str] = field(default_factory=list)
+    track_columns: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Columns to include in change detection. When set, only these columns are hashed; "
+                "all other non-PK columns are ignored for change detection but still appear in the output. "
+                "Applied before ignore_columns."
+            )
+        },
+    )
 
-    # Output table naming
-    output_table_suffix: str = "_historized"
-    output_dataset: Optional[str] = None
-    output_table: Optional[str] = None
+    ignore_columns: List[str] = field(
+        default_factory=list,
+        metadata={
+            "description": (
+                "Columns to exclude from change detection. These columns are still present in the "
+                "output table but do not trigger a new SCD2 record when their value changes. "
+                "Applied after track_columns when both are set."
+            )
+        },
+    )
 
-    # Historized table hints
-    partition_column: str = "_dlt_valid_from"
-    cluster_columns: Optional[List[str]] = None
+    output_table_suffix: str = field(
+        default="_historized",
+        metadata={
+            "description": (
+                "Suffix appended to the source table name to derive the historized table name. "
+                "Defaults to '_historized'."
+            )
+        },
+    )
 
-    # Deletion tracking
-    track_deletions: bool = True
+    output_dataset: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": "Dataset to write the historized table to. Defaults to the same dataset as the source."
+        },
+    )
+
+    output_table: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": "Explicit name for the historized output table. Overrides output_table_suffix when set."
+        },
+    )
+
+    partition_column: str = field(
+        default="_dlt_valid_from",
+        metadata={
+            "description": "Column to partition the historized table by. Defaults to '_dlt_valid_from'."
+        },
+    )
+
+    cluster_columns: Optional[List[str]] = field(
+        default=None,
+        metadata={"description": "Columns to cluster the historized table by (max 4)."},
+    )
+
+    track_deletions: bool = field(
+        default=True,
+        metadata={
+            "description": (
+                "When True, rows that disappear from the source produce a deletion marker row "
+                "(_dlt_is_deleted=True) in the historized table. "
+                "When False, only value changes are tracked."
+            )
+        },
+    )
 
     def __post_init__(self):
         if isinstance(self.primary_key, str):
             self.primary_key = [self.primary_key]
-        if isinstance(self.exclude_columns, str):
-            self.exclude_columns = [self.exclude_columns]
+        if isinstance(self.track_columns, str):
+            self.track_columns = [self.track_columns]
+        if isinstance(self.ignore_columns, str):
+            self.ignore_columns = [self.ignore_columns]
         if isinstance(self.cluster_columns, str):
             self.cluster_columns = [self.cluster_columns]
         self._validate_column_identifiers()

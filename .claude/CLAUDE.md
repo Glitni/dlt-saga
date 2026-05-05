@@ -231,7 +231,7 @@ primary_key: [id]
 historize:
   # snapshot_column: _dlt_ingested_at   # default
   # primary_key: inherited from top level
-  exclude_columns: [_dlt_source_file_name]
+  ignore_columns: [updated_by]
   partition_column: "_dlt_valid_from"
   cluster_columns: [id]
   track_deletions: true
@@ -319,7 +319,7 @@ historize:
 - `_dlt_is_deleted` boolean column: deletions produce a **separate marker row** (`_dlt_is_deleted = TRUE`, `_dlt_valid_to = NULL`) rather than flagging the closed row; closed change rows always have `_dlt_is_deleted = FALSE`; deletion markers are closed (`_dlt_valid_to` set) when the key reappears
 - File metadata (`_dlt_source_file_name`, `_dlt_source_modification_date`) auto-injected for append-mode filesystem pipelines only (not for merge/SCD2 to avoid false change detection)
 - `snapshot_date_regex` + `snapshot_date_format`: top-level config fields for extracting snapshot dates from file paths
-- Config fingerprint stored in log — detects changes to `primary_key`, `exclude_columns`, `track_deletions`, `snapshot_column` and prompts for `saga historize --full-refresh`
+- Config fingerprint stored in log — detects changes to `primary_key`, `track_columns`, `ignore_columns`, `track_deletions`, `snapshot_column` and prompts for `saga historize --full-refresh`
 
 ### CLI and UX
 - Single `saga` entry point with subcommands: `list`, `ingest`, `historize`, `run`, `update-access`, `report`
@@ -371,7 +371,7 @@ historize:
 - Source-specific config (varies by pipeline type)
 - Target config: `write_disposition`, `merge_strategy`, `partition_column`, `cluster_columns`, etc.
 - `write_disposition` controls what runs: `append` (ingest only), `append+historize` (both), `historize` (historize-only)
-- Historize config: `historize:` section with `snapshot_column`, `exclude_columns`, `track_deletions`, etc.
+- Historize config: `historize:` section with `snapshot_column`, `track_columns`, `ignore_columns`, `track_deletions`, etc.
 - Snapshot date extraction: `snapshot_date_regex` + `snapshot_date_format` (top-level, filesystem only)
 - Hierarchical inheritance via `dlt_project.yml` (use `+key:` for merge, `key:` for override)
 

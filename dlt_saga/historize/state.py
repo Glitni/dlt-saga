@@ -133,7 +133,10 @@ class HistorizeStateManager:
 
         fingerprint_data = {
             "primary_key": sorted(config.primary_key),
-            "exclude_columns": sorted(config.exclude_columns),
+            "track_columns": sorted(config.track_columns)
+            if config.track_columns
+            else [],
+            "ignore_columns": sorted(config.ignore_columns),
             "snapshot_column": config.snapshot_column,
             "track_deletions": config.track_deletions,
         }
