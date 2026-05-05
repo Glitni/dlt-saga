@@ -144,7 +144,7 @@ def make_historize_runner(
     primary_key=None,
     snapshot_column="snapshot_date",
     track_deletions=True,
-    exclude_columns=None,
+    ignore_columns=None,
     write_disposition="historize",
 ):
     """Create a HistorizeRunner for testing."""
@@ -152,7 +152,7 @@ def make_historize_runner(
         primary_key=primary_key or ["company_id"],
         snapshot_column=snapshot_column,
         track_deletions=track_deletions,
-        exclude_columns=exclude_columns or [],
+        ignore_columns=ignore_columns or [],
     )
     return HistorizeRunner(
         pipeline_name="test__raw_companies",

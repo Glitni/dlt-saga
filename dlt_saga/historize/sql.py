@@ -56,9 +56,21 @@ class HistorizeSqlBuilder:
         self.source_database = source_database
         self.source_schema = source_schema
         self.source_table = source_table
-        self._exclude_columns = (
-            set(config.exclude_columns) | SYSTEM_COLUMNS | {config.snapshot_column}
-        )
+        self._output_exclude = SYSTEM_COLUMNS | {config.snapshot_column}
+
+    def _get_hash_columns(self, value_columns: List[str]) -> List[str]:
+        """Return the subset of value_columns used for change-detection hashing.
+
+        If track_columns is set, only those columns are considered (applied first).
+        ignore_columns are then subtracted from the result.
+        """
+        if self.config.track_columns:
+            candidate_set = set(self.config.track_columns) - set(
+                self.config.ignore_columns
+            )
+            return [c for c in value_columns if c in candidate_set]
+        ignore_set = set(self.config.ignore_columns)
+        return [c for c in value_columns if c not in ignore_set]
 
     def _q(self, name: str) -> str:
         """Quote a table identifier using the destination's quoting style."""
@@ -137,7 +149,7 @@ class HistorizeSqlBuilder:
         excluding PKs and system columns.
         """
         pk_set = set(self.primary_key)
-        exclude = self._exclude_columns | pk_set
+        exclude = self._output_exclude | pk_set
         exclude_list = ", ".join(f"'{c}'" for c in exclude)
 
         base_query = self.destination.columns_query(
@@ -200,7 +212,8 @@ class HistorizeSqlBuilder:
         """
         pk_cols = self._pk_cols_sql()
         snapshot_col = self.config.snapshot_column
-        hash_expr = self.destination.hash_expression(value_columns)
+        hash_columns = self._get_hash_columns(value_columns)
+        hash_expr = self.destination.hash_expression(hash_columns)
         all_output_cols = list(self.primary_key) + list(value_columns)
         output_cols_from_c = ", ".join(f"c.{col}" for col in all_output_cols)
         src = self.source_table_id
@@ -376,7 +389,8 @@ disappearances AS (
         """
         pk_cols = self._pk_cols_sql()
         snapshot_col = self.config.snapshot_column
-        hash_expr = self.destination.hash_expression(value_columns)
+        hash_columns = self._get_hash_columns(value_columns)
+        hash_expr = self.destination.hash_expression(hash_columns)
         all_output_cols = list(self.primary_key) + list(value_columns)
         output_cols_from_c = ", ".join(f"c.{col}" for col in all_output_cols)
         src = self.source_table_id

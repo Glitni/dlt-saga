@@ -148,7 +148,7 @@ class HistorizeRunner:
         state = self.state_manager.get_pipeline_state(self.pipeline_name)
 
         # Config-changed guard runs for ALL modes (including partial refresh).
-        # PK/exclude_columns changes affect ALL SCD2 records — partial refresh
+        # PK/track_columns/ignore_columns changes affect ALL SCD2 records — partial refresh
         # is not a substitute for a full-refresh after semantic config changes.
         if self.state_manager.config_changed(state, self.config):
             if not self.full_refresh:
@@ -238,7 +238,7 @@ class HistorizeRunner:
         if is_partial:
             suffix = (
                 "Note: --partial-refresh and --historize-from are not substitutes "
-                "for semantic config changes (PK, exclude_columns).\n"
+                "for semantic config changes (PK, track_columns, ignore_columns).\n"
                 "Run 'saga historize --full-refresh' to rebuild the historized table."
             )
         else:

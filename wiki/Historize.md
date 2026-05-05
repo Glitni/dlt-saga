@@ -67,7 +67,8 @@ saga historize --select "filesystem__snapshots__companies"
 | `snapshot_date_regex` | top-level | — | Regex to extract snapshot date from file paths (filesystem only) |
 | `snapshot_date_format` | top-level | — | `strptime` format for the extracted date string |
 | `snapshot_column` | `historize:` | `_dlt_ingested_at` | Column used as the snapshot timestamp |
-| `exclude_columns` | `historize:` | `[]` | Columns excluded from change detection |
+| `track_columns` | `historize:` | — | Opt-in allowlist: only these columns drive change detection (all columns still appear in output) |
+| `ignore_columns` | `historize:` | `[]` | Columns excluded from change detection (still appear in output) |
 | `partition_column` | `historize:` | — | Partition the SCD2 output table |
 | `cluster_columns` | `historize:` | — | Cluster the SCD2 output table |
 | `track_deletions` | `historize:` | `false` | Emit deletion marker rows when a key disappears |
@@ -112,7 +113,7 @@ The `_dlt_ingested_at` column is resolved in this order:
 saga historize --full-refresh --select "filesystem__snapshots__companies"
 ```
 
-Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when `primary_key`, `exclude_columns`, `track_deletions`, or `snapshot_column` changes.
+Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when `primary_key`, `track_columns`, `ignore_columns`, `track_deletions`, or `snapshot_column` changes.
 
 ---
 
@@ -160,7 +161,7 @@ snapshot_date_format: "%Y-%m-%d"
 
 historize:
   # snapshot_column: _dlt_ingested_at  # default
-  exclude_columns: [_dlt_source_file_name]
+  ignore_columns: [updated_by]
   partition_column: "_dlt_valid_from"
   cluster_columns: [orgnr]
   track_deletions: true

@@ -207,7 +207,7 @@ primary_key: [orgnr]
 
 historize:
   snapshot_column: "_dlt_ingested_at"  # Default — column identifying snapshots
-  exclude_columns: [_dlt_source_file_name]
+  ignore_columns: [updated_by]
   partition_column: "_dlt_valid_from"
   cluster_columns: [orgnr]
   track_deletions: true                # Detect deleted rows between snapshots
@@ -219,7 +219,8 @@ historize:
 |-------|------|---------|-------------|
 | `snapshot_column` | string | `_dlt_ingested_at` | Column identifying snapshot timestamps |
 | `primary_key` | list | inherited | Inherits from top-level `primary_key` |
-| `exclude_columns` | list | `[]` | Columns to ignore in change detection |
+| `track_columns` | list | — | Opt-in allowlist for change detection (all columns still in output) |
+| `ignore_columns` | list | `[]` | Columns excluded from change detection (still in output) |
 | `partition_column` | string | — | Partition the output table |
 | `cluster_columns` | list | — | Cluster the output table |
 | `track_deletions` | bool | `false` | Detect rows deleted between snapshots |

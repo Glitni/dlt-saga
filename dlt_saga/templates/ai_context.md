@@ -202,7 +202,7 @@ primary_key: [id]
 
 historize:
   snapshot_column: _dlt_ingested_at   # default
-  exclude_columns: [_dlt_source_file_name]
+  ignore_columns: [updated_by]
   partition_column: "_dlt_valid_from"
   cluster_columns: [id]
   track_deletions: true
