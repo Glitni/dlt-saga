@@ -659,8 +659,11 @@ class HistorizeRunner:
             except Exception:
                 try:
                     self.destination.execute_sql("ROLLBACK", target_schema)
-                except Exception:
-                    pass
+                except Exception as rb_exc:
+                    logger.debug(
+                        "ROLLBACK failed after rollback statement error: %s",
+                        rb_exc,
+                    )
                 raise
         else:
             self.destination.execute_sql(rollback_stmts[1], target_schema)

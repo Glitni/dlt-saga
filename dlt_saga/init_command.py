@@ -571,7 +571,6 @@ def _scaffold(
 
 
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 # Next-steps messaging
 # ---------------------------------------------------------------------------
 
@@ -588,7 +587,10 @@ def _print_next_steps(destination_type: str, config: dict) -> None:
     elif destination_type == "bigquery":
         typer.echo("  1. Authenticate: gcloud auth application-default login")
         typer.echo("  2. Edit profiles.yml with your GCP project details.")
-        typer.echo("  3. Add pipeline configs under configs/.")
+        typer.echo(
+            "  3. Rename configs/TEMPLATE.yml.example to <name>.yml and edit it,"
+        )
+        typer.echo("     or add your own configs under configs/.")
         typer.echo("  4. Run `saga doctor` to verify your setup.")
         typer.echo("  5. Run `saga list` to see discovered pipelines.")
     elif destination_type == "databricks":
@@ -602,7 +604,10 @@ def _print_next_steps(destination_type: str, config: dict) -> None:
             )
         else:
             typer.echo("  2. Set your access_token in profiles.yml.")
-        typer.echo("  3. Add pipeline configs under configs/.")
+        typer.echo(
+            "  3. Rename configs/TEMPLATE.yml.example to <name>.yml and edit it,"
+        )
+        typer.echo("     or add your own configs under configs/.")
         typer.echo("  4. Run `saga list` to see discovered pipelines.")
 
     typer.echo("")

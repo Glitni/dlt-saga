@@ -47,8 +47,13 @@ def _build_import_to_extra() -> Dict[str, str]:
                 for pkg in top_level_txt.strip().split():
                     result[pkg] = extra
                 continue
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Could not read top_level.txt for %s; "
+                "falling back to normalised dist name. Reason: %s",
+                dist_name,
+                exc,
+            )
         # Fallback: normalise distribution name as import name
         result[dist_name.replace("-", "_")] = extra
 
@@ -66,7 +71,12 @@ def _find_extra(package: str) -> Optional[str]:
     if _import_to_extra is None:
         try:
             _import_to_extra = _build_import_to_extra()
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Could not build import-to-extra mapping; "
+                "extras hints will be unavailable. Reason: %s",
+                exc,
+            )
             _import_to_extra = {}
 
     top_level = package.split(".")[0]

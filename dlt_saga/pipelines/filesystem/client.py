@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Optional
 
@@ -19,11 +20,20 @@ class FilesystemClient:
             None  # Lazy-loaded cache
         )
 
-        # When no explicit credentials are provided for GCS, gcsfs / fsspec
-        # will use Application Default Credentials (ADC) automatically.
-        # We intentionally do NOT remove GOOGLE_APPLICATION_CREDENTIALS here —
-        # a user may have set it deliberately to point at a service-account key
-        # file, and removing it would silently switch them to a different identity.
+        # For GCS without explicit credentials, route through ADC so that the
+        # active profile (incl. `run_as` impersonation) controls identity rather
+        # than a stray GOOGLE_APPLICATION_CREDENTIALS pointing at an unrelated
+        # service-account key. Profile-driven auth must be deterministic.
+        if config.filesystem_type == "gs" and not config.credentials:
+            previous_gac = os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+            if previous_gac:
+                logger.debug(
+                    "Cleared GOOGLE_APPLICATION_CREDENTIALS=%s for GCS read; "
+                    "ADC (gcloud / metadata server / profile impersonation) "
+                    "will be used. Pass `credentials:` in the pipeline config "
+                    "to override.",
+                    previous_gac,
+                )
 
     def _build_filesystem_url(self) -> str:
         """Construct filesystem URL from configuration."""

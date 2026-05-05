@@ -138,6 +138,39 @@ snapshot_date_regex: "\\d{4}-\\d{2}-\\d{2}"
 snapshot_date_format: "%Y-%m-%d"
 ```
 
+### GCS authentication
+
+When `filesystem_type: gs` and no explicit `credentials:` are configured, the
+filesystem client clears `GOOGLE_APPLICATION_CREDENTIALS` from the process
+environment and falls through to **Application Default Credentials (ADC)** —
+gcloud user credentials, the GCE/Cloud Run metadata server, or the active
+profile's `run_as` impersonation. The active profile (and any `--target` you
+selected) is therefore the single source of truth for identity. Run with
+`--verbose` to see a debug log when GAC is cleared.
+
+**Why this happens only for filesystem.** Other GCS-touching code paths
+(BigQuery destination, `native_load`, the Cloud Run trigger, the Secret
+Manager resolver) all route through `google.auth.default()`, which dlt-saga
+monkey-patches inside `ImpersonationManager._activate_impersonation()` so
+that GAC and `run_as` impersonation compose correctly. fsspec / gcsfs read
+GAC directly at module load time and bypass that hook, so the env var is
+cleared up-front instead.
+
+**To use a specific service-account key file**, pass it explicitly through
+the pipeline config:
+
+```yaml
+filesystem_type: "gs"
+credentials:
+  type: "service_account"
+  project_id: "my-project"
+  private_key: "googlesecretmanager::my-project::gcs-reader-key"
+  client_email: "gcs-reader@my-project.iam.gserviceaccount.com"
+```
+
+This bypasses the GAC clearing and gives the resource the exact credentials
+you specify.
+
 ---
 
 ## Google Sheets

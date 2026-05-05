@@ -11,7 +11,7 @@ graph TB
     subgraph "Configuration Layer"
         PC["Pipeline Configs\n(configs/*.yml)"]
         PR["profiles.yml"]
-        SP["saga_project.yml"]
+        SAGA_PROJ["saga_project.yml"]
     end
 
     subgraph "Source Layer  (pipelines/)"
@@ -19,7 +19,7 @@ graph TB
         DB["Database\n(ConnectorX)"]
         FS["Filesystem / GCS"]
         GS["Google Sheets"]
-        SP["SharePoint"]
+        SHP["SharePoint"]
         EXT["External plugins\n(entry points / packages.yml)"]
     end
 
@@ -39,13 +39,13 @@ graph TB
 
     PC --> SESSION
     PR --> SESSION
-    SP --> SESSION
+    SAGA_PROJ --> SESSION
     SESSION --> REG
     REG --> API
     REG --> DB
     REG --> FS
     REG --> GS
-    REG --> SP
+    REG --> SHP
     REG --> EXT
     SESSION --> HIST
     SESSION --> HOOKS
@@ -53,11 +53,11 @@ graph TB
     DB --> BQ
     FS --> BQ
     GS --> BQ
-    SP --> BQ
+    SHP --> BQ
     API --> DBX
     DB --> DBX
     FS --> DBX
-    SP --> DBX
+    SHP --> DBX
     HIST --> BQ
     HIST --> DBX
     HIST --> DDB
