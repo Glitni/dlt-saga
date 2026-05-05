@@ -207,8 +207,8 @@ saga run --select "filesystem__snapshots__companies"
 
 ## Further reading
 
-- [Configuration Guide](reference/CONFIGURATION.md) — all config fields, source types, historize options
-- [Profiles Guide](reference/PROFILES.md) — multiple environments, service account impersonation
-- [CLI Reference](reference/CLI.md) — full command and flag reference
-- [Deployment Guide](reference/DEPLOYMENT.md) — Cloud Run, orchestration, production setup
-- [Plugin Development Guide](plugin-development-guide.md) — write custom pipeline sources and hooks
+- [Configuration](Configuration) — all config fields, source types, historize options
+- [Profiles](Profiles) — multiple environments, service account impersonation
+- [CLI Reference](CLI-Reference) — full command and flag reference
+- [Deployment](Deployment) — Cloud Run, orchestration, production setup
+- [Plugin Development](Plugin-Development) — write custom pipeline sources and hooks

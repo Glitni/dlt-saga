@@ -49,7 +49,7 @@ default:
       environment: dev
 
 # Add a prod target here when you're ready to deploy.
-# See: https://dlt-saga.readthedocs.io/en/latest/reference/configuration/
+# See: https://github.com/Glitni/dlt-saga/wiki/Profiles
 """
 
 
@@ -100,7 +100,7 @@ default:
       # staging_volume_name: "my_catalog.my_schema.ingest_volume"
 
 # Add a prod target here when you're ready to deploy.
-# See: https://dlt-saga.readthedocs.io/en/latest/reference/configuration/
+# See: https://github.com/Glitni/dlt-saga/wiki/Profiles
 """
 
 
@@ -558,13 +558,18 @@ def _scaffold(
 
             generate_schemas(schemas_dir)
             created.append(str(schemas_dir) + "/")
-        except Exception:
-            pass  # Non-critical — skip silently if schema generation fails
+        except Exception as exc:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "Schema generation failed: %s. IDE autocomplete will be unavailable. "
+                "Run 'saga generate-schemas' manually to retry.",
+                exc,
+            )
 
     return created, skipped
 
 
-# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Next-steps messaging
 # ---------------------------------------------------------------------------
@@ -582,7 +587,10 @@ def _print_next_steps(destination_type: str, config: dict) -> None:
     elif destination_type == "bigquery":
         typer.echo("  1. Authenticate: gcloud auth application-default login")
         typer.echo("  2. Edit profiles.yml with your GCP project details.")
-        typer.echo("  3. Add pipeline configs under configs/.")
+        typer.echo(
+            "  3. Rename configs/TEMPLATE.yml.example to <name>.yml and edit it,"
+        )
+        typer.echo("     or add your own configs under configs/.")
         typer.echo("  4. Run `saga doctor` to verify your setup.")
         typer.echo("  5. Run `saga list` to see discovered pipelines.")
     elif destination_type == "databricks":
@@ -596,7 +604,10 @@ def _print_next_steps(destination_type: str, config: dict) -> None:
             )
         else:
             typer.echo("  2. Set your access_token in profiles.yml.")
-        typer.echo("  3. Add pipeline configs under configs/.")
+        typer.echo(
+            "  3. Rename configs/TEMPLATE.yml.example to <name>.yml and edit it,"
+        )
+        typer.echo("     or add your own configs under configs/.")
         typer.echo("  4. Run `saga list` to see discovered pipelines.")
 
     typer.echo("")

@@ -186,6 +186,12 @@ class HistorizeConfig:
                 "or as a top-level primary_key in the pipeline config."
             )
 
+        if self.track_columns is not None and len(self.track_columns) == 0:
+            raise ValueError(
+                "track_columns must be either omitted (track all columns) or a "
+                "non-empty list. To track specific columns, list them explicitly."
+            )
+
         if config_dict:
             source_table = config_dict.get("source_table")
             source_schema = config_dict.get("source_schema")

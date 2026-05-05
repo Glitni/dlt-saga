@@ -2140,8 +2140,8 @@ def doctor(
         if ai_warning:
             typer.echo("")
             _emit("!", "AI context", ai_warning)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("AI context staleness check failed: %s", exc)
 
     typer.echo("")
     if ok:

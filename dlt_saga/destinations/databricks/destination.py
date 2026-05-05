@@ -120,8 +120,8 @@ class DatabricksDestination(Destination):
             thrift_logger.addFilter(_SuppressClosedFile())
             try:
                 self._connection.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not close Databricks connection cleanly: %s", exc)
             self._connection = None
 
     def connect(self) -> None:
@@ -739,10 +739,12 @@ class DatabricksDestination(Destination):
             return 0
         try:
             return int(getattr(rows[0], "num_inserted_rows", None) or 0)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Could not read num_inserted_rows by attribute: %s", exc)
             try:
                 return int(rows[0][0] or 0)
-            except Exception:
+            except Exception as exc2:
+                logger.debug("Could not read num_inserted_rows by index: %s", exc2)
                 return 0
 
     def _native_load_rowcounts(self, spec: "Any", target_id: str) -> dict:

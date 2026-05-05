@@ -142,6 +142,7 @@ class HistorizeRunner:
         timings = {}
 
         self.config.validate(self.config_dict)
+        self._validate_destination_capabilities()
 
         # Init phase: fetch state (creates log table on first access if needed)
         t = time.time()
@@ -223,6 +224,26 @@ class HistorizeRunner:
         self.state_manager.clear_log_entries(self.pipeline_name)
         self._create_target_table(value_columns, replace=True)
 
+    def _validate_destination_capabilities(self) -> None:
+        """Validate that the destination supports the configured historize options."""
+        dest_type = type(self.destination).__name__
+        if (
+            self.config.partition_column
+            and self.config.partition_column != "_dlt_valid_from"
+            and not self.destination.supports_partitioning()
+        ):
+            raise ValueError(
+                f"Destination {dest_type} does not support partitioning. "
+                f"Remove 'partition_column' from the historize section of "
+                f"pipeline '{self.pipeline_name}'."
+            )
+        if self.config.cluster_columns and not self.destination.supports_clustering():
+            raise ValueError(
+                f"Destination {dest_type} does not support clustering. "
+                f"Remove 'cluster_columns' from the historize section of "
+                f"pipeline '{self.pipeline_name}'."
+            )
+
     def _raise_config_changed_error(self, state) -> None:
         """Raise a ValueError with a human-readable diff of config changes."""
         previous = self.state_manager.decode_fingerprint(state.config_fingerprint)
@@ -257,6 +278,25 @@ class HistorizeRunner:
             raise ValueError(
                 f"No value columns found in {self.source_table_id}. "
                 f"Check that the table exists and has non-system columns."
+            )
+
+        hash_columns = self.sql_builder._get_hash_columns(columns)
+        if not hash_columns:
+            hint = ""
+            if self.config.ignore_columns:
+                hint = (
+                    f" ignore_columns {self.config.ignore_columns} covers all "
+                    f"value columns — every row will hash the same, so no SCD2 "
+                    f"changes will ever be detected."
+                )
+            elif self.config.track_columns:
+                hint = (
+                    f" track_columns {self.config.track_columns} does not match "
+                    f"any columns in the source table."
+                )
+            raise ValueError(
+                f"Change-detection hash for '{self.pipeline_name}' would be built "
+                f"over zero columns.{hint} Adjust track_columns or ignore_columns."
             )
 
         logger.debug(f"Discovered {len(columns)} value columns for change detection")
@@ -619,8 +659,11 @@ class HistorizeRunner:
             except Exception:
                 try:
                     self.destination.execute_sql("ROLLBACK", target_schema)
-                except Exception:
-                    pass
+                except Exception as rb_exc:
+                    logger.debug(
+                        "ROLLBACK failed after rollback statement error: %s",
+                        rb_exc,
+                    )
                 raise
         else:
             self.destination.execute_sql(rollback_stmts[1], target_schema)

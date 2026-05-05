@@ -31,6 +31,9 @@ class HistorizeLogEntry:
     started_at: Any
     finished_at: Any
     status: str  # 'completed' | 'failed'
+    runner_version: int = (
+        1  # Schema version for future-proofing (bump with ALTER TABLE)
+    )
 
 
 class HistorizeStateManager:
@@ -52,6 +55,10 @@ class HistorizeStateManager:
         self.log_table_name = get_historize_log_table_name()
         self.log_table_id = destination.get_full_table_id(schema, self.log_table_name)
 
+    # Schema version for the log table.  Increment when columns are added so
+    # that ensure_log_table() can evolve existing tables via ALTER TABLE.
+    _LOG_TABLE_VERSION = 1
+
     def _create_table_ddl(self) -> str:
         """Generate DDL to create the log table using destination type names."""
         d = self.destination
@@ -68,7 +75,8 @@ class HistorizeStateManager:
                 is_full_reprocess {d.type_name("bool")},
                 started_at {d.type_name("timestamp")},
                 finished_at {d.type_name("timestamp")},
-                status {d.type_name("string")}
+                status {d.type_name("string")},
+                runner_version {d.type_name("int64")}
             )
         """
 
@@ -178,7 +186,8 @@ class HistorizeStateManager:
             INSERT INTO {q}
             (pipeline_name, source_table, target_table, snapshot_value,
              new_or_changed_rows, deleted_rows,
-             config_fingerprint, is_full_reprocess, started_at, finished_at, status)
+             config_fingerprint, is_full_reprocess, started_at, finished_at, status,
+             runner_version)
             VALUES (
                 {_fmt(entry.pipeline_name)},
                 {_fmt(entry.source_table)},
@@ -190,10 +199,37 @@ class HistorizeStateManager:
                 {_fmt(entry.is_full_reprocess)},
                 {_fmt(entry.started_at)},
                 {_fmt(entry.finished_at)},
-                {_fmt(entry.status)}
+                {_fmt(entry.status)},
+                {_fmt(entry.runner_version)}
             )
         """
-        self.destination.execute_sql(sql, self.schema)
+        try:
+            self.destination.execute_sql(sql, self.schema)
+        except Exception as exc:
+            # The runner_version column may not exist on a pre-existing log table
+            # (deployments created before this field was added). Add the column and retry.
+            if (
+                "runner_version" in str(exc).lower()
+                or "unknown column" in str(exc).lower()
+                or "column" in str(exc).lower()
+            ):
+                logger.debug(
+                    "Log table missing runner_version column — adding it: %s", exc
+                )
+                try:
+                    alter_sql = (
+                        f"ALTER TABLE {q} ADD COLUMN runner_version "
+                        f"{self.destination.type_name('int64')}"
+                    )
+                    self.destination.execute_sql(alter_sql, self.schema)
+                    self.destination.execute_sql(sql, self.schema)
+                except Exception as alter_exc:
+                    logger.warning(
+                        "Could not add runner_version column to log table: %s",
+                        alter_exc,
+                    )
+            else:
+                raise
 
     def clear_log_entries(self, pipeline_name: str) -> None:
         """Delete all log entries for a pipeline (used during full refresh)."""
