@@ -29,6 +29,11 @@ class ExecutionMetadata:
     Captures what was requested (selection criteria, command) and the context
     in which it ran (environment, profile, target). This is stored once per
     execution in the _saga_executions table.
+
+    ``start_value_override`` and ``end_value_override`` are runtime overrides
+    that the worker would otherwise miss (Cloud Run only forwards a fixed set
+    of env vars). They are baked into each pipeline's stored config_json so
+    workers pick them up when reconstructing the PipelineConfig.
     """
 
     select_criteria: Optional[str] = None
@@ -36,6 +41,8 @@ class ExecutionMetadata:
     environment: Optional[str] = None
     profile: Optional[str] = None
     target: Optional[str] = None
+    start_value_override: Optional[str] = None
+    end_value_override: Optional[str] = None
 
 
 class ExecutionPlanManager:
@@ -190,6 +197,23 @@ class ExecutionPlanManager:
         return f"'{_escape(str(value))}'"
 
     @staticmethod
+    def _config_overrides_from_metadata(
+        metadata: "ExecutionMetadata",
+    ) -> Dict[str, Any]:
+        """Project runtime overrides off ExecutionMetadata into a dict.
+
+        These get merged into each pipeline's stored config_json so the worker
+        side picks them up — Cloud Run only forwards a fixed set of env vars,
+        so the orchestrator's CLI flags don't otherwise reach workers.
+        """
+        overrides: Dict[str, Any] = {}
+        if metadata.start_value_override:
+            overrides["start_value_override"] = metadata.start_value_override
+        if metadata.end_value_override:
+            overrides["end_value_override"] = metadata.end_value_override
+        return overrides
+
+    @staticmethod
     def _interleave_by_dataset(
         configs: List[PipelineConfig],
     ) -> List[PipelineConfig]:
@@ -239,6 +263,21 @@ class ExecutionPlanManager:
 
         self.ensure_table_exists()
 
+        # Bake runtime overrides from metadata into each pipeline's stored
+        # config_json so workers pick them up on the other side of the
+        # orchestrator → Cloud Run hop. Workers don't see the orchestrator's
+        # CLI flags; the only state they receive is the plan row.
+        meta = metadata or ExecutionMetadata()
+        config_overrides = self._config_overrides_from_metadata(meta)
+
+        def _build_stored_config(config: PipelineConfig) -> Dict[str, Any]:
+            return {
+                **config.config_dict,
+                **config_overrides,
+                "pipeline_name": config.pipeline_name,
+                "schema_name": config.schema_name,
+            }
+
         # Group pipelines by task_group
         grouped_pipelines: Dict[str, List[PipelineConfig]] = {}
         ungrouped_pipelines = []
@@ -262,11 +301,6 @@ class ExecutionPlanManager:
                 f"will run in parallel in task {task_index}"
             )
             for config in group_configs:
-                stored_config = {
-                    **config.config_dict,
-                    "pipeline_name": config.pipeline_name,
-                    "schema_name": config.schema_name,
-                }
                 rows_to_insert.append(
                     {
                         "execution_id": execution_id,
@@ -274,18 +308,13 @@ class ExecutionPlanManager:
                         "pipeline_type": config.pipeline_group,
                         "pipeline_identifier": config.identifier,
                         "table_name": config.table_name,
-                        "config_json": json.dumps(stored_config),
+                        "config_json": json.dumps(_build_stored_config(config)),
                         "status": "pending",
                     }
                 )
             task_index += 1
 
         for config in self._interleave_by_dataset(ungrouped_pipelines):
-            stored_config = {
-                **config.config_dict,
-                "pipeline_name": config.pipeline_name,
-                "schema_name": config.schema_name,
-            }
             rows_to_insert.append(
                 {
                     "execution_id": execution_id,
@@ -293,11 +322,17 @@ class ExecutionPlanManager:
                     "pipeline_type": config.pipeline_group,
                     "pipeline_identifier": config.identifier,
                     "table_name": config.table_name,
-                    "config_json": json.dumps(stored_config),
+                    "config_json": json.dumps(_build_stored_config(config)),
                     "status": "pending",
                 }
             )
             task_index += 1
+
+        if config_overrides:
+            override_summary = ", ".join(
+                f"{k}={v}" for k, v in config_overrides.items()
+            )
+            logger.info(f"Baked runtime overrides into plan: {override_summary}")
 
         # Build INSERT using SQL literals (same approach as HistorizeStateManager)
         d = self.destination
@@ -329,8 +364,7 @@ class ExecutionPlanManager:
         """
         d.execute_sql(insert_sql, self.schema)
 
-        # Insert execution-level metadata
-        meta = metadata or ExecutionMetadata()
+        # Insert execution-level metadata (meta was already initialized above)
         meta_sql = f"""
             INSERT INTO {self.executions_table_id}
             (execution_id, created_at, command, pipeline_count, task_count,

@@ -141,6 +141,7 @@ class TestCloudRunProvider:
             task_count=3,
             debug_logging=True,
             worker_command="historize",
+            force=False,
         )
         assert (
             result.execution_reference == "projects/p/locations/r/jobs/j/executions/e"

@@ -50,6 +50,7 @@ class CloudRunJobTrigger:
         task_count: int,
         debug_logging: bool = False,
         worker_command: str = "ingest",
+        force: bool = False,
     ) -> str:
         """Trigger a Cloud Run Job execution with specified task count.
 
@@ -57,6 +58,10 @@ class CloudRunJobTrigger:
             execution_id: Execution plan ID (passed to workers via env var)
             task_count: Number of parallel tasks to spawn
             debug_logging: Enable debug logging in worker tasks
+            force: Forwarded as ``SAGA_FORCE=true`` so workers re-process even
+                when source data hasn't changed. ``--full-refresh`` is
+                intentionally not propagated — that flag mutates destination
+                state and requires interactive confirmation.
 
         Returns:
             execution_name: Full resource name of the created execution
@@ -82,6 +87,9 @@ class CloudRunJobTrigger:
         # Add debug logging flag if enabled
         if debug_logging:
             env_vars.append(run_v2.EnvVar(name="SAGA_DEBUG_LOGGING", value="true"))
+
+        if force:
+            env_vars.append(run_v2.EnvVar(name="SAGA_FORCE", value="true"))
 
         # Create container overrides with environment variables
         container_overrides = [
@@ -122,6 +130,7 @@ def trigger_distributed_execution(
     job_name: Optional[str] = None,
     debug_logging: bool = False,
     worker_command: str = "ingest",
+    force: bool = False,
 ) -> str:
     """Convenience function to trigger a distributed execution.
 
@@ -133,6 +142,7 @@ def trigger_distributed_execution(
         job_name: Job name (defaults to CLOUD_RUN_JOB env var, then fallback to dlt-saga-ingest-daily)
         debug_logging: Enable debug logging in worker tasks
         worker_command: Command for workers to execute (ingest, historize, or run)
+        force: Bypass change detection in worker tasks (forwarded as SAGA_FORCE).
 
     Returns:
         execution_name: Full resource name of the created execution
@@ -162,5 +172,9 @@ def trigger_distributed_execution(
     )
 
     return trigger.trigger_execution(
-        execution_id, task_count, debug_logging, worker_command
+        execution_id,
+        task_count,
+        debug_logging=debug_logging,
+        worker_command=worker_command,
+        force=force,
     )
