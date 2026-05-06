@@ -43,6 +43,7 @@ class OrchestrationProvider(ABC):
         task_count: int,
         command: str = "ingest",
         debug: bool = False,
+        force: bool = False,
     ) -> TriggerResult:
         """Trigger workers to execute an execution plan.
 
@@ -51,6 +52,9 @@ class OrchestrationProvider(ABC):
             task_count: Number of parallel tasks to spawn.
             command: Worker command (ingest, historize, run).
             debug: Enable debug logging in workers.
+            force: Bypass change detection in workers (forwarded so that
+                the worker side sees ``--force`` even though Cloud Run only
+                runs the bare ``saga`` CLI).
 
         Returns:
             TriggerResult with a reference to the triggered execution.
@@ -95,6 +99,7 @@ class CloudRunProvider(OrchestrationProvider):
         task_count: int,
         command: str = "ingest",
         debug: bool = False,
+        force: bool = False,
     ) -> TriggerResult:
         from dlt_saga.utility.orchestration.cloud_run_trigger import CloudRunJobTrigger
 
@@ -108,6 +113,7 @@ class CloudRunProvider(OrchestrationProvider):
             task_count=task_count,
             debug_logging=debug,
             worker_command=command,
+            force=force,
         )
         return TriggerResult(execution_reference=execution_name)
 
@@ -173,16 +179,18 @@ class StdoutProvider(OrchestrationProvider):
         task_count: int,
         command: str = "ingest",
         debug: bool = False,
+        force: bool = False,
     ) -> TriggerResult:
         output = {
             "execution_id": execution_id,
             "task_count": task_count,
             "command": command,
+            "force": force,
         }
         # JSON goes to stdout; status messages go to stderr via logger
         print(json.dumps(output))
         logger.info(
             "Execution plan ready for external orchestrator: "
-            f"{task_count} task(s), command={command}"
+            f"{task_count} task(s), command={command}, force={force}"
         )
         return TriggerResult(execution_reference=f"stdout:{execution_id}")

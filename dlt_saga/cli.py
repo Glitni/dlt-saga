@@ -312,11 +312,21 @@ def run_orchestrator_mode(
     profile: str = "default",
     target: Optional[str] = None,
     provider: Optional["OrchestrationProvider"] = None,
+    start_value_override: Optional[str] = None,
+    end_value_override: Optional[str] = None,
+    force: bool = False,
 ):
     """Run in orchestrator mode: create execution plan and trigger workers.
 
     Args:
         provider: OrchestrationProvider to use for triggering workers.
+        start_value_override: Backfill window start, baked into each plan
+            row so workers receive it without seeing the orchestrator's CLI.
+        end_value_override: Backfill window end (same propagation rationale).
+        force: Forwarded to the trigger as ``SAGA_FORCE`` env var so workers
+            bypass change detection. (``full_refresh`` deliberately is *not*
+            propagated — it requires interactive confirmation and must run
+            from a local orchestrator.)
     """
     from dlt_saga.utility.naming import get_execution_plan_schema
     from dlt_saga.utility.orchestration.execution_plan import (
@@ -350,6 +360,8 @@ def run_orchestrator_mode(
         environment=context.get_environment() or get_environment(),
         profile=profile,
         target=target,
+        start_value_override=start_value_override,
+        end_value_override=end_value_override,
     )
     execution_id = plan_manager.create_execution_plan(all_configs, metadata=metadata)
 
@@ -362,6 +374,7 @@ def run_orchestrator_mode(
             task_count=task_count,
             command=command,
             debug=debug_logging,
+            force=force,
         )
         logger.info("Triggered execution: %s", result.execution_reference)
     except Exception as e:
@@ -986,13 +999,17 @@ def ingest(
     setup_logging(verbose)
     in_cloud_run = check_cloud_run_environment()
 
-    # Worker mode: needs execution context set up before dispatching
+    # Worker mode: needs execution context set up before dispatching.
+    # Cloud Run only forwards a fixed set of env vars to workers, so the
+    # worker process never sees the orchestrator's CLI flags. Honor env-var
+    # fallbacks for the runtime overrides we propagate (force).
     if (get_env("SAGA_WORKER_MODE") or "").lower() == "true":
         logger.info("Running in worker mode (SAGA_WORKER_MODE=true)")
         profile_target = load_profile_config(profile, target)
+        effective_force = force or (get_env("SAGA_FORCE") or "").lower() == "true"
         setup_execution_context(
             profile_target,
-            force=force,
+            force=effective_force,
             full_refresh=full_refresh,
             start_value_override=start_value_override,
             end_value_override=end_value_override,
@@ -1033,6 +1050,9 @@ def ingest(
                 profile=profile,
                 target=target,
                 provider=provider,
+                start_value_override=start_value_override,
+                end_value_override=end_value_override,
+                force=force,
             ),
         )
         return
@@ -1126,7 +1146,10 @@ def historize(
     if (get_env("SAGA_WORKER_MODE") or "").lower() == "true":
         logger.info("Running in worker mode (SAGA_WORKER_MODE=true)")
         profile_target = load_profile_config(profile, target)
-        setup_execution_context(profile_target, force=force, full_refresh=full_refresh)
+        effective_force = force or (get_env("SAGA_FORCE") or "").lower() == "true"
+        setup_execution_context(
+            profile_target, force=effective_force, full_refresh=full_refresh
+        )
         run_worker_mode()
         return
 
@@ -1161,6 +1184,7 @@ def historize(
                 profile=profile,
                 target=target,
                 provider=provider,
+                force=force,
             ),
         )
         return
@@ -1338,6 +1362,9 @@ def _run_orchestrate(
             profile=profile,
             target=target,
             provider=provider,
+            start_value_override=start_value_override,
+            end_value_override=end_value_override,
+            force=force,
         ),
     )
 
@@ -1417,9 +1444,10 @@ def run(
     if (get_env("SAGA_WORKER_MODE") or "").lower() == "true":
         logger.info("Running in worker mode (SAGA_WORKER_MODE=true)")
         profile_target = load_profile_config(profile, target)
+        effective_force = force or (get_env("SAGA_FORCE") or "").lower() == "true"
         setup_execution_context(
             profile_target,
-            force=force,
+            force=effective_force,
             full_refresh=False,
             start_value_override=start_value_override,
             end_value_override=end_value_override,
@@ -1804,9 +1832,10 @@ def worker(
     """
     setup_logging(verbose)
     profile_target = load_profile_config(profile, target)
+    effective_force = force or (get_env("SAGA_FORCE") or "").lower() == "true"
     setup_execution_context(
         profile_target,
-        force=force,
+        force=effective_force,
         full_refresh=full_refresh,
         start_value_override=start_value_override,
         end_value_override=end_value_override,
