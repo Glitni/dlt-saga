@@ -601,6 +601,107 @@ class BigQueryDestination(BigQueryBaseDestination):
     # state does not persist across calls.  The clone-and-swap pattern in
     # the partial-refresh runner protects the live table regardless.
 
+    # System columns never written to the historize target table
+    _HISTORIZE_EXCLUDE_COLS = frozenset(
+        {
+            "_dlt_id",
+            "_dlt_load_id",
+            "_dlt_valid_from",
+            "_dlt_valid_to",
+            "_dlt_is_deleted",
+            "_dlt_source_file_name",
+            "_dlt_source_modification_date",
+            "_dlt_ingested_at",
+        }
+    )
+
+    def build_historize_create_table_sql(
+        self,
+        create_clause: str,
+        target_table_id: str,
+        select_body: str,
+        partition_column: Optional[str],
+        cluster_columns: Optional[List[str]],
+        table_format: str = "native",
+        table_name: str = "",
+        schema: str = "",
+        source_database: str = "",
+        source_schema: str = "",
+        source_table: str = "",
+    ) -> str:
+        """Build CREATE TABLE DDL for a BigQuery historize target table.
+
+        Native: standard CTAS with optional PARTITION BY / CLUSTER BY.
+        Iceberg: explicit column definitions + BigLake OPTIONS (CTAS not supported
+        for managed Iceberg tables with OPTIONS in the same statement).
+        """
+        if table_format != "iceberg":
+            return super().build_historize_create_table_sql(
+                create_clause,
+                target_table_id,
+                select_body,
+                partition_column,
+                cluster_columns,
+                table_format,
+                table_name,
+                schema,
+                source_database,
+                source_schema,
+                source_table,
+            )
+
+        # BigQuery Iceberg: explicit CREATE TABLE (no CTAS)
+        storage_path = self.config.storage_path
+        if not storage_path:
+            raise ValueError(
+                "storage_path is required for BigQuery Iceberg historize tables. "
+                "Configure it in the profile or profile.historize.storage_path."
+            )
+        target_dataset = schema or self.config.dataset_name
+        storage_uri = f"{storage_path.rstrip('/')}/{target_dataset}/{table_name}/"
+
+        # Fetch source column names + types for explicit column definitions
+        ts_type = self.type_name("timestamp")
+        bool_type = self.type_name("bool")
+
+        col_defs: List[str] = []
+        if source_schema and source_table:
+            src_db = source_database or self.config.project_id
+            cols_sql = self.columns_query(src_db, source_schema, source_table)
+            rows = self.execute_sql(cols_sql)
+            for row in rows:
+                if row.column_name not in self._HISTORIZE_EXCLUDE_COLS:
+                    col_defs.append(f"  `{row.column_name}` {row.data_type}")
+
+        col_defs.extend(
+            [
+                f"  `_dlt_valid_from` {ts_type}",
+                f"  `_dlt_valid_to` {ts_type}",
+                f"  `_dlt_is_deleted` {bool_type}",
+            ]
+        )
+
+        parts = [f"CREATE TABLE IF NOT EXISTS {target_table_id} ("]
+        parts.append(",\n".join(col_defs))
+        parts.append(")")
+
+        if partition_column:
+            parts.append(self.partition_ddl(partition_column))
+        if cluster_columns:
+            parts.append(self.cluster_ddl(cluster_columns))
+
+        parts.extend(
+            [
+                "WITH CONNECTION DEFAULT",
+                "OPTIONS (",
+                "  file_format = 'PARQUET',",
+                "  table_format = 'ICEBERG',",
+                f"  storage_uri = '{storage_uri}'",
+                ")",
+            ]
+        )
+        return "\n".join(parts)
+
     def clone_table(self, source_table_id: str, target_table_id: str) -> None:
         """Create a zero-copy BigQuery clone of source_table as target_table."""
         sql = f"CREATE TABLE {target_table_id} CLONE {source_table_id}"

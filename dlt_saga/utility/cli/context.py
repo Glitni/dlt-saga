@@ -117,6 +117,18 @@ class ExecutionContext:
             return self.profile_target.table_format
         return "native"
 
+    def get_historize_table_format(self) -> Optional[str]:
+        """Get the historize-layer table_format override from profile.historize, or None."""
+        if self.profile_target:
+            return self.profile_target.historize_table_format
+        return None
+
+    def get_historize_storage_path(self) -> Optional[str]:
+        """Get the historize-layer storage_path override from profile.historize, or None."""
+        if self.profile_target:
+            return self.profile_target.historize_storage_path
+        return None
+
     def get_destination_config(self) -> Dict[str, Any]:
         """Get the full destination-specific config dict."""
         if self.profile_target:

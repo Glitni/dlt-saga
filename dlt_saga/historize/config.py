@@ -112,6 +112,20 @@ class HistorizeConfig:
         },
     )
 
+    table_format: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Table format for the historized table. Overrides the profile-level "
+                "table_format for this pipeline specifically. "
+                "Supported values depend on the destination: 'native', 'iceberg' (BigQuery, Databricks), "
+                "'delta', 'delta_uniform' (Databricks only). "
+                "When omitted, the resolution chain is: pipeline.historize.table_format → "
+                "pipeline.table_format → profile.historize.table_format → profile.table_format → 'native'."
+            )
+        },
+    )
+
     def __post_init__(self):
         if isinstance(self.primary_key, str):
             self.primary_key = [self.primary_key]

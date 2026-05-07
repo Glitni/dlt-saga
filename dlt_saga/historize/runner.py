@@ -77,6 +77,7 @@ class HistorizeRunner:
 
         # Target table in same dataset (or override)
         target_schema = self.config.output_dataset or schema
+        self.target_schema = target_schema
         self.target_table_id = destination.get_full_table_id(
             target_schema, target_table_name
         )
@@ -91,6 +92,8 @@ class HistorizeRunner:
             source_database=self._src_database,
             source_schema=self._src_schema,
             source_table=self._src_table,
+            target_table_name=target_table_name,
+            target_schema=target_schema,
         )
 
     def run(self) -> Dict[str, Any]:
@@ -227,6 +230,8 @@ class HistorizeRunner:
     def _validate_destination_capabilities(self) -> None:
         """Validate that the destination supports the configured historize options."""
         dest_type = type(self.destination).__name__
+        table_format = self.config.table_format or "native"
+
         if (
             self.config.partition_column
             and self.config.partition_column != "_dlt_valid_from"
@@ -244,6 +249,19 @@ class HistorizeRunner:
                 f"pipeline '{self.pipeline_name}'."
             )
 
+        # Databricks Iceberg does not support cluster_columns
+        if (
+            table_format == "iceberg"
+            and dest_type == "DatabricksDestination"
+            and self.config.cluster_columns
+        ):
+            raise ValueError(
+                f"Databricks Iceberg tables do not support cluster_columns. "
+                f"Remove 'cluster_columns' from the historize section of "
+                f"pipeline '{self.pipeline_name}', or use table_format: delta_uniform "
+                f"if you need both Delta and Iceberg compatibility."
+            )
+
     def _raise_config_changed_error(self, state) -> None:
         """Raise a ValueError with a human-readable diff of config changes."""
         previous = self.state_manager.decode_fingerprint(state.config_fingerprint)
@@ -252,8 +270,10 @@ class HistorizeRunner:
         )
         changes = []
         for key in current:
-            if previous.get(key) != current[key]:
-                changes.append(f"  {key}: {previous.get(key)} → {current[key]}")
+            # Skip keys absent from previous (new fingerprint keys added after first run —
+            # these are reported by config_changed only when both dicts have the key)
+            if key in previous and previous[key] != current[key]:
+                changes.append(f"  {key}: {previous[key]} → {current[key]}")
         diff = "\n".join(changes)
         is_partial = self.partial_refresh or self.historize_from is not None
         if is_partial:
@@ -311,6 +331,12 @@ class HistorizeRunner:
             # when the new spec changes partitioning or clustering.
             drop_sql = self.sql_builder.build_drop_target_table_sql()
             self.destination.execute_sql(drop_sql, self.schema)
+
+        # Ensure the target schema exists when it differs from the source schema
+        # (happens when placement=schema_suffix or when output_dataset is set explicitly)
+        if self.target_schema != self.schema:
+            self.destination.ensure_schema_exists(self.target_schema)
+
         sql = self.sql_builder.build_create_target_table_sql(
             value_columns, replace=replace
         )

@@ -110,7 +110,9 @@ class BigQueryDestinationConfig(DestinationConfig):
 
         storage_path = None
         if table_format == "iceberg":
-            storage_path = context.get_storage_path()
+            # config_dict["storage_path"] lets the factory override the profile value
+            # (used when historize-layer needs a different storage_path than ingest)
+            storage_path = config_dict.get("storage_path") or context.get_storage_path()
             if not storage_path:
                 raise ValueError(
                     "storage_path must be configured in profile for Iceberg tables"

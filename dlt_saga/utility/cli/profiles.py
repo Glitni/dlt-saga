@@ -55,6 +55,7 @@ _CORE_FIELDS = {
     "dev_row_limit",
     "table_format",
     "auth_provider",
+    "historize",
 }
 
 
@@ -126,6 +127,15 @@ class ProfileTarget:
             "enum": ["gcp", "azure", "databricks", "aws"],
         },
     )
+    historize: Dict[str, Any] = field(
+        default_factory=dict,
+        metadata={
+            "description": (
+                "Historize-layer overrides. Supports table_format and storage_path keys "
+                "to select a different table format for historized tables than for ingest tables."
+            ),
+        },
+    )
     destination_config: Dict[str, Any] = field(
         default_factory=dict,
         metadata={
@@ -171,6 +181,16 @@ class ProfileTarget:
     @property
     def storage_path(self) -> Optional[str]:
         return self.destination_config.get("storage_path")
+
+    @property
+    def historize_table_format(self) -> Optional[str]:
+        """Historize-layer table_format override, or None if not set."""
+        return self.historize.get("table_format") or None
+
+    @property
+    def historize_storage_path(self) -> Optional[str]:
+        """Historize-layer storage_path override, or None if not set."""
+        return self.historize.get("storage_path") or None
 
     @property
     def server_hostname(self) -> Optional[str]:
@@ -228,6 +248,13 @@ class ProfileTarget:
         # Auth provider (explicit override, e.g., "gcp", "azure", "aws")
         auth_provider = config.get("auth_provider")
 
+        # Historize-layer overrides (table_format, storage_path)
+        historize_raw = config.get("historize") or {}
+        historize: Dict[str, Any] = {
+            k: interpolate_env_vars(v) if isinstance(v, str) else v
+            for k, v in historize_raw.items()
+        }
+
         # Everything not in _CORE_FIELDS goes into destination_config
         dest_config: Dict[str, Any] = {}
         for key, value in config.items():
@@ -245,6 +272,7 @@ class ProfileTarget:
             dev_row_limit=dev_row_limit,
             table_format=table_format,
             auth_provider=auth_provider,
+            historize=historize,
             destination_config=dest_config,
         )
 

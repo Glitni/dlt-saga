@@ -591,6 +591,52 @@ class Destination(ABC):
         """Return table names matching a SQL LIKE pattern in the given dataset."""
         return []
 
+    def build_historize_create_table_sql(
+        self,
+        create_clause: str,
+        target_table_id: str,
+        select_body: str,
+        partition_column: Optional[str],
+        cluster_columns: Optional[list],
+        table_format: str = "native",
+        table_name: str = "",
+        schema: str = "",
+        source_database: str = "",
+        source_schema: str = "",
+        source_table: str = "",
+    ) -> str:
+        """Build the CREATE TABLE DDL for a historize target table.
+
+        Default produces a native CTAS with optional partition/cluster.
+        BigQuery and Databricks override this to add format-specific clauses
+        (Iceberg OPTIONS, USING DELTA, TBLPROPERTIES, etc.).
+
+        Args:
+            create_clause: ``CREATE OR REPLACE TABLE`` or ``CREATE TABLE IF NOT EXISTS``.
+            target_table_id: Fully-qualified target table identifier.
+            select_body: The ``SELECT ... FROM src WHERE FALSE`` body for CTAS.
+            partition_column: Raw partition column name (or None).
+            cluster_columns: Raw cluster column list (or None).
+            table_format: Resolved table format ("native", "iceberg", "delta", "delta_uniform").
+            table_name: Bare target table name (for storage URI construction).
+            schema: Bare target schema/dataset name (for storage URI construction).
+            source_database: Source database/project (for column-type discovery).
+            source_schema: Source schema/dataset (for column-type discovery).
+            source_table: Source table name (for column-type discovery).
+
+        Returns:
+            Complete DDL string ready for execution.
+        """
+        partition = self.partition_ddl(partition_column) if partition_column else ""
+        cluster = self.cluster_ddl(cluster_columns) if cluster_columns else ""
+        parts = [f"{create_clause} {target_table_id}"]
+        if partition:
+            parts.append(partition)
+        if cluster:
+            parts.append(cluster)
+        parts.extend(["AS", select_body])
+        return "\n".join(parts)
+
 
 class AccessManager(ABC):
     """Abstract base class for destination-specific access management.
