@@ -52,8 +52,28 @@ saga ingest --target local                        # Local DuckDB
 | `auth_provider` | No | auto | Auth backend: `gcp`, `azure`, `databricks` (inferred from `type` if omitted) |
 | `dev_row_limit` | No | — | Limit rows extracted per resource (dev only) |
 | `table_format` | No | `native` | Table format: `native` or `iceberg` |
+| `storage_path` | No | — | Base storage URI for external table formats (e.g. `gs://bucket/path/` for BigQuery Iceberg) |
 
 > **Aliases:** `destination_type` is accepted as an alias for `type`, and `dataset` as an alias for `schema`.
+
+### Historize Overrides
+
+A nested `historize:` block under a target overrides `table_format` and `storage_path` for historized tables only. This lets ingest and historize tables use different formats in the same profile:
+
+```yaml
+prod:
+  type: bigquery
+  table_format: native
+  storage_path: gs://bucket/raw/
+  historize:
+    table_format: iceberg
+    storage_path: gs://bucket/historized/
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `table_format` | inherited from target | Override `table_format` for historized tables only |
+| `storage_path` | inherited from target | Override `storage_path` for historized tables only |
 
 ### BigQuery Fields
 

@@ -553,6 +553,35 @@ def _build_profiles_schema(
         "description": "Named Unity Catalog storage credential used in COPY INTO (optional)",
     }
 
+    # Patch historize sub-section with explicit key schemas (overrides the Dict[str, Any] default)
+    yaml_target_props["historize"] = {
+        "type": "object",
+        "description": (
+            "Historize-layer overrides for this target. "
+            "Keys override the top-level target values for historized tables only."
+        ),
+        "properties": {
+            "table_format": {
+                "type": "string",
+                "enum": ["native", "iceberg", "delta", "delta_uniform"],
+                "description": (
+                    "Table format for historized tables. "
+                    "BigQuery: 'native' or 'iceberg' (BigLake). "
+                    "Databricks: 'native' (=delta), 'iceberg', 'delta', 'delta_uniform'."
+                ),
+            },
+            "storage_path": {
+                "type": "string",
+                "description": (
+                    "Cloud storage path for historized Iceberg tables "
+                    "(e.g., 'gs://bucket/historized/'). "
+                    "Overrides the top-level storage_path for historized tables only."
+                ),
+            },
+        },
+        "additionalProperties": False,
+    }
+
     target_obj = {
         "type": "object",
         "description": (

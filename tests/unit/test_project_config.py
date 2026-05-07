@@ -4,11 +4,13 @@ import pytest
 
 from dlt_saga.project_config import (
     ConfigSourceConfig,
+    HistorizeProjectConfig,
     OrchestrationConfig,
     ProvidersConfig,
     SagaProjectConfig,
     _reset_cache,
     get_config_source_settings,
+    get_historize_project_config,
     get_orchestration_config,
     get_project_config,
     get_providers_config,
@@ -201,3 +203,45 @@ class TestSagaProjectConfigFromDict:
         assert config.orchestration is None
         assert config.naming_module is None
         assert config.pipelines is None
+
+
+@pytest.mark.unit
+class TestHistorizeProjectConfig:
+    def test_defaults(self):
+        cfg = HistorizeProjectConfig()
+        assert cfg.placement == "table_suffix"
+        assert cfg.table_suffix == "_historized"
+        assert cfg.schema_suffix == "_historized"
+
+    def test_from_dict_defaults_when_empty(self):
+        cfg = HistorizeProjectConfig.from_dict({})
+        assert cfg.placement == "table_suffix"
+
+    def test_from_dict_schema_suffix(self):
+        cfg = HistorizeProjectConfig.from_dict(
+            {"placement": "schema_suffix", "schema_suffix": "_hist"}
+        )
+        assert cfg.placement == "schema_suffix"
+        assert cfg.schema_suffix == "_hist"
+
+    def test_invalid_placement_raises(self):
+        with pytest.raises(ValueError, match="placement"):
+            HistorizeProjectConfig(placement="invalid")
+
+    def test_invalid_suffix_raises(self):
+        with pytest.raises(ValueError, match="table_suffix"):
+            HistorizeProjectConfig(table_suffix="123bad")
+
+    def test_saga_project_yml_parsed(self, tmp_path, monkeypatch):
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text("historize:\n  placement: schema_suffix\n  schema_suffix: _h\n")
+        monkeypatch.chdir(tmp_path)
+
+        cfg = get_historize_project_config()
+        assert cfg.placement == "schema_suffix"
+        assert cfg.schema_suffix == "_h"
+
+    def test_saga_project_yml_absent_returns_default(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = get_historize_project_config()
+        assert cfg.placement == "table_suffix"

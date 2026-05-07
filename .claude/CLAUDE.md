@@ -320,6 +320,8 @@ historize:
 - File metadata (`_dlt_source_file_name`, `_dlt_source_modification_date`) auto-injected for append-mode filesystem pipelines only (not for merge/SCD2 to avoid false change detection)
 - `snapshot_date_regex` + `snapshot_date_format`: top-level config fields for extracting snapshot dates from file paths
 - Config fingerprint stored in log — detects changes to `primary_key`, `track_columns`, `ignore_columns`, `track_deletions`, `snapshot_column` and prompts for `saga historize --full-refresh`
+- **Table format**: historized table format resolved via 5-level chain: `pipeline.historize.table_format` → `pipeline.table_format` → `profile.historize.table_format` → `profile.table_format` → `"native"`. BigQuery supports `native` and `iceberg` (BigLake). Databricks supports `native` (=delta), `delta`, `iceberg`, `delta_uniform`. BigLake Iceberg requires `storage_path`. Profile-level `historize.table_format` / `historize.storage_path` keys override ingest-layer values for historized tables only.
+- **Historize placement** (`saga_project.yml` → `historize.placement`): `table_suffix` (default) keeps historized table in source dataset with `_historized` name suffix; `schema_suffix` moves it to a parallel dataset `<source_dataset>_historized` with unchanged table name. Resolved via `resolve_historized_target()` in `naming.py`. `placement` is effectively write-once — changing it after first run orphans existing tables. Per-pipeline `historize.output_dataset` / `historize.output_table` always override the project-level strategy.
 
 ### CLI and UX
 - Single `saga` entry point with subcommands: `list`, `ingest`, `historize`, `run`, `update-access`, `report`

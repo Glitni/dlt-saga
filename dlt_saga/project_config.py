@@ -5,6 +5,7 @@ providers configuration, and pipeline settings.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,6 +13,78 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 logger = logging.getLogger(__name__)
+
+
+_VALID_SUFFIX_RE = re.compile(r"^_?[a-zA-Z][a-zA-Z0-9_]*$")
+
+
+@dataclass
+class HistorizeProjectConfig:
+    """The ``historize:`` section of saga_project.yml.
+
+    Controls where historized tables live relative to their source tables.
+
+    ``placement`` is effectively write-once: changing it after the first run
+    orphans existing historize tables in the old location — no migration is
+    performed automatically.
+    """
+
+    placement: str = field(
+        default="table_suffix",
+        metadata={
+            "description": (
+                "Table placement strategy. "
+                "'table_suffix' (default): historize table lives in the source schema "
+                "with a suffix appended to the table name. "
+                "'schema_suffix': historize table lives in a parallel schema whose name "
+                "is the source schema name plus schema_suffix, and the table name is unchanged."
+            ),
+            "enum": ["table_suffix", "schema_suffix"],
+        },
+    )
+    table_suffix: str = field(
+        default="_historized",
+        metadata={
+            "description": (
+                "Suffix appended to the source table name when placement=table_suffix. "
+                "Ignored when placement=schema_suffix."
+            ),
+        },
+    )
+    schema_suffix: str = field(
+        default="_historized",
+        metadata={
+            "description": (
+                "Suffix appended to the source schema name when placement=schema_suffix. "
+                "Ignored when placement=table_suffix."
+            ),
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if self.placement not in ("table_suffix", "schema_suffix"):
+            raise ValueError(
+                f"historize.placement must be 'table_suffix' or 'schema_suffix', "
+                f"got '{self.placement}'"
+            )
+        for field_name, val in [
+            ("table_suffix", self.table_suffix),
+            ("schema_suffix", self.schema_suffix),
+        ]:
+            if val and not _VALID_SUFFIX_RE.match(val.lstrip("_")):
+                raise ValueError(
+                    f"historize.{field_name} must start with a letter or underscore and "
+                    f"contain only alphanumeric characters and underscores, got '{val}'"
+                )
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "HistorizeProjectConfig":
+        """Create from parsed YAML dict."""
+        return cls(
+            placement=data.get("placement", "table_suffix"),
+            table_suffix=data.get("table_suffix", "_historized"),
+            schema_suffix=data.get("schema_suffix", "_historized"),
+        )
 
 
 @dataclass
@@ -275,6 +348,16 @@ class SagaProjectConfig:
             ),
         },
     )
+    historize: HistorizeProjectConfig = field(
+        default_factory=HistorizeProjectConfig,
+        metadata={
+            "description": (
+                "Historize layer placement and suffix configuration. "
+                "'placement' is effectively write-once: changing it after first run "
+                "orphans existing historize tables — no migration is performed."
+            ),
+        },
+    )
 
     @classmethod
     def from_dict(cls, data: dict) -> "SagaProjectConfig":
@@ -282,6 +365,7 @@ class SagaProjectConfig:
         cs_data = data.get("config_source")
         prov_data = data.get("providers")
         orch_data = data.get("orchestration")
+        hist_data = data.get("historize")
         return cls(
             config_source=(ConfigSourceConfig.from_dict(cs_data) if cs_data else None),
             providers=ProvidersConfig.from_dict(prov_data) if prov_data else None,
@@ -293,6 +377,11 @@ class SagaProjectConfig:
             hooks=data.get("hooks"),
             profile=data.get("profile"),
             log_tables=LogTablesConfig.from_dict(data.get("log_tables") or {}),
+            historize=(
+                HistorizeProjectConfig.from_dict(hist_data)
+                if hist_data
+                else HistorizeProjectConfig()
+            ),
         )
 
 
@@ -417,6 +506,15 @@ def get_native_load_log_view_name() -> str:
     Default: ``_saga_native_load_log_latest``.
     """
     return get_project_config().log_tables.native_load_log_latest
+
+
+def get_historize_project_config() -> HistorizeProjectConfig:
+    """Get the historize: section from saga_project.yml.
+
+    Returns:
+        HistorizeProjectConfig instance (defaults if section absent).
+    """
+    return get_project_config().historize
 
 
 def _reset_cache() -> None:

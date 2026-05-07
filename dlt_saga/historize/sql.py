@@ -47,6 +47,8 @@ class HistorizeSqlBuilder:
         source_database: str = "",
         source_schema: str = "",
         source_table: str = "",
+        target_table_name: str = "",
+        target_schema: str = "",
     ):
         self.config = config
         self.destination = destination
@@ -56,6 +58,8 @@ class HistorizeSqlBuilder:
         self.source_database = source_database
         self.source_schema = source_schema
         self.source_table = source_table
+        self.target_table_name = target_table_name
+        self.target_schema = target_schema
         self._output_exclude = SYSTEM_COLUMNS | {config.snapshot_column}
 
     def _get_hash_columns(self, value_columns: List[str]) -> List[str]:
@@ -169,7 +173,11 @@ class HistorizeSqlBuilder:
     def build_create_target_table_sql(
         self, value_columns: List[str], replace: bool = False
     ) -> str:
-        """SQL to create the historized target table."""
+        """SQL to create the historized target table.
+
+        Delegates to destination.build_historize_create_table_sql so each
+        destination can emit format-specific DDL (Iceberg OPTIONS, USING DELTA, etc.).
+        """
         all_data_cols = list(self.primary_key) + list(value_columns)
         create_stmt = (
             "CREATE OR REPLACE TABLE" if replace else "CREATE TABLE IF NOT EXISTS"
@@ -179,27 +187,31 @@ class HistorizeSqlBuilder:
         ts_type = self.destination.type_name("timestamp")
         bool_type = self.destination.type_name("bool")
 
-        partition = ""
-        if self.config.partition_column:
-            partition = self.destination.partition_ddl(self.config.partition_column)
+        select_body = (
+            f"SELECT\n"
+            f"    {', '.join(all_data_cols)},\n"
+            f"    CAST(NULL AS {ts_type}) AS _dlt_valid_from,\n"
+            f"    CAST(NULL AS {ts_type}) AS _dlt_valid_to,\n"
+            f"    CAST(NULL AS {bool_type}) AS _dlt_is_deleted\n"
+            f"FROM {src}\n"
+            f"WHERE FALSE"
+        )
 
-        cluster = ""
-        if self.config.cluster_columns:
-            cluster = self.destination.cluster_ddl(self.config.cluster_columns)
+        table_format = self.config.table_format or "native"
 
-        return f"""
-            {create_stmt} {tgt}
-            {partition}
-            {cluster}
-            AS
-            SELECT
-                {", ".join(all_data_cols)},
-                CAST(NULL AS {ts_type}) AS _dlt_valid_from,
-                CAST(NULL AS {ts_type}) AS _dlt_valid_to,
-                CAST(NULL AS {bool_type}) AS _dlt_is_deleted
-            FROM {src}
-            WHERE FALSE
-        """
+        return self.destination.build_historize_create_table_sql(
+            create_clause=create_stmt,
+            target_table_id=tgt,
+            select_body=select_body,
+            partition_column=self.config.partition_column,
+            cluster_columns=self.config.cluster_columns,
+            table_format=table_format,
+            table_name=self.target_table_name,
+            schema=self.target_schema,
+            source_database=self.source_database,
+            source_schema=self.source_schema,
+            source_table=self.source_table,
+        )
 
     def build_full_reprocess_sql(self, value_columns: List[str]) -> str:
         """Build SQL for full reprocess mode.

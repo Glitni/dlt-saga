@@ -75,10 +75,10 @@ class HistorizeConfig:
         },
     )
 
-    output_dataset: Optional[str] = field(
+    output_schema: Optional[str] = field(
         default=None,
         metadata={
-            "description": "Dataset to write the historized table to. Defaults to the same dataset as the source."
+            "description": "Schema to write the historized table to. Defaults to the same schema as the source."
         },
     )
 
@@ -108,6 +108,20 @@ class HistorizeConfig:
                 "When True, rows that disappear from the source produce a deletion marker row "
                 "(_dlt_is_deleted=True) in the historized table. "
                 "When False, only value changes are tracked."
+            )
+        },
+    )
+
+    table_format: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Table format for the historized table. Overrides the profile-level "
+                "table_format for this pipeline specifically. "
+                "Supported values depend on the destination: 'native', 'iceberg' (BigQuery, Databricks), "
+                "'delta', 'delta_uniform' (Databricks only). "
+                "When omitted, the resolution chain is: pipeline.historize.table_format → "
+                "pipeline.table_format → profile.historize.table_format → profile.table_format → 'native'."
             )
         },
     )

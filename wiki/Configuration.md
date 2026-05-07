@@ -211,8 +211,10 @@ historize:
   partition_column: "_dlt_valid_from"
   cluster_columns: [orgnr]
   track_deletions: true                # Detect deleted rows between snapshots
-  output_table: "custom_table_name"    # Override default output table name
-  output_table_suffix: "_historized"   # Suffix for auto-generated name
+  table_format: iceberg                # Override table format for this pipeline only
+  output_schema: "my_historized"       # Write to a different schema (optional)
+  output_table: "custom_table_name"    # Explicit output table name (optional)
+  output_table_suffix: "_historized"   # Suffix when output_table is not set
 ```
 
 | Field | Type | Default | Description |
@@ -224,8 +226,10 @@ historize:
 | `partition_column` | string | — | Partition the output table |
 | `cluster_columns` | list | — | Cluster the output table |
 | `track_deletions` | bool | `false` | Detect rows deleted between snapshots |
-| `output_table` | string | auto | Override output table name |
-| `output_table_suffix` | string | `_historized` | Suffix for auto-generated name |
+| `table_format` | string | inherited | Table format override for this pipeline's historized table |
+| `output_schema` | string | — | Write the historized table to a different schema |
+| `output_table` | string | — | Explicit name for the historized output table |
+| `output_table_suffix` | string | `_historized` | Suffix appended to the source table name when `output_table` is not set |
 
 ### Historize-Only (External Data)
 
@@ -305,6 +309,29 @@ hooks:
 ```
 
 See the [Plugin Development Guide](Plugin-Development) for writing hooks.
+
+### Historize Placement
+
+Controls where historized tables are created relative to their source tables. **This is effectively write-once** — changing `placement` after the first run orphans existing historized tables (no migration is performed automatically).
+
+```yaml
+historize:
+  placement: table_suffix    # default
+  table_suffix: _historized  # suffix appended to the table name
+```
+
+```yaml
+historize:
+  placement: schema_suffix   # parallel schema, same table name
+  schema_suffix: _historized # suffix appended to the schema name
+```
+
+| Value | Result | Example |
+|-------|--------|---------|
+| `table_suffix` (default) | Same schema, suffixed table name | `dlt_google_sheets.customers_historized` |
+| `schema_suffix` | Parallel schema, unchanged table name | `dlt_google_sheets_historized.customers` |
+
+Per-pipeline `historize.output_schema` and `historize.output_table` always override the project-level placement strategy when set explicitly.
 
 ### Log Tables
 

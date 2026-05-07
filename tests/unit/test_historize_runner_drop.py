@@ -21,6 +21,7 @@ class TestCreateTargetTableFullRefresh:
         runner = object.__new__(HistorizeRunner)
         runner.destination = dest
         runner.schema = "schema"
+        runner.target_schema = "schema"
         runner.target_table_id = "schema.hist_table"
 
         sql_builder = MagicMock()

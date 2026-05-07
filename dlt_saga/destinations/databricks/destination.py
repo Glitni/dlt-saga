@@ -432,6 +432,60 @@ class DatabricksDestination(Destination):
             except Exception as e:
                 logger.debug("Could not clean %s: %s", meta_id, e)
 
+    def build_historize_create_table_sql(
+        self,
+        create_clause: str,
+        target_table_id: str,
+        select_body: str,
+        partition_column: Optional[str],
+        cluster_columns: Optional[list],
+        table_format: str = "native",
+        table_name: str = "",
+        schema: str = "",
+        source_database: str = "",
+        source_schema: str = "",
+        source_table: str = "",
+    ) -> str:
+        """Build CREATE TABLE DDL for a Databricks historize target table.
+
+        Clause order: CREATE ... USING <fmt> [PARTITIONED BY | CLUSTER BY] [TBLPROPERTIES] AS SELECT.
+        - native/delta: USING DELTA, supports PARTITIONED BY and CLUSTER BY.
+        - iceberg: USING ICEBERG; cluster_columns raises a clear error.
+        - delta_uniform: USING DELTA + TBLPROPERTIES for Iceberg compatibility.
+        """
+        effective_format = table_format if table_format != "native" else "delta"
+
+        if effective_format == "iceberg" and cluster_columns:
+            raise ValueError(
+                "Databricks Iceberg tables do not support cluster_columns. "
+                "Remove 'cluster_columns' from the historize section of this pipeline "
+                "or switch to 'delta_uniform' if you need both Delta and Iceberg compatibility."
+            )
+
+        using_clause = (
+            "USING DELTA"
+            if effective_format in ("delta", "delta_uniform")
+            else "USING ICEBERG"
+        )
+
+        parts = [f"{create_clause} {target_table_id}", using_clause]
+
+        if partition_column and not cluster_columns:
+            parts.append(self.partition_ddl(partition_column))
+        if cluster_columns and effective_format != "iceberg":
+            parts.append(self.cluster_ddl(cluster_columns))
+
+        if effective_format == "delta_uniform":
+            parts.append(
+                "TBLPROPERTIES ("
+                "'delta.universalFormat.enabledFormats' = 'iceberg', "
+                "'delta.enableIcebergCompatV2' = 'true'"
+                ")"
+            )
+
+        parts.extend(["AS", select_body])
+        return "\n".join(parts)
+
     def clone_table(self, source_table_id: str, target_table_id: str) -> None:
         """Create a copy of source_table as target_table (DEEP CLONE)."""
         self.execute_sql(f"CREATE TABLE {target_table_id} DEEP CLONE {source_table_id}")

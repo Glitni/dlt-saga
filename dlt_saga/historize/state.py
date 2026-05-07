@@ -147,6 +147,7 @@ class HistorizeStateManager:
             "ignore_columns": sorted(config.ignore_columns),
             "snapshot_column": config.snapshot_column,
             "track_deletions": config.track_deletions,
+            "table_format": config.table_format or "native",
         }
         return base64.b64encode(json.dumps(fingerprint_data).encode()).decode()
 
@@ -161,10 +162,20 @@ class HistorizeStateManager:
     def config_changed(
         self, state: "HistorizeStateManager.PipelineState", config: Any
     ) -> bool:
-        """Check if historization-affecting config has changed since last run."""
+        """Check if historization-affecting config has changed since last run.
+
+        Comparison is done key-by-key against the stored fingerprint so that
+        newly added fingerprint keys (e.g. table_format) don't produce false
+        positives for pipelines whose stored fingerprint pre-dates the key.
+        """
         if not state.has_successful_run:
             return False
-        return state.config_fingerprint != self.compute_fingerprint(config)
+        previous = self.decode_fingerprint(state.config_fingerprint)
+        current = self.decode_fingerprint(self.compute_fingerprint(config))
+        for key, value in current.items():
+            if key in previous and previous[key] != value:
+                return True
+        return False
 
     def write_log_entry(self, entry: HistorizeLogEntry) -> None:
         """Write a single log entry to the historize log table."""

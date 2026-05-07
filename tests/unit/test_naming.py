@@ -6,11 +6,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dlt_saga.historize.config import HistorizeConfig
+from dlt_saga.project_config import _reset_cache
 from dlt_saga.utility.naming import (
     get_dev_schema,
     get_environment,
     get_execution_plan_schema,
     is_production,
+    resolve_historized_target,
 )
 
 
@@ -567,3 +570,99 @@ class TestLoadNamingModuleCaching:
         # so the early-return cache branch fires.
         result2 = load_naming_module({})
         assert result2 is False
+
+
+def _make_hconfig(**kwargs) -> HistorizeConfig:
+    return HistorizeConfig.from_dict(kwargs, top_level_primary_key=["id"])
+
+
+@pytest.mark.unit
+class TestResolveHistorizedTarget:
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        _reset_cache()
+        yield
+        _reset_cache()
+
+    # --- table_suffix placement (default) ---
+
+    def test_table_suffix_defaults(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = _make_hconfig()
+        ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
+        assert ds == "dlt_prod"
+        assert tbl == "orders_historized"
+
+    def test_table_suffix_custom_suffix(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = _make_hconfig(output_table_suffix="_hist")
+        ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
+        assert ds == "dlt_prod"
+        assert tbl == "orders_hist"
+
+    def test_table_suffix_output_table_override(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = _make_hconfig(output_table="orders_scd2")
+        ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
+        assert tbl == "orders_scd2"
+
+    def test_table_suffix_output_schema_override(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = _make_hconfig(output_schema="archive")
+        ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
+        assert ds == "archive"
+        assert tbl == "orders_historized"
+
+    # --- schema_suffix placement ---
+
+    def test_schema_suffix_no_overrides(self, tmp_path, monkeypatch):
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text("historize:\n  placement: schema_suffix\n")
+        monkeypatch.chdir(tmp_path)
+
+        cfg = _make_hconfig()
+        ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
+        assert ds == "dlt_prod_historized"
+        assert tbl == "orders"
+
+    def test_schema_suffix_custom_schema_suffix(self, tmp_path, monkeypatch):
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text(
+            "historize:\n  placement: schema_suffix\n  schema_suffix: _hist\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        cfg = _make_hconfig()
+        ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
+        assert ds == "dlt_prod_hist"
+        assert tbl == "orders"
+
+    def test_schema_suffix_output_schema_wins(self, tmp_path, monkeypatch):
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text("historize:\n  placement: schema_suffix\n")
+        monkeypatch.chdir(tmp_path)
+
+        cfg = _make_hconfig(output_schema="my_archive")
+        ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
+        assert ds == "my_archive"
+        assert tbl == "orders"
+
+    def test_schema_suffix_output_table_wins(self, tmp_path, monkeypatch):
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text("historize:\n  placement: schema_suffix\n")
+        monkeypatch.chdir(tmp_path)
+
+        cfg = _make_hconfig(output_table="orders_v2")
+        ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
+        assert ds == "dlt_prod_historized"
+        assert tbl == "orders_v2"
+
+    def test_schema_suffix_output_table_suffix_ignored(self, tmp_path, monkeypatch):
+        """output_table_suffix is ignored when placement=schema_suffix."""
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text("historize:\n  placement: schema_suffix\n")
+        monkeypatch.chdir(tmp_path)
+
+        cfg = _make_hconfig(output_table_suffix="_hist")
+        _, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
+        assert tbl == "orders"  # no suffix applied

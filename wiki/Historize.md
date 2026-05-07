@@ -72,6 +72,9 @@ saga historize --select "filesystem__snapshots__companies"
 | `partition_column` | `historize:` | — | Partition the SCD2 output table |
 | `cluster_columns` | `historize:` | — | Cluster the SCD2 output table |
 | `track_deletions` | `historize:` | `false` | Emit deletion marker rows when a key disappears |
+| `table_format` | `historize:` | inherited | Table format for the SCD2 output table. Overrides the profile-level setting. See [Table format](#table-format) |
+| `output_schema` | `historize:` | — | Write the historized table to this schema instead of the source schema |
+| `output_table` | `historize:` | — | Explicit name for the historized output table (overrides the auto-generated name) |
 
 ---
 
@@ -103,6 +106,40 @@ The `_dlt_ingested_at` column is resolved in this order:
 
 ---
 
+## Table format
+
+By default, the historized table uses whatever `table_format` is configured on the profile (or `native` if unset). Override it for just the historize layer via a nested `historize:` block in `profiles.yml`:
+
+```yaml
+prod:
+  type: bigquery
+  table_format: native          # ingest tables stay native
+  historize:
+    table_format: iceberg       # historized tables use BigLake Iceberg
+    storage_path: gs://bucket/historized/
+```
+
+Or override for a single pipeline:
+
+```yaml
+historize:
+  table_format: iceberg
+```
+
+Resolution chain (first non-null wins):
+
+1. `pipeline.historize.table_format`
+2. `pipeline.table_format`
+3. `profile.historize.table_format`
+4. `profile.table_format`
+5. `native`
+
+BigQuery supports `native` and `iceberg` (BigLake managed). Databricks supports `native`/`delta`, `iceberg`, and `delta_uniform`. Combining `iceberg` with `cluster_columns` on Databricks raises a validation error.
+
+Changing `table_format` is treated as a config change — historize detects it via the fingerprint and prompts for `saga historize --full-refresh`.
+
+---
+
 ## Incremental vs full refresh
 
 **Incremental** (default): processes only snapshots not yet historized. Uses `LEAD` for within-batch sequencing and `MERGE` to close existing open records.
@@ -113,7 +150,7 @@ The `_dlt_ingested_at` column is resolved in this order:
 saga historize --full-refresh --select "filesystem__snapshots__companies"
 ```
 
-Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when `primary_key`, `track_columns`, `ignore_columns`, `track_deletions`, or `snapshot_column` changes.
+Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when `primary_key`, `track_columns`, `ignore_columns`, `track_deletions`, `snapshot_column`, or `table_format` changes.
 
 ---
 
