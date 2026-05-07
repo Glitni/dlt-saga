@@ -79,42 +79,42 @@ def get_dev_schema() -> str:
 
 
 def resolve_historized_target(
-    source_dataset: str,
+    source_schema: str,
     source_table: str,
     historize_config: "HistorizeConfig",
 ) -> Tuple[str, str]:
-    """Return (historize_dataset, historize_table) applying the configured placement strategy.
+    """Return (historize_schema, historize_table) applying the configured placement strategy.
 
     Resolution order:
-    - historize_dataset:
-        1. historize_config.output_dataset (explicit per-pipeline override)
-        2. if placement == schema_suffix: ``{source_dataset}{schema_suffix}``
-        3. source_dataset (same dataset as source)
+    - historize_schema:
+        1. historize_config.output_schema (explicit per-pipeline override)
+        2. if placement == schema_suffix: ``{source_schema}{schema_suffix}``
+        3. source_schema (same schema as source)
     - historize_table:
         1. historize_config.output_table (explicit per-pipeline override)
         2. if placement == schema_suffix: source_table (no table-level suffix)
         3. ``{source_table}{historize_config.output_table_suffix}``
 
     Args:
-        source_dataset: Schema/dataset where the source ingested table lives.
+        source_schema: Schema where the source ingested table lives.
         source_table: Table name of the source ingested table.
-        historize_config: HistorizeConfig for this pipeline (may carry output_dataset /
+        historize_config: HistorizeConfig for this pipeline (may carry output_schema /
             output_table overrides).
 
     Returns:
-        Tuple of (historize_dataset, historize_table).
+        Tuple of (historize_schema, historize_table).
     """
     from dlt_saga.project_config import get_historize_project_config
 
     proj = get_historize_project_config()
 
-    # --- Dataset resolution ---
-    if historize_config.output_dataset:
-        historize_dataset = historize_config.output_dataset
+    # --- Schema resolution ---
+    if historize_config.output_schema:
+        historize_schema = historize_config.output_schema
     elif proj.placement == "schema_suffix":
-        historize_dataset = f"{source_dataset}{proj.schema_suffix}"
+        historize_schema = f"{source_schema}{proj.schema_suffix}"
     else:
-        historize_dataset = source_dataset
+        historize_schema = source_schema
 
     # --- Table resolution ---
     if historize_config.output_table:
@@ -127,7 +127,7 @@ def resolve_historized_target(
             source_table, historize_config.output_table_suffix
         )
 
-    return historize_dataset, historize_table
+    return historize_schema, historize_table
 
 
 def get_historized_table_name(base_table_name: str, suffix: str = "_historized") -> str:

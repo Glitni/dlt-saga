@@ -12,13 +12,13 @@ pipelines:
 # 'placement' is effectively write-once: changing it after the first run orphans
 # existing historize tables — no migration is performed automatically.
 #
-# Option 1 (default): historized table in the same dataset with a name suffix
+# Option 1 (default): historized table in the same schema with a name suffix
 #   dlt_google_sheets.customers_historized
 # historize:
 #   placement: table_suffix
 #   table_suffix: "_historized"  # default
 #
-# Option 2: historized table in a parallel dataset, same table name
+# Option 2: historized table in a parallel schema, same table name
 #   dlt_google_sheets_historized.customers
 # historize:
 #   placement: schema_suffix

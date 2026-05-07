@@ -108,15 +108,15 @@ def build_historize_runner(
 
     # Resolve historize dataset and table using the configured placement strategy
     target_schema, target_table_name = resolve_historized_target(
-        source_dataset=schema_name,
+        source_schema=schema_name,
         source_table=pipeline_config.table_name,
         historize_config=historize_config,
     )
 
     # Pin resolved target_schema on historize_config so HistorizeRunner uses it
     # everywhere (state manager, partial refresh, etc.)
-    if target_schema != schema_name and historize_config.output_dataset is None:
-        historize_config.output_dataset = target_schema
+    if target_schema != schema_name and historize_config.output_schema is None:
+        historize_config.output_schema = target_schema
 
     return HistorizeRunner(
         pipeline_name=pipeline_config.pipeline_name,

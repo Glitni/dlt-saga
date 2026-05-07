@@ -75,8 +75,8 @@ class HistorizeRunner:
                 schema, source_table_name
             )
 
-        # Target table in same dataset (or override)
-        target_schema = self.config.output_dataset or schema
+        # Target table in same schema (or override)
+        target_schema = self.config.output_schema or schema
         self.target_schema = target_schema
         self.target_table_id = destination.get_full_table_id(
             target_schema, target_table_name
@@ -333,7 +333,7 @@ class HistorizeRunner:
             self.destination.execute_sql(drop_sql, self.schema)
 
         # Ensure the target schema exists when it differs from the source schema
-        # (happens when placement=schema_suffix or when output_dataset is set explicitly)
+        # (happens when placement=schema_suffix or when output_schema is set explicitly)
         if self.target_schema != self.schema:
             self.destination.ensure_schema_exists(self.target_schema)
 
@@ -507,7 +507,7 @@ class HistorizeRunner:
         import uuid
 
         run_id = uuid.uuid4().hex[:8]
-        target_schema = self.config.output_dataset or self.schema
+        target_schema = self.config.output_schema or self.schema
 
         # Resolve effective boundary
         effective_from_date, clamped = self._resolve_effective_from_date()
@@ -793,7 +793,7 @@ class HistorizeRunner:
         """
         src = self.source_table_id
         snapshot_col = self.config.snapshot_column
-        target_schema = self.config.output_dataset or self.schema
+        target_schema = self.config.output_schema or self.schema
 
         sql = f"SELECT MIN({snapshot_col}) AS min_snap FROM {src}"
         rows = list(self.destination.execute_sql(sql, target_schema))

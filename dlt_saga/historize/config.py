@@ -75,10 +75,10 @@ class HistorizeConfig:
         },
     )
 
-    output_dataset: Optional[str] = field(
+    output_schema: Optional[str] = field(
         default=None,
         metadata={
-            "description": "Dataset to write the historized table to. Defaults to the same dataset as the source."
+            "description": "Schema to write the historized table to. Defaults to the same schema as the source."
         },
     )
 

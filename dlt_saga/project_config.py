@@ -34,10 +34,10 @@ class HistorizeProjectConfig:
         metadata={
             "description": (
                 "Table placement strategy. "
-                "'table_suffix' (default): historize table lives in the source dataset "
+                "'table_suffix' (default): historize table lives in the source schema "
                 "with a suffix appended to the table name. "
-                "'schema_suffix': historize table lives in a parallel dataset whose name "
-                "is the source dataset name plus schema_suffix, and the table name is unchanged."
+                "'schema_suffix': historize table lives in a parallel schema whose name "
+                "is the source schema name plus schema_suffix, and the table name is unchanged."
             ),
             "enum": ["table_suffix", "schema_suffix"],
         },
@@ -55,7 +55,7 @@ class HistorizeProjectConfig:
         default="_historized",
         metadata={
             "description": (
-                "Suffix appended to the source dataset name when placement=schema_suffix. "
+                "Suffix appended to the source schema name when placement=schema_suffix. "
                 "Ignored when placement=table_suffix."
             ),
         },

@@ -606,9 +606,9 @@ class TestResolveHistorizedTarget:
         ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
         assert tbl == "orders_scd2"
 
-    def test_table_suffix_output_dataset_override(self, tmp_path, monkeypatch):
+    def test_table_suffix_output_schema_override(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        cfg = _make_hconfig(output_dataset="archive")
+        cfg = _make_hconfig(output_schema="archive")
         ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
         assert ds == "archive"
         assert tbl == "orders_historized"
@@ -637,12 +637,12 @@ class TestResolveHistorizedTarget:
         assert ds == "dlt_prod_hist"
         assert tbl == "orders"
 
-    def test_schema_suffix_output_dataset_wins(self, tmp_path, monkeypatch):
+    def test_schema_suffix_output_schema_wins(self, tmp_path, monkeypatch):
         yml = tmp_path / "saga_project.yml"
         yml.write_text("historize:\n  placement: schema_suffix\n")
         monkeypatch.chdir(tmp_path)
 
-        cfg = _make_hconfig(output_dataset="my_archive")
+        cfg = _make_hconfig(output_schema="my_archive")
         ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
         assert ds == "my_archive"
         assert tbl == "orders"
