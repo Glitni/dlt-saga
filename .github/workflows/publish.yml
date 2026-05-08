@@ -84,6 +84,10 @@ jobs:
 
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        # TestPyPI rejects re-uploading the same version. Re-pushing a release/**
+        # branch (e.g. after fixing something on the release PR) would otherwise
+        # fail CI red. The actual release gate is the tag-push to PyPI proper.
+        continue-on-error: true
         with:
           repository-url: https://test.pypi.org/legacy/
 

@@ -646,7 +646,7 @@ sftp = [
 
 [[package]]
 name = "dlt-saga"
-version = "0.2.0"
+version = "0.2.2"
 source = { editable = "." }
 dependencies = [
     { name = "connectorx" },
