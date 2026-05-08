@@ -16,6 +16,26 @@ def _escape_sql_string(value: str) -> str:
     return value.replace("'", "''").replace("\\", "\\\\")
 
 
+def _looks_like_missing_table(exc: Exception) -> bool:
+    """Best-effort detection of "relation/table does not exist" across destinations.
+
+    BigQuery emits ``Not found: Table ...``, Databricks ``TABLE_OR_VIEW_NOT_FOUND``,
+    and DuckDB ``Catalog Error: Table with name ... does not exist``. We match on
+    the substrings the three share so anything else (permissions, network,
+    syntax) propagates instead of being misread as a missing table.
+    """
+    msg = str(exc).lower()
+    return any(
+        marker in msg
+        for marker in (
+            "not found",
+            "does not exist",
+            "no such table",
+            "table_or_view_not_found",
+        )
+    )
+
+
 @dataclass
 class HistorizeLogEntry:
     """A single entry in the _saga_historize_log table."""
@@ -31,9 +51,6 @@ class HistorizeLogEntry:
     started_at: Any
     finished_at: Any
     status: str  # 'completed' | 'failed'
-    runner_version: int = (
-        1  # Schema version for future-proofing (bump with ALTER TABLE)
-    )
 
 
 class HistorizeStateManager:
@@ -55,10 +72,6 @@ class HistorizeStateManager:
         self.log_table_name = get_historize_log_table_name()
         self.log_table_id = destination.get_full_table_id(schema, self.log_table_name)
 
-    # Schema version for the log table.  Increment when columns are added so
-    # that ensure_log_table() can evolve existing tables via ALTER TABLE.
-    _LOG_TABLE_VERSION = 1
-
     def _create_table_ddl(self) -> str:
         """Generate DDL to create the log table using destination type names."""
         d = self.destination
@@ -75,8 +88,7 @@ class HistorizeStateManager:
                 is_full_reprocess {d.type_name("bool")},
                 started_at {d.type_name("timestamp")},
                 finished_at {d.type_name("timestamp")},
-                status {d.type_name("string")},
-                runner_version {d.type_name("int64")}
+                status {d.type_name("string")}
             )
         """
 
@@ -116,18 +128,23 @@ class HistorizeStateManager:
         """
         try:
             rows = list(self.destination.execute_sql(sql, self.schema))
-            if rows:
-                return self.PipelineState(
-                    last_snapshot_value=rows[0].snapshot_value,
-                    last_finished_at=rows[0].finished_at,
-                    config_fingerprint=rows[0].config_fingerprint,
-                    has_successful_run=True,
-                )
-            return self.PipelineState()
-        except Exception:
-            # Table likely doesn't exist — create it and return empty state
+        except Exception as exc:
+            # Only treat "table doesn't exist" as a recoverable case. Permission
+            # denials, network errors, and SQL errors propagate so the operator
+            # sees them instead of silently re-processing all history.
+            if not _looks_like_missing_table(exc):
+                raise
             self.ensure_log_table()
             return self.PipelineState()
+
+        if rows:
+            return self.PipelineState(
+                last_snapshot_value=rows[0].snapshot_value,
+                last_finished_at=rows[0].finished_at,
+                config_fingerprint=rows[0].config_fingerprint,
+                has_successful_run=True,
+            )
+        return self.PipelineState()
 
     @staticmethod
     def compute_fingerprint(config: Any) -> str:
@@ -197,8 +214,7 @@ class HistorizeStateManager:
             INSERT INTO {q}
             (pipeline_name, source_table, target_table, snapshot_value,
              new_or_changed_rows, deleted_rows,
-             config_fingerprint, is_full_reprocess, started_at, finished_at, status,
-             runner_version)
+             config_fingerprint, is_full_reprocess, started_at, finished_at, status)
             VALUES (
                 {_fmt(entry.pipeline_name)},
                 {_fmt(entry.source_table)},
@@ -210,37 +226,10 @@ class HistorizeStateManager:
                 {_fmt(entry.is_full_reprocess)},
                 {_fmt(entry.started_at)},
                 {_fmt(entry.finished_at)},
-                {_fmt(entry.status)},
-                {_fmt(entry.runner_version)}
+                {_fmt(entry.status)}
             )
         """
-        try:
-            self.destination.execute_sql(sql, self.schema)
-        except Exception as exc:
-            # The runner_version column may not exist on a pre-existing log table
-            # (deployments created before this field was added). Add the column and retry.
-            if (
-                "runner_version" in str(exc).lower()
-                or "unknown column" in str(exc).lower()
-                or "column" in str(exc).lower()
-            ):
-                logger.debug(
-                    "Log table missing runner_version column — adding it: %s", exc
-                )
-                try:
-                    alter_sql = (
-                        f"ALTER TABLE {q} ADD COLUMN runner_version "
-                        f"{self.destination.type_name('int64')}"
-                    )
-                    self.destination.execute_sql(alter_sql, self.schema)
-                    self.destination.execute_sql(sql, self.schema)
-                except Exception as alter_exc:
-                    logger.warning(
-                        "Could not add runner_version column to log table: %s",
-                        alter_exc,
-                    )
-            else:
-                raise
+        self.destination.execute_sql(sql, self.schema)
 
     def clear_log_entries(self, pipeline_name: str) -> None:
         """Delete all log entries for a pipeline (used during full refresh)."""

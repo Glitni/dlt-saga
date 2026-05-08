@@ -77,16 +77,22 @@ class HistorizeSqlBuilder:
         return [c for c in value_columns if c not in ignore_set]
 
     def _q(self, name: str) -> str:
-        """Quote a table identifier using the destination's quoting style."""
+        """Quote a column or table identifier using the destination's quoting style."""
         return self.destination.quote_identifier(name)
 
+    def _qcols(self, cols: List[str]) -> str:
+        """Comma-separated, destination-quoted column list."""
+        return ", ".join(self._q(c) for c in cols)
+
     def _pk_cols_sql(self) -> str:
-        """Comma-separated primary key column list."""
-        return ", ".join(self.primary_key)
+        """Comma-separated primary key column list, destination-quoted."""
+        return self._qcols(self.primary_key)
 
     def _pk_join(self, left: str, right: str) -> str:
-        """JOIN condition for primary keys between two aliases."""
-        return " AND ".join(f"{left}.{pk} = {right}.{pk}" for pk in self.primary_key)
+        """JOIN condition for primary keys between two aliases, destination-quoted."""
+        return " AND ".join(
+            f"{left}.{self._q(pk)} = {right}.{self._q(pk)}" for pk in self.primary_key
+        )
 
     def build_rollback_sql(
         self, effective_from_date: str, run_id: str, dataset: str
@@ -109,7 +115,7 @@ class HistorizeSqlBuilder:
         pk_cols = self._pk_cols_sql()
         tgt = self.target_table_id
         src = self.source_table_id
-        snapshot_col = self.config.snapshot_column
+        q_snapshot = self._q(self.config.snapshot_column)
         safe_date = effective_from_date.replace("'", "''")
 
         keys_table = self.destination.get_full_table_id(
@@ -118,8 +124,8 @@ class HistorizeSqlBuilder:
 
         # PK membership check via IN subquery (no table aliases needed)
         if len(self.primary_key) == 1:
-            pk = self.primary_key[0]
-            pk_in_keys = f"{pk} IN (SELECT {pk} FROM {keys_table})"
+            q_pk = self._q(self.primary_key[0])
+            pk_in_keys = f"{q_pk} IN (SELECT {q_pk} FROM {keys_table})"
         else:
             pk_in_keys = f"({pk_cols}) IN (SELECT {pk_cols} FROM {keys_table})"
 
@@ -127,7 +133,7 @@ class HistorizeSqlBuilder:
             CREATE TABLE {keys_table} AS
             SELECT DISTINCT {pk_cols}
             FROM {src}
-            WHERE {snapshot_col} >= TIMESTAMP '{safe_date}'
+            WHERE {q_snapshot} >= TIMESTAMP '{safe_date}'
         """
 
         delete_sql = f"""
@@ -189,7 +195,7 @@ class HistorizeSqlBuilder:
 
         select_body = (
             f"SELECT\n"
-            f"    {', '.join(all_data_cols)},\n"
+            f"    {self._qcols(all_data_cols)},\n"
             f"    CAST(NULL AS {ts_type}) AS _dlt_valid_from,\n"
             f"    CAST(NULL AS {ts_type}) AS _dlt_valid_to,\n"
             f"    CAST(NULL AS {bool_type}) AS _dlt_is_deleted\n"
@@ -224,10 +230,11 @@ class HistorizeSqlBuilder:
         """
         pk_cols = self._pk_cols_sql()
         snapshot_col = self.config.snapshot_column
+        q_snapshot = self._q(snapshot_col)
         hash_columns = self._get_hash_columns(value_columns)
         hash_expr = self.destination.hash_expression(hash_columns)
         all_output_cols = list(self.primary_key) + list(value_columns)
-        output_cols_from_c = ", ".join(f"c.{col}" for col in all_output_cols)
+        output_cols_from_c = ", ".join(f"c.{self._q(col)}" for col in all_output_cols)
         src = self.source_table_id
         tgt = self.target_table_id
 
@@ -242,7 +249,7 @@ class HistorizeSqlBuilder:
             # _dlt_valid_to is set to the reappearance date (from changes CTE)
             # or NULL if the key never returns.
             output_cols_from_del = ", ".join(
-                f"del_src.{col}" for col in all_output_cols
+                f"del_src.{self._q(col)}" for col in all_output_cols
             )
             pk_join_del = self._pk_join("d", "del_src")
             pk_join_del_c = self._pk_join("d", "reappear")
@@ -250,14 +257,14 @@ class HistorizeSqlBuilder:
 SELECT
   {output_cols_from_del},
   d.disappeared_at AS _dlt_valid_from,
-  (SELECT MIN(reappear.{snapshot_col}) FROM changes reappear
+  (SELECT MIN(reappear.{q_snapshot}) FROM changes reappear
    WHERE {pk_join_del_c}
-     AND reappear.{snapshot_col} >= d.disappeared_at
+     AND reappear.{q_snapshot} >= d.disappeared_at
   ) AS _dlt_valid_to,
   TRUE AS _dlt_is_deleted
 FROM disappearances d
 INNER JOIN deduped del_src ON {pk_join_del}
-  AND del_src.{snapshot_col} = d.last_seen"""
+  AND del_src.{q_snapshot} = d.last_seen"""
 
         return f"""
 -- Full Reprocess Historization
@@ -267,7 +274,7 @@ CREATE TEMP TABLE _historize_result AS
 WITH
 -- All unique snapshot dates
 all_snapshots AS (
-  SELECT DISTINCT {snapshot_col} AS snapshot_date
+  SELECT DISTINCT {q_snapshot} AS snapshot_date
   FROM {src}
 ),
 
@@ -283,7 +290,7 @@ deduped AS (
   SELECT * FROM (
     SELECT h.*,
       ROW_NUMBER() OVER (
-        PARTITION BY {pk_cols}, {snapshot_col}
+        PARTITION BY {pk_cols}, {q_snapshot}
         ORDER BY _row_hash
       ) AS _dedup_rn
     FROM hashed h
@@ -295,11 +302,11 @@ deduped AS (
 with_context AS (
   SELECT d.*,
     LAG(_row_hash) OVER (pk_order) AS _prev_hash,
-    LAG({snapshot_col}) OVER (pk_order) AS _prev_snapshot,
+    LAG({q_snapshot}) OVER (pk_order) AS _prev_snapshot,
     (SELECT MAX(snapshot_date) FROM all_snapshots
-     WHERE snapshot_date < d.{snapshot_col}) AS _expected_prev_snapshot
+     WHERE snapshot_date < d.{q_snapshot}) AS _expected_prev_snapshot
   FROM deduped d
-  WINDOW pk_order AS (PARTITION BY {pk_cols} ORDER BY {snapshot_col})
+  WINDOW pk_order AS (PARTITION BY {pk_cols} ORDER BY {q_snapshot})
 ),
 
 -- Keep rows where: first appearance, value changed, OR reappeared after gap
@@ -315,8 +322,8 @@ changes AS (
 -- Pre-compute next change snapshot per PK
 changes_with_next AS (
   SELECT c.*,
-    LEAD(c.{snapshot_col}) OVER (
-      PARTITION BY {pk_cols} ORDER BY c.{snapshot_col}
+    LEAD(c.{q_snapshot}) OVER (
+      PARTITION BY {pk_cols} ORDER BY c.{q_snapshot}
     ) AS _next_change_snapshot
   FROM changes c
 ),
@@ -325,7 +332,7 @@ changes_with_next AS (
 scd2 AS (
   SELECT
     {output_cols_from_c},
-    c.{snapshot_col} AS _dlt_valid_from,
+    c.{q_snapshot} AS _dlt_valid_from,
     {self._build_scd2_columns_sql(pk_cols, snapshot_col)}
   FROM changes_with_next c
 )
@@ -340,10 +347,11 @@ INSERT INTO {tgt} SELECT * FROM _historize_result;
         self, pk_cols: str, snapshot_col: str, src: str
     ) -> str:
         """Build the CTE for tracking deletions (keys disappearing from snapshots)."""
+        q_snapshot = self._q(snapshot_col)
         return f"""
 -- Track key presence across snapshots for deletion detection
 key_presence AS (
-  SELECT DISTINCT {pk_cols}, {snapshot_col} AS snapshot_date
+  SELECT DISTINCT {pk_cols}, {q_snapshot} AS snapshot_date
   FROM {src}
 ),
 with_next_presence AS (
@@ -369,12 +377,13 @@ disappearances AS (
         Closed rows always have _dlt_is_deleted=FALSE. Deletions are tracked
         via separate deletion marker rows (added in the outer query).
         """
+        q_snapshot = self._q(snapshot_col)
         if self.config.track_deletions:
             pk_join_d_c = self._pk_join("d", "c")
             return f"""COALESCE(
       (SELECT MIN(d.disappeared_at) FROM disappearances d
        WHERE {pk_join_d_c}
-         AND d.last_seen >= c.{snapshot_col}
+         AND d.last_seen >= c.{q_snapshot}
          AND d.disappeared_at <= COALESCE(c._next_change_snapshot, TIMESTAMP '9999-12-31')
       ),
       c._next_change_snapshot
@@ -401,10 +410,11 @@ disappearances AS (
         """
         pk_cols = self._pk_cols_sql()
         snapshot_col = self.config.snapshot_column
+        q_snapshot = self._q(snapshot_col)
         hash_columns = self._get_hash_columns(value_columns)
         hash_expr = self.destination.hash_expression(hash_columns)
         all_output_cols = list(self.primary_key) + list(value_columns)
-        output_cols_from_c = ", ".join(f"c.{col}" for col in all_output_cols)
+        output_cols_from_c = ", ".join(f"c.{self._q(col)}" for col in all_output_cols)
         src = self.source_table_id
         tgt = self.target_table_id
 
@@ -412,12 +422,12 @@ disappearances AS (
         # so partition/cluster pruning can work on the source table)
         snapshot_values = ", ".join(f"TIMESTAMP '{s}'" for s in new_snapshots)
         if last_historized_snapshot:
-            snapshot_filter = f"{snapshot_col} IN (TIMESTAMP '{last_historized_snapshot}', {snapshot_values})"
+            snapshot_filter = f"{q_snapshot} IN (TIMESTAMP '{last_historized_snapshot}', {snapshot_values})"
             reference_filter = (
-                f"AND c.{snapshot_col} != TIMESTAMP '{last_historized_snapshot}'"
+                f"AND c.{q_snapshot} != TIMESTAMP '{last_historized_snapshot}'"
             )
         else:
-            snapshot_filter = f"{snapshot_col} IN ({snapshot_values})"
+            snapshot_filter = f"{q_snapshot} IN ({snapshot_values})"
             reference_filter = ""
 
         track_deletions_sql = ""
@@ -428,14 +438,14 @@ disappearances AS (
             )
             deletion_union = f"""UNION ALL
   SELECT
-    {", ".join(f"del_src.{col}" for col in (list(self.primary_key) + list(value_columns)))},
+    {", ".join(f"del_src.{self._q(col)}" for col in (list(self.primary_key) + list(value_columns)))},
     del.deleted_at AS _dlt_valid_from,
     TRUE AS _dlt_is_deleted
   FROM deletions del
   INNER JOIN deduped del_src ON {self._pk_join("del", "del_src")}
-    AND del_src.{snapshot_col} = del.last_seen"""
+    AND del_src.{q_snapshot} = del.last_seen"""
 
-        output_cols_bare = ", ".join(all_output_cols)
+        output_cols_bare = self._qcols(all_output_cols)
         pk_join_t_n = self._pk_join("t", "n")
 
         return f"""
@@ -446,7 +456,7 @@ CREATE TEMP TABLE _historize_incremental AS
 WITH
 -- All snapshots being processed (including reference)
 all_snapshots AS (
-  SELECT DISTINCT {snapshot_col} AS snapshot_date
+  SELECT DISTINCT {q_snapshot} AS snapshot_date
   FROM {src}
   WHERE {snapshot_filter}
 ),
@@ -464,7 +474,7 @@ deduped AS (
   SELECT * FROM (
     SELECT h.*,
       ROW_NUMBER() OVER (
-        PARTITION BY {pk_cols}, {snapshot_col}
+        PARTITION BY {pk_cols}, {q_snapshot}
         ORDER BY _row_hash
       ) AS _dedup_rn
     FROM hashed h
@@ -476,11 +486,11 @@ deduped AS (
 with_context AS (
   SELECT d.*,
     LAG(_row_hash) OVER (pk_order) AS _prev_hash,
-    LAG({snapshot_col}) OVER (pk_order) AS _prev_snapshot,
+    LAG({q_snapshot}) OVER (pk_order) AS _prev_snapshot,
     (SELECT MAX(snapshot_date) FROM all_snapshots
-     WHERE snapshot_date < d.{snapshot_col}) AS _expected_prev_snapshot
+     WHERE snapshot_date < d.{q_snapshot}) AS _expected_prev_snapshot
   FROM deduped d
-  WINDOW pk_order AS (PARTITION BY {pk_cols} ORDER BY {snapshot_col})
+  WINDOW pk_order AS (PARTITION BY {pk_cols} ORDER BY {q_snapshot})
 ),
 
 -- Keep changed/new rows, exclude reference snapshot from output
@@ -498,7 +508,7 @@ changes AS (
 new_records_raw AS (
   SELECT
     {output_cols_from_c},
-    c.{snapshot_col} AS _dlt_valid_from,
+    c.{q_snapshot} AS _dlt_valid_from,
     FALSE AS _dlt_is_deleted
   FROM changes c
   {deletion_union}
@@ -547,10 +557,11 @@ SELECT * FROM _historize_incremental;
         src: str,
     ) -> str:
         """Build deletion detection CTEs for incremental mode."""
+        q_snapshot = self._q(snapshot_col)
         return f"""
 -- Detect deletions: keys present in reference but missing in new snapshots
 deletion_candidates AS (
-  SELECT DISTINCT {pk_cols}, {snapshot_col} AS snapshot_date
+  SELECT DISTINCT {pk_cols}, {q_snapshot} AS snapshot_date
   FROM {src}
   WHERE {self._snapshot_filter_for_deletions(snapshot_col)}
 ),
@@ -571,4 +582,4 @@ deletions AS (
 
     def _snapshot_filter_for_deletions(self, snapshot_col: str) -> str:
         """Build the WHERE clause for deletion candidate detection."""
-        return f"{snapshot_col} IN (SELECT snapshot_date FROM all_snapshots)"
+        return f"{self._q(snapshot_col)} IN (SELECT snapshot_date FROM all_snapshots)"
