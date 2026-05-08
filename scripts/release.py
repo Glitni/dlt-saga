@@ -58,7 +58,17 @@ def main() -> None:
         sys.exit(0)
 
     run("git", "checkout", "-b", f"release/{tag}")
-    run("git", "cliff", "--unreleased", "--tag", tag, "--prepend", "CHANGELOG.md")
+    run(
+        "git",
+        "cliff",
+        "--unreleased",
+        "--tag",
+        tag,
+        "--prepend",
+        "CHANGELOG.md",
+        "--strip",
+        "header",
+    )
 
     pyproject = open("pyproject.toml").read()
     pyproject = re.sub(

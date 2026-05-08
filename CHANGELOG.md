@@ -23,8 +23,3 @@ All notable changes to dlt-saga are documented here.
 
 ### Security
 - Pin CI action SHAs and add safe dependency upgrade script (#12)
-
-# Changelog
-
-All notable changes are documented here.
-
