@@ -137,6 +137,11 @@ class NativeLoadPipeline(BasePipeline):
                     self._target_exists = False
                 else:
                     self._ensure_target_table()
+                # Self-heal stale external tables left by a previously crashed
+                # run. native_load_chunk drops its own ext table in a finally,
+                # but a SIGKILL or OOM-kill mid-chunk skips the finally; the
+                # debris would otherwise accumulate forever.
+                self._sweep_orphan_ext_tables()
 
             with self._phase("discover"):
                 new_files_by_cursor = self._discover_new_files()
@@ -214,8 +219,6 @@ class NativeLoadPipeline(BasePipeline):
                 self.destination.drop_table(self._dataset, self.table_name)
         except Exception as exc:
             self.logger.debug("Could not drop target (may not exist): %s", exc)
-
-        self._sweep_orphan_ext_tables()
 
         try:
             self.state_manager.clear_pipeline_state(self.pipeline_name)
@@ -508,27 +511,6 @@ class NativeLoadPipeline(BasePipeline):
 
         try:
             result = self.destination.native_load_chunk(spec)
-            self._target_exists = True
-
-            if self._incremental:
-                size_by_load_id = {
-                    load_id: f.size for f, load_id in zip(files, load_ids)
-                }
-                loaded_rows_by_load_id = {
-                    load_id: int(result.rows_by_uri.get(f.full_uri, 0))
-                    for f, load_id in zip(files, load_ids)
-                }
-                self.state_manager.record_loads_success_bulk(
-                    pipeline_name=self.pipeline_name,
-                    rows=rows_for_log,
-                    load_ids=load_ids,
-                    job_id=result.job_id,
-                    size_bytes_by_load_id=size_by_load_id,
-                    loaded_rows_by_load_id=loaded_rows_by_load_id,
-                    started_at=started_at,
-                )
-            return result.rows_loaded
-
         except Exception as exc:
             self.logger.error(
                 "Native load failed for %d file(s): %s", len(files), exc, exc_info=True
@@ -542,6 +524,44 @@ class NativeLoadPipeline(BasePipeline):
                     started_at=started_at,
                 )
             raise
+
+        self._target_exists = True
+
+        if self._incremental:
+            size_by_load_id = {load_id: f.size for f, load_id in zip(files, load_ids)}
+            loaded_rows_by_load_id = {
+                load_id: int(result.rows_by_uri.get(f.full_uri, 0))
+                for f, load_id in zip(files, load_ids)
+            }
+            try:
+                self.state_manager.record_loads_success_bulk(
+                    pipeline_name=self.pipeline_name,
+                    rows=rows_for_log,
+                    load_ids=load_ids,
+                    job_id=result.job_id,
+                    size_bytes_by_load_id=size_by_load_id,
+                    loaded_rows_by_load_id=loaded_rows_by_load_id,
+                    started_at=started_at,
+                )
+            except Exception as exc:
+                # The warehouse load succeeded — never mark these loads as
+                # failed, that would re-load and duplicate data on retry.
+                # The 'started' rows already inserted by record_loads_started_bulk
+                # protect against duplicates for STALE_HOURS (24h); after that
+                # window the files will be re-loaded, so the operator must
+                # repair the state log manually if recovery takes longer.
+                self.logger.error(
+                    "Warehouse load succeeded but failed to record success "
+                    "state for %d file(s). The state log shows them as "
+                    "'started'; they will be skipped on retries within the "
+                    "staleness window (24h) but re-loaded after that. "
+                    "Repair the state log manually if needed: %s",
+                    len(files),
+                    exc,
+                )
+                raise
+
+        return result.rows_loaded
 
     # ------------------------------------------------------------------
     # Derived columns
@@ -588,6 +608,11 @@ class NativeLoadPipeline(BasePipeline):
 
         Keys are normalized via dlt snake_case so both raw and normalized names
         in the config resolve to the same key.  Values are destination SQL types.
+
+        Raises:
+            ValueError: If two distinct raw column names normalize to the same
+                key (e.g. ``OrderDate`` and ``order_date``) — silently keeping
+                only the last one would drop a type hint without any signal.
         """
         raw_columns = self.native_config.columns
         if not raw_columns:
@@ -597,6 +622,7 @@ class NativeLoadPipeline(BasePipeline):
 
         conv = NamingConvention()
         hints: dict = {}
+        source_for_key: dict = {}
         for col_name, col_def in raw_columns.items():
             if not isinstance(col_def, dict):
                 continue
@@ -604,6 +630,13 @@ class NativeLoadPipeline(BasePipeline):
             if not data_type:
                 continue
             norm_key = conv.normalize_identifier(col_name).lower()
+            if norm_key in source_for_key and source_for_key[norm_key] != col_name:
+                raise ValueError(
+                    f"Column hint collision: {source_for_key[norm_key]!r} and "
+                    f"{col_name!r} both normalize to {norm_key!r}. Use a single "
+                    "canonical name in the columns: block."
+                )
+            source_for_key[norm_key] = col_name
             hints[norm_key] = self.destination.dlt_type_to_native(str(data_type))
         return hints
 
