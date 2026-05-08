@@ -12,6 +12,8 @@ saga ingest --workers 8 --select "tag:daily"
 
 **Orchestrated** — the framework fans out to parallel workers via the configured `OrchestrationProvider`. Enable with `--orchestrate`:
 
+> **Using Dagster, Airflow, or Prefect?** Skip this layer and let the external orchestrator own scheduling and execution — see [Orchestration Recipes](Orchestration-Recipes) for `Session`-based integration patterns.
+
 ```bash
 saga ingest --orchestrate --select "tag:daily"
 ```

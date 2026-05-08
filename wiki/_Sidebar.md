@@ -14,6 +14,7 @@
 
 **Operations**
 - [Deployment](Deployment)
+- [Orchestration Recipes](Orchestration-Recipes)
 - [Performance](Performance)
 
 **Extending**
