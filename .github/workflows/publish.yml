@@ -106,7 +106,7 @@ jobs:
 
       - name: Install git-cliff
         run: |
-          curl -sfL "https://github.com/orhun/git-cliff/releases/download/v2.12.0/git-cliff-2.12.0-x86_64-unknown-linux-gnu.tar.gz" \
+          curl -sfL "https://github.com/orhun/git-cliff/releases/download/v2.13.1/git-cliff-2.13.1-x86_64-unknown-linux-gnu.tar.gz" \
             | tar -xz --wildcards --strip-components=1 -C /usr/local/bin '*/git-cliff'
 
       - name: Generate release notes
