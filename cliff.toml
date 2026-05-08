@@ -20,7 +20,7 @@ body = """
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group }}
 {% for commit in commits %}\
-- {{ commit.message | split(pat="\n") | first | regexreplace(pat="^(?i)(feat(ure)?|fix|sec(urity)?|perf(ormance)?|refactor)[:\s]\s*", rep="") | trim | upper_first }}
+- {{ commit.message | split(pat="\n") | first | replace_regex(from="^(?i)(feat(ure)?|fix|sec(urity)?|perf(ormance)?|refactor)[:\\s]\\s*", to="") | trim | upper_first }}
 {% endfor %}
 {% endfor %}
 """

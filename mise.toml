@@ -1,5 +1,5 @@
 [tools]
-"git-cliff" = "2.12.0"
+"git-cliff" = "2.13.1"
 
 [tasks.release]
 description = "Prepare a release PR. Usage: mise run release X.Y.Z"
