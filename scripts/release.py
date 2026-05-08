@@ -2,6 +2,7 @@
 """Prepare a release PR. Usage: uv run python scripts/release.py X.Y.Z"""
 
 import re
+import shutil
 import subprocess
 import sys
 
@@ -12,6 +13,18 @@ def run(*cmd: str) -> None:
 
 def check(*cmd: str) -> bool:
     return subprocess.run(cmd, capture_output=True).returncode == 0
+
+
+def _origin_repo_slug() -> str | None:
+    """Return ``owner/repo`` parsed from ``origin``, or ``None`` if unrecognised."""
+    result = subprocess.run(
+        ["git", "remote", "get-url", "origin"], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return None
+    url = result.stdout.strip()
+    m = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?/?$", url)
+    return m.group(1) if m else None
 
 
 def main() -> None:
@@ -61,19 +74,39 @@ def main() -> None:
     run("git", "commit", "-m", f"Bump: version to {version}")
     run("git", "push", "-u", "origin", f"release/{tag}")
 
-    run(
-        "gh",
-        "pr",
-        "create",
-        "--title",
-        f"Bump: version to {version}",
-        "--body",
-        f"Release preparation for {tag}. Merge when ready, then run `mise run tag {version}` to trigger the release.",
-        "--base",
-        "main",
+    pr_title = f"Bump: version to {version}"
+    pr_body = (
+        f"Release preparation for {tag}. Merge when ready, "
+        f"then run `mise run tag {version}` to trigger the release."
     )
 
-    print(f"\nPR created. After it is merged, run:\n  mise run tag {version}")
+    if shutil.which("gh"):
+        run(
+            "gh",
+            "pr",
+            "create",
+            "--title",
+            pr_title,
+            "--body",
+            pr_body,
+            "--base",
+            "main",
+        )
+        print(f"\nPR created. After it is merged, run:\n  mise run tag {version}")
+    else:
+        slug = _origin_repo_slug()
+        compare_url = (
+            f"https://github.com/{slug}/compare/main...release/{tag}?quick_pull=1"
+            if slug
+            else f"https://github.com/<owner>/<repo>/pull/new/release/{tag}"
+        )
+        print(
+            "\ngh CLI not found — open the PR manually:\n"
+            f"  URL:   {compare_url}\n"
+            f"  Title: {pr_title}\n"
+            f"  Body:  {pr_body}\n"
+            f"\nAfter merging, run:\n  mise run tag {version}"
+        )
 
 
 if __name__ == "__main__":
