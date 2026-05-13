@@ -692,11 +692,19 @@ class NativeLoadPipeline(BasePipeline):
             )
 
     def _build_load_info_entry(self, loaded: int) -> dict:
+        t = self._phase_timings
         return {
-            "pipeline_name": self.pipeline_name,
+            "pipeline": {"pipeline_name": self.pipeline_name},
+            "destination_name": self.destination.config.__class__.__name__.lower().replace(
+                "destinationconfig", ""
+            ),
             "dataset_name": self._dataset,
-            "table_name": self.table_name,
-            "row_count": loaded,
+            "total_pipeline_duration": sum(t.values()),
+            "initialization_duration": t.get("init", 0),
+            "extraction_duration": t.get("discover", 0),
+            "load_duration": t.get("load", 0),
+            "finalize_duration": t.get("finalize", 0),
+            "row_counts": {self.table_name: loaded} if loaded else {},
         }
 
     # ------------------------------------------------------------------
