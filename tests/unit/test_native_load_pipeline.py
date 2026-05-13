@@ -165,7 +165,7 @@ class TestNoNewFiles:
 
         result = p.run()
         assert len(result) == 1
-        assert result[0]["row_count"] == 0
+        assert result[0]["row_counts"] == {}
 
 
 @pytest.mark.unit
