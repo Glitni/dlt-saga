@@ -39,8 +39,8 @@ def main() -> None:
         print("Error: version must be X.Y.Z (e.g. 0.2.5)")
         sys.exit(1)
 
-    if not check("git", "diff", "--quiet") or not check(
-        "git", "diff", "--cached", "--quiet"
+    if not check("git", "diff", "--quiet", "--", ":(exclude)uv.lock") or not check(
+        "git", "diff", "--cached", "--quiet", "--", ":(exclude)uv.lock"
     ):
         print("Error: uncommitted changes — commit or stash before releasing")
         sys.exit(1)
@@ -80,7 +80,8 @@ def main() -> None:
     )
     open("pyproject.toml", "w").write(pyproject)
 
-    run("git", "add", "CHANGELOG.md", "pyproject.toml")
+    run("uv", "lock")
+    run("git", "add", "CHANGELOG.md", "pyproject.toml", "uv.lock")
     run("git", "commit", "-m", f"Bump: version to {version}")
     run("git", "push", "-u", "origin", f"release/{tag}")
 
