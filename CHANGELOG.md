@@ -1,3 +1,8 @@
+## 0.2.3 — 2026-05-13
+
+### Fixed
+- Native_load completion summary shows "Unknown → Unknown: 0 rows" (#27)
+
 # Changelog
 
 All notable changes to dlt-saga are documented here.
