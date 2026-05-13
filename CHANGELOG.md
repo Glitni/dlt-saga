@@ -1,3 +1,8 @@
+## 0.2.4 — 2026-05-13
+
+### Fixed
+- Release script regenerates and commits uv.lock alongside the version bump (#30)
+
 ## 0.2.3 — 2026-05-13
 
 ### Fixed
