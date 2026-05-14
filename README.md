@@ -144,6 +144,10 @@ Historize transforms raw snapshot data into [SCD2](https://en.wikipedia.org/wiki
 - **[Performance](https://github.com/Glitni/dlt-saga/wiki/Performance)** — Parallel execution, worker tuning, backfill
 - **[Plugin Development](https://github.com/Glitni/dlt-saga/wiki/Plugin-Development)** — Custom sources, destinations, hooks
 
+## Origin
+
+dlt-saga is derived from an internal data ingestion framework originally built by [Glitni](https://www.glitni.no/) for [Amedia](https://www.amedia.no/), a leading Nordic media group, as the ingestion layer of Amedia's data platform. Amedia supported open-sourcing the project and continues to fund ongoing development through their partnership with Glitni, enabling the framework to be shared with the broader community.
+
 ## Project Structure
 
 ```
