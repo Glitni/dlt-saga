@@ -50,6 +50,7 @@ def build_historize_runner(
     full_refresh: bool,
     partial_refresh: bool = False,
     historize_from: Optional[str] = None,
+    log_prefix: Optional[str] = None,
 ) -> HistorizeRunner:
     """Build a HistorizeRunner from a pipeline config and execution context.
 
@@ -130,4 +131,5 @@ def build_historize_runner(
         full_refresh=full_refresh,
         partial_refresh=partial_refresh,
         historize_from=historize_from,
+        log_prefix=log_prefix,
     )

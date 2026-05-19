@@ -477,7 +477,7 @@ class Session:
             ),
         )
         try:
-            load_info = execute_pipeline(config)
+            load_info = execute_pipeline(config, log_prefix=log_prefix)
             if isinstance(load_info, list):
                 summary = summarize_load_info(load_info)
                 logger.info("%s%s", prefix, summary)
@@ -608,7 +608,11 @@ class Session:
             from dlt_saga.historize.factory import build_historize_runner
 
             runner = build_historize_runner(
-                config, full_refresh, partial_refresh, historize_from
+                config,
+                full_refresh,
+                partial_refresh,
+                historize_from,
+                log_prefix=log_prefix,
             )
             run_result = runner.run()
 

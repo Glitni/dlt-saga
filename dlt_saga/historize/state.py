@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
+from dlt_saga.utility.cli.logging import PrefixedLoggerAdapter
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,7 +65,13 @@ class HistorizeStateManager:
     - Write per-snapshot results to the log
     """
 
-    def __init__(self, destination: Any, database: str, schema: str):
+    def __init__(
+        self,
+        destination: Any,
+        database: str,
+        schema: str,
+        log_prefix: Optional[str] = None,
+    ):
         from dlt_saga.project_config import get_historize_log_table_name
 
         self.destination = destination
@@ -71,6 +79,9 @@ class HistorizeStateManager:
         self.schema = schema
         self.log_table_name = get_historize_log_table_name()
         self.log_table_id = destination.get_full_table_id(schema, self.log_table_name)
+        self.logger = (
+            PrefixedLoggerAdapter(logger, log_prefix) if log_prefix else logger
+        )
 
     def _create_table_ddl(self) -> str:
         """Generate DDL to create the log table using destination type names."""
@@ -96,7 +107,7 @@ class HistorizeStateManager:
         """Create the historize log table if it doesn't exist."""
         ddl = self._create_table_ddl()
         self.destination.execute_sql(ddl, self.schema)
-        logger.debug(f"Ensured historize log table exists: {self.log_table_id}")
+        self.logger.debug(f"Ensured historize log table exists: {self.log_table_id}")
 
     @dataclass
     class PipelineState:
@@ -241,10 +252,10 @@ class HistorizeStateManager:
         """
         try:
             self.destination.execute_sql(sql, self.schema)
-            logger.info(f"Cleared historize log entries for {pipeline_name}")
+            self.logger.info(f"Cleared historize log entries for {pipeline_name}")
         except Exception:
             # Table might not exist yet
-            logger.debug(f"No historize log entries to clear for {pipeline_name}")
+            self.logger.debug(f"No historize log entries to clear for {pipeline_name}")
 
     def clear_log_entries_from(self, pipeline_name: str, historize_from: str) -> None:
         """Delete log entries for snapshots on or after historize_from.
@@ -266,11 +277,11 @@ class HistorizeStateManager:
         """
         try:
             self.destination.execute_sql(sql, self.schema)
-            logger.info(
+            self.logger.info(
                 f"Cleared historize log entries from {historize_from} for {pipeline_name}"
             )
         except Exception:
-            logger.debug(
+            self.logger.debug(
                 f"No historize log entries to clear from {historize_from} "
                 f"for {pipeline_name}"
             )
@@ -311,5 +322,5 @@ class HistorizeStateManager:
 
         rows = list(self.destination.execute_sql(sql, self.schema))
         snapshots = [row.snapshot_val for row in rows]
-        logger.debug(f"Discovered {len(snapshots)} unprocessed snapshot(s)")
+        self.logger.debug(f"Discovered {len(snapshots)} unprocessed snapshot(s)")
         return snapshots

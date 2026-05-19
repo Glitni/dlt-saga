@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.sql import HistorizeSqlBuilder
 from dlt_saga.historize.state import HistorizeLogEntry, HistorizeStateManager
+from dlt_saga.utility.cli.logging import PrefixedLoggerAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class HistorizeRunner:
         full_refresh: bool = False,
         partial_refresh: bool = False,
         historize_from: Optional[str] = None,
+        log_prefix: Optional[str] = None,
     ):
         self.pipeline_name = pipeline_name
         self.config = historize_config
@@ -53,6 +55,10 @@ class HistorizeRunner:
         self.full_refresh = full_refresh
         self.partial_refresh = partial_refresh
         self.historize_from = historize_from
+        self.log_prefix = log_prefix
+        self.logger = (
+            PrefixedLoggerAdapter(logger, log_prefix) if log_prefix else logger
+        )
 
         # Build fully qualified source table ID
         # Only use source_* fields for historize-only pipelines (write_disposition: "historize")
@@ -82,7 +88,9 @@ class HistorizeRunner:
             target_schema, target_table_name
         )
 
-        self.state_manager = HistorizeStateManager(destination, database, target_schema)
+        self.state_manager = HistorizeStateManager(
+            destination, database, target_schema, log_prefix=log_prefix
+        )
         self.sql_builder = HistorizeSqlBuilder(
             config=self.config,
             destination=destination,
@@ -123,7 +131,7 @@ class HistorizeRunner:
             }
         except Exception as e:
             # Unexpected errors — include traceback for debugging
-            logger.error(
+            self.logger.error(
                 f"Historization failed for {self.pipeline_name}: {e}", exc_info=True
             )
             return {
@@ -172,7 +180,9 @@ class HistorizeRunner:
             )
             if not new_snapshots:
                 timings["init"] = time.time() - t
-                logger.info(f"No new snapshots to historize for {self.pipeline_name}")
+                self.logger.info(
+                    f"No new snapshots to historize for {self.pipeline_name}"
+                )
                 return {
                     "mode": "incremental",
                     "snapshots_processed": 0,
@@ -219,7 +229,7 @@ class HistorizeRunner:
     ) -> None:
         """Prepare for full reprocess: warn if historize_from is being ignored, clear log, create table."""
         if is_partial and not self.partial_refresh and not state.has_successful_run:
-            logger.warning(
+            self.logger.warning(
                 f"No prior historization run found for {self.pipeline_name}. "
                 f"--historize-from {self.historize_from} will be ignored; "
                 "running full reprocess instead."
@@ -319,7 +329,9 @@ class HistorizeRunner:
                 f"over zero columns.{hint} Adjust track_columns or ignore_columns."
             )
 
-        logger.debug(f"Discovered {len(columns)} value columns for change detection")
+        self.logger.debug(
+            f"Discovered {len(columns)} value columns for change detection"
+        )
         return columns
 
     def _create_target_table(
@@ -342,16 +354,16 @@ class HistorizeRunner:
         )
         self.destination.execute_sql(sql, self.schema)
         action = "Replaced" if replace else "Created"
-        logger.info(f"{action} historized table: {self.target_table_id}")
+        self.logger.info(f"{action} historized table: {self.target_table_id}")
 
     def _run_full_reprocess(
         self, value_columns: List[str], started_at: datetime
     ) -> Dict[str, Any]:
         """Execute full reprocess: rebuild entire historized table from all raw data."""
-        logger.info(f"Full reprocess historization for {self.pipeline_name}")
+        self.logger.info(f"Full reprocess historization for {self.pipeline_name}")
 
         sql = self.sql_builder.build_full_reprocess_sql(value_columns)
-        logger.debug(f"Full reprocess SQL ({len(sql)} chars)")
+        self.logger.debug(f"Full reprocess SQL ({len(sql)} chars)")
 
         self.destination.execute_sql(sql, self.schema)
 
@@ -401,7 +413,7 @@ class HistorizeRunner:
             )
         )
 
-        logger.info(
+        self.logger.info(
             f"Full reprocess complete for {self.pipeline_name}: "
             f"{new_or_changed:,} rows, {deleted:,} deletions"
         )
@@ -421,7 +433,7 @@ class HistorizeRunner:
         new_snapshots: List[str],
     ) -> Dict[str, Any]:
         """Execute incremental historization: process only new snapshots."""
-        logger.info(
+        self.logger.info(
             f"Incremental historization for {self.pipeline_name}: "
             f"{len(new_snapshots)} new snapshot(s)"
         )
@@ -435,11 +447,11 @@ class HistorizeRunner:
             new_snapshots=new_snapshots,
             last_historized_snapshot=last_historized,
         )
-        logger.debug(f"Incremental SQL ({len(sql)} chars)")
+        self.logger.debug(f"Incremental SQL ({len(sql)} chars)")
 
         t_sql = time.time()
         self.destination.execute_sql(sql, self.schema)
-        logger.debug(f"Incremental SQL executed in {time.time() - t_sql:.1f}s")
+        self.logger.debug(f"Incremental SQL executed in {time.time() - t_sql:.1f}s")
 
         finished_at = datetime.now(timezone.utc)
 
@@ -459,7 +471,7 @@ class HistorizeRunner:
         row = rows[0] if rows else None
         new_or_changed = row.new_or_changed_rows if row else 0
         deleted = row.deleted_rows if row else 0
-        logger.debug(f"Stats query executed in {time.time() - t_stats:.1f}s")
+        self.logger.debug(f"Stats query executed in {time.time() - t_stats:.1f}s")
 
         # Log with last snapshot value for state tracking
         fingerprint = self.state_manager.compute_fingerprint(self.config)
@@ -480,7 +492,7 @@ class HistorizeRunner:
             )
         )
 
-        logger.info(
+        self.logger.info(
             f"Incremental historization complete for {self.pipeline_name}: "
             f"{len(new_snapshots)} snapshot(s), {new_or_changed} changes, "
             f"{deleted} deletions"
@@ -517,7 +529,7 @@ class HistorizeRunner:
                 "cannot determine reprocessing boundary."
             )
         if clamped:
-            logger.warning(
+            self.logger.warning(
                 f"--historize-from {self.historize_from} predates earliest raw snapshot "
                 f"({effective_from_date}). Using {effective_from_date} as effective start date."
             )
@@ -527,7 +539,7 @@ class HistorizeRunner:
             effective_from_date, target_schema
         )
         if not snapshots_to_reprocess:
-            logger.info(
+            self.logger.info(
                 f"No snapshots to reprocess from {effective_from_date} for "
                 f"{self.pipeline_name}; nothing to do."
             )
@@ -538,7 +550,7 @@ class HistorizeRunner:
                 "deleted_rows": 0,
             }
 
-        logger.info(
+        self.logger.info(
             f"Partial re-historization for {self.pipeline_name} from "
             f"{effective_from_date}: {len(snapshots_to_reprocess)} snapshot(s) to reprocess"
         )
@@ -581,7 +593,7 @@ class HistorizeRunner:
 
         try:
             self.destination.clone_table(self.target_table_id, staging_table_id)
-            logger.debug(f"Cloned {self.target_table_id} → {staging_table_id}")
+            self.logger.debug(f"Cloned {self.target_table_id} → {staging_table_id}")
 
             staging_builder = HistorizeSqlBuilder(
                 config=self.config,
@@ -604,7 +616,7 @@ class HistorizeRunner:
                 last_historized_snapshot=lag_reference,
             )
             self.destination.execute_sql(incremental_sql, target_schema)
-            logger.debug("Incremental re-run on staging complete")
+            self.logger.debug("Incremental re-run on staging complete")
 
             new_or_changed, deleted = self._collect_partial_stats(
                 staging_table_id, snapshots_to_reprocess, target_schema
@@ -634,7 +646,7 @@ class HistorizeRunner:
                     if self.partial_refresh
                     else f"--historize-from {effective_from_date}"
                 )
-                logger.info(
+                self.logger.info(
                     f"Original table is untouched. Re-run with {flag} to retry."
                 )
             raise
@@ -644,7 +656,7 @@ class HistorizeRunner:
                     f"DROP TABLE IF EXISTS {keys_table_id}", target_schema
                 )
             except Exception as e:
-                logger.debug(f"Could not drop keys table {keys_table_id}: {e}")
+                self.logger.debug(f"Could not drop keys table {keys_table_id}: {e}")
 
             if not swap_succeeded:
                 try:
@@ -652,7 +664,7 @@ class HistorizeRunner:
                         f"DROP TABLE IF EXISTS {staging_table_id}", target_schema
                     )
                 except Exception as e:
-                    logger.debug(
+                    self.logger.debug(
                         f"Could not drop staging table {staging_table_id}: {e}"
                     )
 
@@ -686,7 +698,7 @@ class HistorizeRunner:
                 try:
                     self.destination.execute_sql("ROLLBACK", target_schema)
                 except Exception as rb_exc:
-                    logger.debug(
+                    self.logger.debug(
                         "ROLLBACK failed after rollback statement error: %s",
                         rb_exc,
                     )
@@ -727,13 +739,13 @@ class HistorizeRunner:
         try:
             self.destination.rename_table(staging_table_id, self.target_table_id)
         except Exception:
-            logger.error(
+            self.logger.error(
                 "Staging → target rename failed; restoring original from backup"
             )
             try:
                 self.destination.rename_table(backup_table_id, self.target_table_id)
             except Exception:
-                logger.error(
+                self.logger.error(
                     f"CRITICAL: Could not restore target from backup. "
                     f"Manual recovery: rename {backup_table_id} → "
                     f"{self.target_table_id}"
@@ -742,7 +754,9 @@ class HistorizeRunner:
         self.destination.execute_sql(
             f"DROP TABLE IF EXISTS {backup_table_id}", target_schema
         )
-        logger.debug(f"Swap complete: {staging_table_id} is now {self.target_table_id}")
+        self.logger.debug(
+            f"Swap complete: {staging_table_id} is now {self.target_table_id}"
+        )
 
     def _write_partial_log(
         self,
@@ -773,7 +787,7 @@ class HistorizeRunner:
                 status="completed",
             )
         )
-        logger.info(
+        self.logger.info(
             f"Partial re-historization complete for {self.pipeline_name}: "
             f"{len(snapshots_to_reprocess)} snapshot(s), "
             f"{new_or_changed} changes, {deleted} deletions"
