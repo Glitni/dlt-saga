@@ -264,6 +264,16 @@ The most useful pattern, once you have more than a handful of pipelines, is **on
 
 > Tag values (e.g. `hourly: [1, 10]`) work too — `cfg.has_tag("hourly", 10)` filters down to pipelines that should run at 10am. In practice it's cleaner to let the external scheduler own the cron and use bare tag names for filtering.
 
+> Need per-weekday hourly runs? Use the nested form:
+> ```yaml
+> tags:
+>   - hourly:
+>     - monday: [6]
+>     - tuesday: [6]
+>     - 9
+> ```
+> A single `tag:hourly` cron fires every hour; the pipeline self-constrains to Mon@6, Tue@6, and every day @ 9am. See [Configuration → Scheduling tags](Configuration#scheduling-tags).
+
 ### Dagster — one `ScheduleDefinition` per tag
 
 The Dagster recipe already attaches each pipeline's tag names to its assets, so `AssetSelection.tag(...)` does the filtering for you:

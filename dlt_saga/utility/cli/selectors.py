@@ -21,6 +21,8 @@ Schedule-aware behavior:
 - A config with "daily: [2, 28]" only matches "tag:daily" on the 2nd or 28th
 - A config with "daily: [monday]" only matches "tag:daily" on Mondays
 - A config with "daily: [2, monday]" matches on the 2nd OR on Mondays
+- A config with "hourly: [monday]" matches "tag:hourly" any hour on Mondays
+- A config with "hourly: [{monday: [6]}, 9]" matches Mon@6am OR every day@9am
 - Other tags (critical, api, etc.) match regardless of time
 
 Schedule values in config files:
@@ -33,6 +35,10 @@ Schedule values in config files:
       - daily:
         - 2
         - monday           # Runs on 2nd and every Monday
+      - hourly:
+        - monday: [6]      # Runs Mondays at 6am
+        - tuesday: [6]     # AND Tuesdays at 6am
+        - 9                # AND every day at 9am
 
 Selector combinations:
 - Space-separated: UNION (OR) - "tag:daily type:google_sheets"
@@ -241,12 +247,15 @@ class PipelineSelector:
 
         Returns:
             Tuple of (numeric_value, weekday_name_or_none):
-            - "hourly": (current_hour 0-23, None)
+            - "hourly": (current_hour 0-23, current_weekday e.g. "monday")
+              Weekday is included so per-weekday hourly bindings
+              (e.g. `hourly: [{monday: [6]}]`) and bare-weekday entries
+              (e.g. `hourly: [monday]`) can be matched.
             - "daily": (current_day_of_month 1-31, current_weekday e.g. "monday")
         """
         now = datetime.now(timezone.utc)
         if tag_name == "hourly":
-            return (now.hour, None)
+            return (now.hour, now.strftime("%A").lower())
         elif tag_name == "daily":
             return (now.day, now.strftime("%A").lower())
         else:

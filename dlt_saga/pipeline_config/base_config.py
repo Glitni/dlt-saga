@@ -62,14 +62,18 @@ class ScheduleTag:
     """Represents a tag with optional schedule values.
 
     Tags can be simple (e.g., "daily") or have specific values (e.g., "hourly: [1, 10]").
-    Daily tags support both day-of-month numbers and weekday names.
+    Daily tags support both day-of-month numbers and weekday names. Hourly tags additionally
+    support per-weekday hour bindings via dict entries.
 
     Examples:
         - Simple tag: ScheduleTag("daily") - runs every day
-        - With values: ScheduleTag("hourly", [1, 10]) - runs at 1am and 10am
+        - With values: ScheduleTag("hourly", [1, 10]) - runs at 1am and 10am every day
         - With values: ScheduleTag("daily", [2, 28]) - runs on 2nd and 28th of month
         - With weekdays: ScheduleTag("daily", ["monday"]) - runs every Monday
         - Mixed: ScheduleTag("daily", [2, "monday"]) - runs on 2nd and every Monday
+        - Bare weekday in hourly: ScheduleTag("hourly", ["monday"]) - runs every hour on Mondays
+        - Per-weekday hours: ScheduleTag("hourly", [{"monday": [6]}, 9])
+          runs Mon@6 OR every day@9
 
     YAML formats supported:
         tags:
@@ -81,12 +85,19 @@ class ScheduleTag:
           - daily:
             - 2
             - monday           # Weekday name
+          - hourly:
+            - monday: [6]      # Per-weekday: Monday at 6am
+            - tuesday: [6]     # Per-weekday: Tuesday at 6am
+            - 9                # Plus every day at 9am
     """
 
     name: str
-    values: Optional[List[Union[int, str]]] = (
-        None  # None means "all" (every hour, every day)
-    )
+    # Each list element is one of:
+    #   int               -> value (hour/day) every weekday
+    #   str               -> weekday name (any value on that weekday)
+    #   Dict[str, [int]]  -> {weekday: [values]} - weekday/value pairs
+    # None means "all" (matches every value).
+    values: Optional[List[Union[int, str, Dict[str, List[int]]]]] = None
 
     def matches(
         self,
@@ -123,6 +134,11 @@ class ScheduleTag:
             tag.matches("daily", 2)                          # True - day 2 of month
             tag.matches("daily", 15, query_weekday="monday") # True - it's a Monday
             tag.matches("daily", 15, query_weekday="friday") # False - not day 15, not Monday
+
+            tag = ScheduleTag("hourly", [{"monday": [6]}, 9])
+            tag.matches("hourly", 9)                          # True - every day @ 9
+            tag.matches("hourly", 6, query_weekday="monday")  # True - Mon @ 6
+            tag.matches("hourly", 6, query_weekday="tuesday") # False - Tue @ 6 not declared
         """
         if self.name != query_name:
             return False
@@ -133,17 +149,15 @@ class ScheduleTag:
             # exact=True: only match if explicitly listed (so False here)
             # exact=False: match any value since we run always
             return not exact
-        if query_value is not None and query_value in self.values:
-            return True
-        if query_weekday is not None and query_weekday in self.values:
-            return True
-        return False
+        return any(
+            _entry_matches(entry, query_value, query_weekday) for entry in self.values
+        )
 
     def __str__(self) -> str:
         """String representation for display."""
         if self.values is None:
             return self.name
-        return f"{self.name}:{','.join(str(v) for v in self.values)}"
+        return f"{self.name}:{','.join(_format_value(v) for v in self.values)}"
 
     def __eq__(self, other: object) -> bool:
         """Equality check - supports comparison with string for backwards compatibility."""
@@ -156,14 +170,58 @@ class ScheduleTag:
 
     def __hash__(self) -> int:
         """Hash for use in sets/dicts."""
-        return hash((self.name, tuple(self.values) if self.values else None))
+        if self.values is None:
+            return hash((self.name, None))
+        return hash((self.name, tuple(_hashable_value(v) for v in self.values)))
 
 
-def parse_tag(tag_data: Union[str, Dict[str, List[Union[int, str]]]]) -> ScheduleTag:
+def _entry_matches(
+    entry: Union[int, str, Dict[str, List[int]]],
+    query_value: Optional[int],
+    query_weekday: Optional[str],
+) -> bool:
+    """Check whether a single value-list entry matches a query.
+
+    - dict {weekday: [values]}: requires matching weekday; if query_weekday is
+      None (e.g. explicit "tag:hourly:6" selector), match on value alone.
+    - str (bare weekday): matches when query_weekday equals the entry.
+    - int (bare value): matches when query_value equals the entry.
+    """
+    if isinstance(entry, dict):
+        weekday_key, value_list = next(iter(entry.items()))
+        if query_weekday is not None and query_weekday != weekday_key:
+            return False
+        if query_value is None:
+            return query_weekday is not None  # tag-name-only against weekday
+        return query_value in value_list
+    if isinstance(entry, str):
+        return query_weekday is not None and query_weekday == entry
+    return query_value is not None and query_value == entry
+
+
+def _format_value(v: Union[int, str, Dict[str, List[int]]]) -> str:
+    """Render a single ScheduleTag value entry for display."""
+    if isinstance(v, dict):
+        key, vals = next(iter(v.items()))
+        return f"{key}:{','.join(str(x) for x in vals)}"
+    return str(v)
+
+
+def _hashable_value(v: Union[int, str, Dict[str, List[int]]]) -> Any:
+    """Convert a value entry to a hashable form."""
+    if isinstance(v, dict):
+        key, vals = next(iter(v.items()))
+        return (key, tuple(vals))
+    return v
+
+
+def parse_tag(tag_data: Union[str, Dict[str, Any]]) -> ScheduleTag:
     """Parse a tag from YAML format into a ScheduleTag object.
 
     String values in tag lists are validated as weekday names and normalized
-    to canonical lowercase form (e.g., "Mon" -> "monday").
+    to canonical lowercase form (e.g., "Mon" -> "monday"). List entries may
+    also be single-key dicts `{weekday: [values]}` expressing per-weekday
+    value bindings (e.g. `hourly: [{monday: [6]}]` for Monday@6am).
 
     Args:
         tag_data: Either a string ("daily") or dict ({"hourly": [1, 10]})
@@ -175,6 +233,8 @@ def parse_tag(tag_data: Union[str, Dict[str, List[Union[int, str]]]]) -> Schedul
         parse_tag("daily") -> ScheduleTag("daily")
         parse_tag({"hourly": [1, 10]}) -> ScheduleTag("hourly", [1, 10])
         parse_tag({"daily": [2, "monday"]}) -> ScheduleTag("daily", [2, "monday"])
+        parse_tag({"hourly": [{"monday": [6]}, 9]})
+            -> ScheduleTag("hourly", [{"monday": [6]}, 9])
     """
     if isinstance(tag_data, str):
         return ScheduleTag(name=tag_data)
@@ -184,26 +244,75 @@ def parse_tag(tag_data: Union[str, Dict[str, List[Union[int, str]]]]) -> Schedul
         name, values = next(iter(tag_data.items()))
         if not isinstance(values, list):
             values = [values]
-        # Validate and normalize string values as weekday names
-        normalized: List[Union[int, str]] = []
-        for v in values:
-            if isinstance(v, str):
-                weekday = normalize_weekday(v)
-                if weekday is None:
-                    raise ValueError(
-                        f"Invalid weekday name '{v}' in tag '{name}'. "
-                        f"Valid weekdays: {', '.join(sorted(WEEKDAY_NAMES))}"
-                    )
-                normalized.append(weekday)
-            else:
-                normalized.append(v)
+        normalized: List[Union[int, str, Dict[str, List[int]]]] = [
+            _normalize_value_entry(v, name) for v in values
+        ]
         return ScheduleTag(name=name, values=normalized)
     else:
         raise ValueError(f"Invalid tag format: {tag_data}")
 
 
+def _normalize_value_entry(
+    entry: Any, tag_name: str
+) -> Union[int, str, Dict[str, List[int]]]:
+    """Normalize a single entry in a tag's values list.
+
+    Bare strings are normalized as weekday names. Bare ints pass through.
+    Dict entries must be `{weekday: int}` or `{weekday: [int, ...]}` and
+    are normalized to `{canonical_weekday: [int, ...]}`.
+    """
+    if isinstance(entry, bool):
+        # bool is a subclass of int in Python — reject explicitly
+        raise ValueError(f"Invalid value in tag '{tag_name}': {entry!r}")
+    if isinstance(entry, int):
+        return entry
+    if isinstance(entry, str):
+        return _normalize_weekday_str(entry, tag_name)
+    if isinstance(entry, dict):
+        return _normalize_per_weekday_dict(entry, tag_name)
+    raise ValueError(f"Invalid value in tag '{tag_name}': {entry!r}")
+
+
+def _normalize_weekday_str(value: str, tag_name: str) -> str:
+    weekday = normalize_weekday(value)
+    if weekday is None:
+        raise ValueError(
+            f"Invalid weekday name '{value}' in tag '{tag_name}'. "
+            f"Valid weekdays: {', '.join(sorted(WEEKDAY_NAMES))}"
+        )
+    return weekday
+
+
+def _normalize_per_weekday_dict(
+    entry: Dict[Any, Any], tag_name: str
+) -> Dict[str, List[int]]:
+    if len(entry) != 1:
+        raise ValueError(
+            f"Per-weekday entry in tag '{tag_name}' must have exactly one "
+            f"weekday key, got: {entry}"
+        )
+    weekday_raw, sub_values = next(iter(entry.items()))
+    if not isinstance(weekday_raw, str):
+        raise ValueError(
+            f"Per-weekday entry key in tag '{tag_name}' must be a weekday "
+            f"name, got: {weekday_raw!r}"
+        )
+    weekday = _normalize_weekday_str(weekday_raw, tag_name)
+    if not isinstance(sub_values, list):
+        sub_values = [sub_values]
+    sub_ints: List[int] = []
+    for sv in sub_values:
+        if isinstance(sv, bool) or not isinstance(sv, int):
+            raise ValueError(
+                f"Per-weekday value in tag '{tag_name}' under '{weekday}' "
+                f"must be an integer, got: {sv!r}"
+            )
+        sub_ints.append(sv)
+    return {weekday: sub_ints}
+
+
 def parse_tags(
-    tags_data: List[Union[str, Dict[str, List[Union[int, str]]]]],
+    tags_data: List[Union[str, Dict[str, Any]]],
 ) -> List[ScheduleTag]:
     """Parse a list of tags from YAML format.
 
