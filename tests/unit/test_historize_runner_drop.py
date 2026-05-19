@@ -1,5 +1,6 @@
 """Unit test for Phase 9: DROP before CREATE OR REPLACE in full-refresh."""
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,6 +20,7 @@ class TestCreateTargetTableFullRefresh:
 
         # Bypass __init__ entirely to avoid live connections
         runner = object.__new__(HistorizeRunner)
+        runner.logger = logging.getLogger(__name__)
         runner.destination = dest
         runner.schema = "schema"
         runner.target_schema = "schema"

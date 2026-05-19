@@ -1,5 +1,6 @@
 """Unit tests for HistorizeConfig and HistorizeRunner validation."""
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -58,6 +59,7 @@ class TestHistorizeRunnerCapabilityValidation:
         )
 
         runner = object.__new__(HistorizeRunner)
+        runner.logger = logging.getLogger(__name__)
         runner.pipeline_name = "test__pipe"
         runner.config = config
         runner.destination = dest
@@ -115,6 +117,7 @@ class TestHistorizeRunnerAllColumnsIgnored:
         )
 
         runner = object.__new__(HistorizeRunner)
+        runner.logger = logging.getLogger(__name__)
         runner.pipeline_name = "test__pipe"
         runner.config = config
         runner.destination = dest
@@ -162,6 +165,7 @@ class TestHistorizeRunnerAllColumnsIgnored:
         config = HistorizeConfig(primary_key=["id"], ignore_columns=["city"])
 
         runner = object.__new__(HistorizeRunner)
+        runner.logger = logging.getLogger(__name__)
         runner.pipeline_name = "test__pipe"
         runner.config = config
         runner.destination = dest
