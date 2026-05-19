@@ -1,6 +1,6 @@
 # CLI Reference
 
-All commands share common options: `--select`, `--verbose`, `--profile`, `--target`.
+All commands share common options: `--select`, `--verbose`, `--profile`, `--target`. See [Logging & debugging](#logging--debugging) for the on-disk debug log written for every local run.
 
 ---
 
@@ -280,6 +280,21 @@ saga generate-schemas [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-o, --output-dir TEXT` | `schemas` | Directory to write schemas to |
+
+---
+
+## Logging & debugging
+
+Every local `saga` invocation writes a full DEBUG transcript to `logs/saga-<timestamp>-<pid>.log` while keeping the terminal at INFO. If a run fails, the file already contains the detail — no need to re-run with `--verbose` to reproduce the failure. `--verbose` only widens what reaches the terminal; the file is always DEBUG.
+
+File logging is **off** in Cloud Run, in distributed worker mode (`SAGA_WORKER_MODE=true`), and during tests — those environments either capture stdout already or run on ephemeral storage.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SAGA_LOG_FILE` | (auto) | Set to `0`/`false` to disable file logging, or to `1`/`true` to force-enable it (e.g. inside a container with a mounted volume) |
+| `SAGA_LOG_DIR` | `./logs` | Directory for log files |
+| `SAGA_LOG_RETENTION` | `10` | Number of recent log files to keep; older files are pruned on each run |
+| `SAGA_DEBUG_LOGGING` | off | Set to `true` to flip the terminal to DEBUG without passing `--verbose` |
 
 ---
 

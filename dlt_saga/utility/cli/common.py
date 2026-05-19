@@ -21,6 +21,7 @@ from dlt_saga.utility.auth.providers import (
     get_auth_provider,
 )
 from dlt_saga.utility.cli.context import get_execution_context, set_execution_context
+from dlt_saga.utility.cli.logging import set_console_verbose
 from dlt_saga.utility.cli.profiles import get_profiles_config
 from dlt_saga.utility.cli.selectors import PipelineSelector
 from dlt_saga.utility.env import get_env
@@ -56,13 +57,19 @@ def get_config_source() -> ConfigSource:
 
 
 def setup_logging(verbose: bool) -> None:
-    """Set up debug logging if verbose flag or env var is set."""
-    if verbose or (get_env("SAGA_DEBUG_LOGGING") or "").lower() == "true":
-        logging.getLogger().setLevel(logging.DEBUG)
-        if (get_env("SAGA_DEBUG_LOGGING") or "").lower() == "true":
-            logger.debug(
-                "Debug logging enabled via SAGA_DEBUG_LOGGING environment variable"
-            )
+    """Toggle terminal verbosity.
+
+    The file handler (if attached at startup by ``configure_cli_logging``) is
+    always at DEBUG, so all detail is captured to ``logs/`` regardless of this
+    flag. ``--verbose`` only widens what reaches the terminal.
+    """
+    env_verbose = (get_env("SAGA_DEBUG_LOGGING") or "").lower() == "true"
+    is_verbose = verbose or env_verbose
+    set_console_verbose(is_verbose)
+    if env_verbose:
+        logger.debug(
+            "Debug logging enabled via SAGA_DEBUG_LOGGING environment variable"
+        )
 
 
 def check_cloud_run_environment() -> bool:
