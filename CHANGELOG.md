@@ -1,3 +1,12 @@
+## 0.2.5 — 2026-05-19
+
+### Added
+- Per-weekday hour bindings in hourly tags (#34)
+
+
+### Fixed
+- Thread log_prefix through ingest and historize pipeline-internal logs (#33)
+
 ## 0.2.4 — 2026-05-13
 
 ### Fixed
