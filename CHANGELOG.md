@@ -1,3 +1,8 @@
+## 0.2.6 — 2026-05-19
+
+### Added
+- Dbt-style debug log files in logs/ (#36)
+
 ## 0.2.5 — 2026-05-19
 
 ### Added
