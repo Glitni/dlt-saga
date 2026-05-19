@@ -15,7 +15,9 @@
         {"label": "daily: [monday]", "body": {"daily": ["monday"]}},
         {"label": "daily: [monday, wednesday, friday]", "body": {"daily": ["monday", "wednesday", "friday"]}},
         {"label": "hourly: [1]", "body": {"hourly": [1]}},
-        {"label": "hourly: [1, 10, 14]", "body": {"hourly": [1, 10, 14]}}
+        {"label": "hourly: [1, 10, 14]", "body": {"hourly": [1, 10, 14]}},
+        {"label": "hourly: [monday]", "body": {"hourly": ["monday"]}},
+        {"label": "hourly: per-weekday hours", "body": {"hourly": [{"monday": [6]}, {"tuesday": [6]}, 9]}}
       ],
       "oneOf": [
         {
@@ -24,7 +26,7 @@
         },
         {
           "type": "object",
-          "description": "Tag with schedule values (e.g., {daily: [monday]} or {hourly: [1, 10]})",
+          "description": "Tag with schedule values. Examples: {daily: [monday]}, {hourly: [1, 10]}, {hourly: [{monday: [6]}, 9]} for per-weekday hourly bindings",
           "minProperties": 1,
           "maxProperties": 1,
           "additionalProperties": {
@@ -32,7 +34,22 @@
             "items": {
               "oneOf": [
                 { "type": "string" },
-                { "type": "integer" }
+                { "type": "integer" },
+                {
+                  "type": "object",
+                  "description": "Per-weekday value binding (hourly only): {weekday: hour} or {weekday: [hours]}",
+                  "minProperties": 1,
+                  "maxProperties": 1,
+                  "additionalProperties": {
+                    "oneOf": [
+                      { "type": "integer" },
+                      {
+                        "type": "array",
+                        "items": { "type": "integer" }
+                      }
+                    ]
+                  }
+                }
               ]
             }
           }

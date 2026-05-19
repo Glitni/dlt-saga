@@ -53,7 +53,7 @@ spreadsheet_id: "123ABC"
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Master switch — disables both ingest and historize |
-| `tags` | list | `[]` | Tags for selector filtering (`saga ingest --select "tag:daily"`) |
+| `tags` | list | `[]` | Tags for selector filtering (`saga ingest --select "tag:daily"`). Supports schedule values — see [Scheduling tags](#scheduling-tags) |
 | `write_disposition` | string | `"replace"` | Controls operations — see below |
 | `primary_key` | string/list | — | Primary key column(s) for merge/historize |
 | `partition_column` | string | — | BigQuery partition column |
@@ -130,6 +130,37 @@ Override at runtime for backfills:
 ```bash
 saga ingest --select "my_pipeline" --start-value-override "2025-06-01"
 ```
+
+### Scheduling tags
+
+The `tags` field accepts plain labels (`critical`, `api`) and **schedule-aware** values for `daily` and `hourly`. Schedule-aware tags filter against current UTC time when the orchestrator fires `tag:daily` / `tag:hourly`.
+
+```yaml
+tags:
+  - critical                       # plain label — always matches tag:critical
+  - daily                          # runs any day (matches tag:daily anytime)
+  - hourly: [1, 10]                # runs at 1am and 10am every day
+  - daily: [2, 28]                 # runs on the 2nd and 28th
+  - daily: [monday, friday]        # runs Mondays and Fridays
+  - daily: [2, monday]             # runs on the 2nd OR any Monday
+  - hourly: [monday]               # runs every hour on Mondays
+  - hourly:                        # mixed per-weekday + bare hour
+    - monday: [6]                  # Mon @ 6am
+    - tuesday: [6]                 # Tue @ 6am
+    - 9                            # AND every day @ 9am
+```
+
+**Per-weekday hourly bindings** (the nested form above) let a pipeline declare disjoint `(weekday, hour)` runs inside a single tag. With an orchestrator that fires `tag:hourly` every hour, the pipeline self-constrains: Mon@6, Tue@6, and 9am every day fire — Wed@6 does not.
+
+Selector reference:
+
+| Selector | Matches |
+|----------|---------|
+| `tag:hourly` | Configs whose hourly tag matches current `(hour, weekday)` |
+| `tag:hourly:10` | Configs that explicitly include hour 10 (anywhere — bare list or per-weekday) |
+| `tag:daily` | Configs whose daily tag matches current `(day, weekday)` |
+| `tag:daily:monday` | Configs that include Monday in their daily tag |
+| `tag:critical` | Configs with the `critical` tag (no time constraint) |
 
 ## Source-Specific Fields
 

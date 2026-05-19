@@ -68,7 +68,7 @@ Selectors filter which pipelines to run. They work across all commands.
 |--------|---------|---------|
 | `name` | Exact pipeline name | `--select google_sheets__my_pipeline` |
 | `*glob*` | Glob pattern | `--select "*balance*"` |
-| `tag:name` | Filter by tag | `--select "tag:daily"` |
+| `tag:name` | Filter by tag | `--select "tag:daily"` (schedule-aware — see [Configuration → Scheduling tags](wiki/Configuration.md#scheduling-tags)) |
 | `group:name` | Filter by source group | `--select "group:google_sheets"` |
 | space-separated | UNION (OR) | `--select "tag:daily group:filesystem"` |
 | comma-separated | INTERSECTION (AND) | `--select "tag:daily,group:google_sheets"` |
