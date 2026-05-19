@@ -51,6 +51,9 @@ htmlcov/
 .coverage
 coverage.xml
 
+# Saga debug logs (written by configure_cli_logging in local mode)
+logs/
+
 # Claude
 .claude/settings.local.json
 

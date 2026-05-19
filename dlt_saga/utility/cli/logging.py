@@ -1,6 +1,9 @@
 import logging
 import os
+import sys
 import warnings
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 
@@ -33,6 +36,11 @@ RESET = "\033[0m"
 def _is_cloud_run() -> bool:
     """Detect if running inside a Cloud Run service or job."""
     return os.getenv("K_SERVICE") is not None or os.getenv("CLOUD_RUN_JOB") is not None
+
+
+def _is_worker_mode() -> bool:
+    """Detect if running as a distributed worker (orchestrator-spawned)."""
+    return (os.getenv("SAGA_WORKER_MODE") or "").lower() == "true"
 
 
 # ---------------------------------------------------------------------------
@@ -74,30 +82,145 @@ class _DatabricksSqlFilter(logging.Filter):
         return not any(msg.startswith(s) for s in self._SUPPRESSED)
 
 
+# ---------------------------------------------------------------------------
+# File logging (dbt-style: full DEBUG to logs/, narrow INFO to terminal)
+# ---------------------------------------------------------------------------
+
+_FILE_LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s %(message)s"
+_DEFAULT_RETENTION = 10
+
+_log_file_path: Optional[Path] = None
+_console_handler: Optional[logging.Handler] = None
+
+
+def get_log_file_path() -> Optional[Path]:
+    """Return the active debug-log file path, or None if file logging is disabled."""
+    return _log_file_path
+
+
+def _file_logging_enabled() -> bool:
+    """Decide whether to attach a file handler at startup.
+
+    Disabled in any of these cases:
+      - Cloud Run (ephemeral fs, stdout is already captured by the platform)
+      - Worker mode (orchestrator-spawned, same reasoning)
+      - Pytest is loaded (avoid creating log files on test imports)
+      - SAGA_LOG_FILE env var is set to a falsy value
+    """
+    override = os.getenv("SAGA_LOG_FILE")
+    if override is not None:
+        return override.lower() not in ("0", "false", "no", "off", "")
+    if _is_cloud_run() or _is_worker_mode():
+        return False
+    if "pytest" in sys.modules:
+        return False
+    return True
+
+
+def _resolve_log_dir() -> Path:
+    """Resolve the directory where log files are written."""
+    custom = os.getenv("SAGA_LOG_DIR")
+    if custom:
+        return Path(custom).expanduser()
+    return Path.cwd() / "logs"
+
+
+def _resolve_retention() -> int:
+    """Resolve how many recent log files to keep on disk."""
+    raw = os.getenv("SAGA_LOG_RETENTION")
+    if raw is None:
+        return _DEFAULT_RETENTION
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_RETENTION
+    return max(value, 1)
+
+
+def _cleanup_old_log_files(log_dir: Path, retention: int) -> None:
+    """Keep only the ``retention`` most recent saga-*.log files."""
+    try:
+        existing = sorted(
+            log_dir.glob("saga-*.log"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+
+    for stale in existing[retention:]:
+        try:
+            stale.unlink()
+        except OSError:
+            # Best-effort cleanup — never fail startup over an unlinkable log.
+            pass
+
+
+def _create_file_handler(log_dir: Path) -> Optional[logging.FileHandler]:
+    """Create a DEBUG-level file handler. Returns None on any I/O error."""
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        pid = os.getpid()
+        path = log_dir / f"saga-{timestamp}-{pid}.log"
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter(_FILE_LOG_FORMAT))
+        global _log_file_path
+        _log_file_path = path
+        return handler
+    except OSError:
+        return None
+
+
 def configure_cli_logging() -> None:
     """Configure handlers, formatters, and filters for CLI use.
 
     This must only be called from the CLI entry point (cli.py).
     Library code must never call this — it should use
     ``logging.getLogger(__name__)`` and nothing else.
+
+    When enabled, a DEBUG-level file handler is attached so that re-running
+    with ``--verbose`` is not required to diagnose a failure after the fact.
     """
+    global _console_handler
     log_format = "%(asctime)s - %(levelname)s - %(message)s"
 
     noise_filters = [_OAuth2ClientFilter(), _DatabricksSqlFilter()]
 
+    root = logging.getLogger()
+    # Clear any handlers that a prior call (e.g. in tests) installed so this
+    # function is idempotent.
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
     if _is_cloud_run():
-        logging.basicConfig(level=logging.INFO, format=log_format)
-        for f in noise_filters:
-            logging.getLogger().addFilter(f)
+        console = logging.StreamHandler()
+        console.setFormatter(logging.Formatter(log_format))
     else:
-        handler = logging.StreamHandler()
-        handler.setFormatter(_ColoredFormatter(log_format))
-        # Filters must be on the handler, not the logger, so they apply to
-        # records that propagate up from child loggers (callHandlers bypasses
-        # parent logger filters).
-        for f in noise_filters:
-            handler.addFilter(f)
-        logging.basicConfig(level=logging.INFO, handlers=[handler])
+        console = logging.StreamHandler()
+        console.setFormatter(_ColoredFormatter(log_format))
+
+    console.setLevel(logging.INFO)
+    for f in noise_filters:
+        console.addFilter(f)
+
+    root.addHandler(console)
+    _console_handler = console
+
+    file_handler: Optional[logging.FileHandler] = None
+    if _file_logging_enabled():
+        log_dir = _resolve_log_dir()
+        file_handler = _create_file_handler(log_dir)
+        if file_handler is not None:
+            for f in noise_filters:
+                file_handler.addFilter(f)
+            root.addHandler(file_handler)
+            _cleanup_old_log_files(log_dir, _resolve_retention())
+
+    # Root must allow DEBUG records through when a file handler is attached;
+    # the console handler stays at INFO so terminal output remains narrow.
+    root.setLevel(logging.DEBUG if file_handler is not None else logging.INFO)
 
     warnings.filterwarnings(
         "ignore", message="file_cache is only supported with oauth2client<4.0.0"
@@ -122,6 +245,22 @@ def configure_cli_logging() -> None:
         "msal",
     ):
         logging.getLogger(name).setLevel(logging.WARNING)
+
+
+def set_console_verbose(verbose: bool) -> None:
+    """Toggle the console handler between INFO and DEBUG.
+
+    The file handler (if attached) always remains at DEBUG, so re-running with
+    ``--verbose`` is only needed when the user wants to see DEBUG on stdout.
+    """
+    if _console_handler is None:
+        # No prior configure_cli_logging — fall back to root level.
+        logging.getLogger().setLevel(logging.DEBUG if verbose else logging.INFO)
+        return
+    _console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    # Root must permit DEBUG so the console can see it.
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
 
 # ---------------------------------------------------------------------------

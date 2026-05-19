@@ -121,6 +121,8 @@ saga worker \
 | `SAGA_TASK_INDEX` | Task index — fallback when not on Cloud Run |
 | `SAGA_WORKER_COMMAND` | Command: `ingest`, `historize`, or `run` (fallback for `--command`) |
 
+Workers do not write the local debug-log file — their stdout is already captured by the platform. If you run a worker on a host with persistent storage and want the file anyway, set `SAGA_LOG_FILE=1` (and optionally `SAGA_LOG_DIR=/mnt/logs`). See [CLI Reference → Logging & debugging](CLI-Reference#logging--debugging).
+
 ---
 
 ## Containerisation

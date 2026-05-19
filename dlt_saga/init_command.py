@@ -278,6 +278,9 @@ venv/
 # Generated files
 schemas/
 
+# Saga debug logs (one DEBUG-level transcript per local CLI run)
+logs/
+
 # Local DuckDB databases
 *.duckdb
 
