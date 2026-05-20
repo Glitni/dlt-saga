@@ -15,6 +15,41 @@ logger = logging.getLogger(__name__)
 DEV_MODE = False
 
 
+def _make_arrow_filter(specs: List[Any]):
+    from dlt_saga.utility.filters import apply_filters_to_arrow
+
+    def _arrow_filter(item: Any) -> Any:
+        try:
+            import pyarrow as pa
+        except ImportError:
+            return item
+        if not isinstance(item, (pa.Table, pa.RecordBatch)):
+            return item
+        return apply_filters_to_arrow(item, specs)
+
+    return _arrow_filter
+
+
+def _make_dict_predicate(specs: List[Any]):
+    from dlt_saga.utility.filters import build_row_predicate
+
+    predicate = build_row_predicate(specs)
+
+    def _dict_predicate(item: Any) -> bool:
+        try:
+            import pyarrow as pa
+
+            if isinstance(item, (pa.Table, pa.RecordBatch)):
+                return True  # already handled by the arrow map
+        except ImportError:
+            pass
+        if not isinstance(item, dict):
+            return True
+        return predicate(item)
+
+    return _dict_predicate
+
+
 class BasePipeline:
     def __init__(self, config: Dict[str, Any], log_prefix: Optional[str] = None):
         self.config_dict = config or {}
@@ -409,6 +444,33 @@ class BasePipeline:
 
         return result
 
+    def _apply_filters(self, resource: Any) -> Any:
+        """Apply declarative ``filters:`` from the pipeline config.
+
+        Translates the YAML spec into a row predicate and registers two
+        transforms on the resource: an ``add_map`` that filters PyArrow
+        tables row-by-row, and an ``add_filter`` for dict rows.  Both are
+        installed because dlt routes arrow and dict items differently and
+        a single transform can't cleanly drop sub-rows from an arrow batch
+        while also dropping individual dict items.
+
+        See ``dlt_saga/utility/filters.py`` for the spec / operator set.
+        """
+        from dlt_saga.utility.filters import parse_filters
+
+        raw = self.config_dict.get("filters")
+        if not raw:
+            return resource
+
+        specs = parse_filters(raw, context=self.pipeline_name)
+        if not specs:
+            return resource
+
+        self.logger.debug("Applying %d row filter(s)", len(specs))
+        resource.add_map(_make_arrow_filter(specs))
+        resource.add_filter(_make_dict_predicate(specs))
+        return resource
+
     def _apply_row_limit(self, resource: Any) -> Any:
         """Apply dev_row_limit from profile if configured (best-effort cap).
 
@@ -448,6 +510,7 @@ class BasePipeline:
         if resource.max_table_nesting is None:
             resource.max_table_nesting = 0
         resource = self._inject_ingested_at(resource)
+        resource = self._apply_filters(resource)
         resource = self._apply_row_limit(resource)
         hints = self._build_destination_hints(description)
         adapted_resource = self.destination.apply_hints(resource, **hints)

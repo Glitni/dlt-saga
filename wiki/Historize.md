@@ -75,6 +75,63 @@ saga historize --select "filesystem__snapshots__companies"
 | `table_format` | `historize:` | inherited | Table format for the SCD2 output table. Overrides the profile-level setting. See [Table format](#table-format) |
 | `output_schema` | `historize:` | — | Write the historized table to this schema instead of the source schema |
 | `output_table` | `historize:` | — | Explicit name for the historized output table (overrides the auto-generated name) |
+| `filters` | `historize:` | — | Declarative row filter applied only during historize — see [Filtering the source](#filtering-the-source) |
+
+---
+
+## Filtering the source
+
+`historize.filters:` restricts which source rows enter the SCD2 history. Same schema as the top-level ingest [Row Filters](Configuration#row-filters) (operators `eq`, `ne`, `in`, `not_in`, `is_null`, `is_not_null`, `matches`; optional dotted JSON path; AND-joined), but applied **only** to the historize SQL — independent of any ingest-stage filter.
+
+The classic use case is partitioning one source table into multiple tenant-scoped histories. Each pipeline reads the same source, applies its own filter, and writes to its own output table:
+
+```yaml
+# configs/streams/stream_writes_tenant_a.yml
+write_disposition: historize
+primary_key: [event_id]
+
+source_database: analytics
+source_schema: events
+source_table: stream_writes_raw
+
+historize:
+  snapshot_column: event_ts
+  output_table: stream_writes_tenant_a_historized
+  track_deletions: true
+  filters:
+    - column: tenant_id
+      value: tenant_a
+```
+
+A sibling config with `tenant_b` produces an independent history under `stream_writes_tenant_b_historized`. The historize log keys by pipeline name, so each tenant's snapshot tracking, deletion detection, and partial/full-refresh state are isolated.
+
+**Filter is pushed down everywhere.** The same WHERE clause is applied in every source read the runner makes: snapshot discovery, full-reprocess CTEs (all-snapshots, hashed-rows, key-presence for deletion detection), incremental CTEs (snapshot-filtered hashed reads, deletion candidates), the rollback affected-keys query for partial refresh, and the summary stats query. There is no path through which an out-of-scope row reaches the historized table.
+
+**Composition with ingest `filters:`.** They run independently and stack. For `append+historize`, the top-level `filters:` shapes what enters the raw append table; `historize.filters:` shapes what enters the SCD2 table built from that raw table.
+
+```yaml
+write_disposition: append+historize
+primary_key: [event_id]
+
+# Ingest-stage filter: keep archived rows out of the raw table entirely
+filters:
+  - column: status
+    op: ne
+    value: archived
+
+historize:
+  snapshot_column: event_ts
+  output_table: stream_writes_tenant_a_historized
+  track_deletions: true
+  # Historize-stage filter: further restrict to tenant A's history
+  filters:
+    - column: tenant_id
+      value: tenant_a
+```
+
+**A subtlety with `track_deletions: true`.** A row whose `tenant_id` mutates between snapshots (e.g. from `tenant_a` to `tenant_b`) registers as a delete in tenant A's history and an insert in tenant B's history. From each tenant's view that's the correct semantic — the row is gone from theirs and appears in the other's — but worth knowing if you rely on `_dlt_is_deleted` markers downstream.
+
+**Config-change detection.** The filter list is part of the historize config fingerprint. Changing `historize.filters:` between runs triggers the same prompt as changing `primary_key` or `ignore_columns` — you'll be told to run `saga historize --full-refresh` so the existing historized table is rebuilt against the new predicate.
 
 ---
 

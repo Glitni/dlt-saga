@@ -151,6 +151,23 @@ def default_generate_table_name(segments: List[str], environment: str) -> str:
     return f"{first_segment}__{base_name}"
 
 
+def resolve_table_name_with_leaf(
+    segments: List[str],
+    leaf: str,
+    environment: str,
+    project_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Run the canonical table-name generator with the leaf segment replaced.
+
+    Honours a custom ``naming_module.generate_table_name`` when one is configured.
+    """
+    new_segments = list(segments[:-1]) + [leaf] if segments else [leaf]
+    module = load_naming_module(project_config) if project_config else None
+    if module and hasattr(module, "generate_table_name"):
+        return module.generate_table_name(new_segments, environment)
+    return default_generate_table_name(new_segments, environment)
+
+
 def default_generate_target_location(
     segments: List[str],
     environment: str,

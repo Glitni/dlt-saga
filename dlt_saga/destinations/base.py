@@ -49,6 +49,8 @@ class NativeLoadSpec:
     target_location: Optional[str] = None
     # Databricks-specific: table format ("delta", "iceberg", "delta_uniform")
     table_format: str = "delta"
+    # Declarative row filters pushed down into the load SELECT.
+    filters: list = field(default_factory=list)
 
 
 @dataclass
@@ -470,6 +472,132 @@ class Destination(ABC):
             SQL expression string (no trailing semicolon).
         """
         return f"CURRENT_TIMESTAMP() - INTERVAL '{days}' DAY"
+
+    def render_filter(self, specs: list, column_resolver: Optional[Any] = None) -> str:
+        """Render a list of FilterSpec objects as a SQL ``WHERE`` clause body.
+
+        Returns an empty string when ``specs`` is empty (callers should
+        skip appending ``WHERE`` in that case).  Otherwise returns an
+        AND-joined predicate without the leading ``WHERE`` keyword.
+
+        Path-based filters drill into JSON via the destination's JSON
+        access syntax — ``_render_filter_column`` is the override hook
+        for destinations that don't use the ANSI ``JSON_VALUE`` shape.
+
+        Args:
+            specs: List of ``dlt_saga.utility.filters.FilterSpec``.
+            column_resolver: Optional callable ``(filter_column) -> sql_identifier``.
+                When provided, used to map a user-facing column name to
+                the underlying source column reference (e.g. a raw
+                external/staging column).  Defaults to ``quote_identifier``.
+        """
+        from dlt_saga.utility.filters import FilterSpec  # local import
+
+        if not specs:
+            return ""
+
+        resolve = column_resolver or self.quote_identifier
+        parts: list[str] = []
+        for spec in specs:
+            if not isinstance(spec, FilterSpec):
+                raise TypeError(
+                    f"render_filter expects FilterSpec objects, got {type(spec).__name__}"
+                )
+            parts.append(self._render_filter_one(spec, resolve))
+        return " AND ".join(parts)
+
+    def _render_filter_one(self, spec: Any, resolve: Any) -> str:
+        col_sql = self._render_filter_column(spec, resolve)
+        op = spec.op
+        # Path-based JSON access returns STRING on every supported destination.
+        # Render values as quoted strings so the comparison is STRING-STRING —
+        # avoids type-mismatch errors and keeps semantics identical to the
+        # Python-side coercion in filters._eval.
+        render_val = (
+            self._render_path_literal if spec.path else self._render_sql_literal
+        )
+        if op == "is_null":
+            return f"{col_sql} IS NULL"
+        if op == "is_not_null":
+            return f"{col_sql} IS NOT NULL"
+        if op == "eq":
+            return f"{col_sql} = {render_val(spec.value)}"
+        if op == "ne":
+            return f"{col_sql} <> {render_val(spec.value)}"
+        if op == "in":
+            literals = ", ".join(render_val(v) for v in spec.value)
+            return f"{col_sql} IN ({literals})"
+        if op == "not_in":
+            literals = ", ".join(render_val(v) for v in spec.value)
+            return f"{col_sql} NOT IN ({literals})"
+        if op == "matches":
+            return self._render_regex_match(col_sql, str(spec.value))
+        raise ValueError(f"Unsupported filter op {op!r}")
+
+    def _render_filter_column(self, spec: Any, resolve: Any) -> str:
+        """Render the column reference part of a filter.
+
+        Plain column → ``resolve(col)``.  When a path is set, the default
+        wraps the column with the ANSI/SQL-2016 ``JSON_VALUE`` function;
+        destinations whose JSON access uses a different shape (e.g. a
+        colon operator, ``->>``, ``get_json_object``) should override.
+        """
+        col = resolve(spec.column)
+        if not spec.path:
+            return col
+        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
+
+        path_literal = "$." + ".".join(spec.path)
+        return f"JSON_VALUE({col}, '{esc_sql_literal(path_literal)}')"
+
+    def _render_sql_literal(self, value: Any) -> str:
+        """Render a Python value as a SQL literal.
+
+        Strings → escaped single-quoted.  Bools → TRUE/FALSE.  None → NULL.
+        Numbers → str().  Lists/dicts not allowed (caller should expand IN).
+        """
+        if value is None:
+            return "NULL"
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, str):
+            from dlt_saga.pipelines.native_load._sql import esc_sql_literal
+
+            return f"'{esc_sql_literal(value)}'"
+        raise ValueError(
+            f"Cannot render value {value!r} of type {type(value).__name__} as SQL literal"
+        )
+
+    def _render_path_literal(self, value: Any) -> str:
+        """Render a value as a quoted SQL STRING for path-based comparisons.
+
+        Mirrors ``filters._coerce_for_path``: booleans become lowercase
+        ``'true'``/``'false'`` to match the JSON wire form, everything
+        else goes through ``str()`` and is single-quoted.  Used only when
+        ``spec.path`` is set, where the destination's JSON access always
+        returns STRING.
+        """
+        if value is None:
+            return "NULL"
+        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
+
+        if isinstance(value, bool):
+            literal = "true" if value else "false"
+        else:
+            literal = str(value)
+        return f"'{esc_sql_literal(literal)}'"
+
+    def _render_regex_match(self, col_sql: str, pattern: str) -> str:
+        """Render a regex-match predicate.
+
+        Default uses ANSI ``SIMILAR TO`` semantics — most destinations
+        override (BigQuery: ``REGEXP_CONTAINS``, Databricks: ``RLIKE``).
+        """
+        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
+
+        return f"{col_sql} SIMILAR TO '{esc_sql_literal(pattern)}'"
 
     def create_or_replace_view(
         self, schema: str, view_name: str, view_sql: str
