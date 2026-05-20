@@ -175,7 +175,9 @@ class DatabricksDestination(Destination):
         """Apply Databricks-specific hints to a dlt resource.
 
         Supports ``table_description``, ``cluster_columns`` (Liquid Clustering),
-        and ``partition_column`` (traditional PARTITIONED BY).
+        ``partition_column`` (traditional PARTITIONED BY), and ``insert_api``
+        (``zerobus`` selects the Databricks Zerobus SDK for append loads;
+        ``copy_into`` selects the default COPY INTO loader).
         Unknown hints are silently ignored.
         """
         try:
@@ -188,6 +190,8 @@ class DatabricksDestination(Destination):
                 adapter_kwargs["liquid_cluster_by"] = hints["cluster_columns"]
             if "partition_column" in hints:
                 adapter_kwargs["partition"] = hints["partition_column"]
+            if "insert_api" in hints and hints["insert_api"]:
+                adapter_kwargs["insert_api"] = hints["insert_api"]
 
             if adapter_kwargs:
                 return databricks_adapter(resource, **adapter_kwargs)

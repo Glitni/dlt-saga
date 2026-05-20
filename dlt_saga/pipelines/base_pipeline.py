@@ -237,6 +237,9 @@ class BasePipeline:
         ):
             hints["cluster_columns"] = self.target_writer.config.cluster_columns
 
+        if self.target_writer.config.insert_api:
+            hints["insert_api"] = self.target_writer.config.insert_api
+
         logger.debug(f"Applying destination hints: {hints}")
         return hints
 
