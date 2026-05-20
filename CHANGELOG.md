@@ -1,3 +1,11 @@
+## 0.2.7 — 2026-05-20
+
+### Added
+- Declarative row filters (ingest + historize) (#41)
+- Declarative row filters (ingest + historize)
+- Insert-only merge strategy (#40)
+- Databricks Zerobus insert_api support (#39)
+
 ## 0.2.6 — 2026-05-19
 
 ### Added
