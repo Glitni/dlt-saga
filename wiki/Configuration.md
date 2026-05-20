@@ -112,11 +112,20 @@ The `write_disposition` field controls which operations are enabled:
 | `delete-insert` | Delete matching rows, insert new |
 | `scd2` | dlt's built-in SCD2 (distinct from historize) |
 | `upsert` | Update existing, insert new |
+| `insert-only` | Idempotent append: insert rows whose `primary_key` isn't already in the target; never update or delete existing rows. Requires `primary_key`; `merge_key` is not supported. |
 
 ```yaml
 write_disposition: "merge"
 merge_strategy: "scd2"
 primary_key: "id"
+```
+
+`insert-only` is the right pick when re-running the same batch must not produce duplicates but you also don't want the cost of a full MERGE. Append-style sources (events, logs, transactions) with a stable `primary_key` are the typical fit:
+
+```yaml
+write_disposition: "merge"
+merge_strategy: "insert-only"
+primary_key: "event_id"
 ```
 
 ### Databricks insert API

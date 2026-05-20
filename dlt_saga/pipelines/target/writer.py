@@ -72,6 +72,9 @@ class TargetWriter:
             and self.config.primary_key
         ):
             merge_config["primary_key"] = self.config.primary_key
+        elif self.config.merge_strategy == MergeStrategy.INSERT_ONLY:
+            # primary_key is required by validation; merge_key is rejected upstream.
+            merge_config["primary_key"] = self.config.primary_key
 
         return merge_config
 

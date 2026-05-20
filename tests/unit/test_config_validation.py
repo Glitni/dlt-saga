@@ -269,6 +269,52 @@ class TestTargetConfigInsertApiValidation:
 
 
 @pytest.mark.unit
+class TestTargetConfigInsertOnlyMergeStrategy:
+    """Validation for merge_strategy='insert-only'."""
+
+    def _make(self, **overrides):
+        from dlt_saga.pipelines.target.config import TargetConfig
+
+        return TargetConfig(**overrides)
+
+    def test_insert_only_string_accepted_and_normalized_to_enum(self):
+        from dlt_saga.pipelines.target.config import MergeStrategy
+
+        config = self._make(
+            write_disposition="merge",
+            merge_strategy="insert-only",
+            primary_key="id",
+        )
+        assert config.merge_strategy == MergeStrategy.INSERT_ONLY
+
+    def test_insert_only_without_primary_key_rejected(self):
+        with pytest.raises(
+            ValueError, match="merge_strategy='insert-only' requires primary_key"
+        ):
+            self._make(write_disposition="merge", merge_strategy="insert-only")
+
+    def test_insert_only_with_merge_key_rejected(self):
+        with pytest.raises(
+            ValueError,
+            match="merge_strategy='insert-only' does not support merge_key",
+        ):
+            self._make(
+                write_disposition="merge",
+                merge_strategy="insert-only",
+                primary_key="id",
+                merge_key="other_id",
+            )
+
+    def test_insert_only_with_composite_primary_key_accepted(self):
+        config = self._make(
+            write_disposition="merge",
+            merge_strategy="insert-only",
+            primary_key=["org_id", "event_id"],
+        )
+        assert config.primary_key == ["org_id", "event_id"]
+
+
+@pytest.mark.unit
 class TestHistorizeConfigColumnValidation:
     """SQL identifier checks for HistorizeConfig."""
 
