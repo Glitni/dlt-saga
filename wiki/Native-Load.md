@@ -120,6 +120,19 @@ columns:
   amount:     {data_type: decimal}
 ```
 
+### Row filters
+
+`filters:` is honoured and **pushed down to SQL** — the warehouse engine drops filtered rows during the `INSERT … SELECT` (BigQuery) or `COPY INTO … FROM (SELECT … WHERE …)` (Databricks). Filtered-out rows never enter the target table or Python.
+
+```yaml
+filters:
+  - column: config
+    path: aid.legal_entity
+    value: bm
+```
+
+When a file's rows are 100% filtered out, the file is still recorded in `_saga_native_load_log` with `loaded_rows = 0`, so it isn't re-scanned on the next incremental run. See [Row Filters in Configuration](Configuration#row-filters) for the full operator set and JSON-path semantics.
+
 ### CSV options
 
 Only used when `file_type: csv`.

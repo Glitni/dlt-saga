@@ -107,6 +107,7 @@ class NativeLoadPipeline(BasePipeline):
         self._target_exists: bool = False
         self._ingest_time_iso: str = datetime.now(timezone.utc).isoformat()
         self._column_hints: dict = self._build_column_hints()
+        self._filters: list = self._parse_filters()
 
     # ------------------------------------------------------------------
     # Entry points
@@ -505,6 +506,7 @@ class NativeLoadPipeline(BasePipeline):
             column_hints=self._column_hints,
             target_location=self._target_location,
             table_format=self.native_config.table_format,
+            filters=self._filters,
         )
         # Expose source_uri so Databricks COPY INTO can compute basenames
         spec._source_uri = self.native_config.source_uri  # type: ignore[attr-defined]
@@ -602,6 +604,14 @@ class NativeLoadPipeline(BasePipeline):
                     )
                 )
         return cols
+
+    def _parse_filters(self) -> list:
+        """Parse declarative ``filters:`` from config for SQL pushdown."""
+        from dlt_saga.utility.filters import parse_filters
+
+        return parse_filters(
+            self.config_dict.get("filters"), context=self.pipeline_name
+        )
 
     def _build_column_hints(self) -> dict:
         """Resolve config.columns to {normalized_col_name_lower: bq_sql_type}.

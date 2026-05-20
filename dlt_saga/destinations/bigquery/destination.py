@@ -578,6 +578,11 @@ class BigQueryDestination(BigQueryBaseDestination):
             return ""
         return f"CLUSTER BY {', '.join(columns)}"
 
+    def _render_regex_match(self, col_sql: str, pattern: str) -> str:
+        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
+
+        return f"REGEXP_CONTAINS({col_sql}, r'{esc_sql_literal(pattern)}')"
+
     def type_name(self, logical_type: str) -> str:
         type_map = {
             "string": "STRING",
@@ -1149,7 +1154,11 @@ class BigQueryDestination(BigQueryBaseDestination):
         if spec.cluster_columns:
             parts.append(self.cluster_ddl(spec.cluster_columns))
 
-        parts.append(f"AS SELECT {all_select} FROM {ext_id}")
+        where_sql = self._render_native_load_where(spec, ext_cols)
+        select_sql = f"AS SELECT {all_select} FROM {ext_id}"
+        if where_sql:
+            select_sql = f"{select_sql} WHERE {where_sql}"
+        parts.append(select_sql)
 
         _, job_id = self.execute_sql_with_job(" ".join(parts), spec.staging_dataset)
 
@@ -1226,6 +1235,9 @@ class BigQueryDestination(BigQueryBaseDestination):
         )
         full_select = ", ".join(filter(None, [data_select, derived_select]))
         sql = f"INSERT INTO {target_id} ({col_list}) SELECT {full_select} FROM {ext_id}"
+        where_sql = self._render_native_load_where(spec, ext_cols)
+        if where_sql:
+            sql = f"{sql} WHERE {where_sql}"
 
         # Execute and capture affected rows from job stats
         client = bigquery.Client(
@@ -1237,6 +1249,30 @@ class BigQueryDestination(BigQueryBaseDestination):
         job.result(timeout=600)
         rows_loaded = job.num_dml_affected_rows or 0
         return int(rows_loaded), job.job_id
+
+    def _render_native_load_where(self, spec: "Any", ext_cols: list) -> str:
+        """Resolve filter column names against the external table and render WHERE.
+
+        Filters in YAML reference the source column name (which may differ
+        from the normalized target column name).  Match case-insensitively
+        against ext_cols and emit the raw external name in the WHERE — the
+        clause runs on the external table read, before projection.
+        """
+        if not getattr(spec, "filters", None):
+            return ""
+
+        ext_by_lower = {raw.lower(): raw for raw, _ in ext_cols}
+
+        def resolve(col_name: str) -> str:
+            raw = ext_by_lower.get(col_name.lower())
+            if raw is None:
+                raise ValueError(
+                    f"Filter column {col_name!r} not found in external table "
+                    f"columns: {sorted(r for r, _ in ext_cols)}"
+                )
+            return self.quote_identifier(raw)
+
+        return self.render_filter(spec.filters, column_resolver=resolve)
 
     def _native_load_rowcounts(self, spec: "Any") -> dict:
         """Query per-file row counts from the target using _dlt_source_file_name filter."""

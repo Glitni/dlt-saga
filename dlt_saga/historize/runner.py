@@ -13,6 +13,7 @@ from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.sql import HistorizeSqlBuilder
 from dlt_saga.historize.state import HistorizeLogEntry, HistorizeStateManager
 from dlt_saga.utility.cli.logging import PrefixedLoggerAdapter
+from dlt_saga.utility.filters import and_filter, filter_where_clause
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,13 @@ class HistorizeRunner:
         self.state_manager = HistorizeStateManager(
             destination, database, target_schema, log_prefix=log_prefix
         )
+
+        # Parse declarative historize.filters once and render to a SQL
+        # WHERE body. Reused by the SqlBuilder for in-CTE source reads
+        # and by the runner's own ancillary queries (stats, snapshot
+        # discovery, partial-refresh boundary resolution).
+        self._filter_sql: Optional[str] = self._parse_historize_filters()
+
         self.sql_builder = HistorizeSqlBuilder(
             config=self.config,
             destination=destination,
@@ -102,7 +110,18 @@ class HistorizeRunner:
             source_table=self._src_table,
             target_table_name=target_table_name,
             target_schema=target_schema,
+            filter_sql=self._filter_sql,
         )
+
+    def _parse_historize_filters(self) -> Optional[str]:
+        """Parse ``historize.filters`` and render to a destination SQL WHERE body."""
+        from dlt_saga.utility.filters import parse_filters
+
+        specs = parse_filters(
+            self.config.filters,
+            context=f"historize.filters in {self.pipeline_name}",
+        )
+        return self.destination.render_filter(specs) or None if specs else None
 
     def run(self) -> Dict[str, Any]:
         """Execute historization and return stats.
@@ -177,6 +196,7 @@ class HistorizeRunner:
                 state=state,
                 source_table_id=self.source_table_id,
                 snapshot_column=self.config.snapshot_column,
+                filter_sql=self._filter_sql,
             )
             if not new_snapshots:
                 timings["init"] = time.time() - t
@@ -385,7 +405,7 @@ class HistorizeRunner:
             ),
             source_stats AS (
                 SELECT {cast_max} AS last_snapshot
-                FROM {src}
+                FROM {src}{filter_where_clause(self._filter_sql)}
             )
             SELECT * FROM target_stats CROSS JOIN source_stats
         """
@@ -809,7 +829,7 @@ class HistorizeRunner:
         snapshot_col = self.config.snapshot_column
         target_schema = self.config.output_schema or self.schema
 
-        sql = f"SELECT MIN({snapshot_col}) AS min_snap FROM {src}"
+        sql = f"SELECT MIN({snapshot_col}) AS min_snap FROM {src}{filter_where_clause(self._filter_sql)}"
         rows = list(self.destination.execute_sql(sql, target_schema))
         min_snap = rows[0].min_snap if rows else None
 
@@ -856,7 +876,7 @@ class HistorizeRunner:
         forward_sql = f"""
             SELECT DISTINCT {cast_expr} AS snapshot_val
             FROM {src}
-            WHERE {snapshot_col} >= TIMESTAMP '{safe_date}'
+            WHERE {and_filter(self._filter_sql, f"{snapshot_col} >= TIMESTAMP '{safe_date}'")}
             ORDER BY snapshot_val
         """
         rows = list(self.destination.execute_sql(forward_sql, target_schema))
@@ -866,7 +886,7 @@ class HistorizeRunner:
         lag_sql = f"""
             SELECT {cast_expr} AS snapshot_val
             FROM {src}
-            WHERE {snapshot_col} < TIMESTAMP '{safe_date}'
+            WHERE {and_filter(self._filter_sql, f"{snapshot_col} < TIMESTAMP '{safe_date}'")}
             ORDER BY {snapshot_col} DESC
             LIMIT 1
         """
