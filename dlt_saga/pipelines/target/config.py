@@ -16,6 +16,7 @@ class MergeStrategy(str, Enum):
     DELETE_INSERT = "delete-insert"
     SCD2 = "scd2"
     UPSERT = "upsert"
+    INSERT_ONLY = "insert-only"
 
 
 @dataclass
@@ -131,8 +132,13 @@ class TargetConfig:
     merge_strategy: Optional[MergeStrategy] = field(
         default=None,
         metadata={
-            "description": "Strategy when using write_disposition: merge",
-            "enum": ["delete-insert", "scd2", "upsert"],
+            "description": (
+                "Strategy when using write_disposition: merge. "
+                "'insert-only' performs idempotent, key-based appending: rows whose "
+                "primary_key already exists in the target are skipped; existing rows are "
+                "never updated or deleted. Requires primary_key; merge_key is not supported."
+            ),
+            "enum": ["delete-insert", "scd2", "upsert", "insert-only"],
         },
     )
     primary_key: Optional[Union[str, List[str]]] = field(
@@ -234,6 +240,7 @@ class TargetConfig:
         self._validate_insert_api()
         self._normalize_keys()
         self._normalize_enums()
+        self._validate_merge_strategy()
         self._initialize_columns()
 
     def _validate_dataset_name(self):
@@ -272,6 +279,28 @@ class TargetConfig:
         if self.destination_type not in valid_destinations:
             raise ValueError(
                 f"destination_type must be one of {valid_destinations}, got '{self.destination_type}'"
+            )
+
+    def _validate_merge_strategy(self):
+        """Validate constraints for specific merge strategies.
+
+        The ``insert-only`` strategy requires ``primary_key`` and explicitly
+        does not support ``merge_key`` (dlt limitation).
+        """
+        if self.merge_strategy != MergeStrategy.INSERT_ONLY:
+            return
+
+        if not self.primary_key:
+            raise ValueError(
+                "merge_strategy='insert-only' requires primary_key. "
+                "Insert-only inserts rows whose primary_key does not already "
+                "exist in the target; without a primary_key dlt cannot detect duplicates."
+            )
+
+        if self.merge_key:
+            raise ValueError(
+                "merge_strategy='insert-only' does not support merge_key "
+                "(dlt limitation). Use primary_key only."
             )
 
     def _validate_insert_api(self):
