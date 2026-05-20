@@ -869,6 +869,41 @@ class TestDatabricksApplyHints:
         mock_adapter.assert_called_once_with(resource, table_description="My table")
         assert result is adapted
 
+    def test_zerobus_insert_api_passes_through(self):
+        dest = _make_destination()
+        resource = MagicMock()
+        adapted = MagicMock()
+        with patch(
+            "dlt.destinations.adapters.databricks_adapter", return_value=adapted
+        ) as mock_adapter:
+            result = dest.apply_hints(resource, insert_api="zerobus")
+        mock_adapter.assert_called_once_with(resource, insert_api="zerobus")
+        assert result is adapted
+
+    def test_copy_into_insert_api_passes_through(self):
+        dest = _make_destination()
+        resource = MagicMock()
+        adapted = MagicMock()
+        with patch(
+            "dlt.destinations.adapters.databricks_adapter", return_value=adapted
+        ) as mock_adapter:
+            result = dest.apply_hints(resource, insert_api="copy_into")
+        mock_adapter.assert_called_once_with(resource, insert_api="copy_into")
+        assert result is adapted
+
+    def test_falsy_insert_api_not_passed(self):
+        dest = _make_destination()
+        resource = MagicMock()
+        adapted = MagicMock()
+        with patch(
+            "dlt.destinations.adapters.databricks_adapter", return_value=adapted
+        ) as mock_adapter:
+            # Only table_description should reach the adapter; insert_api=None
+            # must be dropped so dlt's destination-level default kicks in.
+            result = dest.apply_hints(resource, table_description="t", insert_api=None)
+        mock_adapter.assert_called_once_with(resource, table_description="t")
+        assert result is adapted
+
     def test_import_error_falls_back_to_resource(self):
         dest = _make_destination()
         resource = MagicMock()

@@ -141,6 +141,13 @@ class BigQueryDestination(BigQueryBaseDestination):
                 self._normalize_column_name(c) for c in hints["cluster_columns"]
             ]
 
+        if hints.get("insert_api"):
+            logger.warning(
+                "insert_api='%s' is only supported on the Databricks destination; "
+                "ignoring on BigQuery.",
+                hints["insert_api"],
+            )
+
         if self.config.table_format == "iceberg":
             return self._apply_iceberg_hints(resource, hints)
         return self._apply_native_hints(resource, hints)

@@ -96,6 +96,21 @@ class TargetConfig:
         },
     )
 
+    # Databricks-only loader selection
+    insert_api: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Databricks-only: alternative insert API. 'zerobus' uses the "
+                "Databricks Zerobus SDK for low-latency append loading into Delta "
+                "tables; 'copy_into' uses the default COPY INTO loader. "
+                "'zerobus' requires write_disposition 'append' or 'append+historize'. "
+                "Ignored on non-Databricks destinations."
+            ),
+            "enum": ["zerobus", "copy_into"],
+        },
+    )
+
     # Replace strategy
     replace_strategy: Optional[ReplaceStrategy] = field(
         default=None,
@@ -216,6 +231,7 @@ class TargetConfig:
         self._validate_dataset_name()
         self._validate_destination_type()
         self._validate_column_identifiers()
+        self._validate_insert_api()
         self._normalize_keys()
         self._normalize_enums()
         self._initialize_columns()
@@ -257,6 +273,33 @@ class TargetConfig:
             raise ValueError(
                 f"destination_type must be one of {valid_destinations}, got '{self.destination_type}'"
             )
+
+    def _validate_insert_api(self):
+        """Validate insert_api value and write-disposition compatibility.
+
+        Zerobus is an append-only Databricks loader and requires the
+        ingest path to be in append mode. Both ``append`` and
+        ``append+historize`` qualify (the +historize suffix only affects
+        our SCD2 layer, not the underlying dlt write disposition).
+        """
+        if self.insert_api is None:
+            return
+
+        valid = {"zerobus", "copy_into"}
+        if self.insert_api not in valid:
+            raise ValueError(
+                f"insert_api must be one of {sorted(valid)} or unset, "
+                f"got '{self.insert_api}'"
+            )
+
+        if self.insert_api == "zerobus":
+            base = (self.write_disposition or "").split("+", 1)[0]
+            if base != "append":
+                raise ValueError(
+                    "insert_api='zerobus' requires write_disposition 'append' "
+                    f"or 'append+historize' (Zerobus is append-only); "
+                    f"got write_disposition='{self.write_disposition}'."
+                )
 
     def _normalize_keys(self):
         """Normalize primary_key and merge_key to lists."""

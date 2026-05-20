@@ -218,6 +218,57 @@ class TestTargetConfigColumnValidation:
 
 
 @pytest.mark.unit
+class TestTargetConfigInsertApiValidation:
+    """Insert-API validation for TargetConfig (Databricks Zerobus)."""
+
+    def _make(self, **overrides):
+        from dlt_saga.pipelines.target.config import TargetConfig
+
+        return TargetConfig(**overrides)
+
+    def test_insert_api_none_accepted(self):
+        config = self._make()
+        assert config.insert_api is None
+
+    def test_zerobus_with_append_accepted(self):
+        config = self._make(write_disposition="append", insert_api="zerobus")
+        assert config.insert_api == "zerobus"
+
+    def test_zerobus_with_append_historize_accepted(self):
+        config = self._make(write_disposition="append+historize", insert_api="zerobus")
+        assert config.insert_api == "zerobus"
+
+    def test_zerobus_with_merge_rejected(self):
+        with pytest.raises(
+            ValueError, match="insert_api='zerobus' requires write_disposition"
+        ):
+            self._make(write_disposition="merge", insert_api="zerobus")
+
+    def test_zerobus_with_replace_rejected(self):
+        with pytest.raises(
+            ValueError, match="insert_api='zerobus' requires write_disposition"
+        ):
+            self._make(write_disposition="replace", insert_api="zerobus")
+
+    def test_zerobus_with_historize_only_rejected(self):
+        # 'historize' (external delivery) has no ingest path, so Zerobus
+        # is not applicable.
+        with pytest.raises(
+            ValueError, match="insert_api='zerobus' requires write_disposition"
+        ):
+            self._make(write_disposition="historize", insert_api="zerobus")
+
+    def test_copy_into_with_any_disposition_accepted(self):
+        for disposition in ("append", "merge", "replace", "append+historize"):
+            config = self._make(write_disposition=disposition, insert_api="copy_into")
+            assert config.insert_api == "copy_into"
+
+    def test_invalid_insert_api_value_rejected(self):
+        with pytest.raises(ValueError, match="insert_api must be one of"):
+            self._make(write_disposition="append", insert_api="bogus")
+
+
+@pytest.mark.unit
 class TestHistorizeConfigColumnValidation:
     """SQL identifier checks for HistorizeConfig."""
 

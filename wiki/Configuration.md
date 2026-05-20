@@ -58,6 +58,7 @@ spreadsheet_id: "123ABC"
 | `primary_key` | string/list | — | Primary key column(s) for merge/historize |
 | `partition_column` | string | — | BigQuery partition column |
 | `cluster_columns` | list | — | BigQuery cluster columns (max 4) |
+| `insert_api` | string | — | Databricks-only: `zerobus` (low-latency append) or `copy_into` (default). See [Databricks insert API](#databricks-insert-api) |
 | `dataset_name` | string | — | Override default dataset |
 | `access` | list | — | BigQuery IAM access (`"group:email"`, `"user:email"`) |
 | `columns` | dict | — | Explicit column type hints — see [Column Hints](#column-hints) |
@@ -117,6 +118,28 @@ write_disposition: "merge"
 merge_strategy: "scd2"
 primary_key: "id"
 ```
+
+### Databricks insert API
+
+On the Databricks destination, `insert_api` selects how rows are written into the Delta table:
+
+| Value | Description |
+|-------|-------------|
+| _unset_ | Default — `COPY INTO` via Unity Catalog volume staging. |
+| `copy_into` | Same as unset, but explicit. |
+| `zerobus` | Loads via the Databricks Zerobus SDK. Lower per-batch overhead than `COPY INTO` and useful for high-throughput append workloads. Only valid with `write_disposition: append` or `append+historize`. |
+
+```yaml
+write_disposition: "append+historize"
+insert_api: "zerobus"
+primary_key: [id]
+
+historize:
+  partition_column: "_dlt_valid_from"
+  cluster_columns: [id]
+```
+
+Ignored on BigQuery and DuckDB destinations (a warning is logged).
 
 ### Incremental Loading
 

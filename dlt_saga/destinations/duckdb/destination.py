@@ -66,6 +66,12 @@ class DuckDBDestination(Destination):
             logger.debug(
                 f"Table description for {resource.name}: {hints['table_description']}"
             )
+        if hints.get("insert_api"):
+            logger.warning(
+                "insert_api='%s' is only supported on the Databricks destination; "
+                "ignoring on DuckDB.",
+                hints["insert_api"],
+            )
         return resource
 
     def get_access_manager(self) -> None:
