@@ -35,6 +35,45 @@ def _resolve_historize_table_format(
     )
 
 
+def _env_aware_override(config_dict: Dict[str, Any], override: str) -> str:
+    """Run ``output_table`` through the project's table-name generator so it
+    gets the same env-aware prefix as the source table.
+
+    Falls back to the literal override when no ``config_path`` is available.
+    """
+    from pathlib import Path
+
+    from dlt_saga.pipeline_config.naming import resolve_table_name_with_leaf
+    from dlt_saga.project_config import get_project_config
+    from dlt_saga.utility.naming import get_environment
+
+    config_path = config_dict.get("config_path") or ""
+    if not config_path:
+        return override
+
+    parts = Path(config_path).parts
+    if "configs" in parts:
+        idx = parts.index("configs")
+        segments = list(parts[idx + 1 :])
+    else:
+        segments = list(parts)
+    if not segments:
+        return override
+    last = segments[-1]
+    for ext in (".yml", ".yaml"):
+        if last.endswith(ext):
+            segments[-1] = last[: -len(ext)]
+            break
+
+    project_config = get_project_config()
+    return resolve_table_name_with_leaf(
+        segments,
+        override,
+        get_environment(),
+        {"naming_module": project_config.naming_module},
+    )
+
+
 def _resolve_historize_storage_path(context: Any) -> Optional[str]:
     """Resolve the effective storage_path for the historize layer.
 
@@ -107,7 +146,15 @@ def build_historize_runner(
         destination.config, "catalog", "local"
     )
 
-    # Resolve historize dataset and table using the configured placement strategy
+    # When output_table is set, run it through the same table-name generator
+    # as the source so it picks up the env prefix and any custom naming rules
+    # — i.e. treat the override as a peer of the source, not a literal name.
+    if historize_config.output_table:
+        historize_config.output_table = _env_aware_override(
+            config_dict, historize_config.output_table
+        )
+
+    # Resolve historize dataset and table using the configured placement strategy.
     target_schema, target_table_name = resolve_historized_target(
         source_schema=schema_name,
         source_table=pipeline_config.table_name,
