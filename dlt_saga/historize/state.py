@@ -176,11 +176,6 @@ class HistorizeStateManager:
             "snapshot_column": config.snapshot_column,
             "track_deletions": config.track_deletions,
             "table_format": config.table_format or "native",
-            # Filters affect *which* rows enter the historized table.  A
-            # change requires a full rebuild — otherwise rows that no
-            # longer pass the filter would survive as stale history.
-            # Serialised with sort_keys so dict-order isn't load-bearing.
-            "filters": json.dumps(config.filters or [], sort_keys=True),
         }
         return base64.b64encode(json.dumps(fingerprint_data).encode()).decode()
 
@@ -296,7 +291,6 @@ class HistorizeStateManager:
         state: "HistorizeStateManager.PipelineState",
         source_table_id: str,
         snapshot_column: str,
-        filter_sql: Optional[str] = None,
     ) -> List[str]:
         """Discover snapshot values in the raw table that haven't been historized yet.
 
@@ -304,31 +298,25 @@ class HistorizeStateManager:
             state: Pre-fetched pipeline state from get_pipeline_state()
             source_table_id: Fully qualified source table ID
             snapshot_column: Column containing snapshot timestamps
-            filter_sql: Optional pre-rendered SQL WHERE body (no leading
-                ``WHERE``) applied to the source read so the discovered
-                snapshots match what historize will actually process.
 
         Returns:
             List of snapshot values (as strings) to process, ordered chronologically
         """
-        from dlt_saga.utility.filters import and_filter, filter_where_clause
-
         src = source_table_id
         cast_expr = self.destination.cast_to_string(snapshot_column)
 
         if not state.has_successful_run:
             sql = f"""
                 SELECT DISTINCT {cast_expr} AS snapshot_val
-                FROM {src}{filter_where_clause(filter_sql)}
+                FROM {src}
                 ORDER BY snapshot_val
             """
         else:
             safe_val = _escape_sql_string(state.last_snapshot_value)
-            base_where = f"{snapshot_column} > TIMESTAMP '{safe_val}'"
             sql = f"""
                 SELECT DISTINCT {cast_expr} AS snapshot_val
                 FROM {src}
-                WHERE {and_filter(filter_sql, base_where)}
+                WHERE {snapshot_column} > TIMESTAMP '{safe_val}'
                 ORDER BY snapshot_val
             """
 

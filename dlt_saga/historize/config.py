@@ -8,8 +8,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from dlt_saga.utility.filters import filter_field_metadata as _filter_field_metadata
-
 
 @dataclass
 class HistorizeConfig:
@@ -126,20 +124,6 @@ class HistorizeConfig:
                 "pipeline.table_format → profile.historize.table_format → profile.table_format → 'native'."
             )
         },
-    )
-
-    filters: Optional[List[Dict[str, Any]]] = field(
-        default=None,
-        metadata=_filter_field_metadata(
-            "Declarative row filters applied during historize (AND-joined). "
-            "Same schema as the top-level filters: block but applied only to "
-            "the source read in the historize SQL — independent of any ingest "
-            "filter. Useful for partitioning one source table into multiple "
-            "tenant-scoped histories (combine with historize.output_table). "
-            "Operators: eq (default), ne, in, not_in, is_null, is_not_null, "
-            "matches. Path-based filters drill into JSON columns and compare "
-            "as strings."
-        ),
     )
 
     def __post_init__(self):

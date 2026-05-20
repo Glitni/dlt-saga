@@ -65,7 +65,6 @@ spreadsheet_id: "123ABC"
 | `dev_row_limit` | int | — | Limit rows in dev (uses `dlt.resource.add_limit()`) |
 | `task_group` | string | — | Group pipelines to run together in orchestration mode |
 | `adapter` | string | — | Explicit pipeline implementation binding (e.g., `dlt_saga.api.myservice`) |
-| `filters` | list | — | Row-level filters applied during ingest — see [Row Filters](#row-filters) |
 
 ### Column Hints
 
@@ -92,60 +91,6 @@ Keys are normalized by dlt using snake_case before being matched against the dat
 | Simple lowercase (wrong) | `oppty_targetamount` | ❌ ghost column |
 
 dlt splits CamelCase on word boundaries: `TargetAmount` → `target_amount`, `SoldPriceSum` → `sold_price_sum`. A key that is just lowercased without splitting (e.g., `oppty_targetamount`) will not match the actual column and instead creates a separate column in the destination that is always NULL.
-
-### Row Filters
-
-Drop unwanted rows during ingest using a declarative `filters:` block. Multiple entries compose as **AND**.
-
-```yaml
-filters:
-  - column: config              # required: top-level column name
-    path: aid.legal_entity      # optional: dotted JSON path into the value
-    value: bm                   # required for eq/ne/in/not_in/matches
-  - column: status
-    op: ne
-    value: archived
-```
-
-| Op | Value | Description |
-|----|-------|-------------|
-| `eq` (default) | scalar | Column equals value |
-| `ne` | scalar | Not equal |
-| `in` | non-empty list | Value in list |
-| `not_in` | non-empty list | Value not in list |
-| `is_null` | (omit) | Value is NULL |
-| `is_not_null` | (omit) | Value is not NULL |
-| `matches` | regex string | Regex match (Python `re.search` / `REGEXP_CONTAINS` / `RLIKE`) |
-
-**JSON path access.** When `path` is set, the filter drills into a nested object on the column's value. Columns that hold a JSON-encoded string (common with Sheets / API sources) are parsed automatically — no extra config. Path access returns NULL when any intermediate key is missing, so the row is dropped under `eq`/`ne`/`in`/`not_in`/`matches` and counted as null under `is_null`/`is_not_null`.
-
-**Path comparisons are STRING.** Path-based JSON access returns a string scalar on every destination, so both the extracted leaf and the configured `value:` are coerced to STRING before comparison. Booleans use lowercase `"true"`/`"false"` to match JSON wire form; integers and floats are stringified. This keeps Python and SQL evaluation identical — `value: 5` matches a JSON leaf `5` whether the pipeline runs in-process or pushes down to the warehouse. For typed numeric comparisons on a path leaf, use a top-level typed column (or open a follow-up for an explicit `cast:` knob).
-
-**Prefer source-level pushdown when available.** For sources that filter natively — `database` (use a `WHERE` in the SQL query), `api` (use a query parameter) — apply the filter there. `filters:` is the fallback for sources that don't support native filtering (Sheets, filesystem, SharePoint) and for keeping the predicate visible in YAML for stacks where that matters. With `native_load` the filter pushes down to the warehouse engine, so `filters:` is the right place for that adapter regardless of source.
-
-**Multi-resource pipelines.** A filter on `config` does not affect resources that lack a `config` column — the filter silently skips when the column is absent, so unrelated tables are not wiped.
-
-**Top-level vs `historize.filters`.** The top-level `filters:` block on this page applies only to the **ingest** stage (raw rows entering the destination). For SCD2 historization there's a separate `historize.filters:` block under the `historize:` section — same schema, but it applies only to the historize source read. They run independently and stack: for `append+historize`, top-level filters shape the raw append table; `historize.filters:` shapes the SCD2 history built from it. See [Filtering the source](Historize#filtering-the-source) in the Historize docs.
-
-**Pushdown for `native_load`.** When the pipeline uses `adapter: dlt_saga.native_load`, filters are rendered into the load SELECT as a `WHERE` clause and applied by the warehouse engine. Filtered-out rows are never materialised in the target table or in Python memory:
-
-```sql
--- BigQuery (INSERT … SELECT FROM <external table>):
-INSERT INTO `proj.ds.tbl` (...)
-SELECT ... FROM `proj.ds_staging.ext_abc123`
-WHERE JSON_VALUE(`config`, '$.aid.legal_entity') = 'bm'
-
--- Databricks (COPY INTO with a SELECT subquery):
-COPY INTO `cat`.`ds`.`tbl`
-FROM (SELECT * FROM 'gs://bucket/...' WHERE `config`:aid.legal_entity = 'bm')
-FILEFORMAT = PARQUET ...
-```
-
-The same `filters` block applies to both first-run CTAS and subsequent INSERT/COPY INTO so the target stays consistent across runs.
-
-**Filter column resolution.** In all paths the `column:` value refers to the **source** column name (the field the source emits, before any normalization). For `native_load` on BigQuery the column is matched case-insensitively against the external table; for Databricks `COPY INTO` the file's column name is used verbatim. Unknown columns raise a clear `ValueError` at SQL-build time rather than silently producing no rows.
-
-**Performance.** For non-`native_load` pipelines the predicate evaluates per row in Python. For small reference tables (Sheets, configs, dimension tables) this is negligible. For PyArrow batches the table is materialised via `to_pylist()` for the row-level evaluation — fine for the common cases but worth pushing down at the source when filtering tens of millions of rows.
 
 ### Write Dispositions
 

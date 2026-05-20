@@ -13,7 +13,6 @@ import logging
 from typing import Any, List, Optional
 
 from dlt_saga.historize.config import HistorizeConfig
-from dlt_saga.utility.filters import and_filter, filter_where_clause
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,6 @@ class HistorizeSqlBuilder:
         source_table: str = "",
         target_table_name: str = "",
         target_schema: str = "",
-        filter_sql: Optional[str] = None,
     ):
         self.config = config
         self.destination = destination
@@ -63,10 +61,6 @@ class HistorizeSqlBuilder:
         self.target_table_name = target_table_name
         self.target_schema = target_schema
         self._output_exclude = SYSTEM_COLUMNS | {config.snapshot_column}
-        # Pre-rendered source-side WHERE body shared with the runner; ``None`` when
-        # no historize.filters: block is configured.  Spliced at each source-read
-        # site via the module-level ``filter_where_clause`` / ``and_filter`` helpers.
-        self.filter_sql: Optional[str] = filter_sql or None
 
     def _get_hash_columns(self, value_columns: List[str]) -> List[str]:
         """Return the subset of value_columns used for change-detection hashing.
@@ -139,7 +133,7 @@ class HistorizeSqlBuilder:
             CREATE TABLE {keys_table} AS
             SELECT DISTINCT {pk_cols}
             FROM {src}
-            WHERE {and_filter(self.filter_sql, f"{q_snapshot} >= TIMESTAMP '{safe_date}'")}
+            WHERE {q_snapshot} >= TIMESTAMP '{safe_date}'
         """
 
         delete_sql = f"""
@@ -281,14 +275,14 @@ WITH
 -- All unique snapshot dates
 all_snapshots AS (
   SELECT DISTINCT {q_snapshot} AS snapshot_date
-  FROM {src}{filter_where_clause(self.filter_sql)}
+  FROM {src}
 ),
 
 -- Hash value columns for change detection
 hashed AS (
   SELECT *,
     {hash_expr} AS _row_hash
-  FROM {src}{filter_where_clause(self.filter_sql)}
+  FROM {src}
 ),
 
 -- Deduplicate within each snapshot (one row per PK per snapshot)
@@ -358,7 +352,7 @@ INSERT INTO {tgt} SELECT * FROM _historize_result;
 -- Track key presence across snapshots for deletion detection
 key_presence AS (
   SELECT DISTINCT {pk_cols}, {q_snapshot} AS snapshot_date
-  FROM {src}{filter_where_clause(self.filter_sql)}
+  FROM {src}
 ),
 with_next_presence AS (
   SELECT kp.*,
@@ -464,7 +458,7 @@ WITH
 all_snapshots AS (
   SELECT DISTINCT {q_snapshot} AS snapshot_date
   FROM {src}
-  WHERE {and_filter(self.filter_sql, snapshot_filter)}
+  WHERE {snapshot_filter}
 ),
 
 -- Hash value columns
@@ -472,7 +466,7 @@ hashed AS (
   SELECT *,
     {hash_expr} AS _row_hash
   FROM {src}
-  WHERE {and_filter(self.filter_sql, snapshot_filter)}
+  WHERE {snapshot_filter}
 ),
 
 -- Dedup within each snapshot
@@ -569,7 +563,7 @@ SELECT * FROM _historize_incremental;
 deletion_candidates AS (
   SELECT DISTINCT {pk_cols}, {q_snapshot} AS snapshot_date
   FROM {src}
-  WHERE {and_filter(self.filter_sql, self._snapshot_filter_for_deletions(snapshot_col))}
+  WHERE {self._snapshot_filter_for_deletions(snapshot_col)}
 ),
 with_next_key AS (
   SELECT dc.*,

@@ -5,9 +5,7 @@ and control pipeline execution and source extraction behavior.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-
-from dlt_saga.utility.filters import filter_field_metadata as _filter_field_metadata
+from typing import List, Optional
 
 
 @dataclass
@@ -54,18 +52,6 @@ class BaseConfig:
         metadata={
             "description": "Pipeline adapter to use. Format: <namespace>.<path> (e.g., 'dlt_saga.api.genesyscloud', 'local.api.my_custom'). The namespace maps to a package, and the path resolves to a pipeline.py module within it. If omitted, falls back to folder-structure-based resolution.",
         },
-    )
-
-    filters: Optional[List[Dict[str, Any]]] = field(
-        default=None,
-        metadata=_filter_field_metadata(
-            "Declarative row filters applied during ingest (AND-joined). "
-            "Each entry: {column, path?, op?, value?}. Operators: eq (default), "
-            "ne, in, not_in, is_null, is_not_null, matches. Path-based filters "
-            "drill into JSON columns and compare as strings. With the "
-            "dlt_saga.native_load adapter the filter is pushed down into the "
-            "load SELECT; otherwise it evaluates per row in Python."
-        ),
     )
 
     # =========================================================================

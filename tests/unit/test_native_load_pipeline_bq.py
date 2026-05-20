@@ -118,7 +118,7 @@ class TestNativeLoadChunkBQ:
         assert result.rows_loaded == 7
 
     def test_framework_cols_auto_added_when_missing(self):
-        from unittest.mock import patch
+        import sys
 
         dest = _make_dest()
         dest.config = MagicMock()
@@ -130,18 +130,20 @@ class TestNativeLoadChunkBQ:
         ]  # target: missing fw cols
         spec = _make_spec(target_exists=True)
 
+        mock_bq = MagicMock()
         mock_job = MagicMock()
         mock_job.job_id = "job-fw"
         mock_job.num_dml_affected_rows = 3
+        mock_bq.Client.return_value.query.return_value = mock_job
 
-        # Patch the attribute directly — `from google.cloud import bigquery`
-        # reads `google.cloud.bigquery` as an attribute once the module has
-        # been loaded, so a sys.modules-only patch wouldn't be picked up.
-        with patch("google.cloud.bigquery.Client") as mock_client:
-            mock_client.return_value.query.return_value = mock_job
+        # Patch via sys.modules since google.cloud.bigquery is imported locally in the method
+        sys.modules["google.cloud.bigquery"] = mock_bq
+        try:
             BigQueryDestination._native_load_insert_into_target(
                 dest, spec, "proj.ds_staging.ext", [("col1", "STRING")]
             )
+        finally:
+            del sys.modules["google.cloud.bigquery"]
 
         assert dest.add_column.call_count == 2
         added_cols = [c[0][2] for c in dest.add_column.call_args_list]
@@ -327,7 +329,7 @@ class TestReplaceModeCreateTarget:
 class TestSchemaEvolutionAlwaysOn:
     def test_new_column_auto_added_without_schema_evolution_flag(self):
         """New columns are always added — no schema_evolution field needed."""
-        from unittest.mock import patch
+        import sys
 
         dest = _make_dest()
         dest.config = MagicMock()
@@ -338,18 +340,22 @@ class TestSchemaEvolutionAlwaysOn:
         dest.list_table_columns.return_value = [("col1", "STRING")]
         spec = _make_spec(target_exists=True)
 
+        mock_bq = MagicMock()
         mock_job = MagicMock()
         mock_job.job_id = "job-se"
         mock_job.num_dml_affected_rows = 1
+        mock_bq.Client.return_value.query.return_value = mock_job
 
-        with patch("google.cloud.bigquery.Client") as mock_client:
-            mock_client.return_value.query.return_value = mock_job
+        sys.modules["google.cloud.bigquery"] = mock_bq
+        try:
             BigQueryDestination._native_load_insert_into_target(
                 dest,
                 spec,
                 "proj.ds_staging.ext",
                 [("col1", "STRING"), ("new_col", "INT64")],
             )
+        finally:
+            del sys.modules["google.cloud.bigquery"]
 
         # add_column called for framework cols + new data col
         added = [c[0][2] for c in dest.add_column.call_args_list]

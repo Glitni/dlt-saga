@@ -749,9 +749,6 @@ class DatabricksDestination(Destination):
         else:
             select_clause = data_select
 
-        where_sql = self.render_filter(getattr(spec, "filters", []) or [])
-        where_clause = f" WHERE {where_sql}" if where_sql else ""
-
         # FILES basenames relative to source_prefix
         file_items = []
         for uri in spec.source_uris:
@@ -767,7 +764,7 @@ class DatabricksDestination(Destination):
 
         return (
             f"COPY INTO {target_id} "
-            f"FROM ({select_clause} FROM '{esc_sql_literal(source_prefix)}'{where_clause}) "
+            f"FROM ({select_clause} FROM '{esc_sql_literal(source_prefix)}') "
             f"FILEFORMAT = {file_format} "
             f"FILES = ({files_list}) "
             f"FORMAT_OPTIONS ({format_options_str}) "
@@ -848,16 +845,3 @@ class DatabricksDestination(Destination):
 
     def extract_json_value(self, json_expr: str) -> str:
         return f"to_json({json_expr})"
-
-    def _render_filter_column(self, spec: Any, resolve: Any) -> str:
-        col = resolve(spec.column)
-        if not spec.path:
-            return col
-        # Databricks colon notation works on both STRING (auto-parsed) and
-        # VARIANT columns and is faster than get_json_object.
-        return col + ":" + ".".join(spec.path)
-
-    def _render_regex_match(self, col_sql: str, pattern: str) -> str:
-        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
-
-        return f"{col_sql} RLIKE '{esc_sql_literal(pattern)}'"

@@ -91,16 +91,13 @@ def resolve_historized_target(
         2. if placement == schema_suffix: ``{source_schema}{schema_suffix}``
         3. source_schema (same schema as source)
     - historize_table:
-        1. historize_config.output_table (explicit per-pipeline override) —
-           assumed already env-aware (caller is responsible for running the
-           override through the project's table-name generator before
-           passing it in).
+        1. historize_config.output_table (explicit per-pipeline override)
         2. if placement == schema_suffix: source_table (no table-level suffix)
         3. ``{source_table}{historize_config.output_table_suffix}``
 
     Args:
         source_schema: Schema where the source ingested table lives.
-        source_table: Table name of the source ingested table (env-prefixed in dev).
+        source_table: Table name of the source ingested table.
         historize_config: HistorizeConfig for this pipeline (may carry output_schema /
             output_table overrides).
 

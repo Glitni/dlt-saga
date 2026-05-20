@@ -182,18 +182,7 @@ merge_strategy: scd2              # For merge disposition
 # Destination hints
 partition_column: date
 cluster_columns: [id, category]
-
-# Row filters (optional) — drop rows during ingest
-filters:
-  - column: config
-    path: aid.legal_entity          # optional dotted JSON path
-    value: bm                       # op defaults to eq
-  - column: status
-    op: in
-    value: [active, pending]
 ```
-
-Filters compose as AND. Operators: `eq` (default), `ne`, `in`, `not_in`, `is_null`, `is_not_null`, `matches`. With `native_load`, filters push down to SQL `WHERE` automatically; for other adapters they evaluate in Python before dlt loads the rows.
 
 ### write_disposition controls what runs
 
@@ -217,12 +206,6 @@ historize:
   partition_column: "_dlt_valid_from"
   cluster_columns: [id]
   track_deletions: true
-  # Optional: row filter applied only during historize (same schema as top-level
-  # filters:, independent of any ingest filter). Useful for partitioning one
-  # source table into multiple tenant-scoped histories.
-  # filters:
-  #   - column: tenant_id
-  #     value: tenant_a
 ```
 
 ## CLI quick reference
