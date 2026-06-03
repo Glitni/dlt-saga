@@ -306,10 +306,17 @@ class Session:
     def _run_update_access(
         self, select: Optional[List[str]], workers: int
     ) -> SessionResult:
-        """Per-pipeline access sync, then orchestration schema sync."""
-        result = self._run_ingest(select, workers)
+        """Orchestration schema sync first, then per-pipeline access sync.
+
+        Order matters for log readability: with the orchestration sync
+        running first, its `Updated access controls for dataset …` line
+        appears alongside the per-pipeline sync logs in chronological order,
+        rather than at the end after a long quiet pipeline iteration. There's
+        no functional dependency between the two — both write to BigQuery
+        independently — so the reordering is purely about log clarity.
+        """
         self._apply_orchestration_access()
-        return result
+        return self._run_ingest(select, workers)
 
     @staticmethod
     def _apply_orchestration_access() -> None:
@@ -506,9 +513,26 @@ class Session:
             logger.info("No ingest-enabled pipelines matched the selection criteria")
             return SessionResult()
 
-        logger.info(
-            "Running %d ingest pipeline(s) with %d worker(s)", len(all_configs), workers
-        )
+        # `_run_ingest` is also used by `update_access` — only the destination
+        # access sync runs in that mode, not the actual extract/load. Pick the
+        # log wording to match so an operator running `saga update-access`
+        # doesn't see "Running 151 ingest pipeline(s)" and worry pipelines
+        # are about to execute.
+        from dlt_saga.utility.cli.context import get_execution_context
+
+        update_access = get_execution_context().update_access
+        if update_access:
+            logger.info(
+                "Syncing access for %d pipeline(s) with %d worker(s)",
+                len(all_configs),
+                workers,
+            )
+        else:
+            logger.info(
+                "Running %d ingest pipeline(s) with %d worker(s)",
+                len(all_configs),
+                workers,
+            )
         self._prepare_destinations(configs)
         return self._execute_pipelines_tracked(all_configs, workers)
 
@@ -534,12 +558,22 @@ class Session:
                 results.append(future.result())
 
         result = SessionResult(pipeline_results=results)
-        logger.info(
-            "Ingest complete: %d/%d succeeded, %d failed",
-            result.succeeded,
-            len(results),
-            result.failed,
-        )
+        from dlt_saga.utility.cli.context import get_execution_context
+
+        if get_execution_context().update_access:
+            logger.info(
+                "Access sync complete: %d/%d succeeded, %d failed",
+                result.succeeded,
+                len(results),
+                result.failed,
+            )
+        else:
+            logger.info(
+                "Ingest complete: %d/%d succeeded, %d failed",
+                result.succeeded,
+                len(results),
+                result.failed,
+            )
         return result
 
     @staticmethod
@@ -567,7 +601,13 @@ class Session:
             load_info = execute_pipeline(config, log_prefix=log_prefix)
             if isinstance(load_info, list):
                 summary = summarize_load_info(load_info)
-                logger.info("%s%s", prefix, summary)
+                # `summarize_load_info([])` returns ""; previously this
+                # produced an empty `[N/total] ` line — visible whenever a
+                # pipeline returned `[]` (e.g. native_load skipping its run
+                # in update-access mode, or any pipeline with no resources
+                # to load).
+                if summary:
+                    logger.info("%s%s", prefix, summary)
             registry.fire(
                 ON_PIPELINE_COMPLETE,
                 HookContext(

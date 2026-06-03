@@ -133,13 +133,19 @@ class BasePipeline:
         # Create pipeline (will have clean schema after full_refresh)
         self.pipeline = self._create_pipeline()
 
-        self.logger.info(
-            "Running for destination "
-            + colorize(
-                f"{self.destination_database}.{self.pipeline.dataset_name}.{self.table_name}",
-                YELLOW,
+        # In update-access mode we iterate every pipeline but the work that
+        # actually matters (added/removed entries) is logged separately by
+        # the destination's access syncs. Suppress the per-pipeline "Running
+        # for destination" line in that mode so the diff stands out — keep
+        # it for normal ingest where it's a useful progress indicator.
+        if not context.update_access:
+            self.logger.info(
+                "Running for destination "
+                + colorize(
+                    f"{self.destination_database}.{self.pipeline.dataset_name}.{self.table_name}",
+                    YELLOW,
+                )
             )
-        )
 
     def _create_pipeline(self) -> dlt.Pipeline:
         """Create pipeline with destination abstraction."""

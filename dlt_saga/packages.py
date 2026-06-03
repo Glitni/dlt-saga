@@ -175,7 +175,11 @@ def _register_package(entry: PackageEntry, project_root: Path) -> None:
     # The importable base module is the directory name
     base_module = abs_path.name
     register_namespace(entry.namespace, base_module)
-    logger.info(
+    # DEBUG, not INFO: this fires once per packages.yml entry during startup
+    # and is dev-info ("the loader picked up your package") — not actionable
+    # after the first successful run, and pure noise in `saga update-access`
+    # where it's the only line between the header and the iteration.
+    logger.debug(
         "Registered package: %s → %s (from %s)",
         entry.namespace,
         base_module,
