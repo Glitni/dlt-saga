@@ -6,6 +6,7 @@ Provides shared functionality for destinations that use BigQuery datasets
 
 import json
 import logging
+import os
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from dlt_saga.destinations.base import Destination
@@ -60,6 +61,61 @@ def _format_access_key(key: tuple) -> str:
     if role is None:
         return f"{entity_type}:{entity_id}"
     return f"{role}:{entity_type}:{entity_id}"
+
+
+def _running_principal_email() -> Optional[str]:
+    """Identify the principal whose credentials will be used for the
+    BigQuery API calls in this run.
+
+    Returns the impersonated SA email when ``GOOGLE_IMPERSONATE_SERVICE_ACCOUNT``
+    is set (the path saga uses in prod via ``execute_with_impersonation``);
+    otherwise falls back to the ADC principal's ``service_account_email``
+    when available. Returns ``None`` when the identity can't be determined
+    cleanly (e.g. user creds from ``gcloud auth application-default login``,
+    which don't expose an email here) — callers should degrade gracefully
+    rather than block.
+    """
+    impersonated = os.getenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT")
+    if impersonated:
+        return impersonated
+    try:
+        import google.auth
+
+        credentials, _ = google.auth.default()
+        return getattr(credentials, "service_account_email", None)
+    except Exception:
+        return None
+
+
+def _suggest_owner_entry(principal: str) -> str:
+    """Render the ``dataset_access:`` YAML entry that grants OWNER to
+    ``principal``, using the entity-type prefix saga's parser expects
+    (``serviceAccount:`` vs ``user:``)."""
+    prefix = (
+        "serviceAccount" if principal.endswith(".iam.gserviceaccount.com") else "user"
+    )
+    return f"OWNER:{prefix}:{principal}"
+
+
+class DatasetAccessLockoutError(RuntimeError):
+    """Raised when a ``dataset_access:`` change would remove OWNER from the
+    principal running the update — the change would lock saga out of any
+    future access syncs on the same dataset (no permission to modify the
+    access policy)."""
+
+
+class DatasetAccessMissingOwnerError(RuntimeError):
+    """Raised when ``dataset_access:`` has no OWNER entry at all. BigQuery
+    auto-adds the creating SA as ``OWNER:userByEmail:<sa>`` when a dataset
+    is created; applying a ``dataset_access:`` that omits OWNER strips
+    that entry, leaving the dataset with no managed owner. If the creating
+    SA is also the one running ``saga update-access`` the result is an
+    unrecoverable lockout (see :class:`DatasetAccessLockoutError`); even
+    when it isn't, the strip silently revokes whoever's currently OWNER.
+
+    Treating "missing OWNER" as a config error rather than letting the
+    reconciler proceed surfaces the foot-gun the moment it's declared,
+    not after it's applied to BigQuery."""
 
 
 def _is_managed_entry(entry: Any) -> bool:
@@ -423,6 +479,13 @@ class BigQueryBaseDestination(Destination):
                 access_entries = BigQueryBaseDestination._parse_dataset_access_static(
                     dataset_access
                 )
+                # Validate the declared list before either creating the
+                # dataset with it or PATCHing an existing dataset against
+                # it. Both paths strip the BQ-auto-added creator OWNER if
+                # the list has none.
+                BigQueryBaseDestination._require_owner_entry(
+                    access_entries, dataset_name
+                )
                 access_entries = BigQueryBaseDestination._filter_staging_access_entries(
                     access_entries, dataset_name
                 )
@@ -465,6 +528,91 @@ class BigQueryBaseDestination(Destination):
             logger.warning(f"Failed to sync dataset access for {dataset_name}: {e}")
 
     @staticmethod
+    def _require_owner_entry(access_entries: List[Any], dataset_name: str) -> None:
+        """Refuse a ``dataset_access:`` list that declares no OWNER.
+
+        BigQuery auto-adds the creating SA as a managed OWNER entry; if
+        the desired list has no OWNER at all, applying it strips that
+        entry — and the dataset ends up with no managed OWNER. The next
+        run can no longer modify the access policy (in the unrecoverable
+        case, the creating SA *is* the one running update-access).
+
+        Raises :class:`DatasetAccessMissingOwnerError` with the YAML line
+        the operator should add. Only role-based entries can be OWNER —
+        ``AUTHORIZED_DATASET``/``AUTHORIZED_VIEW`` entries have ``role=None``
+        and don't satisfy the requirement.
+        """
+        has_owner = any(getattr(e, "role", None) == "OWNER" for e in access_entries)
+        if has_owner:
+            return
+
+        principal = _running_principal_email()
+        if principal:
+            hint = (
+                "Add an OWNER entry to dataset_access: — typically the "
+                "service account running saga update-access, e.g.:\n"
+                f'    - "{_suggest_owner_entry(principal)}"'
+            )
+        else:
+            hint = (
+                "Add an OWNER entry to dataset_access: — typically the "
+                "service account that runs saga update-access."
+            )
+        raise DatasetAccessMissingOwnerError(
+            f"Refusing to apply dataset_access for dataset "
+            f"{dataset_name!r}: no OWNER entry is declared. BigQuery "
+            f"adds the creating SA as OWNER automatically, and applying "
+            f"a dataset_access list without OWNER strips that entry — "
+            f"leaving the dataset with no managed owner. " + hint
+        )
+
+    @staticmethod
+    def _check_lockout(
+        existing_managed_keys: set,
+        desired_keys: set,
+        dataset_name: str,
+    ) -> None:
+        """Refuse the access update when it would remove OWNER from the
+        principal running it.
+
+        Detection is conservative: we only check the principal we can name
+        with certainty (the impersonated SA, or an ADC principal that
+        exposes ``service_account_email``). When the principal can't be
+        identified — e.g. ``gcloud auth application-default login`` user
+        creds — we log a debug line and skip the check rather than block on
+        a false positive. The current bug only manifests under prod
+        impersonation, where the principal *is* identifiable.
+        """
+        principal = _running_principal_email()
+        if not principal:
+            logger.debug(
+                "Lockout safeguard skipped: running principal not "
+                "identifiable from credentials"
+            )
+            return
+
+        running_owner_key = ("OWNER", "userByEmail", principal)
+        if running_owner_key not in existing_managed_keys:
+            # Nothing to lose — the principal doesn't currently rely on a
+            # managed OWNER entry on this dataset (probably has access via
+            # project-level IAM).
+            return
+        if running_owner_key in desired_keys:
+            # Desired list preserves it — safe.
+            return
+
+        suggested = _suggest_owner_entry(principal)
+        raise DatasetAccessLockoutError(
+            f"Refusing to update access on dataset {dataset_name!r}: the "
+            f"configured dataset_access would remove OWNER from the "
+            f"principal running this update ({principal}), which would "
+            f"lock saga out of future access syncs on this dataset "
+            f"(recovery requires a project-Owner to re-grant manually). "
+            f"Add this entry to dataset_access: and re-run:\n"
+            f'    - "{suggested}"'
+        )
+
+    @staticmethod
     def _update_access_if_needed(
         client: Any,
         existing_dataset: Any,
@@ -493,6 +641,17 @@ class BigQueryBaseDestination(Destination):
 
         if existing_managed_keys == desired_keys:
             return
+
+        # Lockout safeguard: a managed OWNER entry on this dataset is what
+        # grants saga `bigquery.datasets.update` permission to make this
+        # call in the first place. If the desired list omits the principal
+        # currently running the update, applying the change would strip
+        # OWNER from ourselves — the next `saga update-access` would 403
+        # on the same PATCH, and recovery requires a project-Owner to
+        # re-grant manually. Refuse early with a paste-back fix.
+        BigQueryBaseDestination._check_lockout(
+            existing_managed_keys, desired_keys, dataset_name
+        )
 
         # Preserve unmanaged entries (BigQuery defaults), replace managed with desired
         unmanaged = [
