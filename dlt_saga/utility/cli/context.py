@@ -22,6 +22,7 @@ class ExecutionContext:
         force: bool = False,
         full_refresh: bool = False,
         update_access: bool = False,
+        dry_run: bool = False,
         start_value_override: Optional[str] = None,
         end_value_override: Optional[str] = None,
     ):
@@ -32,6 +33,9 @@ class ExecutionContext:
             force: Force execution even if source hasn't changed
             full_refresh: Drop existing pipeline state/tables before running
             update_access: Only update access controls without running pipelines
+            dry_run: Preview changes (used by ``saga update-access --dry-run``)
+                without applying them to BigQuery. Log emission still happens
+                so the operator sees what *would* change.
             start_value_override: Override start value for incremental loading (backfill)
             end_value_override: Override end value for incremental loading (backfill)
         """
@@ -39,8 +43,18 @@ class ExecutionContext:
         self.force = force
         self.full_refresh = full_refresh
         self.update_access = update_access
+        self.dry_run = dry_run
         self.start_value_override = start_value_override
         self.end_value_override = end_value_override
+        # Counters bumped by the access-sync paths so the run-end summary
+        # can report grants/revokes totals without per-pipeline plumbing.
+        # In dry-run mode they reflect what *would* have been applied.
+        self.access_grants_applied: int = 0
+        self.access_revokes_applied: int = 0
+        # Config errors (lockout / missing-OWNER) are logged as they occur
+        # but don't abort the run — we want every broken dataset visible
+        # in one pass. CLI checks this counter to decide the exit code.
+        self.access_config_error_count: int = 0
 
     def get_database(self) -> Optional[str]:
         """Get the database (GCP project, Snowflake account, etc.) from profile."""
@@ -141,6 +155,7 @@ def set_execution_context(
     force: bool = False,
     full_refresh: bool = False,
     update_access: bool = False,
+    dry_run: bool = False,
     start_value_override: Optional[str] = None,
     end_value_override: Optional[str] = None,
 ) -> None:
@@ -151,6 +166,7 @@ def set_execution_context(
         force: Force execution even if source hasn't changed
         full_refresh: Drop existing pipeline state/tables before running
         update_access: Only update access controls without running pipelines
+        dry_run: Preview update-access changes without applying them
         start_value_override: Override start value for incremental loading (backfill)
         end_value_override: Override end value for incremental loading (backfill)
     """
@@ -160,6 +176,7 @@ def set_execution_context(
         force,
         full_refresh,
         update_access,
+        dry_run,
         start_value_override,
         end_value_override,
     )
@@ -189,6 +206,7 @@ def execution_context_scope(
     force: bool = False,
     full_refresh: bool = False,
     update_access: bool = False,
+    dry_run: bool = False,
     start_value_override: Optional[str] = None,
     end_value_override: Optional[str] = None,
 ) -> Generator[ExecutionContext, None, None]:
@@ -203,6 +221,7 @@ def execution_context_scope(
         force: Force execution even if source hasn't changed.
         full_refresh: Drop existing pipeline state/tables before running.
         update_access: Only update access controls without running pipelines.
+        dry_run: Preview update-access changes without applying them.
         start_value_override: Override start value for incremental loading.
         end_value_override: Override end value for incremental loading.
 
@@ -216,6 +235,7 @@ def execution_context_scope(
         force=force,
         full_refresh=full_refresh,
         update_access=update_access,
+        dry_run=dry_run,
         start_value_override=start_value_override,
         end_value_override=end_value_override,
     )

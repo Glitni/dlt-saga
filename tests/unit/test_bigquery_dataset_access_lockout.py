@@ -94,12 +94,18 @@ class TestCheckLockout:
     managed OWNER entry that the desired list would remove."""
 
     def test_raises_when_desired_would_remove_running_owner(self, monkeypatch):
+        """When the desired list would remove the running principal's OWNER
+        but still has OWNER entries (just not for the principal), lockout fires."""
         monkeypatch.setenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", PRINCIPAL)
         existing = {
             PRINCIPAL_OWNER_KEY,
             ("READER", "userByEmail", "viewer@example.com"),
         }
-        desired = {("READER", "userByEmail", "viewer@example.com")}  # OWNER absent
+        # Desired list has a different OWNER (not the running principal)
+        desired = {
+            ("OWNER", "userByEmail", "other-admin@example.com"),
+            ("READER", "userByEmail", "viewer@example.com"),
+        }
 
         with pytest.raises(DatasetAccessLockoutError) as exc_info:
             BigQueryBaseDestination._check_lockout(existing, desired, "my_dataset")
@@ -109,6 +115,19 @@ class TestCheckLockout:
         assert PRINCIPAL in msg
         # The suggested entry the operator should paste back is in the message.
         assert f"OWNER:serviceAccount:{PRINCIPAL}" in msg
+
+    def test_noop_when_desired_has_no_owner_at_all(self, monkeypatch):
+        """When the desired list has no OWNER entries at all, the lockout check
+        is skipped (missing-owner validation will catch it as a config error)."""
+        monkeypatch.setenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", PRINCIPAL)
+        existing = {
+            PRINCIPAL_OWNER_KEY,
+            ("READER", "userByEmail", "viewer@example.com"),
+        }
+        desired = {("READER", "userByEmail", "viewer@example.com")}  # OWNER absent
+
+        # Should not raise — missing-owner validation will catch this separately
+        BigQueryBaseDestination._check_lockout(existing, desired, "my_dataset")
 
     def test_noop_when_desired_preserves_running_owner(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", PRINCIPAL)
