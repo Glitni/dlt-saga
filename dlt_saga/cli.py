@@ -1685,6 +1685,15 @@ def plan(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Preview task assignments without persisting"
     ),
+    compact: bool = typer.Option(
+        False,
+        "--compact",
+        help=(
+            "Emit JSON on a single line instead of pretty-printed. "
+            "Use when piping into a parser or when each log entry is "
+            "captured separately (e.g. Cloud Logging from a Cloud Run job)."
+        ),
+    ),
 ):
     """Create an execution plan without triggering workers.
 
@@ -1696,6 +1705,7 @@ def plan(
         saga plan --select "tag:daily" --command run --target prod
         saga plan --select "tag:daily" --dry-run            # Preview only
         saga plan --command historize --select "group:filesystem"
+        saga plan --select "tag:daily" --compact            # Single-line JSON
     """
     setup_logging(verbose)
     profile_target = load_profile_config(profile, target)
@@ -1734,7 +1744,7 @@ def plan(
             "command": command,
             "tasks": tasks,
         }
-        print(json.dumps(output, indent=2))
+        print(json.dumps(output, indent=None if compact else 2))
         return
 
     # Persist the plan
@@ -1775,7 +1785,7 @@ def plan(
             "command": command,
             "plan_dataset": plan_dataset,
         }
-        print(json.dumps(output, indent=2))
+        print(json.dumps(output, indent=None if compact else 2))
 
     execute_with_impersonation(profile_target, _create)
 

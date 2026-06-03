@@ -162,6 +162,7 @@ saga plan [OPTIONS]
 | `-s, --select TEXT` | all | Selector expression(s) |
 | `-c, --command TEXT` | `ingest` | Command workers will run: `ingest`, `historize`, or `run` |
 | `--dry-run` | off | Preview task assignments without persisting |
+| `--compact` | off | Emit JSON on a single line instead of pretty-printed. Pair with automation harnesses that read Cloud Logging entry-by-entry, where a multi-line block can be split into separate ingestion entries and arrive interleaved. |
 | `-v, --verbose` | off | Enable debug logging |
 | `--profile TEXT` | `default` | Profile name |
 | `--target TEXT` | — | Target within profile |
