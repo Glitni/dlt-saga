@@ -176,6 +176,32 @@ class TestUpdateAccessNotSupported:
         result = p.run()
         assert result == []
 
+    def test_no_warning_when_no_table_level_access_configured(self, caplog):
+        """Dataset-level grants are applied by `prepare_for_execution` before
+        the pipeline runs. With no per-pipeline `access:`, the pipeline has
+        nothing to do here — no warning, just a debug line."""
+        p = _make_pipeline()  # no `access:` in config
+        p.context.update_access = True
+        with caplog.at_level("WARNING"):
+            p.run()
+        assert not any("access" in r.message.lower() for r in caplog.records), (
+            f"Unexpected access warning: {[r.message for r in caplog.records]}"
+        )
+
+    def test_warns_when_table_level_access_configured(self, caplog):
+        """When the pipeline has `access:` entries set, those would normally
+        be applied by `update_access_only` — but native_load short-circuits
+        before that. Warn so the operator knows those entries aren't taking
+        effect."""
+        p = _make_pipeline(access=["user:alice@example.com"])
+        p.context.update_access = True
+        with caplog.at_level("WARNING"):
+            p.run()
+        assert any(
+            "Per-table" in r.message and "native_load" in r.message
+            for r in caplog.records
+        ), f"Expected per-table warning, got: {[r.message for r in caplog.records]}"
+
 
 @pytest.mark.unit
 class TestWriteLoadInfoSkipped:
