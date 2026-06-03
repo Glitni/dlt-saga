@@ -1,3 +1,20 @@
+## 0.2.8 — 2026-06-03
+
+### Added
+- --dry-run, grant/revoke labels, change-count summary for update-access (#49)
+- Add saga plan --compact for single-line JSON output (#44)
+- Add orchestration.dataset_access for the orchestration schema (#43)
+
+
+### Changed
+- Clearer logs for saga update-access (#47)
+
+
+### Fixed
+- Validate dataset_access OWNER entries to prevent lockout (#48)
+- Correct misleading native_load warning during saga update-access (#46)
+- Correct Session profile resolution to use the standard env/config chain (#45)
+
 ## 0.2.7 — 2026-05-20
 
 ### Added
