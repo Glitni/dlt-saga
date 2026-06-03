@@ -1,3 +1,8 @@
+## 0.2.9 — 2026-06-03
+
+### Added
+- Accept explicit execution_id in saga plan command (#51)
+
 ## 0.2.8 — 2026-06-03
 
 ### Added
