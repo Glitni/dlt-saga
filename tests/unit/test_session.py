@@ -158,6 +158,89 @@ class TestSessionInit:
 
         assert session._config_source.root_dir == "/custom/configs"
 
+    @patch("dlt_saga.defaults.apply_dlt_defaults")
+    @patch("dlt_saga.session.get_auth_provider")
+    @patch("dlt_saga.session.get_profiles_config")
+    @patch("dlt_saga.session.get_config_source_settings")
+    def test_init_with_profile_none_resolves_through_standard_chain(
+        self, mock_settings, mock_profiles, mock_auth, mock_defaults, monkeypatch
+    ):
+        """`Session(target='prod')` (or any caller that passes profile=None
+        explicitly, like the update-access CLI) should resolve the profile
+        name through the standard chain: SAGA_PROFILE env → saga_project.yml
+        profile: → 'default'. Regression test for
+        https://github.com/<...>: Session passing None straight to
+        ``profiles_config.get_target`` produced 'Profile \\'None\\' not found'
+        instead of resolving to 'default'."""
+        mock_settings.return_value = ConfigSourceConfig(type="file", paths=["configs"])
+        mock_target = MagicMock()
+        mock_target.auth_provider = "gcp"
+        mock_target.destination_type = "bigquery"
+        mock_target.billing_project = None
+        profiles_config = MagicMock()
+        profiles_config.profiles_exist.return_value = True
+        profiles_config.get_target.return_value = mock_target
+        mock_profiles.return_value = profiles_config
+        mock_auth.return_value = MagicMock()
+        # No SAGA_PROFILE env var, no profile: in saga_project.yml → "default".
+        monkeypatch.delenv("SAGA_PROFILE", raising=False)
+        with patch("dlt_saga.utility.cli.common.get_project_config") as mock_project:
+            mock_project.return_value.profile = None
+            Session(profile=None, target="prod-impersonation")
+
+        profiles_config.get_target.assert_called_once_with(
+            "default", "prod-impersonation"
+        )
+
+    @patch("dlt_saga.defaults.apply_dlt_defaults")
+    @patch("dlt_saga.session.get_auth_provider")
+    @patch("dlt_saga.session.get_profiles_config")
+    @patch("dlt_saga.session.get_config_source_settings")
+    def test_init_honours_saga_profile_env_when_profile_arg_is_none(
+        self, mock_settings, mock_profiles, mock_auth, mock_defaults, monkeypatch
+    ):
+        """`SAGA_PROFILE=staging` should win when no explicit profile is passed."""
+        mock_settings.return_value = ConfigSourceConfig(type="file", paths=["configs"])
+        mock_target = MagicMock()
+        mock_target.auth_provider = "gcp"
+        mock_target.destination_type = "bigquery"
+        mock_target.billing_project = None
+        profiles_config = MagicMock()
+        profiles_config.profiles_exist.return_value = True
+        profiles_config.get_target.return_value = mock_target
+        mock_profiles.return_value = profiles_config
+        mock_auth.return_value = MagicMock()
+        monkeypatch.setenv("SAGA_PROFILE", "staging")
+
+        Session(profile=None, target="prod")
+
+        profiles_config.get_target.assert_called_once_with("staging", "prod")
+
+    @patch("dlt_saga.defaults.apply_dlt_defaults")
+    @patch("dlt_saga.session.get_auth_provider")
+    @patch("dlt_saga.session.get_profiles_config")
+    @patch("dlt_saga.session.get_config_source_settings")
+    def test_init_explicit_profile_arg_overrides_env_and_project_config(
+        self, mock_settings, mock_profiles, mock_auth, mock_defaults, monkeypatch
+    ):
+        """An explicit ``profile=`` argument takes precedence over both
+        SAGA_PROFILE and saga_project.yml ``profile:``."""
+        mock_settings.return_value = ConfigSourceConfig(type="file", paths=["configs"])
+        mock_target = MagicMock()
+        mock_target.auth_provider = "gcp"
+        mock_target.destination_type = "bigquery"
+        mock_target.billing_project = None
+        profiles_config = MagicMock()
+        profiles_config.profiles_exist.return_value = True
+        profiles_config.get_target.return_value = mock_target
+        mock_profiles.return_value = profiles_config
+        mock_auth.return_value = MagicMock()
+        monkeypatch.setenv("SAGA_PROFILE", "staging")
+
+        Session(profile="explicit_choice", target="prod")
+
+        profiles_config.get_target.assert_called_once_with("explicit_choice", "prod")
+
 
 # ---------------------------------------------------------------------------
 # Session.discover tests

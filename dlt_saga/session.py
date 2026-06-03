@@ -97,7 +97,10 @@ class Session:
     Python code.
 
     Args:
-        profile: Profile name from profiles.yml (default: ``"default"``).
+        profile: Profile name from profiles.yml. When ``None`` (the default),
+            resolved through the standard chain: ``SAGA_PROFILE`` env var →
+            ``profile:`` in saga_project.yml → ``"default"``. Explicit values
+            are used as-is.
         target: Target within the profile (e.g., ``"dev"``, ``"prod"``).
             If None, uses the profile's default target.
         config_dir: Override path for pipeline config directory. If None,
@@ -111,7 +114,7 @@ class Session:
 
     def __init__(
         self,
-        profile: str = "default",
+        profile: Optional[str] = None,
         target: Optional[str] = None,
         config_dir: Optional[str] = None,
         _profile_target: Optional[ProfileTarget] = None,
@@ -370,14 +373,26 @@ class Session:
     # -------------------------------------------------------------------
 
     @staticmethod
-    def _load_profile(profile: str, target: Optional[str]) -> Optional[ProfileTarget]:
-        """Load profile target from profiles.yml."""
+    def _load_profile(
+        profile: Optional[str], target: Optional[str]
+    ) -> Optional[ProfileTarget]:
+        """Load profile target from profiles.yml.
+
+        ``profile`` may be ``None`` when the caller didn't pass one explicitly
+        (CLI without ``--profile``, ``dlt_saga.Session(target=...)``, etc.).
+        Resolution goes through the standard chain — ``resolve_profile_name``
+        — so ``SAGA_PROFILE`` env var and ``profile:`` in ``saga_project.yml``
+        are honoured before falling back to ``"default"``.
+        """
+        from dlt_saga.utility.cli.common import resolve_profile_name
+
         profiles_config = get_profiles_config()
         if not profiles_config.profiles_exist():
             logger.debug("No profiles.yml found, using environment variables")
             return None
+        resolved = resolve_profile_name(profile)
         try:
-            return profiles_config.get_target(profile, target)
+            return profiles_config.get_target(resolved, target)
         except Exception as e:
             logger.warning(
                 "Failed to load profile: %s. Falling back to environment variables.", e
