@@ -152,6 +152,52 @@ class TestExecutionPlanOverrideBakeIn:
         assert "start_value_override" not in pipeline_configs[0]
 
 
+@pytest.mark.unit
+class TestExecutionIdControl:
+    """Execution ID can be explicitly provided or auto-generated."""
+
+    def test_explicit_execution_id_is_used(self):
+        """When explicit execution_id is provided, it's used instead of auto-generating."""
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        returned_id = manager.create_execution_plan(
+            [_make_config("orders")],
+            execution_id="my-custom-run-001",
+        )
+
+        assert returned_id == "my-custom-run-001"
+        # Verify it appears in the SQL calls
+        all_sql = " ".join(dest.sql_calls)
+        assert "my-custom-run-001" in all_sql
+
+    def test_execution_id_auto_generated_when_not_provided(self):
+        """When no execution_id is provided, a UUID is auto-generated."""
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        returned_id = manager.create_execution_plan([_make_config("orders")])
+
+        # Should be a valid UUID string (36 chars for UUID4 with hyphens)
+        assert len(returned_id) == 36
+        assert returned_id.count("-") == 4
+
+    def test_explicit_execution_id_in_plan_rows(self):
+        """Explicit execution_id appears in all plan rows."""
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        execution_id = "orchestration-run-2026-06-03"
+        manager.create_execution_plan(
+            [_make_config("orders"), _make_config("customers")],
+            execution_id=execution_id,
+        )
+
+        # Check that the execution_id appears in the SQL calls
+        all_sql = " ".join(dest.sql_calls)
+        assert execution_id in all_sql
+
+
 # ---------------------------------------------------------------------------
 # Force propagation through the orchestration provider stack
 # ---------------------------------------------------------------------------
