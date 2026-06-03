@@ -127,6 +127,7 @@ saga update-access [OPTIONS]
 |--------|---------|-------------|
 | `-s, --select TEXT` | all ingest-enabled | Selector expression(s) |
 | `-w, --workers INT` | `4` | Number of parallel workers |
+| `--dry-run` | off | Preview the access changes that would be applied without calling BigQuery's `update_dataset` / `set_iam_policy`. Log output mirrors a real run, prefixed with `[DRY RUN]` and using `would grant` / `would revoke` verbs. The run-end summary reports `would apply N grant(s), M revoke(s)` instead of `applied …`. |
 | `-v, --verbose` | off | Enable debug logging |
 | `--profile TEXT` | `default` | Profile name |
 | `--target TEXT` | — | Target within profile |

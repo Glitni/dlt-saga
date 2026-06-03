@@ -94,12 +94,18 @@ class TestCheckLockout:
     managed OWNER entry that the desired list would remove."""
 
     def test_raises_when_desired_would_remove_running_owner(self, monkeypatch):
+        """When the desired list would remove the running principal's OWNER
+        but still has OWNER entries (just not for the principal), lockout fires."""
         monkeypatch.setenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", PRINCIPAL)
         existing = {
             PRINCIPAL_OWNER_KEY,
             ("READER", "userByEmail", "viewer@example.com"),
         }
-        desired = {("READER", "userByEmail", "viewer@example.com")}  # OWNER absent
+        # Desired list has a different OWNER (not the running principal)
+        desired = {
+            ("OWNER", "userByEmail", "other-admin@example.com"),
+            ("READER", "userByEmail", "viewer@example.com"),
+        }
 
         with pytest.raises(DatasetAccessLockoutError) as exc_info:
             BigQueryBaseDestination._check_lockout(existing, desired, "my_dataset")
@@ -109,6 +115,19 @@ class TestCheckLockout:
         assert PRINCIPAL in msg
         # The suggested entry the operator should paste back is in the message.
         assert f"OWNER:serviceAccount:{PRINCIPAL}" in msg
+
+    def test_noop_when_desired_has_no_owner_at_all(self, monkeypatch):
+        """When the desired list has no OWNER entries at all, the lockout check
+        is skipped (missing-owner validation will catch it as a config error)."""
+        monkeypatch.setenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", PRINCIPAL)
+        existing = {
+            PRINCIPAL_OWNER_KEY,
+            ("READER", "userByEmail", "viewer@example.com"),
+        }
+        desired = {("READER", "userByEmail", "viewer@example.com")}  # OWNER absent
+
+        # Should not raise — missing-owner validation will catch this separately
+        BigQueryBaseDestination._check_lockout(existing, desired, "my_dataset")
 
     def test_noop_when_desired_preserves_running_owner(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", PRINCIPAL)
@@ -214,3 +233,56 @@ class TestRequireOwnerEntry:
         assert "no OWNER entry" in msg
         # Generic hint, no `OWNER:serviceAccount:` paste-back line.
         assert "OWNER:serviceAccount:" not in msg
+
+
+# ---------------------------------------------------------------------------
+# Config errors propagate through _sync_dataset_and_access_static
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestConfigErrorsAreLoggedAndCounted:
+    """``_sync_dataset_and_access_static`` catches the two dataset-access
+    config errors (``DatasetAccessLockoutError``, ``DatasetAccessMissingOwnerError``)
+    rather than raising them, so the run continues and every broken
+    dataset surfaces in one pass. The CLI exits non-zero based on the
+    ``access_config_error_count`` counter on ``ExecutionContext``."""
+
+    def test_missing_owner_logs_error_and_bumps_counter(self, monkeypatch, caplog):
+        from unittest.mock import MagicMock
+
+        from dlt_saga.utility.cli.context import (
+            clear_execution_context,
+            get_execution_context,
+            set_execution_context,
+        )
+
+        monkeypatch.setenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", PRINCIPAL)
+        monkeypatch.setenv("SAGA_ENVIRONMENT", "prod")
+        clear_execution_context()
+        set_execution_context(None, update_access=True)
+
+        with patch(
+            "dlt_saga.destinations.bigquery.base.BigQueryBaseDestination._build_bq_client",
+            return_value=MagicMock(),
+        ):
+            with caplog.at_level("ERROR"):
+                # Must NOT raise — the function catches and logs.
+                BigQueryBaseDestination._sync_dataset_and_access_static(
+                    project_id="proj",
+                    location="EU",
+                    dataset_name="dlt_orchestration",
+                    dataset_access=[
+                        "READER:serviceAccount:foo@x.iam.gserviceaccount.com"
+                    ],
+                )
+
+        # The error message ended up at ERROR level, naming the dataset.
+        error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert any(
+            "dlt_orchestration" in r.message and "no OWNER entry" in r.message
+            for r in error_records
+        ), f"Expected missing-OWNER error log; got {[r.message for r in error_records]}"
+        # Counter bumped so the CLI can detect this and exit non-zero.
+        assert get_execution_context().access_config_error_count == 1
+        clear_execution_context()

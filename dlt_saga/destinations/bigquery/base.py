@@ -454,63 +454,26 @@ class BigQueryBaseDestination(Destination):
             dataset_access: Optional dataset-level access control list
             client: Optional BigQuery client to reuse (avoids creating a new one)
         """
-        import os
-
-        from google.api_core.exceptions import Conflict
-        from google.cloud import bigquery
         from google.cloud.exceptions import NotFound
 
-        from dlt_saga.utility.naming import get_environment
-
-        environment = get_environment()
+        from dlt_saga.utility.cli.context import get_execution_context
 
         try:
-            if client is None:
-                service_account = os.getenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT")
-                if service_account:
-                    logger.debug(
-                        f"Using impersonated credentials for {service_account}"
-                    )
-                client = bigquery.Client(project=project_id, location=location)
+            client = client or BigQueryBaseDestination._build_bq_client(
+                project_id, location
+            )
+            access_entries = BigQueryBaseDestination._prepare_access_entries(
+                dataset_access, dataset_name
+            )
 
-            # Parse access entries once (if configured and in prod)
-            access_entries = None
-            if dataset_access and environment == "prod":
-                access_entries = BigQueryBaseDestination._parse_dataset_access_static(
-                    dataset_access
-                )
-                # Validate the declared list before either creating the
-                # dataset with it or PATCHing an existing dataset against
-                # it. Both paths strip the BQ-auto-added creator OWNER if
-                # the list has none.
-                BigQueryBaseDestination._require_owner_entry(
-                    access_entries, dataset_name
-                )
-                access_entries = BigQueryBaseDestination._filter_staging_access_entries(
-                    access_entries, dataset_name
-                )
-
-            # Step 1: Ensure dataset exists
+            # Step 1: Ensure dataset exists; create if missing
             try:
                 existing_dataset = client.get_dataset(dataset_name)
                 logger.debug(f"BigQuery dataset {dataset_name} exists")
             except NotFound:
-                dataset = bigquery.Dataset(f"{project_id}.{dataset_name}")
-                dataset.location = location
-
-                if access_entries:
-                    dataset.access_entries = access_entries
-                    logger.debug(
-                        f"Setting {len(access_entries)} access entries for {dataset_name}"
-                    )
-
-                try:
-                    client.create_dataset(dataset, exists_ok=True)
-                    logger.info(f"Created BigQuery dataset {dataset_name}")
-                except Conflict:
-                    logger.debug(f"Dataset {dataset_name} created by another process")
-
-                # Dataset just created with correct access, no update needed
+                BigQueryBaseDestination._create_dataset_with_access(
+                    client, project_id, location, dataset_name, access_entries
+                )
                 return
 
             # Step 2: Sync access controls on existing dataset (prod only)
@@ -519,6 +482,14 @@ class BigQueryBaseDestination(Destination):
                     client, existing_dataset, dataset_name, access_entries
                 )
 
+        except (DatasetAccessLockoutError, DatasetAccessMissingOwnerError) as e:
+            # Config errors are unrecoverable until the operator fixes the
+            # config — but we DON'T raise, so the run continues and every
+            # broken dataset surfaces in one pass. Bump the run-level
+            # counter; the CLI checks it at the end to exit non-zero.
+            # Message is logged verbatim (it names the dataset + the fix).
+            logger.error(str(e))
+            get_execution_context().access_config_error_count += 1
         except NotFound:
             logger.debug(
                 f"Could not find dataset {dataset_name}, "
@@ -526,6 +497,85 @@ class BigQueryBaseDestination(Destination):
             )
         except Exception as e:
             logger.warning(f"Failed to sync dataset access for {dataset_name}: {e}")
+
+    @staticmethod
+    def _build_bq_client(project_id: str, location: str) -> Any:
+        """Build a BQ client, logging the impersonated SA if one is set."""
+        from google.cloud import bigquery
+
+        service_account = os.getenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT")
+        if service_account:
+            logger.debug(f"Using impersonated credentials for {service_account}")
+        return bigquery.Client(project=project_id, location=location)
+
+    @staticmethod
+    def _prepare_access_entries(
+        dataset_access: Optional[List[str]], dataset_name: str
+    ) -> Optional[List[Any]]:
+        """Parse + validate + filter ``dataset_access`` for a given dataset.
+
+        Returns ``None`` when no access management should happen (no list
+        declared, or non-prod environment). Validation refuses lists with
+        no OWNER (see :meth:`_require_owner_entry`); the staging filter
+        drops READER entries from `_staging` datasets.
+        """
+        from dlt_saga.utility.naming import get_environment
+
+        if not dataset_access or get_environment() != "prod":
+            return None
+        entries = BigQueryBaseDestination._parse_dataset_access_static(dataset_access)
+        BigQueryBaseDestination._require_owner_entry(entries, dataset_name)
+        return BigQueryBaseDestination._filter_staging_access_entries(
+            entries, dataset_name
+        )
+
+    @staticmethod
+    def _create_dataset_with_access(
+        client: Any,
+        project_id: str,
+        location: str,
+        dataset_name: str,
+        access_entries: Optional[List[Any]],
+    ) -> None:
+        """Create a BigQuery dataset, optionally with explicit access entries.
+
+        Dry-run path is silent except for a `[DRY RUN] Would create…` log
+        and a grant-counter bump; an update-access preview shouldn't
+        materialise empty datasets.
+        """
+        from google.api_core.exceptions import Conflict
+        from google.cloud import bigquery
+
+        from dlt_saga.utility.cli.context import get_execution_context
+
+        ctx = get_execution_context()
+        if ctx.dry_run:
+            # Don't materialise the dataset under --dry-run. Bump the grant
+            # counter so the run-end summary reflects what would happen,
+            # but stay silent at INFO — past-tense "Created" would lie,
+            # and the diff lines below are the operator's primary signal.
+            logger.debug(
+                f"Dataset {dataset_name} does not exist; create skipped (dry-run). "
+                f"Would create with {len(access_entries) if access_entries else 0} "
+                f"access entries."
+            )
+            if access_entries:
+                ctx.access_grants_applied += len(access_entries)
+            return
+
+        dataset = bigquery.Dataset(f"{project_id}.{dataset_name}")
+        dataset.location = location
+        if access_entries:
+            dataset.access_entries = access_entries
+            logger.debug(
+                f"Setting {len(access_entries)} access entries for {dataset_name}"
+            )
+
+        try:
+            client.create_dataset(dataset, exists_ok=True)
+            logger.info(f"Created BigQuery dataset {dataset_name}")
+        except Conflict:
+            logger.debug(f"Dataset {dataset_name} created by another process")
 
     @staticmethod
     def _require_owner_entry(access_entries: List[Any], dataset_name: str) -> None:
@@ -541,6 +591,9 @@ class BigQueryBaseDestination(Destination):
         the operator should add. Only role-based entries can be OWNER —
         ``AUTHORIZED_DATASET``/``AUTHORIZED_VIEW`` entries have ``role=None``
         and don't satisfy the requirement.
+
+        In dry-run mode, logs a warning instead of raising so the operator
+        can see what grants *would* be applied while fixing the owner config.
         """
         has_owner = any(getattr(e, "role", None) == "OWNER" for e in access_entries)
         if has_owner:
@@ -558,13 +611,23 @@ class BigQueryBaseDestination(Destination):
                 "Add an OWNER entry to dataset_access: — typically the "
                 "service account that runs saga update-access."
             )
-        raise DatasetAccessMissingOwnerError(
-            f"Refusing to apply dataset_access for dataset "
-            f"{dataset_name!r}: no OWNER entry is declared. BigQuery "
-            f"adds the creating SA as OWNER automatically, and applying "
-            f"a dataset_access list without OWNER strips that entry — "
-            f"leaving the dataset with no managed owner. " + hint
-        )
+
+        error_msg = f"No OWNER entry declared for dataset {dataset_name!r}. " + hint
+
+        from dlt_saga.utility.cli.context import get_execution_context
+
+        context = get_execution_context()
+
+        if context.dry_run:
+            logger.error(error_msg)
+            context.access_config_error_count += 1
+        else:
+            raise DatasetAccessMissingOwnerError(
+                f"Refusing to apply dataset_access for dataset {dataset_name!r}: "
+                f"no OWNER entry is declared. BigQuery adds the creating SA as OWNER "
+                f"automatically, and applying a dataset_access list without OWNER strips "
+                f"that entry — leaving the dataset with no managed owner. " + hint
+            )
 
     @staticmethod
     def _check_lockout(
@@ -582,6 +645,9 @@ class BigQueryBaseDestination(Destination):
         creds — we log a debug line and skip the check rather than block on
         a false positive. The current bug only manifests under prod
         impersonation, where the principal *is* identifiable.
+
+        In dry-run mode, logs a warning instead of raising so the operator
+        can see what grants *would* be applied while fixing the lockout issue.
         """
         principal = _running_principal_email()
         if not principal:
@@ -601,16 +667,37 @@ class BigQueryBaseDestination(Destination):
             # Desired list preserves it — safe.
             return
 
+        # If desired list has no OWNER at all, the missing-owner validation
+        # will catch it and report the fix. Skip this lockout warning to avoid
+        # duplicate error messages about the same root cause.
+        has_any_owner = any(key[0] == "OWNER" for key in desired_keys)
+        if not has_any_owner:
+            return
+
         suggested = _suggest_owner_entry(principal)
-        raise DatasetAccessLockoutError(
-            f"Refusing to update access on dataset {dataset_name!r}: the "
-            f"configured dataset_access would remove OWNER from the "
-            f"principal running this update ({principal}), which would "
-            f"lock saga out of future access syncs on this dataset "
-            f"(recovery requires a project-Owner to re-grant manually). "
-            f"Add this entry to dataset_access: and re-run:\n"
-            f'    - "{suggested}"'
+        hint = f'Add this entry to dataset_access:\n    - "{suggested}"'
+        error_msg = (
+            f"Configured dataset_access for {dataset_name!r} would remove OWNER from "
+            f"running principal ({principal}). " + hint
         )
+
+        from dlt_saga.utility.cli.context import get_execution_context
+
+        context = get_execution_context()
+
+        if context.dry_run:
+            logger.error(error_msg)
+            context.access_config_error_count += 1
+        else:
+            raise DatasetAccessLockoutError(
+                f"Refusing to update access on dataset {dataset_name!r}: the "
+                f"configured dataset_access would remove OWNER from the "
+                f"principal running this update ({principal}), which would "
+                f"lock saga out of future access syncs on this dataset "
+                f"(recovery requires a project-Owner to re-grant manually). "
+                f"Add this entry to dataset_access: and re-run:\n"
+                f'    - "{suggested}"'
+            )
 
     @staticmethod
     def _update_access_if_needed(
@@ -662,20 +749,30 @@ class BigQueryBaseDestination(Destination):
         added = desired_keys - existing_managed_keys
         removed = existing_managed_keys - desired_keys
 
-        existing_dataset.access_entries = final_entries
-        client.update_dataset(existing_dataset, ["access_entries"])
+        # Honour --dry-run: skip the destructive PATCH but emit the same
+        # diff. The DRY RUN banner at run start and the summary footer
+        # carry the "nothing applied" signal — per-line wording stays
+        # identical so an operator reads the diff the same way in both
+        # modes. Counters bump in both modes; the run-end summary uses
+        # them to report what was (or would be) applied.
+        from dlt_saga.utility.cli.context import get_execution_context
 
-        # Emit the diff at INFO — counts on the summary line, identities on
-        # follow-up lines — so an operator running `saga update-access` can
-        # see exactly which entries the run touched without flipping log levels.
+        context = get_execution_context()
+        if not context.dry_run:
+            existing_dataset.access_entries = final_entries
+            client.update_dataset(existing_dataset, ["access_entries"])
+
+        context.access_grants_applied += len(added)
+        context.access_revokes_applied += len(removed)
+
         lines = [
             f"Updated access controls for dataset {dataset_name} "
             f"(total: {len(final_entries)})"
         ]
         for key in sorted(added):
-            lines.append(f"  + {_format_access_key(key)}")
+            lines.append(f"  + granted {_format_access_key(key)}")
         for key in sorted(removed):
-            lines.append(f"  - {_format_access_key(key)}")
+            lines.append(f"  - revoked {_format_access_key(key)}")
         logger.info("\n".join(lines))
 
     @classmethod

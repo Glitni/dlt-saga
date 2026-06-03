@@ -280,6 +280,7 @@ class Session:
         self,
         select: Optional[List[str]] = None,
         workers: int = 4,
+        dry_run: bool = False,
     ) -> SessionResult:
         """Update access controls (e.g., BigQuery IAM policies) without running pipelines.
 
@@ -291,6 +292,10 @@ class Session:
         Args:
             select: Selector expressions. None = all ingest-enabled.
             workers: Number of parallel workers.
+            dry_run: When True, compute the diff and emit log lines as if
+                applying, but skip the BigQuery PATCH / set_iam_policy /
+                create_dataset calls. Use to preview the change set before
+                committing.
 
         Returns:
             SessionResult with per-pipeline outcomes.
@@ -298,6 +303,7 @@ class Session:
         with execution_context_scope(
             self._profile_target,
             update_access=True,
+            dry_run=dry_run,
         ):
             return self._execute_with_auth(
                 lambda: self._run_update_access(select, workers)
@@ -362,7 +368,11 @@ class Session:
         schema = get_execution_plan_schema()
         location = context.get_location() or "EU"
 
-        logger.info(
+        # No "Applying orchestration.dataset_access …" log here — the
+        # downstream `Updated access controls for dataset X` line (from
+        # `_update_access_if_needed`) names the dataset and shows the diff.
+        # Silence on no-op runs is consistent with the per-pipeline path.
+        logger.debug(
             "Applying orchestration.dataset_access to %s.%s (%d entries)",
             project_id,
             schema,
@@ -517,16 +527,20 @@ class Session:
         # access sync runs in that mode, not the actual extract/load. Pick the
         # log wording to match so an operator running `saga update-access`
         # doesn't see "Running 151 ingest pipeline(s)" and worry pipelines
-        # are about to execute.
+        # are about to execute. In dry-run, suppress the iteration header
+        # entirely — "Syncing" implies action that isn't happening, and the
+        # DRY RUN banner + per-dataset/per-table diff lines + summary
+        # footer already carry the context.
         from dlt_saga.utility.cli.context import get_execution_context
 
-        update_access = get_execution_context().update_access
-        if update_access:
-            logger.info(
-                "Syncing access for %d pipeline(s) with %d worker(s)",
-                len(all_configs),
-                workers,
-            )
+        context = get_execution_context()
+        if context.update_access:
+            if not context.dry_run:
+                logger.info(
+                    "Syncing access for %d pipeline(s) with %d worker(s)",
+                    len(all_configs),
+                    workers,
+                )
         else:
             logger.info(
                 "Running %d ingest pipeline(s) with %d worker(s)",
@@ -560,13 +574,40 @@ class Session:
         result = SessionResult(pipeline_results=results)
         from dlt_saga.utility.cli.context import get_execution_context
 
-        if get_execution_context().update_access:
-            logger.info(
-                "Access sync complete: %d/%d succeeded, %d failed",
-                result.succeeded,
-                len(results),
-                result.failed,
+        context = get_execution_context()
+        if context.update_access:
+            grants = context.access_grants_applied
+            revokes = context.access_revokes_applied
+            config_errors = context.access_config_error_count
+            dry_run_suffix = " (DRY RUN — nothing applied)" if context.dry_run else ""
+            verb = "would apply" if context.dry_run else "applied"
+            errors_suffix = (
+                f", {config_errors} config error(s)" if config_errors else ""
             )
+            if grants == 0 and revokes == 0:
+                # Distinguish "actually nothing to change" from a partial
+                # run where everything in scope was already in sync.
+                logger.info(
+                    "Access sync complete%s: no changes %s; "
+                    "%d pipelines processed, %d failed%s",
+                    dry_run_suffix,
+                    verb,
+                    len(results),
+                    result.failed,
+                    errors_suffix,
+                )
+            else:
+                logger.info(
+                    "Access sync complete%s: %s %d grant(s), %d revoke(s); "
+                    "%d pipelines processed, %d failed%s",
+                    dry_run_suffix,
+                    verb,
+                    grants,
+                    revokes,
+                    len(results),
+                    result.failed,
+                    errors_suffix,
+                )
         else:
             logger.info(
                 "Ingest complete: %d/%d succeeded, %d failed",

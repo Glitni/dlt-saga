@@ -179,16 +179,25 @@ class BigQueryAccessManager(AccessManager):
             f"Policy update decision for {table_id}: missing={len(missing_members)}, revoked={len(revoked_members)}"
         )
 
+        # Honour --dry-run from the execution context: skip the destructive
+        # `set_iam_policy` call. Per-line wording stays identical to a real
+        # run — the DRY RUN banner and summary footer carry the "nothing
+        # applied" context. Counters bump in both modes.
+        from dlt_saga.utility.cli.context import get_execution_context
+
+        context = get_execution_context()
         try:
-            self.client.set_iam_policy(table_ref, policy)
-            # Emit identities at INFO so operators see what changed without
-            # flipping log levels. Members are pre-formatted (e.g.
-            # ``user:alice@example.com``) so they pass through unchanged.
+            if not context.dry_run:
+                self.client.set_iam_policy(table_ref, policy)
+
+            context.access_grants_applied += len(missing_members)
+            context.access_revokes_applied += len(revoked_members)
+
             lines = [f"Updated IAM policy for table {table_id}"]
             for member in sorted(missing_members):
-                lines.append(f"  + {member}")
+                lines.append(f"  + granted {member}")
             for member in sorted(revoked_members):
-                lines.append(f"  - {member}")
+                lines.append(f"  - revoked {member}")
             logger.info("\n".join(lines))
         except Exception as e:
             logger.error(f"Failed to update IAM policy for table {table_id}: {str(e)}")

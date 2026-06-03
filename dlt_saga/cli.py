@@ -1224,6 +1224,16 @@ def update_access(
     target: Optional[str] = typer.Option(
         None, "--target", help="Target within profile"
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Preview the access changes that would be applied without "
+            "calling BigQuery's update_dataset / set_iam_policy. Log "
+            "output is the same shape as a real run, prefixed with "
+            "[DRY RUN] and using `would grant`/`would revoke` verbs."
+        ),
+    ),
 ):
     """Update BigQuery access controls (IAM policies) without running pipelines.
 
@@ -1231,22 +1241,30 @@ def update_access(
         saga update-access                                  # All tables
         saga update-access --select "type:google_sheets"    # Specific type
         saga update-access --target prod                    # In production
+        saga update-access --dry-run --target prod          # Preview only
     """
     setup_logging(verbose)
 
     logger.info("=" * 60)
-    logger.info("UPDATE ACCESS MODE")
+    logger.info("UPDATE ACCESS MODE%s", " (DRY RUN)" if dry_run else "")
     logger.info("Only updating BigQuery access controls (IAM policies)")
     logger.info("Pipelines will NOT be executed")
+    if dry_run:
+        logger.info("DRY RUN: no changes will be applied to BigQuery")
     logger.info("=" * 60)
 
     from dlt_saga.session import Session
+    from dlt_saga.utility.cli.context import get_execution_context
 
     result = Session(profile=profile, target=target).update_access(
         select=list(select) if select else None,
         workers=workers,
+        dry_run=dry_run,
     )
-    if result.has_failures:
+    # Config errors (lockout / missing-OWNER) are logged as they occur
+    # rather than raised, so the operator sees every broken dataset in
+    # one pass. Exit non-zero here if any fired during the run.
+    if result.has_failures or get_execution_context().access_config_error_count > 0:
         raise typer.Exit(1)
 
 
