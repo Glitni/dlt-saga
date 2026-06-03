@@ -345,6 +345,26 @@ def dlt_saga_by_tag(tag: str, target: str = "prod") -> None:
 
 ---
 
+## Granting access to the orchestration schema
+
+When an external orchestrator drives `saga plan` / `saga worker` (or wants to wait on / inspect runs it triggered), it needs read access to the orchestration schema where saga persists execution plans — `dlt_orchestration` in prod by default. Saga creates the schema on first plan run; access controls are declared in `saga_project.yml`:
+
+```yaml
+orchestration:
+  provider: cloud_run
+  job_name: adp-dlt-ingest-daily
+  schema: dlt_orchestration            # optional override
+  dataset_access:
+    - "READER:serviceAccount:airflow-runner@<project>.iam.gserviceaccount.com"
+    - "READER:group:data-platform@example.com"
+```
+
+`saga update-access` applies these entries to the orchestration schema alongside the per-pipeline `pipelines.dataset_access` grants. Same string format. Applied in prod only — matches the per-pipeline behaviour. Without this, an external orchestrator querying the execution plan tables will see `PERMISSION_DENIED` even though saga creates the schema itself.
+
+> **BigQuery only.** Saga's orchestration provider (Cloud Run) writes the plan to BigQuery, so `orchestration.dataset_access:` is a no-op on other destinations today. When orchestration support arrives for Databricks etc., the same field will dispatch through that destination.
+
+---
+
 ## Tips and trade-offs
 
 - **Always pass `workers=1`** when the orchestrator is already parallelising across pipelines. Letting both layers fan out leads to surprising contention and double-counted concurrency.

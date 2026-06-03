@@ -280,6 +280,11 @@ class Session:
     ) -> SessionResult:
         """Update access controls (e.g., BigQuery IAM policies) without running pipelines.
 
+        Syncs per-pipeline ``dataset_access`` (under ``pipelines:`` in
+        saga_project.yml) and, if configured, ``orchestration.dataset_access``
+        on the orchestration schema — letting external orchestrators (Airflow,
+        Dagster, Prefect) read the execution plan they triggered.
+
         Args:
             select: Selector expressions. None = all ingest-enabled.
             workers: Number of parallel workers.
@@ -291,7 +296,74 @@ class Session:
             self._profile_target,
             update_access=True,
         ):
-            return self._execute_with_auth(lambda: self._run_ingest(select, workers))
+            return self._execute_with_auth(
+                lambda: self._run_update_access(select, workers)
+            )
+
+    def _run_update_access(
+        self, select: Optional[List[str]], workers: int
+    ) -> SessionResult:
+        """Per-pipeline access sync, then orchestration schema sync."""
+        result = self._run_ingest(select, workers)
+        self._apply_orchestration_access()
+        return result
+
+    @staticmethod
+    def _apply_orchestration_access() -> None:
+        """Apply ``orchestration.dataset_access`` to the orchestration schema.
+
+        No-op when the field is unset or when the destination doesn't support
+        orchestration (only BigQuery today — the Cloud Run provider writes the
+        execution plan there).
+        """
+        from dlt_saga.project_config import get_orchestration_config
+        from dlt_saga.utility.cli.context import get_execution_context
+        from dlt_saga.utility.naming import get_execution_plan_schema
+
+        orchestration_config = get_orchestration_config()
+        if not orchestration_config.dataset_access:
+            logger.debug(
+                "No orchestration.dataset_access configured; "
+                "skipping orchestration schema access sync"
+            )
+            return
+
+        context = get_execution_context()
+        destination_type = context.get_destination_type()
+        if destination_type != "bigquery":
+            logger.warning(
+                "orchestration.dataset_access is set but destination type "
+                "%r does not support orchestration access sync; skipping. "
+                "Apply the grant out-of-band for now.",
+                destination_type,
+            )
+            return
+
+        project_id = context.get_database()
+        if not project_id:
+            logger.warning(
+                "Cannot apply orchestration.dataset_access: no project "
+                "configured in the execution context"
+            )
+            return
+
+        from dlt_saga.destinations.bigquery.base import BigQueryBaseDestination
+
+        schema = get_execution_plan_schema()
+        location = context.get_location() or "EU"
+
+        logger.info(
+            "Applying orchestration.dataset_access to %s.%s (%d entries)",
+            project_id,
+            schema,
+            len(orchestration_config.dataset_access),
+        )
+        BigQueryBaseDestination._sync_dataset_and_access_static(
+            project_id=project_id,
+            location=location,
+            dataset_name=schema,
+            dataset_access=orchestration_config.dataset_access,
+        )
 
     # -------------------------------------------------------------------
     # Internal: initialization helpers
