@@ -115,9 +115,25 @@ class NativeLoadPipeline(BasePipeline):
 
     def run(self) -> list:
         if self.context.update_access:
-            self.logger.warning(
-                "update_access is not supported for native_load adapter"
+            # Dataset-level grants (`pipelines.dataset_access` /
+            # `orchestration.dataset_access`) are applied earlier, in the
+            # destination's `prepare_for_execution`, so they take effect for
+            # native_load datasets too. What's skipped here is per-pipeline
+            # table-level `access:` — native_load creates tables via raw DDL
+            # outside dlt's pipeline machinery, and the table access manager
+            # has no hook for that path. Phrase the warning accordingly so an
+            # operator running `saga update-access` doesn't think dataset
+            # access is broken when only table-level access is unsupported.
+            self.logger.debug(
+                "Skipping table-level access for native_load pipeline "
+                "(dataset-level access already applied)"
             )
+            if self.config_dict.get("access"):
+                self.logger.warning(
+                    "Per-table `access:` is not yet supported for native_load "
+                    "adapter — entries on this pipeline will not be applied. "
+                    "Dataset-level `dataset_access:` is applied normally."
+                )
             return []
 
         try:
