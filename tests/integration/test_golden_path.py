@@ -70,3 +70,50 @@ class TestGoldenPath:
         assert (tmp_path / "local.duckdb").exists(), (
             "DuckDB file not created after ingest"
         )
+
+    def test_plan_dry_run_emits_pretty_json_by_default(self, tmp_path, monkeypatch):
+        """`saga plan --dry-run` pretty-prints JSON with indent=2, so a
+        human running it interactively gets a readable block."""
+        monkeypatch.chdir(tmp_path)
+        run_init(no_input=True)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["plan", "--dry-run", "--select", "filesystem__sample"]
+        )
+        assert result.exit_code == 0, (
+            f"saga plan exited {result.exit_code}:\n{result.output}"
+        )
+        # Pretty-printed: opening brace on its own line, then indented keys.
+        assert "{\n  " in result.output
+
+    def test_plan_dry_run_with_compact_emits_single_line(self, tmp_path, monkeypatch):
+        """`saga plan --dry-run --compact` collapses to a single line — the
+        shape an automation harness reading Cloud Logging entry-by-entry
+        wants (one log entry = the whole JSON, no interleaving)."""
+        monkeypatch.chdir(tmp_path)
+        run_init(no_input=True)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["plan", "--dry-run", "--compact", "--select", "filesystem__sample"],
+        )
+        assert result.exit_code == 0, (
+            f"saga plan exited {result.exit_code}:\n{result.output}"
+        )
+        # Locate the JSON line (other log output may precede it).
+        import json as _json
+
+        json_lines = [
+            line
+            for line in result.output.splitlines()
+            if line.startswith("{") and line.endswith("}")
+        ]
+        assert len(json_lines) == 1, (
+            f"Expected exactly one single-line JSON object, got:\n{result.output}"
+        )
+        # Parses and carries the expected dry-run keys.
+        parsed = _json.loads(json_lines[0])
+        assert parsed["dry_run"] is True
+        assert "task_count" in parsed
