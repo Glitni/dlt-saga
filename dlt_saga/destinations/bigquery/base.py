@@ -50,6 +50,18 @@ def _stable_entry_key(entry: Any) -> tuple:
 _MANAGED_ENTITY_TYPES = frozenset({"userByEmail", "groupByEmail", "view"})
 
 
+def _format_access_key(key: tuple) -> str:
+    """Render a ``_stable_entry_key`` tuple as a human-readable string for
+    logs — mirrors the ``ROLE:entity_type:entity_id`` shape the YAML config
+    uses, so a diff line matches what an operator would write to reproduce
+    the entry."""
+    role, entity_type, entity_id = key
+    # Authorized dataset/view entries have role=None.
+    if role is None:
+        return f"{entity_type}:{entity_id}"
+    return f"{role}:{entity_type}:{entity_id}"
+
+
 def _is_managed_entry(entry: Any) -> bool:
     """Check if an access entry is one we manage via config.
 
@@ -491,23 +503,21 @@ class BigQueryBaseDestination(Destination):
         added = desired_keys - existing_managed_keys
         removed = existing_managed_keys - desired_keys
 
-        if added:
-            logger.debug(f"Access entries to add for {dataset_name}: {added}")
-        if removed:
-            logger.debug(f"Access entries to remove for {dataset_name}: {removed}")
-
         existing_dataset.access_entries = final_entries
         client.update_dataset(existing_dataset, ["access_entries"])
 
-        parts = []
-        if added:
-            parts.append(f"added {len(added)}")
-        if removed:
-            parts.append(f"removed {len(removed)}")
-        logger.info(
+        # Emit the diff at INFO — counts on the summary line, identities on
+        # follow-up lines — so an operator running `saga update-access` can
+        # see exactly which entries the run touched without flipping log levels.
+        lines = [
             f"Updated access controls for dataset {dataset_name} "
-            f"({', '.join(parts)}, total: {len(final_entries)})"
-        )
+            f"(total: {len(final_entries)})"
+        ]
+        for key in sorted(added):
+            lines.append(f"  + {_format_access_key(key)}")
+        for key in sorted(removed):
+            lines.append(f"  - {_format_access_key(key)}")
+        logger.info("\n".join(lines))
 
     @classmethod
     def prepare_for_execution(cls, pipeline_configs: list[Any]) -> None:

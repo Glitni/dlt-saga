@@ -181,14 +181,15 @@ class BigQueryAccessManager(AccessManager):
 
         try:
             self.client.set_iam_policy(table_ref, policy)
-            changes = []
-            if missing_members:
-                changes.append(f"granted {len(missing_members)}")
-            if revoked_members:
-                changes.append(f"revoked {len(revoked_members)}")
-            logger.info(
-                f"Updated IAM policy for table {table_id}: {', '.join(changes)} access entries"
-            )
+            # Emit identities at INFO so operators see what changed without
+            # flipping log levels. Members are pre-formatted (e.g.
+            # ``user:alice@example.com``) so they pass through unchanged.
+            lines = [f"Updated IAM policy for table {table_id}"]
+            for member in sorted(missing_members):
+                lines.append(f"  + {member}")
+            for member in sorted(revoked_members):
+                lines.append(f"  - {member}")
+            logger.info("\n".join(lines))
         except Exception as e:
             logger.error(f"Failed to update IAM policy for table {table_id}: {str(e)}")
 
