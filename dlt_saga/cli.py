@@ -1687,12 +1687,40 @@ def report(
 _PLAN_COMMAND_HELP = "Command that workers will execute: ingest, historize, or run."
 
 
+def _validate_execution_id(execution_id: str) -> str:
+    """Validate execution ID format. Accepts UUIDs or alphanumeric+dash+underscore.
+
+    Raises:
+        ValueError: If format is invalid
+    """
+    import re
+
+    if len(execution_id) > 255:
+        raise ValueError(
+            f"execution_id must be <= 255 characters (got {len(execution_id)})"
+        )
+    if not re.match(r"^[a-zA-Z0-9\-_]+$", execution_id):
+        raise ValueError(
+            "execution_id must contain only alphanumeric characters, dashes, and underscores"
+        )
+    return execution_id
+
+
 @app.command()
 def plan(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
     command: str = typer.Option("ingest", "--command", "-c", help=_PLAN_COMMAND_HELP),
+    execution_id: Optional[str] = typer.Option(
+        None,
+        "--execution-id",
+        help=(
+            "Explicit execution ID for this plan. "
+            "If not provided, a UUID is auto-generated. Useful for multi-stage orchestration "
+            "where you need to reference the same execution across separate jobs."
+        ),
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="Profile to use from profiles.yml"
@@ -1717,15 +1745,25 @@ def plan(
 
     Outputs JSON metadata to stdout for external orchestrators.
     Use --dry-run to preview the task assignments without writing to the
-    execution plan store.
+    execution plan store. Use --execution-id to provide a deterministic ID
+    for multi-stage orchestration workflows (plan → worker).
 
     Examples:
         saga plan --select "tag:daily" --command run --target prod
-        saga plan --select "tag:daily" --dry-run            # Preview only
+        saga plan --select "tag:daily" --dry-run                                    # Preview only
         saga plan --command historize --select "group:filesystem"
-        saga plan --select "tag:daily" --compact            # Single-line JSON
+        saga plan --select "tag:daily" --compact                                    # Single-line JSON
+        saga plan --select "tag:daily" --execution-id my-run-001 --target prod      # Explicit ID
     """
     setup_logging(verbose)
+
+    # Validate execution_id format if provided
+    if execution_id:
+        try:
+            execution_id = _validate_execution_id(execution_id)
+        except ValueError as e:
+            logger.error("Invalid --execution-id: %s", e)
+            raise typer.Exit(1)
     profile_target = load_profile_config(profile, target)
     setup_execution_context(profile_target)
 
@@ -1792,12 +1830,12 @@ def plan(
             profile=profile,
             target=target,
         )
-        execution_id = plan_manager.create_execution_plan(
-            all_configs, metadata=metadata
+        resolved_execution_id = plan_manager.create_execution_plan(
+            all_configs, metadata=metadata, execution_id=execution_id
         )
 
         output = {
-            "execution_id": execution_id,
+            "execution_id": resolved_execution_id,
             "task_count": task_count,
             "pipeline_count": len(all_configs),
             "command": command,

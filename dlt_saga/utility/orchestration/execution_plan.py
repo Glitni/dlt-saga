@@ -243,6 +243,7 @@ class ExecutionPlanManager:
         self,
         pipeline_configs: List[PipelineConfig],
         metadata: Optional[ExecutionMetadata] = None,
+        execution_id: Optional[str] = None,
     ) -> str:
         """Create a new execution plan for the given pipeline configs.
 
@@ -252,11 +253,12 @@ class ExecutionPlanManager:
         Args:
             pipeline_configs: List of PipelineConfig objects to execute
             metadata: Optional execution-level metadata (select criteria, command, etc.)
+            execution_id: Optional explicit execution ID. If not provided, a UUID is auto-generated.
 
         Returns:
             execution_id: Unique ID for this execution
         """
-        execution_id = str(uuid.uuid4())
+        execution_id = execution_id or str(uuid.uuid4())
         logger.debug(
             f"Creating execution plan {execution_id} for {len(pipeline_configs)} pipelines"
         )
