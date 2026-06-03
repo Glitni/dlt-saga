@@ -387,11 +387,12 @@ class TestGetWorkerEnvironment:
 
     @patch("dlt_saga.cli.get_env", return_value=None)
     def test_missing_execution_id_exits(self, mock_get_env):
-        from click.exceptions import Exit
+        import typer
 
         from dlt_saga.cli import _get_worker_environment
 
-        with pytest.raises(Exit):
+        # Newer typer versions raise typer.Exit (typer._click.exceptions.Exit)
+        with pytest.raises(typer.Exit):
             _get_worker_environment()
 
     @patch("dlt_saga.cli.get_env", return_value="id")
@@ -399,11 +400,12 @@ class TestGetWorkerEnvironment:
     def test_missing_task_index_exits(self, mock_get_env):
         import os
 
-        from click.exceptions import Exit
+        import typer
 
         from dlt_saga.cli import _get_worker_environment
 
         os.environ.pop("CLOUD_RUN_TASK_INDEX", None)
         os.environ.pop("SAGA_TASK_INDEX", None)
-        with pytest.raises(Exit):
+        # Newer typer versions raise typer.Exit (typer._click.exceptions.Exit)
+        with pytest.raises(typer.Exit):
             _get_worker_environment()
