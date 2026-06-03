@@ -217,6 +217,21 @@ class OrchestrationConfig:
             ),
         },
     )
+    dataset_access: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Access entries applied to the orchestration schema by "
+                "``saga update-access``. Same string format as "
+                "``pipelines.dataset_access`` (e.g. "
+                "``READER:serviceAccount:<email>``). Use this to grant "
+                "external orchestrators (Airflow, Dagster, Prefect) read "
+                "access on the execution plan tables so they can wait on "
+                "and inspect runs they triggered. Applied in prod only — "
+                "matches the per-pipeline access behaviour."
+            ),
+        },
+    )
 
     @classmethod
     def from_dict(cls, data: dict) -> "OrchestrationConfig":
@@ -226,6 +241,7 @@ class OrchestrationConfig:
             region=data.get("region"),
             job_name=data.get("job_name"),
             schema=data.get("schema"),
+            dataset_access=data.get("dataset_access"),
         )
 
 

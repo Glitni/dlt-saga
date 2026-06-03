@@ -371,6 +371,111 @@ class TestSessionUpdateAccess:
 
 
 # ---------------------------------------------------------------------------
+# Session._apply_orchestration_access tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestApplyOrchestrationAccess:
+    """Test that orchestration.dataset_access from saga_project.yml is
+    applied to the orchestration schema during ``saga update-access``."""
+
+    def test_noop_when_dataset_access_unset(self):
+        from dlt_saga.project_config import OrchestrationConfig
+
+        with (
+            patch(
+                "dlt_saga.project_config.get_orchestration_config",
+                return_value=OrchestrationConfig(),  # no dataset_access
+            ),
+            patch(
+                "dlt_saga.destinations.bigquery.base.BigQueryBaseDestination._sync_dataset_and_access_static"
+            ) as mock_sync,
+        ):
+            Session._apply_orchestration_access()
+
+        mock_sync.assert_not_called()
+
+    def test_skips_with_warning_for_non_bigquery_destination(self, caplog):
+        from dlt_saga.project_config import OrchestrationConfig
+
+        access = ["READER:serviceAccount:airflow@example.iam.gserviceaccount.com"]
+        with (
+            patch(
+                "dlt_saga.project_config.get_orchestration_config",
+                return_value=OrchestrationConfig(dataset_access=access),
+            ),
+            patch("dlt_saga.utility.cli.context.get_execution_context") as mock_ctx,
+            patch(
+                "dlt_saga.destinations.bigquery.base.BigQueryBaseDestination._sync_dataset_and_access_static"
+            ) as mock_sync,
+            caplog.at_level("WARNING"),
+        ):
+            mock_ctx.return_value.get_destination_type.return_value = "databricks"
+            Session._apply_orchestration_access()
+
+        mock_sync.assert_not_called()
+        assert any("does not support" in r.message for r in caplog.records)
+
+    def test_applies_access_when_set_and_destination_is_bigquery(self):
+        from dlt_saga.project_config import OrchestrationConfig
+
+        access = [
+            "READER:serviceAccount:airflow@example.iam.gserviceaccount.com",
+            "READER:group:data@example.com",
+        ]
+        with (
+            patch(
+                "dlt_saga.project_config.get_orchestration_config",
+                return_value=OrchestrationConfig(dataset_access=access),
+            ),
+            patch("dlt_saga.utility.cli.context.get_execution_context") as mock_ctx,
+            patch(
+                "dlt_saga.utility.naming.get_execution_plan_schema",
+                return_value="dlt_orchestration",
+            ),
+            patch(
+                "dlt_saga.destinations.bigquery.base.BigQueryBaseDestination._sync_dataset_and_access_static"
+            ) as mock_sync,
+        ):
+            mock_ctx.return_value.get_destination_type.return_value = "bigquery"
+            mock_ctx.return_value.get_database.return_value = "amedia-adp-sources"
+            mock_ctx.return_value.get_location.return_value = "EU"
+
+            Session._apply_orchestration_access()
+
+        mock_sync.assert_called_once_with(
+            project_id="amedia-adp-sources",
+            location="EU",
+            dataset_name="dlt_orchestration",
+            dataset_access=access,
+        )
+
+    def test_skips_with_warning_when_no_project_in_context(self, caplog):
+        from dlt_saga.project_config import OrchestrationConfig
+
+        access = ["READER:serviceAccount:airflow@example.iam.gserviceaccount.com"]
+        with (
+            patch(
+                "dlt_saga.project_config.get_orchestration_config",
+                return_value=OrchestrationConfig(dataset_access=access),
+            ),
+            patch("dlt_saga.utility.cli.context.get_execution_context") as mock_ctx,
+            patch(
+                "dlt_saga.destinations.bigquery.base.BigQueryBaseDestination._sync_dataset_and_access_static"
+            ) as mock_sync,
+            caplog.at_level("WARNING"),
+        ):
+            mock_ctx.return_value.get_destination_type.return_value = "bigquery"
+            mock_ctx.return_value.get_database.return_value = None
+
+            Session._apply_orchestration_access()
+
+        mock_sync.assert_not_called()
+        assert any("no project" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # execution_context_scope tests
 # ---------------------------------------------------------------------------
 

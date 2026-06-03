@@ -161,6 +161,31 @@ class TestGetOrchestrationConfig:
         assert isinstance(result, OrchestrationConfig)
         assert result.provider is None
 
+    def test_dataset_access_defaults_to_none(self, tmp_path, monkeypatch):
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text("orchestration:\n  provider: cloud_run\n")
+        monkeypatch.chdir(tmp_path)
+
+        result = get_orchestration_config()
+        assert result.dataset_access is None
+
+    def test_dataset_access_parsed_when_present(self, tmp_path, monkeypatch):
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text(
+            "orchestration:\n"
+            "  provider: cloud_run\n"
+            "  dataset_access:\n"
+            "    - 'READER:serviceAccount:airflow@example.iam.gserviceaccount.com'\n"
+            "    - 'READER:group:data@example.com'\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        result = get_orchestration_config()
+        assert result.dataset_access == [
+            "READER:serviceAccount:airflow@example.iam.gserviceaccount.com",
+            "READER:group:data@example.com",
+        ]
+
 
 @pytest.mark.unit
 class TestSagaProjectConfigFromDict:
