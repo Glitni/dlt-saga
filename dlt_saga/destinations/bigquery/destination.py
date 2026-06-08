@@ -640,6 +640,9 @@ class BigQueryDestination(BigQueryBaseDestination):
         source_database: str = "",
         source_schema: str = "",
         source_table: str = "",
+        valid_from_column: str = "_dlt_valid_from",
+        valid_to_column: str = "_dlt_valid_to",
+        is_deleted_column: str = "_dlt_is_deleted",
     ) -> str:
         """Build CREATE TABLE DDL for a BigQuery historize target table.
 
@@ -660,6 +663,9 @@ class BigQueryDestination(BigQueryBaseDestination):
                 source_database,
                 source_schema,
                 source_table,
+                valid_from_column,
+                valid_to_column,
+                is_deleted_column,
             )
 
         # BigQuery Iceberg: explicit CREATE TABLE (no CTAS)
@@ -687,9 +693,9 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         col_defs.extend(
             [
-                f"  `_dlt_valid_from` {ts_type}",
-                f"  `_dlt_valid_to` {ts_type}",
-                f"  `_dlt_is_deleted` {bool_type}",
+                f"  `{valid_from_column}` {ts_type}",
+                f"  `{valid_to_column}` {ts_type}",
+                f"  `{is_deleted_column}` {bool_type}",
             ]
         )
 

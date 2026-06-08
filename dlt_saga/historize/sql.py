@@ -63,6 +63,10 @@ class HistorizeSqlBuilder:
         self.target_table_name = target_table_name
         self.target_schema = target_schema
         self._output_exclude = SYSTEM_COLUMNS | {config.snapshot_column}
+        # SCD2 output column names (configurable; validated as SQL identifiers in HistorizeConfig).
+        self.valid_from = config.valid_from_column
+        self.valid_to = config.valid_to_column
+        self.is_deleted = config.is_deleted_column
         # Pre-rendered source-side WHERE body shared with the runner; ``None`` when
         # no historize.filters: block is configured.  Spliced at each source-read
         # site via the module-level ``filter_where_clause`` / ``and_filter`` helpers.
@@ -144,15 +148,15 @@ class HistorizeSqlBuilder:
 
         delete_sql = f"""
             DELETE FROM {tgt}
-            WHERE _dlt_valid_from >= TIMESTAMP '{safe_date}'
+            WHERE {self.valid_from} >= TIMESTAMP '{safe_date}'
               AND {pk_in_keys}
         """
 
         update_sql = f"""
             UPDATE {tgt}
-            SET _dlt_valid_to = NULL
-            WHERE _dlt_valid_from < TIMESTAMP '{safe_date}'
-              AND _dlt_valid_to >= TIMESTAMP '{safe_date}'
+            SET {self.valid_to} = NULL
+            WHERE {self.valid_from} < TIMESTAMP '{safe_date}'
+              AND {self.valid_to} >= TIMESTAMP '{safe_date}'
               AND {pk_in_keys}
         """
 
@@ -202,9 +206,9 @@ class HistorizeSqlBuilder:
         select_body = (
             f"SELECT\n"
             f"    {self._qcols(all_data_cols)},\n"
-            f"    CAST(NULL AS {ts_type}) AS _dlt_valid_from,\n"
-            f"    CAST(NULL AS {ts_type}) AS _dlt_valid_to,\n"
-            f"    CAST(NULL AS {bool_type}) AS _dlt_is_deleted\n"
+            f"    CAST(NULL AS {ts_type}) AS {self.valid_from},\n"
+            f"    CAST(NULL AS {ts_type}) AS {self.valid_to},\n"
+            f"    CAST(NULL AS {bool_type}) AS {self.is_deleted}\n"
             f"FROM {src}\n"
             f"WHERE FALSE"
         )
@@ -223,6 +227,9 @@ class HistorizeSqlBuilder:
             source_database=self.source_database,
             source_schema=self.source_schema,
             source_table=self.source_table,
+            valid_from_column=self.valid_from,
+            valid_to_column=self.valid_to,
+            is_deleted_column=self.is_deleted,
         )
 
     def build_full_reprocess_sql(self, value_columns: List[str]) -> str:
@@ -262,12 +269,12 @@ class HistorizeSqlBuilder:
             deletion_union = f"""UNION ALL
 SELECT
   {output_cols_from_del},
-  d.disappeared_at AS _dlt_valid_from,
+  d.disappeared_at AS {self.valid_from},
   (SELECT MIN(reappear.{q_snapshot}) FROM changes reappear
    WHERE {pk_join_del_c}
      AND reappear.{q_snapshot} >= d.disappeared_at
-  ) AS _dlt_valid_to,
-  TRUE AS _dlt_is_deleted
+  ) AS {self.valid_to},
+  TRUE AS {self.is_deleted}
 FROM disappearances d
 INNER JOIN deduped del_src ON {pk_join_del}
   AND del_src.{q_snapshot} = d.last_seen"""
@@ -338,7 +345,7 @@ changes_with_next AS (
 scd2 AS (
   SELECT
     {output_cols_from_c},
-    c.{q_snapshot} AS _dlt_valid_from,
+    c.{q_snapshot} AS {self.valid_from},
     {self._build_scd2_columns_sql(pk_cols, snapshot_col)}
   FROM changes_with_next c
 )
@@ -378,9 +385,9 @@ disappearances AS (
 """
 
     def _build_scd2_columns_sql(self, pk_cols: str, snapshot_col: str) -> str:
-        """Build the _dlt_valid_to and _dlt_is_deleted expressions.
+        """Build the valid-to and is-deleted expressions.
 
-        Closed rows always have _dlt_is_deleted=FALSE. Deletions are tracked
+        Closed rows always have is_deleted=FALSE. Deletions are tracked
         via separate deletion marker rows (added in the outer query).
         """
         q_snapshot = self._q(snapshot_col)
@@ -393,11 +400,11 @@ disappearances AS (
          AND d.disappeared_at <= COALESCE(c._next_change_snapshot, TIMESTAMP '9999-12-31')
       ),
       c._next_change_snapshot
-    ) AS _dlt_valid_to,
-    FALSE AS _dlt_is_deleted"""
+    ) AS {self.valid_to},
+    FALSE AS {self.is_deleted}"""
         else:
-            return """c._next_change_snapshot AS _dlt_valid_to,
-    FALSE AS _dlt_is_deleted"""
+            return f"""c._next_change_snapshot AS {self.valid_to},
+    FALSE AS {self.is_deleted}"""
 
     def build_incremental_sql(
         self,
@@ -445,8 +452,8 @@ disappearances AS (
             deletion_union = f"""UNION ALL
   SELECT
     {", ".join(f"del_src.{self._q(col)}" for col in (list(self.primary_key) + list(value_columns)))},
-    del.deleted_at AS _dlt_valid_from,
-    TRUE AS _dlt_is_deleted
+    del.deleted_at AS {self.valid_from},
+    TRUE AS {self.is_deleted}
   FROM deletions del
   INNER JOIN deduped del_src ON {self._pk_join("del", "del_src")}
     AND del_src.{q_snapshot} = del.last_seen"""
@@ -514,8 +521,8 @@ changes AS (
 new_records_raw AS (
   SELECT
     {output_cols_from_c},
-    c.{q_snapshot} AS _dlt_valid_from,
-    FALSE AS _dlt_is_deleted
+    c.{q_snapshot} AS {self.valid_from},
+    FALSE AS {self.is_deleted}
   FROM changes c
   {deletion_union}
 ),
@@ -526,11 +533,11 @@ new_records_raw AS (
 new_records AS (
   SELECT
     {output_cols_bare},
-    _dlt_valid_from,
-    LEAD(_dlt_valid_from) OVER (
-      PARTITION BY {pk_cols} ORDER BY _dlt_valid_from
-    ) AS _dlt_valid_to,
-    _dlt_is_deleted
+    {self.valid_from},
+    LEAD({self.valid_from}) OVER (
+      PARTITION BY {pk_cols} ORDER BY {self.valid_from}
+    ) AS {self.valid_to},
+    {self.is_deleted}
   FROM new_records_raw
 )
 SELECT * FROM new_records;
@@ -540,14 +547,14 @@ SELECT * FROM new_records;
 -- when a batch contains both a deletion and a reappearance for the same key.
 MERGE INTO {tgt} t
 USING (
-  SELECT {pk_cols}, MIN(_dlt_valid_from) AS _dlt_valid_from
+  SELECT {pk_cols}, MIN({self.valid_from}) AS {self.valid_from}
   FROM _historize_incremental
   GROUP BY {pk_cols}
 ) n
-ON {pk_join_t_n} AND t._dlt_valid_to IS NULL
-  AND n._dlt_valid_from > t._dlt_valid_from
+ON {pk_join_t_n} AND t.{self.valid_to} IS NULL
+  AND n.{self.valid_from} > t.{self.valid_from}
 WHEN MATCHED THEN
-  UPDATE SET _dlt_valid_to = n._dlt_valid_from;
+  UPDATE SET {self.valid_to} = n.{self.valid_from};
 
 -- Insert all new records (changes + deletion markers)
 INSERT INTO {tgt}

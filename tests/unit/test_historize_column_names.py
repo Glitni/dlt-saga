@@ -1,0 +1,124 @@
+"""Unit tests for configurable SCD2 output column names in historize.
+
+Covers:
+- HistorizeConfig defaults and overrides for valid_from/valid_to/is_deleted columns
+- partition_column falling back to the valid_from column
+- HistorizeSqlBuilder emitting the configured names in full-reprocess, incremental,
+  and create-table SQL (and the defaults when not overridden)
+- SQL-identifier validation of the new column-name fields
+"""
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from dlt_saga.historize.config import HistorizeConfig
+from dlt_saga.historize.sql import HistorizeSqlBuilder
+
+CUSTOM = {
+    "valid_from_column": "zyx_ErGyldigFraDato",
+    "valid_to_column": "zyx_ErGyldigTilDato",
+    "is_deleted_column": "zyx_ErSlettetFlagg",
+}
+DEFAULT_NAMES = ("_dlt_valid_from", "_dlt_valid_to", "_dlt_is_deleted")
+
+
+def _stub_destination():
+    dest = MagicMock()
+    dest.quote_identifier.side_effect = lambda s: f"`{s}`"
+    dest.hash_expression.side_effect = lambda cols: f"HASH({', '.join(cols)})"
+    dest.cast_to_string.side_effect = lambda expr: f"CAST({expr} AS STRING)"
+    dest.type_name.side_effect = lambda t: t.upper()
+    dest.get_full_table_id.side_effect = lambda ds, tbl: f"proj.{ds}.{tbl}"
+    dest.columns_query.side_effect = lambda db, sc, t: "SELECT column_name FROM info"
+    dest.build_historize_create_table_sql.side_effect = lambda **kw: (
+        f"CREATE TABLE {kw['target_table_id']} AS {kw['select_body']}"
+    )
+    return dest
+
+
+def _make_builder(historize_dict=None):
+    config = HistorizeConfig.from_dict(
+        historize_dict or {}, top_level_primary_key=["id"]
+    )
+    return HistorizeSqlBuilder(
+        config=config,
+        destination=_stub_destination(),
+        source_table_id="proj.ds.src",
+        target_table_id="proj.ds.tgt",
+        primary_key=["id"],
+        source_database="proj",
+        source_schema="ds",
+        source_table="src",
+        target_table_name="tgt",
+        target_schema="ds",
+    )
+
+
+@pytest.mark.unit
+class TestHistorizeConfigColumnNames:
+    def test_defaults(self):
+        c = HistorizeConfig.from_dict({}, top_level_primary_key=["id"])
+        assert c.valid_from_column == "_dlt_valid_from"
+        assert c.valid_to_column == "_dlt_valid_to"
+        assert c.is_deleted_column == "_dlt_is_deleted"
+
+    def test_overrides(self):
+        c = HistorizeConfig.from_dict(dict(CUSTOM), top_level_primary_key=["id"])
+        assert c.valid_from_column == "zyx_ErGyldigFraDato"
+        assert c.valid_to_column == "zyx_ErGyldigTilDato"
+        assert c.is_deleted_column == "zyx_ErSlettetFlagg"
+
+    def test_partition_column_defaults_to_valid_from(self):
+        c = HistorizeConfig.from_dict(dict(CUSTOM), top_level_primary_key=["id"])
+        assert c.partition_column == "zyx_ErGyldigFraDato"
+
+    def test_explicit_partition_column_preserved(self):
+        c = HistorizeConfig.from_dict(
+            {**CUSTOM, "partition_column": "snapshot_dt"}, top_level_primary_key=["id"]
+        )
+        assert c.partition_column == "snapshot_dt"
+
+    def test_invalid_identifier_rejected(self):
+        with pytest.raises(ValueError):
+            HistorizeConfig.from_dict(
+                {"valid_from_column": "not a column"}, top_level_primary_key=["id"]
+            )
+
+
+@pytest.mark.unit
+class TestHistorizeSqlColumnNames:
+    def test_full_reprocess_uses_custom_names(self):
+        sql = _make_builder(dict(CUSTOM)).build_full_reprocess_sql(["a", "b"])
+        for name in CUSTOM.values():
+            assert name in sql
+        for default in DEFAULT_NAMES:
+            assert default not in sql
+
+    def test_full_reprocess_defaults(self):
+        sql = _make_builder().build_full_reprocess_sql(["a", "b"])
+        for default in DEFAULT_NAMES:
+            assert default in sql
+
+    def test_incremental_uses_custom_names(self):
+        sql = _make_builder(dict(CUSTOM)).build_incremental_sql(
+            ["a", "b"], new_snapshots=["2024-01-01"]
+        )
+        for name in CUSTOM.values():
+            assert name in sql
+        for default in DEFAULT_NAMES:
+            assert default not in sql
+
+    def test_create_table_uses_custom_names(self):
+        sql = _make_builder(dict(CUSTOM)).build_create_target_table_sql(["a", "b"])
+        for name in CUSTOM.values():
+            assert name in sql
+
+    def test_rollback_uses_custom_names(self):
+        stmts = _make_builder(dict(CUSTOM)).build_rollback_sql(
+            "2024-01-01T00:00:00", run_id="abc", dataset="ds"
+        )
+        joined = "\n".join(stmts)
+        assert "zyx_ErGyldigFraDato" in joined
+        assert "zyx_ErGyldigTilDato" in joined
+        assert "_dlt_valid_from" not in joined

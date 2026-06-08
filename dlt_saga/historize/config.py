@@ -91,10 +91,43 @@ class HistorizeConfig:
         },
     )
 
-    partition_column: str = field(
+    valid_from_column: str = field(
         default="_dlt_valid_from",
         metadata={
-            "description": "Column to partition the historized table by. Defaults to '_dlt_valid_from'."
+            "description": (
+                "Name of the SCD2 valid-from column in the historized table. "
+                "Defaults to '_dlt_valid_from'."
+            )
+        },
+    )
+
+    valid_to_column: str = field(
+        default="_dlt_valid_to",
+        metadata={
+            "description": (
+                "Name of the SCD2 valid-to column in the historized table. "
+                "Defaults to '_dlt_valid_to'."
+            )
+        },
+    )
+
+    is_deleted_column: str = field(
+        default="_dlt_is_deleted",
+        metadata={
+            "description": (
+                "Name of the soft-delete marker column in the historized table. "
+                "Defaults to '_dlt_is_deleted'."
+            )
+        },
+    )
+
+    partition_column: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Column to partition the historized table by. "
+                "Defaults to the valid_from_column."
+            )
         },
     )
 
@@ -151,16 +184,26 @@ class HistorizeConfig:
             self.ignore_columns = [self.ignore_columns]
         if isinstance(self.cluster_columns, str):
             self.cluster_columns = [self.cluster_columns]
+        # partition_column defaults to the SCD2 valid-from column when not set.
+        if not self.partition_column:
+            self.partition_column = self.valid_from_column
         self._validate_column_identifiers()
 
     def _validate_column_identifiers(self):
         """Validate SQL identifier format for column name fields."""
         _SQL_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
-        if not _SQL_IDENT.match(self.partition_column):
-            raise ValueError(
-                f"partition_column must be a valid SQL identifier, got '{self.partition_column}'"
-            )
+        for attr in (
+            "valid_from_column",
+            "valid_to_column",
+            "is_deleted_column",
+            "partition_column",
+        ):
+            value = getattr(self, attr)
+            if not _SQL_IDENT.match(value):
+                raise ValueError(
+                    f"{attr} must be a valid SQL identifier, got '{value}'"
+                )
         if self.cluster_columns:
             for col in self.cluster_columns:
                 if not _SQL_IDENT.match(col):

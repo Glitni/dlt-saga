@@ -1,3 +1,8 @@
+## Unreleased
+
+### Added
+- Configurable SCD2 column names for historize via `valid_from_column`, `valid_to_column`, and `is_deleted_column` (default to `_dlt_valid_from` / `_dlt_valid_to` / `_dlt_is_deleted`). `partition_column` now defaults to `valid_from_column`.
+
 ## 0.2.9 — 2026-06-03
 
 ### Added

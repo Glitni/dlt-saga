@@ -732,6 +732,9 @@ class Destination(ABC):
         source_database: str = "",
         source_schema: str = "",
         source_table: str = "",
+        valid_from_column: str = "_dlt_valid_from",
+        valid_to_column: str = "_dlt_valid_to",
+        is_deleted_column: str = "_dlt_is_deleted",
     ) -> str:
         """Build the CREATE TABLE DDL for a historize target table.
 

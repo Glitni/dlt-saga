@@ -449,6 +449,9 @@ class DatabricksDestination(Destination):
         source_database: str = "",
         source_schema: str = "",
         source_table: str = "",
+        valid_from_column: str = "_dlt_valid_from",
+        valid_to_column: str = "_dlt_valid_to",
+        is_deleted_column: str = "_dlt_is_deleted",
     ) -> str:
         """Build CREATE TABLE DDL for a Databricks historize target table.
 
