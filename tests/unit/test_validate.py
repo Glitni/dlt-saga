@@ -120,6 +120,24 @@ class TestValidatePipelineImpl:
         impl_errors = [e for e in result.errors if "implementation" in e.lower()]
         assert not impl_errors
 
+    def test_historize_only_skips_adapter_resolution(self):
+        """A historize-only pipeline (write_disposition: historize) has no ingest
+        step, so there is no source adapter to resolve — validation must not flag a
+        missing implementation, even for a group with no built-in adapter."""
+        config = _make_config(
+            pipeline_group="streams",
+            table_name="streams__orders",
+            config_dict={
+                "write_disposition": "historize",
+                "primary_key": ["id"],
+                "source_schema": "raw",
+                "source_table": "orders",
+            },
+        )
+        result = validate_pipeline_config(config)
+        assert result.is_valid
+        assert not any("implementation" in e.lower() for e in result.errors)
+
 
 @pytest.mark.unit
 class TestValidateSourceConfig:

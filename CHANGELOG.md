@@ -1,3 +1,8 @@
+## Unreleased
+
+### Fixed
+- `saga validate` no longer reports a missing pipeline implementation for historize-only pipelines (`write_disposition: historize`). These have no ingest step and therefore no source adapter to resolve, so adapter/source-config validation is now skipped for them.
+
 ## 0.2.9 — 2026-06-03
 
 ### Added

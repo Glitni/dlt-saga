@@ -184,8 +184,11 @@ def validate_pipeline_config(config: PipelineConfig) -> ValidationResult:
     result = ValidationResult(pipeline_name=config.pipeline_name)
 
     _validate_write_disposition(config, result)
-    _validate_adapter(config, result)
-    _validate_source_config(config, result)
+    # Historize-only pipelines (write_disposition: "historize") have no ingest step,
+    # so there is no source adapter/config to resolve — skip those checks for them.
+    if config.raw_write_disposition != "historize":
+        _validate_adapter(config, result)
+        _validate_source_config(config, result)
     _validate_historize_config(config, result)
 
     return result
