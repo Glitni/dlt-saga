@@ -1,3 +1,8 @@
+## Unreleased
+
+### Fixed
+- Historize SQL no longer places a correlated scalar subquery in the same `SELECT` clause as window functions, which Spark/Databricks rejects (`UNSUPPORTED_CORRELATED_SCALAR_SUBQUERY_IN_WINDOW`). The previous/next snapshot is precomputed in a `snapshot_sequence` CTE and joined. Unblocks historize on Databricks.
+
 ## 0.2.9 — 2026-06-03
 
 ### Added

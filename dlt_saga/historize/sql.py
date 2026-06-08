@@ -284,6 +284,16 @@ all_snapshots AS (
   FROM {src}{filter_where_clause(self.filter_sql)}
 ),
 
+-- Previous/next snapshot per distinct snapshot. Precomputed here so downstream
+-- CTEs can JOIN instead of using a correlated scalar subquery in the same clause
+-- as a window function (unsupported on Spark/Databricks).
+snapshot_sequence AS (
+  SELECT snapshot_date AS seq_snapshot_date,
+    LAG(snapshot_date) OVER (ORDER BY snapshot_date) AS prev_snapshot_date,
+    LEAD(snapshot_date) OVER (ORDER BY snapshot_date) AS next_snapshot_date
+  FROM all_snapshots
+),
+
 -- Hash value columns for change detection
 hashed AS (
   SELECT *,
@@ -309,9 +319,9 @@ with_context AS (
   SELECT d.*,
     LAG(_row_hash) OVER (pk_order) AS _prev_hash,
     LAG({q_snapshot}) OVER (pk_order) AS _prev_snapshot,
-    (SELECT MAX(snapshot_date) FROM all_snapshots
-     WHERE snapshot_date < d.{q_snapshot}) AS _expected_prev_snapshot
+    ss.prev_snapshot_date AS _expected_prev_snapshot
   FROM deduped d
+  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = d.{q_snapshot}
   WINDOW pk_order AS (PARTITION BY {pk_cols} ORDER BY {q_snapshot})
 ),
 
@@ -364,9 +374,9 @@ with_next_presence AS (
   SELECT kp.*,
     LEAD(snapshot_date) OVER (PARTITION BY {pk_cols} ORDER BY snapshot_date)
       AS next_key_snapshot,
-    (SELECT MIN(snapshot_date) FROM all_snapshots
-     WHERE snapshot_date > kp.snapshot_date) AS next_overall_snapshot
+    ss.next_snapshot_date AS next_overall_snapshot
   FROM key_presence kp
+  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = kp.snapshot_date
 ),
 disappearances AS (
   SELECT {pk_cols}, snapshot_date AS last_seen,
@@ -467,6 +477,15 @@ all_snapshots AS (
   WHERE {and_filter(self.filter_sql, snapshot_filter)}
 ),
 
+-- Previous/next snapshot per distinct snapshot (JOINed below instead of using a
+-- correlated subquery alongside window functions — unsupported on Spark/Databricks).
+snapshot_sequence AS (
+  SELECT snapshot_date AS seq_snapshot_date,
+    LAG(snapshot_date) OVER (ORDER BY snapshot_date) AS prev_snapshot_date,
+    LEAD(snapshot_date) OVER (ORDER BY snapshot_date) AS next_snapshot_date
+  FROM all_snapshots
+),
+
 -- Hash value columns
 hashed AS (
   SELECT *,
@@ -493,9 +512,9 @@ with_context AS (
   SELECT d.*,
     LAG(_row_hash) OVER (pk_order) AS _prev_hash,
     LAG({q_snapshot}) OVER (pk_order) AS _prev_snapshot,
-    (SELECT MAX(snapshot_date) FROM all_snapshots
-     WHERE snapshot_date < d.{q_snapshot}) AS _expected_prev_snapshot
+    ss.prev_snapshot_date AS _expected_prev_snapshot
   FROM deduped d
+  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = d.{q_snapshot}
   WINDOW pk_order AS (PARTITION BY {pk_cols} ORDER BY {q_snapshot})
 ),
 
@@ -574,9 +593,9 @@ deletion_candidates AS (
 with_next_key AS (
   SELECT dc.*,
     LEAD(snapshot_date) OVER (PARTITION BY {pk_cols} ORDER BY snapshot_date) AS next_key_snapshot,
-    (SELECT MIN(snapshot_date) FROM all_snapshots
-     WHERE snapshot_date > dc.snapshot_date) AS next_overall_snapshot
+    ss.next_snapshot_date AS next_overall_snapshot
   FROM deletion_candidates dc
+  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = dc.snapshot_date
 ),
 deletions AS (
   SELECT {pk_cols}, snapshot_date AS last_seen, next_overall_snapshot AS deleted_at
