@@ -264,7 +264,7 @@ class HistorizeRunner:
 
         if (
             self.config.partition_column
-            and self.config.partition_column != "_dlt_valid_from"
+            and self.config.partition_column != self.config.valid_from_column
             and not self.destination.supports_partitioning()
         ):
             raise ValueError(
@@ -399,8 +399,8 @@ class HistorizeRunner:
         )
         stats_sql = f"""
             WITH target_stats AS (
-                SELECT SUM(CASE WHEN NOT _dlt_is_deleted THEN 1 ELSE 0 END) AS new_or_changed_rows,
-                       SUM(CASE WHEN _dlt_is_deleted THEN 1 ELSE 0 END) AS deleted_rows
+                SELECT SUM(CASE WHEN NOT {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS new_or_changed_rows,
+                       SUM(CASE WHEN {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS deleted_rows
                 FROM {tgt}
             ),
             source_stats AS (
@@ -482,10 +482,10 @@ class HistorizeRunner:
         tgt = self.target_table_id
         stats_sql = f"""
             SELECT
-                SUM(CASE WHEN NOT _dlt_is_deleted THEN 1 ELSE 0 END) AS new_or_changed_rows,
-                SUM(CASE WHEN _dlt_is_deleted THEN 1 ELSE 0 END) AS deleted_rows
+                SUM(CASE WHEN NOT {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS new_or_changed_rows,
+                SUM(CASE WHEN {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS deleted_rows
             FROM {tgt}
-            WHERE _dlt_valid_from IN ({snapshot_list})
+            WHERE {self.config.valid_from_column} IN ({snapshot_list})
         """
         rows = list(self.destination.execute_sql(stats_sql, self.schema))
         row = rows[0] if rows else None
@@ -737,10 +737,10 @@ class HistorizeRunner:
         snapshot_list = ", ".join(f"TIMESTAMP '{s}'" for s in snapshots)
         stats_sql = f"""
             SELECT
-                SUM(CASE WHEN NOT _dlt_is_deleted THEN 1 ELSE 0 END) AS new_or_changed_rows,
-                SUM(CASE WHEN _dlt_is_deleted THEN 1 ELSE 0 END) AS deleted_rows
+                SUM(CASE WHEN NOT {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS new_or_changed_rows,
+                SUM(CASE WHEN {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS deleted_rows
             FROM {staging_table_id}
-            WHERE _dlt_valid_from IN ({snapshot_list})
+            WHERE {self.config.valid_from_column} IN ({snapshot_list})
         """
         stat_rows = list(self.destination.execute_sql(stats_sql, target_schema))
         stat_row = stat_rows[0] if stat_rows else None

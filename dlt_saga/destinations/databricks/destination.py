@@ -449,6 +449,9 @@ class DatabricksDestination(Destination):
         source_database: str = "",
         source_schema: str = "",
         source_table: str = "",
+        valid_from_column: str = "_dlt_valid_from",
+        valid_to_column: str = "_dlt_valid_to",
+        is_deleted_column: str = "_dlt_is_deleted",
     ) -> str:
         """Build CREATE TABLE DDL for a Databricks historize target table.
 
@@ -456,6 +459,11 @@ class DatabricksDestination(Destination):
         - native/delta: USING DELTA, supports PARTITIONED BY and CLUSTER BY.
         - iceberg: USING ICEBERG; cluster_columns raises a clear error.
         - delta_uniform: USING DELTA + TBLPROPERTIES for Iceberg compatibility.
+
+        The valid_from/valid_to/is_deleted column-name params are accepted for API parity
+        with the base/BigQuery signatures but unused here: the Databricks CTAS reads the SCD2
+        column names straight from ``select_body``, which the SQL builder already renders with
+        the configured names.
         """
         effective_format = table_format if table_format != "native" else "delta"
 

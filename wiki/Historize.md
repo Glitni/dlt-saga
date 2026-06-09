@@ -20,9 +20,12 @@ A row is active when `ts >= _dlt_valid_from AND (ts < _dlt_valid_to OR _dlt_vali
 
 | Column | Description |
 |--------|-------------|
-| `_dlt_valid_from` | When this version became active (snapshot timestamp) |
-| `_dlt_valid_to` | When this version was superseded (`NULL` = current) |
-| `_dlt_is_deleted` | `TRUE` on deletion marker rows, `FALSE` on all change rows |
+| `_dlt_valid_from` | When this version became active (snapshot timestamp). Renameable via `valid_from_column`. |
+| `_dlt_valid_to` | When this version was superseded (`NULL` = current). Renameable via `valid_to_column`. |
+| `_dlt_is_deleted` | `TRUE` on deletion marker rows, `FALSE` on all change rows. Renameable via `is_deleted_column`. |
+
+The three SCD2 column names default to `_dlt_*` but can be renamed per pipeline — useful when a
+downstream convention expects domain-specific names. See [Renaming the SCD2 columns](#renaming-the-scd2-columns).
 
 ---
 
@@ -69,13 +72,46 @@ saga historize --select "filesystem__snapshots__companies"
 | `snapshot_column` | `historize:` | `_dlt_ingested_at` | Column used as the snapshot timestamp |
 | `track_columns` | `historize:` | — | Opt-in allowlist: only these columns drive change detection (all columns still appear in output) |
 | `ignore_columns` | `historize:` | `[]` | Columns excluded from change detection (still appear in output) |
-| `partition_column` | `historize:` | — | Partition the SCD2 output table |
+| `partition_column` | `historize:` | `valid_from_column` | Partition the SCD2 output table |
 | `cluster_columns` | `historize:` | — | Cluster the SCD2 output table |
 | `track_deletions` | `historize:` | `false` | Emit deletion marker rows when a key disappears |
+| `valid_from_column` | `historize:` | `_dlt_valid_from` | Name of the SCD2 valid-from column in the output table |
+| `valid_to_column` | `historize:` | `_dlt_valid_to` | Name of the SCD2 valid-to column in the output table |
+| `is_deleted_column` | `historize:` | `_dlt_is_deleted` | Name of the soft-delete marker column in the output table |
 | `table_format` | `historize:` | inherited | Table format for the SCD2 output table. Overrides the profile-level setting. See [Table format](#table-format) |
 | `output_schema` | `historize:` | — | Write the historized table to this schema instead of the source schema |
 | `output_table` | `historize:` | — | Explicit name for the historized output table (overrides the auto-generated name) |
 | `filters` | `historize:` | — | Declarative row filter applied only during historize — see [Filtering the source](#filtering-the-source) |
+
+### Renaming the SCD2 columns
+
+By default the validity/deletion columns are named `_dlt_valid_from`, `_dlt_valid_to`, and
+`_dlt_is_deleted`. Set `valid_from_column`, `valid_to_column`, and `is_deleted_column` to emit
+your own names — for example to match an existing data-warehouse naming convention:
+
+```yaml
+write_disposition: "append+historize"
+primary_key: [id]
+
+historize:
+  track_deletions: true
+  valid_from_column: valid_from
+  valid_to_column: valid_to
+  is_deleted_column: is_deleted
+```
+
+The output table then carries `valid_from` / `valid_to` / `is_deleted` instead of the `_dlt_*`
+names. `partition_column` follows `valid_from_column` unless set explicitly. All four names are
+validated as SQL identifiers. Existing tables are unaffected: the defaults are unchanged, so
+pipelines that don't set these keys keep emitting `_dlt_*`. Changing a name after a historized
+table exists requires a full refresh (`saga historize --full-refresh`) — it's part of the config
+fingerprint, so the framework prompts for it.
+
+> **Consistency caveat.** When you override these names, the historized tables no longer match the
+> `_dlt_*` convention dlt's own ingested tables use. That's fine when everything downstream is
+> historized, but mixing renamed historized tables with default-named ingested tables in one
+> warehouse yields inconsistent column names across sibling tables — pick one convention per
+> warehouse.
 
 ---
 
