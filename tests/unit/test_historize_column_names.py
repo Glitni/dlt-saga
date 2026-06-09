@@ -126,6 +126,81 @@ class TestHistorizeSqlColumnNames:
 
 
 @pytest.mark.unit
+class TestBigQueryIcebergRenameCollision:
+    """When the user renames an SCD2 column to a name that also exists on the
+    source, the BigQuery Iceberg explicit-column DDL must not emit both — the
+    explicit SCD2 column wins, the source-side same-name column is dropped."""
+
+    def _invoke(self, source_cols, **rename):
+        from dlt_saga.destinations.bigquery.config import BigQueryDestinationConfig
+        from dlt_saga.destinations.bigquery.destination import BigQueryDestination
+
+        dest = MagicMock(spec=BigQueryDestination)
+        dest.config = BigQueryDestinationConfig(
+            project_id="p", storage_path="gs://b/p/", table_format="iceberg"
+        )
+        dest._HISTORIZE_EXCLUDE_COLS = BigQueryDestination._HISTORIZE_EXCLUDE_COLS
+        dest.type_name.side_effect = lambda t: t.upper()
+        dest.columns_query.side_effect = lambda db, sc, t: (
+            "SELECT column_name FROM info"
+        )
+        dest.execute_sql.return_value = [
+            MagicMock(column_name=n, data_type="STRING") for n in source_cols
+        ]
+        dest.partition_ddl.side_effect = lambda c: f"PARTITION BY DATE({c})"
+
+        return BigQueryDestination.build_historize_create_table_sql(
+            dest,
+            create_clause="CREATE TABLE",
+            target_table_id="proj.ds.tgt",
+            select_body="ignored",
+            partition_column=rename.get("valid_from_column", "_dlt_valid_from"),
+            cluster_columns=None,
+            table_format="iceberg",
+            table_name="tgt",
+            schema="ds",
+            source_database="proj",
+            source_schema="ds",
+            source_table="src",
+            valid_from_column=rename.get("valid_from_column", "_dlt_valid_from"),
+            valid_to_column=rename.get("valid_to_column", "_dlt_valid_to"),
+            is_deleted_column=rename.get("is_deleted_column", "_dlt_is_deleted"),
+        )
+
+    def test_source_column_colliding_with_renamed_is_deleted_is_dropped(self):
+        """Source has `is_deleted`; SCD2 is renamed to `is_deleted`. The source
+        column must NOT appear — the explicit SCD2 definition is the only one."""
+        sql = self._invoke(
+            source_cols=["id", "name", "is_deleted"],
+            valid_from_column="valid_from",
+            valid_to_column="valid_to",
+            is_deleted_column="is_deleted",
+        )
+        # `is_deleted` appears exactly once — as the explicit BOOL column at the bottom.
+        assert sql.count("`is_deleted`") == 1
+        assert "`is_deleted` BOOL" in sql
+
+    def test_source_column_colliding_with_renamed_valid_from_is_dropped(self):
+        sql = self._invoke(
+            source_cols=["id", "valid_from"],
+            valid_from_column="valid_from",
+            valid_to_column="valid_to",
+            is_deleted_column="is_deleted",
+        )
+        assert sql.count("`valid_from`") == 1
+        assert "`valid_from` TIMESTAMP" in sql
+
+    def test_default_names_still_filter_dlt_columns(self):
+        """No rename — defaults still drop the standard `_dlt_*` system columns
+        from the source side (existing behavior preserved)."""
+        sql = self._invoke(source_cols=["id", "_dlt_valid_from", "_dlt_id"])
+        # _dlt_valid_from appears exactly once (the explicit SCD2 column),
+        # not twice (the source-side _dlt_valid_from is dropped by the existing exclude).
+        assert sql.count("`_dlt_valid_from`") == 1
+        assert "`_dlt_id`" not in sql
+
+
+@pytest.mark.unit
 class TestColumnNamesInFingerprint:
     """Renaming an SCD2 column must change the config fingerprint, so the
     framework forces a full refresh instead of emitting SQL against columns the

@@ -682,13 +682,21 @@ class BigQueryDestination(BigQueryBaseDestination):
         ts_type = self.type_name("timestamp")
         bool_type = self.type_name("bool")
 
+        # Also exclude the configured SCD2 names so a source column with the same
+        # name as a renamed SCD2 column doesn't collide with the explicit
+        # definition added below (duplicate column → BigQuery rejects the DDL).
+        excludes = self._HISTORIZE_EXCLUDE_COLS | {
+            valid_from_column,
+            valid_to_column,
+            is_deleted_column,
+        }
         col_defs: List[str] = []
         if source_schema and source_table:
             src_db = source_database or self.config.project_id
             cols_sql = self.columns_query(src_db, source_schema, source_table)
             rows = self.execute_sql(cols_sql)
             for row in rows:
-                if row.column_name not in self._HISTORIZE_EXCLUDE_COLS:
+                if row.column_name not in excludes:
                     col_defs.append(f"  `{row.column_name}` {row.data_type}")
 
         col_defs.extend(
