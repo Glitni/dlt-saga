@@ -185,6 +185,7 @@ class NativeLoadPipeline(BasePipeline):
             with self._phase("finalize"):
                 if total_rows > 0:
                     self._write_load_info(total_rows, first_run)
+                self._sync_target_table_options()
 
             t = self._phase_timings
             self.logger.info(
@@ -726,6 +727,26 @@ class NativeLoadPipeline(BasePipeline):
             self.logger.warning(
                 "Failed to write _saga_load_info: %s; "
                 "run will not appear in `saga report`",
+                exc,
+            )
+
+    def _sync_target_table_options(self) -> None:
+        """Reconcile destination-level table options (e.g. partition_expiration_days).
+
+        Named distinctly from BasePipeline._sync_destination_table_options (which
+        takes a list of loaded tables) because native_load operates on a single
+        known target table — the override would otherwise have an incompatible
+        signature.
+
+        Best-effort: never fail a successful load if the post-load ALTER fails.
+        """
+        try:
+            self.destination.sync_table_options(self._dataset, self.table_name)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to sync destination table options for %s.%s: %s",
+                self._dataset,
+                self.table_name,
                 exc,
             )
 

@@ -546,11 +546,37 @@ class BasePipeline:
 
         finalize_start = time.time()
         self._manage_table_access(loaded_tables)
+        self._sync_destination_table_options(loaded_tables)
 
         if all_load_info:
             self._save_load_info(all_load_info)
 
         return time.time() - finalize_start
+
+    def _sync_destination_table_options(self, loaded_tables: List[str]) -> None:
+        """Reconcile destination-level table options for each loaded table.
+
+        Currently only BigQuery uses this hook (to sync
+        ``partition_expiration_days`` since dlt's adapter doesn't apply it on
+        ALTER). The base ``Destination.sync_table_options`` is a no-op, so
+        destinations without per-table options pay nothing.
+
+        Errors are caught and logged — sync is best-effort and must never
+        fail a successful load.
+        """
+        if not loaded_tables:
+            return
+        dataset = self.pipeline.dataset_name
+        for table in loaded_tables:
+            try:
+                self.destination.sync_table_options(dataset, table)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to sync destination table options for %s.%s: %s",
+                    dataset,
+                    table,
+                    exc,
+                )
 
     def _add_timing_breakdown(
         self,

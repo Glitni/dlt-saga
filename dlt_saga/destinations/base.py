@@ -216,6 +216,25 @@ class Destination(ABC):
         """
         return pipeline.run(data)
 
+    def sync_table_options(self, dataset: str, table: str) -> None:
+        """Reconcile declared table-level options against the destination.
+
+        Called after each successful load to bring an existing table's options
+        in line with the declared config. Idempotent — destinations should
+        compare current state and only emit ALTER statements when something
+        changed.
+
+        Base implementation is a no-op. Destinations override this to honor
+        options that aren't applied on ALTER by the underlying engine — most
+        notably BigQuery's ``partition_expiration_days``, which dlt's own
+        bigquery_adapter only applies at table-creation time.
+
+        Args:
+            dataset: Target dataset / schema name.
+            table: Target table name.
+        """
+        return None
+
     def save_load_info(
         self, dataset_name: str, records: list[dict], pipeline: Any = None
     ) -> None:

@@ -620,6 +620,70 @@ class BigQueryDestination(BigQueryBaseDestination):
             dataset.location = self.config.location
             client.create_dataset(dataset)
 
+    def sync_table_options(self, dataset: str, table: str) -> None:
+        """Reconcile partition_expiration_days against an existing BigQuery table.
+
+        dlt's bigquery_adapter only honors partition_expiration_days on table
+        creation; subsequent changes require an explicit ALTER. This method
+        bridges that gap: it compares the declared value against the table's
+        current ``time_partitioning.expiration_ms`` and updates it when they
+        differ. Setting the config to ``None`` clears the expiration.
+
+        Idempotent — no API call beyond ``get_table`` when nothing needs to
+        change. Silently no-ops on Iceberg tables (which don't expose
+        ``time_partitioning``) and when the target table doesn't exist yet
+        (the CREATE-time path covers first runs).
+
+        Args:
+            dataset: BigQuery dataset name.
+            table: BigQuery table name.
+        """
+        if self.config.table_format == "iceberg":
+            return
+
+        from google.cloud import bigquery
+        from google.cloud.exceptions import NotFound
+
+        client = bigquery.Client(
+            project=self.config.job_project_id, location=self.config.location
+        )
+        table_ref = f"{self.config.project_id}.{dataset}.{table}"
+
+        try:
+            tbl = client.get_table(table_ref)
+        except NotFound:
+            return
+
+        desired_days = self.config.partition_expiration_days
+        desired_ms = desired_days * 86_400_000 if desired_days else None
+
+        if tbl.time_partitioning is None:
+            if desired_days is not None:
+                logger.warning(
+                    "partition_expiration_days=%s declared on %s.%s, but the "
+                    "table is not partitioned; skipping ALTER.",
+                    desired_days,
+                    dataset,
+                    table,
+                )
+            return
+
+        current_ms = tbl.time_partitioning.expiration_ms
+        if current_ms == desired_ms:
+            return
+
+        tbl.time_partitioning.expiration_ms = desired_ms
+        client.update_table(tbl, ["time_partitioning"])
+        logger.info(
+            "Updated partition_expiration_days on %s.%s: %s → %s (days: %s → %s)",
+            dataset,
+            table,
+            current_ms,
+            desired_ms,
+            (current_ms // 86_400_000) if current_ms else None,
+            desired_days,
+        )
+
     # supports_transactions() is intentionally not overridden (returns False).
     # BigQuery supports BEGIN TRANSACTION / COMMIT at the SQL level, but
     # execute_sql() creates a separate query job per call, so transaction

@@ -135,3 +135,110 @@ class TestApplyNativeHintsPartitionExpiration:
             )
         kwargs = mock_adapter.call_args.kwargs
         assert "partition_expiration_days" not in kwargs
+
+
+@pytest.mark.unit
+class TestSyncTableOptionsPartitionExpiration:
+    """`sync_table_options` ALTERs an existing table when the declared value differs."""
+
+    def _make_dest(
+        self,
+        partition_expiration_days=None,
+        table_format="native",
+    ):
+        dest = MagicMock(spec=BigQueryDestination)
+        dest.config = MagicMock()
+        dest.config.project_id = "proj"
+        dest.config.job_project_id = "proj"
+        dest.config.location = "EU"
+        dest.config.partition_expiration_days = partition_expiration_days
+        dest.config.table_format = table_format
+        return dest
+
+    def _make_table(self, expiration_ms, partitioned=True):
+        tbl = MagicMock()
+        if partitioned:
+            tbl.time_partitioning = MagicMock()
+            tbl.time_partitioning.expiration_ms = expiration_ms
+        else:
+            tbl.time_partitioning = None
+        return tbl
+
+    def _invoke(self, dest, table_mock=None, not_found=False):
+        from google.cloud.exceptions import NotFound
+
+        with patch("google.cloud.bigquery.Client") as mock_client_cls:
+            client = mock_client_cls.return_value
+            if not_found:
+                client.get_table.side_effect = NotFound("nope")
+            else:
+                client.get_table.return_value = table_mock
+            BigQueryDestination.sync_table_options(dest, "ds", "tbl")
+            return client
+
+    def test_sets_expiration_when_table_unbounded(self):
+        dest = self._make_dest(partition_expiration_days=90)
+        tbl = self._make_table(expiration_ms=None)
+        client = self._invoke(dest, table_mock=tbl)
+        assert tbl.time_partitioning.expiration_ms == 90 * 86_400_000
+        client.update_table.assert_called_once_with(tbl, ["time_partitioning"])
+
+    def test_clears_expiration_when_config_unset(self):
+        dest = self._make_dest(partition_expiration_days=None)
+        tbl = self._make_table(expiration_ms=30 * 86_400_000)
+        client = self._invoke(dest, table_mock=tbl)
+        assert tbl.time_partitioning.expiration_ms is None
+        client.update_table.assert_called_once_with(tbl, ["time_partitioning"])
+
+    def test_updates_expiration_when_value_differs(self):
+        dest = self._make_dest(partition_expiration_days=90)
+        tbl = self._make_table(expiration_ms=30 * 86_400_000)
+        client = self._invoke(dest, table_mock=tbl)
+        assert tbl.time_partitioning.expiration_ms == 90 * 86_400_000
+        client.update_table.assert_called_once()
+
+    def test_idempotent_when_value_matches(self):
+        dest = self._make_dest(partition_expiration_days=90)
+        tbl = self._make_table(expiration_ms=90 * 86_400_000)
+        client = self._invoke(dest, table_mock=tbl)
+        client.update_table.assert_not_called()
+
+    def test_noop_when_table_missing(self):
+        dest = self._make_dest(partition_expiration_days=90)
+        client = self._invoke(dest, not_found=True)
+        client.update_table.assert_not_called()
+
+    def test_noop_on_iceberg(self):
+        dest = self._make_dest(partition_expiration_days=90, table_format="iceberg")
+        # Iceberg branch returns before instantiating a Client at all.
+        with patch("google.cloud.bigquery.Client") as mock_client_cls:
+            BigQueryDestination.sync_table_options(dest, "ds", "tbl")
+            mock_client_cls.assert_not_called()
+
+    def test_warns_when_table_not_partitioned(self, caplog):
+        import logging
+
+        dest = self._make_dest(partition_expiration_days=90)
+        tbl = self._make_table(expiration_ms=None, partitioned=False)
+        with caplog.at_level(
+            logging.WARNING, logger="dlt_saga.destinations.bigquery.destination"
+        ):
+            client = self._invoke(dest, table_mock=tbl)
+        client.update_table.assert_not_called()
+        assert any(
+            "not partitioned" in record.getMessage() for record in caplog.records
+        )
+
+    def test_no_warning_when_unpartitioned_and_config_unset(self, caplog):
+        import logging
+
+        dest = self._make_dest(partition_expiration_days=None)
+        tbl = self._make_table(expiration_ms=None, partitioned=False)
+        with caplog.at_level(
+            logging.WARNING, logger="dlt_saga.destinations.bigquery.destination"
+        ):
+            client = self._invoke(dest, table_mock=tbl)
+        client.update_table.assert_not_called()
+        assert not any(
+            "not partitioned" in record.getMessage() for record in caplog.records
+        )
