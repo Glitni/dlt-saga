@@ -1,7 +1,7 @@
 ## Unreleased
 
 ### Added
-- Configurable SCD2 column names for historize via `valid_from_column`, `valid_to_column`, and `is_deleted_column` (default to `_dlt_valid_from` / `_dlt_valid_to` / `_dlt_is_deleted`). `partition_column` now defaults to `valid_from_column`.
+- Configurable SCD2 column names for historize via `valid_from_column`, `valid_to_column`, and `is_deleted_column` (default to `_dlt_valid_from` / `_dlt_valid_to` / `_dlt_is_deleted`). `partition_column` now defaults to `valid_from_column`. The names are part of the historize config fingerprint, so renaming a column on an existing table triggers the standard "config changed → run `saga historize --full-refresh`" guard.
 
 ## 0.2.9 — 2026-06-03
 

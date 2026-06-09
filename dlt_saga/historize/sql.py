@@ -62,11 +62,19 @@ class HistorizeSqlBuilder:
         self.source_table = source_table
         self.target_table_name = target_table_name
         self.target_schema = target_schema
-        self._output_exclude = SYSTEM_COLUMNS | {config.snapshot_column}
         # SCD2 output column names (configurable; validated as SQL identifiers in HistorizeConfig).
         self.valid_from = config.valid_from_column
         self.valid_to = config.valid_to_column
         self.is_deleted = config.is_deleted_column
+        # Exclude both the default _dlt_* system columns AND the configured SCD2 names
+        # from value-column discovery, so a source that happens to contain a literal
+        # valid_from/valid_to/is_deleted column doesn't get propagated into the output.
+        self._output_exclude = SYSTEM_COLUMNS | {
+            config.snapshot_column,
+            self.valid_from,
+            self.valid_to,
+            self.is_deleted,
+        }
         # Pre-rendered source-side WHERE body shared with the runner; ``None`` when
         # no historize.filters: block is configured.  Spliced at each source-read
         # site via the module-level ``filter_where_clause`` / ``and_filter`` helpers.

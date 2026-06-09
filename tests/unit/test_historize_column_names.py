@@ -14,6 +14,7 @@ import pytest
 
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.sql import HistorizeSqlBuilder
+from dlt_saga.historize.state import HistorizeStateManager
 
 CUSTOM = {
     "valid_from_column": "zyx_ErGyldigFraDato",
@@ -122,3 +123,31 @@ class TestHistorizeSqlColumnNames:
         assert "zyx_ErGyldigFraDato" in joined
         assert "zyx_ErGyldigTilDato" in joined
         assert "_dlt_valid_from" not in joined
+
+
+@pytest.mark.unit
+class TestColumnNamesInFingerprint:
+    """Renaming an SCD2 column must change the config fingerprint, so the
+    framework forces a full refresh instead of emitting SQL against columns the
+    existing historized table doesn't have."""
+
+    def _fp(self, **overrides):
+        cfg = HistorizeConfig.from_dict(dict(overrides), top_level_primary_key=["id"])
+        return HistorizeStateManager.compute_fingerprint(cfg)
+
+    def test_changes_when_valid_from_renamed(self):
+        assert self._fp() != self._fp(valid_from_column="valid_from")
+
+    def test_changes_when_valid_to_renamed(self):
+        assert self._fp() != self._fp(valid_to_column="valid_to")
+
+    def test_changes_when_is_deleted_renamed(self):
+        assert self._fp() != self._fp(is_deleted_column="is_deleted")
+
+    def test_changes_when_partition_renamed(self):
+        assert self._fp() != self._fp(partition_column="snapshot_dt")
+
+    def test_stable_for_unrelated_change(self):
+        # output_table is not part of the fingerprint — renaming it must not
+        # trigger a full refresh.
+        assert self._fp() == self._fp(output_table="custom_name")

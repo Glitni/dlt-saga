@@ -146,6 +146,9 @@ def make_historize_runner(
     track_deletions=True,
     ignore_columns=None,
     write_disposition="historize",
+    valid_from_column="_dlt_valid_from",
+    valid_to_column="_dlt_valid_to",
+    is_deleted_column="_dlt_is_deleted",
 ):
     """Create a HistorizeRunner for testing."""
     config = HistorizeConfig(
@@ -153,6 +156,9 @@ def make_historize_runner(
         snapshot_column=snapshot_column,
         track_deletions=track_deletions,
         ignore_columns=ignore_columns or [],
+        valid_from_column=valid_from_column,
+        valid_to_column=valid_to_column,
+        is_deleted_column=is_deleted_column,
     )
     return HistorizeRunner(
         pipeline_name="test__raw_companies",

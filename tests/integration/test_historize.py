@@ -258,3 +258,49 @@ class TestConfigChanges:
 
         assert result["status"] == "failed"
         assert "config changed" in result["error"].lower()
+
+    def test_column_rename_requires_full_refresh(self, duckdb_destination):
+        """Renaming an SCD2 output column without --full-refresh is caught by the
+        config fingerprint (would otherwise emit SQL against columns the existing
+        historized table doesn't have)."""
+        run_historize(
+            duckdb_destination,
+            [SNAPSHOT_1, SNAPSHOT_2, SNAPSHOT_3],
+        )
+
+        runner = make_historize_runner(
+            duckdb_destination,
+            full_refresh=False,
+            valid_to_column="valid_to",
+        )
+        result = runner.run()
+
+        assert result["status"] == "failed"
+        assert "config changed" in result["error"].lower()
+
+
+class TestCustomColumnNames:
+    """End-to-end historization with renamed SCD2 output columns."""
+
+    def test_full_reprocess_with_renamed_columns(self, duckdb_destination):
+        result = run_historize(
+            duckdb_destination,
+            [SNAPSHOT_1, SNAPSHOT_2, SNAPSHOT_3],
+            valid_from_column="valid_from",
+            valid_to_column="valid_to",
+            is_deleted_column="is_deleted",
+        )
+        assert result["status"] == "completed"
+
+        rows = query_historized(duckdb_destination, order_by="company_id, valid_from")
+        assert rows, "expected historized rows"
+
+        # Renamed columns present; defaults absent.
+        assert {"valid_from", "valid_to", "is_deleted"}.issubset(rows[0].keys())
+        for default in ("_dlt_valid_from", "_dlt_valid_to", "_dlt_is_deleted"):
+            assert default not in rows[0]
+
+        # SCD2 semantics still correct: Acme (id=1) is deleted in SNAPSHOT_3, so it
+        # has an open deletion marker carrying the renamed flag.
+        acme = get_rows_for(rows, 1)
+        assert any(r["is_deleted"] and r["valid_to"] is None for r in acme)

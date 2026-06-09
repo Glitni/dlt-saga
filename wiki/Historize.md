@@ -81,6 +81,7 @@ saga historize --select "filesystem__snapshots__companies"
 | `table_format` | `historize:` | inherited | Table format for the SCD2 output table. Overrides the profile-level setting. See [Table format](#table-format) |
 | `output_schema` | `historize:` | — | Write the historized table to this schema instead of the source schema |
 | `output_table` | `historize:` | — | Explicit name for the historized output table (overrides the auto-generated name) |
+| `filters` | `historize:` | — | Declarative row filter applied only during historize — see [Filtering the source](#filtering-the-source) |
 
 ### Renaming the SCD2 columns
 
@@ -102,8 +103,15 @@ historize:
 The output table then carries `valid_from` / `valid_to` / `is_deleted` instead of the `_dlt_*`
 names. `partition_column` follows `valid_from_column` unless set explicitly. All four names are
 validated as SQL identifiers. Existing tables are unaffected: the defaults are unchanged, so
-pipelines that don't set these keys keep emitting `_dlt_*`.
-| `filters` | `historize:` | — | Declarative row filter applied only during historize — see [Filtering the source](#filtering-the-source) |
+pipelines that don't set these keys keep emitting `_dlt_*`. Changing a name after a historized
+table exists requires a full refresh (`saga historize --full-refresh`) — it's part of the config
+fingerprint, so the framework prompts for it.
+
+> **Consistency caveat.** When you override these names, the historized tables no longer match the
+> `_dlt_*` convention dlt's own ingested tables use. That's fine when everything downstream is
+> historized, but mixing renamed historized tables with default-named ingested tables in one
+> warehouse yields inconsistent column names across sibling tables — pick one convention per
+> warehouse.
 
 ---
 

@@ -176,6 +176,13 @@ class HistorizeStateManager:
             "snapshot_column": config.snapshot_column,
             "track_deletions": config.track_deletions,
             "table_format": config.table_format or "native",
+            # Output column names rename the SCD2 columns. Changing one after the
+            # historized table exists would emit SQL referencing columns the table
+            # doesn't have, so it mandates a full refresh like the other keys here.
+            "valid_from_column": config.valid_from_column,
+            "valid_to_column": config.valid_to_column,
+            "is_deleted_column": config.is_deleted_column,
+            "partition_column": config.partition_column,
             # Filters affect *which* rows enter the historized table.  A
             # change requires a full rebuild — otherwise rows that no
             # longer pass the filter would survive as stale history.

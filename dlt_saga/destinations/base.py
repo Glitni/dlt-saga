@@ -754,6 +754,11 @@ class Destination(ABC):
             source_database: Source database/project (for column-type discovery).
             source_schema: Source schema/dataset (for column-type discovery).
             source_table: Source table name (for column-type discovery).
+            valid_from_column: SCD2 valid-from column name (defaults to ``_dlt_valid_from``).
+            valid_to_column: SCD2 valid-to column name (defaults to ``_dlt_valid_to``).
+            is_deleted_column: Soft-delete marker column name (defaults to ``_dlt_is_deleted``).
+                Only destinations that emit explicit column DDL (e.g. BigQuery Iceberg) need these;
+                CTAS paths take the names from ``select_body``.
 
         Returns:
             Complete DDL string ready for execution.
