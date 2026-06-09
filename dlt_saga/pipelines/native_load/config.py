@@ -257,12 +257,17 @@ class NativeLoadConfig(BaseConfig):
         default=None,
         metadata={
             "description": (
-                "Hive-style partition layout under source_uri. "
+                "Hive-style partition layout under source_uri. Storage-agnostic — "
+                "works on any supported cloud storage (gs://, abfss://). "
                 "Tokens: {year}, {month}, {day}, {hour}. "
-                "When set with filename_date_format, discovery lists only the partitions "
-                "in [last_cursor - lookback_days, today] instead of the full source root. "
-                "Example: 'year={year}/month={month}/day={day}/'. "
-                "ADLS only; ignored for GCS sources."
+                "When set together with filename_date_regex and filename_date_format, "
+                "discovery lists only the partitions in [last_cursor - lookback_days, today] "
+                "instead of the full source root, and the date regex is matched against the "
+                "full URI rather than the basename. "
+                "Useful when files are organised by date folder but the basename has no date "
+                "(e.g. 'gs://bucket/root/YYYY-MM-DD/<table>_*.csv') — set this to "
+                "'{year}-{month}-{day}/' and use a regex like '/(\\\\d{4}-\\\\d{2}-\\\\d{2})/'. "
+                "Example: 'year={year}/month={month}/day={day}/'."
             ),
         },
     )
