@@ -4,6 +4,16 @@ the same clause as a window function (unsupported on Spark/Databricks).
 The previous/next overall snapshot is precomputed in a `snapshot_sequence` CTE
 and JOINed, instead of `(SELECT MAX/MIN(snapshot_date) FROM all_snapshots ...)`
 inline next to LAG/LEAD window functions.
+
+If one of these tests fails, you probably introduced a correlated scalar
+subquery (e.g. ``(SELECT MAX(...) FROM all_snapshots WHERE ...)``) into a
+``SELECT`` that also uses ``LAG`` / ``LEAD`` / other window functions.
+Spark/Databricks rejects that combination with
+``UNSUPPORTED_CORRELATED_SCALAR_SUBQUERY_IN_WINDOW`` even though DuckDB and
+BigQuery accept it. To get the same value Spark-compatibly, precompute it once
+in a separate CTE (the existing ``snapshot_sequence`` is the template) and
+``LEFT JOIN`` it into the windowed CTE — see ``HistorizeSqlBuilder`` for the
+pattern.
 """
 
 from unittest.mock import MagicMock
