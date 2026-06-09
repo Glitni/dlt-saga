@@ -81,6 +81,7 @@ prod:
 |-------|----------|---------|-------------|
 | `database` | Yes | — | GCP project ID (aliases: `project`, `project_id`) |
 | `location` | No | `EU` | BigQuery location |
+| `partition_expiration_days` | No | — | Default partition expiration (in days) for partitioned tables created by pipelines targeting this profile. Maps to BigQuery's `time_partitioning.expiration_ms`. Honored on `CREATE TABLE` and reconciled on every subsequent run (changing or unsetting the value ALTERs the existing table); can be overridden per-pipeline. Only applies to native tables — Iceberg ignores it. |
 
 ### Databricks Fields
 

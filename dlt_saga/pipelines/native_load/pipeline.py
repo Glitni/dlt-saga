@@ -185,6 +185,7 @@ class NativeLoadPipeline(BasePipeline):
             with self._phase("finalize"):
                 if total_rows > 0:
                     self._write_load_info(total_rows, first_run)
+                self._sync_target_table_options()
 
             t = self._phase_timings
             self.logger.info(
@@ -669,20 +670,32 @@ class NativeLoadPipeline(BasePipeline):
     def _build_format_options(self) -> dict:
         opts: dict = {}
         if self.native_config.file_type == "csv":
-            if self.native_config.csv_separator:
-                opts["field_delimiter"] = self.native_config.csv_separator
-            if self.native_config.csv_skip_leading_rows:
-                opts["skip_leading_rows"] = self.native_config.csv_skip_leading_rows
-            if self.native_config.csv_quote_character:
-                opts["quote_character"] = self.native_config.csv_quote_character
-            if self.native_config.csv_null_marker:
-                opts["null_marker"] = self.native_config.csv_null_marker
-            if self.native_config.encoding:
-                opts["encoding"] = self.native_config.encoding
+            opts.update(self._build_csv_format_options())
         if self.native_config.max_bad_records:
             opts["max_bad_records"] = self.native_config.max_bad_records
         if self.native_config.ignore_unknown_values:
             opts["ignore_unknown_values"] = self.native_config.ignore_unknown_values
+        return opts
+
+    def _build_csv_format_options(self) -> dict:
+        cfg = self.native_config
+        opts: dict = {}
+        if cfg.csv_separator:
+            opts["field_delimiter"] = cfg.csv_separator
+        if cfg.csv_skip_leading_rows:
+            opts["skip_leading_rows"] = cfg.csv_skip_leading_rows
+        if cfg.csv_quote_character:
+            opts["quote_character"] = cfg.csv_quote_character
+        if cfg.csv_null_marker:
+            opts["null_marker"] = cfg.csv_null_marker
+        if cfg.encoding:
+            opts["encoding"] = cfg.encoding
+        if cfg.csv_allow_quoted_newlines:
+            opts["allow_quoted_newlines"] = True
+        if cfg.csv_allow_jagged_rows:
+            opts["allow_jagged_rows"] = True
+        if cfg.csv_preserve_ascii_control_characters:
+            opts["preserve_ascii_control_characters"] = True
         return opts
 
     # ------------------------------------------------------------------
@@ -714,6 +727,26 @@ class NativeLoadPipeline(BasePipeline):
             self.logger.warning(
                 "Failed to write _saga_load_info: %s; "
                 "run will not appear in `saga report`",
+                exc,
+            )
+
+    def _sync_target_table_options(self) -> None:
+        """Reconcile destination-level table options (e.g. partition_expiration_days).
+
+        Named distinctly from BasePipeline._sync_destination_table_options (which
+        takes a list of loaded tables) because native_load operates on a single
+        known target table — the override would otherwise have an incompatible
+        signature.
+
+        Best-effort: never fail a successful load if the post-load ALTER fails.
+        """
+        try:
+            self.destination.sync_table_options(self._dataset, self.table_name)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to sync destination table options for %s.%s: %s",
+                self._dataset,
+                self.table_name,
                 exc,
             )
 

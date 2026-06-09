@@ -58,6 +58,7 @@ spreadsheet_id: "123ABC"
 | `primary_key` | string/list | — | Primary key column(s) for merge/historize |
 | `partition_column` | string | — | BigQuery partition column |
 | `cluster_columns` | list | — | BigQuery cluster columns (max 4) |
+| `partition_expiration_days` | int | inherited from profile | BigQuery only. Sets `time_partitioning.expiration_ms` on the created table. Honored on first `CREATE TABLE` for both dlt-managed pipelines and `native_load`, and reconciled on every subsequent run — changing or unsetting the value emits `ALTER TABLE ... SET OPTIONS(partition_expiration_days = ...)` against the existing table. Pipeline-level value overrides the profile default. Has no effect on Iceberg tables. |
 | `insert_api` | string | — | Databricks-only: `zerobus` (low-latency append) or `copy_into` (default). See [Databricks insert API](#databricks-insert-api) |
 | `dataset_name` | string | — | Override default dataset |
 | `access` | list | — | BigQuery IAM access (`"group:email"`, `"user:email"`) |

@@ -27,6 +27,11 @@ def _make_dest() -> BigQueryDestination:
     dest.execute_sql_with_job.return_value = ([], "job-001")
     dest.execute_sql.return_value = []
     dest.list_table_columns.return_value = []
+    # `config` isn't a spec attribute (it's set in __init__), so attach a plain
+    # MagicMock and seed the fields read during DDL building.
+    dest.config = MagicMock()
+    dest.config.partition_expiration_days = None
+    dest.config.table_format = "native"
     return dest
 
 
@@ -172,6 +177,77 @@ class TestNativeLoadChunkBQ:
 
 
 # ---------------------------------------------------------------------------
+# create_external_table — CSV options
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCreateExternalTableCsvOptions:
+    """Verify CSV format_options propagate through to bigquery.CSVOptions."""
+
+    def _invoke_with_format_options(self, format_options: dict):
+        from unittest.mock import patch
+
+        dest = _make_dest()
+        dest.config = MagicMock()
+        dest.config.job_project_id = "proj"
+        dest.config.project_id = "proj"
+        dest.config.location = "EU"
+
+        captured = []
+        with patch("google.cloud.bigquery.Client") as mock_client:
+            mock_client.return_value.create_table.side_effect = lambda t: (
+                captured.append(t)
+            )
+            BigQueryDestination.create_external_table(
+                dest,
+                dataset="ds",
+                name="ext",
+                source_uris=["gs://bucket/f.csv"],
+                source_format="CSV",
+                autodetect=True,
+                format_options=format_options,
+            )
+        assert len(captured) == 1
+        return captured[0].external_data_configuration.csv_options
+
+    def test_allow_quoted_newlines_propagates(self):
+        opts = self._invoke_with_format_options({"allow_quoted_newlines": True})
+        assert opts.allow_quoted_newlines is True
+
+    def test_allow_jagged_rows_propagates(self):
+        opts = self._invoke_with_format_options({"allow_jagged_rows": True})
+        assert opts.allow_jagged_rows is True
+
+    def test_preserve_ascii_control_characters_propagates(self):
+        opts = self._invoke_with_format_options(
+            {"preserve_ascii_control_characters": True}
+        )
+        assert opts.preserve_ascii_control_characters is True
+
+    def test_new_bools_default_unset(self):
+        # Only field_delimiter passed — the new flags should not be enabled.
+        opts = self._invoke_with_format_options({"field_delimiter": ";"})
+        assert not opts.allow_quoted_newlines
+        assert not opts.allow_jagged_rows
+        assert not opts.preserve_ascii_control_characters
+
+    def test_combined_flags_propagate(self):
+        opts = self._invoke_with_format_options(
+            {
+                "field_delimiter": ";",
+                "allow_quoted_newlines": True,
+                "allow_jagged_rows": True,
+                "preserve_ascii_control_characters": True,
+            }
+        )
+        assert opts.field_delimiter == ";"
+        assert opts.allow_quoted_newlines is True
+        assert opts.allow_jagged_rows is True
+        assert opts.preserve_ascii_control_characters is True
+
+
+# ---------------------------------------------------------------------------
 # _native_load_create_target — CTAS SQL shape
 # ---------------------------------------------------------------------------
 
@@ -231,6 +307,65 @@ class TestNativeLoadCreateTarget:
         sql = dest.execute_sql_with_job.call_args[0][0]
         assert "_dlt_ingested_at" in sql
         assert "_dlt_source_file_name" in sql or "_FILE_NAME" in sql
+
+    def test_partition_expiration_options_in_ctas(self):
+        dest = _make_dest()
+        dest.execute_sql.return_value = [MagicMock(cnt=0)]
+        dest.config.partition_expiration_days = 90
+        spec = _make_spec(partition_column="event_date")
+        ext_cols = [("event_date", "DATE")]
+
+        BigQueryDestination._native_load_create_target(
+            dest, spec, "proj.ds_staging.ext", ext_cols
+        )
+
+        sql = dest.execute_sql_with_job.call_args[0][0]
+        assert "OPTIONS (partition_expiration_days = 90)" in sql
+
+    def test_partition_expiration_options_omitted_without_partition_column(self):
+        # Without a partition column the OPTIONS clause makes no sense; BigQuery
+        # would reject it. Skip silently.
+        dest = _make_dest()
+        dest.execute_sql.return_value = [MagicMock(cnt=0)]
+        dest.config.partition_expiration_days = 90
+        spec = _make_spec(partition_column=None)
+        ext_cols = [("col1", "STRING")]
+
+        BigQueryDestination._native_load_create_target(
+            dest, spec, "proj.ds_staging.ext", ext_cols
+        )
+
+        sql = dest.execute_sql_with_job.call_args[0][0]
+        assert "partition_expiration_days" not in sql
+
+    def test_partition_expiration_options_omitted_when_unset(self):
+        dest = _make_dest()
+        dest.execute_sql.return_value = [MagicMock(cnt=0)]
+        # partition_expiration_days defaults to None via _make_dest.
+        spec = _make_spec(partition_column="event_date")
+        ext_cols = [("event_date", "DATE")]
+
+        BigQueryDestination._native_load_create_target(
+            dest, spec, "proj.ds_staging.ext", ext_cols
+        )
+
+        sql = dest.execute_sql_with_job.call_args[0][0]
+        assert "partition_expiration_days" not in sql
+
+    def test_partition_expiration_options_skipped_on_iceberg(self):
+        dest = _make_dest()
+        dest.execute_sql.return_value = [MagicMock(cnt=0)]
+        dest.config.partition_expiration_days = 90
+        dest.config.table_format = "iceberg"
+        spec = _make_spec(partition_column="event_date")
+        ext_cols = [("event_date", "DATE")]
+
+        BigQueryDestination._native_load_create_target(
+            dest, spec, "proj.ds_staging.ext", ext_cols
+        )
+
+        sql = dest.execute_sql_with_job.call_args[0][0]
+        assert "partition_expiration_days" not in sql
 
 
 # ---------------------------------------------------------------------------
