@@ -138,6 +138,24 @@ class TestValidatePipelineImpl:
         assert result.is_valid
         assert not any("implementation" in e.lower() for e in result.errors)
 
+    def test_historize_only_still_validates_historize_config(self):
+        """Skipping the adapter/source-config checks for historize-only pipelines
+        must not also skip _validate_historize_config — a broken historize block
+        (e.g. missing primary_key) should still surface."""
+        config = _make_config(
+            pipeline_group="streams",
+            table_name="streams__orders",
+            config_dict={
+                "write_disposition": "historize",
+                # primary_key intentionally omitted — historize config must flag this.
+                "source_schema": "raw",
+                "source_table": "orders",
+            },
+        )
+        result = validate_pipeline_config(config)
+        assert not result.is_valid
+        assert any("primary_key" in e.lower() for e in result.errors)
+
 
 @pytest.mark.unit
 class TestValidateSourceConfig:

@@ -186,6 +186,8 @@ def validate_pipeline_config(config: PipelineConfig) -> ValidationResult:
     _validate_write_disposition(config, result)
     # Historize-only pipelines (write_disposition: "historize") have no ingest step,
     # so there is no source adapter/config to resolve — skip those checks for them.
+    # Compared against the raw string rather than `ingest_enabled`, which would also
+    # short-circuit for invalid/unknown values and mask their adapter errors.
     if config.raw_write_disposition != "historize":
         _validate_adapter(config, result)
         _validate_source_config(config, result)
