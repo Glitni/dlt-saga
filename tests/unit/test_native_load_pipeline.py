@@ -138,6 +138,27 @@ class TestFullRefresh:
 
 
 @pytest.mark.unit
+class TestSyncTargetTableOptions:
+    def test_calls_destination_sync_with_dataset_and_table(self):
+        p = _make_pipeline()
+        p._dataset = "my_dataset"
+        p.table_name = "my_table"
+        p._sync_target_table_options()
+        p.destination.sync_table_options.assert_called_once_with(
+            "my_dataset", "my_table"
+        )
+
+    def test_swallows_errors(self):
+        # A failure on the post-load sync must not fail the load.
+        p = _make_pipeline()
+        p._dataset = "ds"
+        p.table_name = "tbl"
+        p.destination.sync_table_options.side_effect = RuntimeError("boom")
+        # Should not raise.
+        p._sync_target_table_options()
+
+
+@pytest.mark.unit
 class TestBuildFormatOptions:
     def test_empty_for_parquet(self):
         p = _make_pipeline(file_type="parquet")
