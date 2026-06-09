@@ -83,7 +83,7 @@ Discovery mode is implied: set both `filename_date_regex` and `filename_date_for
 | `filename_date_format` | — | strftime format string matching the capture group (e.g. `%Y%m%d`). Must be set if and only if `filename_date_regex` is set. |
 | `date_lookback_days` | `2` | How many days before the last loaded date to re-scan for late-arriving files. Requires `incremental: true`; a warning is logged when set without it. |
 | `date_filename_prefix` | — | Literal filename prefix before the date group, used to compute GCS `start_offset` for faster listing (auto-detected if omitted). Requires `incremental: true`; a warning is logged when set without it. |
-| `partition_prefix_pattern` | — | Date-partition layout under `source_uri` (Databricks + ADLS only, e.g. `year={year}/month={month}/day={day}/`). Lists only partitions in the lookback window instead of scanning the full root. Requires `incremental: true` and `filename_date_regex`; warnings are logged when either is absent. |
+| `partition_prefix_pattern` | — | Date-partition layout under `source_uri` (storage-agnostic; works on both `gs://` and `abfss://`). Tokens: `{year}`, `{month}`, `{day}`, `{hour}`. Lists only partitions in the lookback window instead of scanning the full root, and matches `filename_date_regex` against the full URI rather than the basename — useful when files are organised by date folder but the basename has no date. Requires `incremental: true` and `filename_date_regex`; warnings are logged when either is absent. |
 
 ### Write disposition and incremental loading
 
@@ -275,8 +275,10 @@ tags: [daily]
 
 source_uri: abfss://raw@myaccount.dfs.core.windows.net/customer_orders/
 file_type: parquet
-partition_prefix_pattern: "year=*/month=*/day=*"   # skip scanning whole container
-incremental: true                      # required for partition_prefix_pattern
+partition_prefix_pattern: "{year}-{month}-{day}/"   # date-folder layout; skips full-container scan
+filename_date_regex: '/(\d{4}-\d{2}-\d{2})/'        # match against full URI (path-mode)
+filename_date_format: "%Y-%m-%d"
+incremental: true                                   # required for partition_prefix_pattern
 
 write_disposition: append+historize
 primary_key: [order_id]
@@ -297,7 +299,7 @@ If your current ADF pipeline does:
 | ADF activity | Equivalent in saga |
 |---|---|
 | `GetMetadata` on container | Flat listing (automatic, no config needed) |
-| `Filter` on date folder | `partition_prefix_pattern: year=*/month=*/day=*` |
+| `Filter` on date folder | `partition_prefix_pattern: "{year}-{month}-{day}/"` (tokens; works on both `abfss://` and `gs://`) |
 | `ForEach` over date folders | Handled internally; chunks by `load_batch_size` |
 | `DatabricksNotebook(COPY INTO)` | `adapter: dlt_saga.native_load` + `file_type: parquet` |
 | Manual SCD2 notebook | `write_disposition: append+historize` |
