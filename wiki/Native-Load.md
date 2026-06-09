@@ -144,6 +144,9 @@ Only used when `file_type: csv`.
 | `csv_skip_leading_rows` | `0` | Header rows to skip. |
 | `csv_quote_character` | — | Quote character override. |
 | `csv_null_marker` | — | String to interpret as NULL. |
+| `csv_allow_quoted_newlines` | `false` | Allow newlines inside quoted fields. Set this for sources with free-text columns that may contain embedded line breaks — without it the parser splits such rows mid-cell and the load fails or corrupts data. BigQuery only. |
+| `csv_allow_jagged_rows` | `false` | Accept rows with missing trailing optional columns (treated as null). Rows with extra values still fail. BigQuery only. |
+| `csv_preserve_ascii_control_characters` | `false` | Preserve embedded ASCII control characters (< 32, excluding tab / newline / carriage return) in string values rather than rejecting the row. BigQuery only. |
 
 ### Databricks external tables
 
