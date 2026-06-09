@@ -257,12 +257,17 @@ class NativeLoadConfig(BaseConfig):
         default=None,
         metadata={
             "description": (
-                "Hive-style partition layout under source_uri. "
+                "Hive-style partition layout under source_uri. Storage-agnostic — "
+                "works on any supported cloud storage (gs://, abfss://). "
                 "Tokens: {year}, {month}, {day}, {hour}. "
-                "When set with filename_date_format, discovery lists only the partitions "
-                "in [last_cursor - lookback_days, today] instead of the full source root. "
-                "Example: 'year={year}/month={month}/day={day}/'. "
-                "ADLS only; ignored for GCS sources."
+                "When set together with filename_date_regex and filename_date_format, "
+                "discovery lists only the partitions in [last_cursor - lookback_days, today] "
+                "instead of the full source root, and the date regex is matched against the "
+                "full URI rather than the basename. "
+                "Useful when files are organised by date folder but the basename has no date "
+                "(e.g. 'gs://bucket/root/YYYY-MM-DD/<table>_*.csv') — set this to "
+                "'{year}-{month}-{day}/' and use a regex like '/(\\\\d{4}-\\\\d{2}-\\\\d{2})/'. "
+                "Example: 'year={year}/month={month}/day={day}/'."
             ),
         },
     )
@@ -294,6 +299,40 @@ class NativeLoadConfig(BaseConfig):
     csv_null_marker: Optional[str] = field(
         default=None,
         metadata={"description": "String that represents NULL values in CSV files."},
+    )
+
+    csv_allow_quoted_newlines: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "Allow newlines inside quoted CSV fields. Required for CSVs with "
+                "free-text columns that may contain embedded line breaks; without "
+                "it the parser splits such rows mid-cell and the load fails or "
+                "corrupts data. BigQuery only; ignored by Databricks."
+            )
+        },
+    )
+
+    csv_allow_jagged_rows: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "Accept rows with missing trailing optional columns. Missing values "
+                "are treated as nulls; rows with too many values still fail. "
+                "BigQuery only; ignored by Databricks."
+            )
+        },
+    )
+
+    csv_preserve_ascii_control_characters: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "Preserve embedded ASCII control characters (< 32, excluding tab, "
+                "newline, carriage return) in string values rather than rejecting "
+                "the row. BigQuery only; ignored by Databricks."
+            )
+        },
     )
 
     # -------------------------------------------------------------------------
@@ -406,6 +445,11 @@ class NativeLoadConfig(BaseConfig):
             else None,
             "csv_quote_character": self.csv_quote_character,
             "csv_null_marker": self.csv_null_marker,
+            "csv_allow_quoted_newlines": self.csv_allow_quoted_newlines or None,
+            "csv_allow_jagged_rows": self.csv_allow_jagged_rows or None,
+            "csv_preserve_ascii_control_characters": (
+                self.csv_preserve_ascii_control_characters or None
+            ),
         }
         if self.file_type != "csv":
             for name, val in csv_only.items():
