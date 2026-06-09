@@ -29,6 +29,11 @@ class BigQueryDestinationConfig(DestinationConfig):
     dataset_access: Optional[List[str]] = None  # Dataset access control entries
     table_format: str = "native"  # "native" or "iceberg"
     storage_path: Optional[str] = None  # Required for Iceberg tables (gs://bucket/path)
+    # Partition expiration in days. Maps to time_partitioning.expiration_ms on
+    # native BigQuery tables. Resolution: pipeline config > profile
+    # destination_config > None (no expiration). Has no effect on Iceberg
+    # tables, which don't expose a time_partitioning option.
+    partition_expiration_days: Optional[int] = None
 
     @property
     def database(self) -> str:
@@ -54,6 +59,14 @@ class BigQueryDestinationConfig(DestinationConfig):
                 "storage_path is required for BigLake Iceberg tables (table_format='iceberg')"
             )
 
+        if (
+            self.partition_expiration_days is not None
+            and self.partition_expiration_days < 1
+        ):
+            raise ValueError(
+                f"partition_expiration_days must be >= 1, got {self.partition_expiration_days}"
+            )
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> BigQueryDestinationConfig:
         """Create BigQuery config from dictionary.
@@ -74,6 +87,7 @@ class BigQueryDestinationConfig(DestinationConfig):
             dataset_access=data.get("dataset_access"),
             table_format=data.get("table_format", "native"),
             storage_path=data.get("storage_path"),
+            partition_expiration_days=data.get("partition_expiration_days"),
         )
 
     @classmethod
@@ -122,6 +136,14 @@ class BigQueryDestinationConfig(DestinationConfig):
         if context.profile_target:
             billing_project_id = context.profile_target.billing_project
 
+        # Resolution: pipeline config overrides profile destination_config, which
+        # acts as the destination-level default.
+        partition_expiration_days = config_dict.get("partition_expiration_days")
+        if partition_expiration_days is None and context.profile_target:
+            partition_expiration_days = context.profile_target.destination_config.get(
+                "partition_expiration_days"
+            )
+
         return cls(
             destination_type="bigquery",
             project_id=project_id,
@@ -131,4 +153,5 @@ class BigQueryDestinationConfig(DestinationConfig):
             dataset_access=config_dict.get("dataset_access"),
             table_format=table_format,
             storage_path=storage_path,
+            partition_expiration_days=partition_expiration_days,
         )

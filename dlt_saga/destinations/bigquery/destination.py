@@ -170,8 +170,7 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         return resource
 
-    @staticmethod
-    def _apply_native_hints(resource: Any, hints: dict) -> Any:
+    def _apply_native_hints(self, resource: Any, hints: dict) -> Any:
         """Apply hints via bigquery_adapter for native BigQuery tables."""
         from dlt.destinations.adapters import bigquery_adapter
 
@@ -185,6 +184,20 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         if "cluster_columns" in hints and hints["cluster_columns"]:
             adapter_args["cluster"] = hints["cluster_columns"]
+
+        # partition_expiration_days is a destination-level setting carried by
+        # BigQueryDestinationConfig and applies to any partitioned table dlt
+        # creates for this pipeline. dlt's bigquery_adapter honors it on CREATE
+        # only — changes to an existing table are not propagated by dlt and
+        # require a separate ALTER (tracked as a follow-up).
+        if (
+            self.config.partition_expiration_days is not None
+            and "partition_column" in hints
+            and hints["partition_column"]
+        ):
+            adapter_args["partition_expiration_days"] = (
+                self.config.partition_expiration_days
+            )
 
         if adapter_args:
             logger.debug(f"Applying BigQuery adapter with args: {adapter_args}")
@@ -1159,6 +1172,18 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         if spec.cluster_columns:
             parts.append(self.cluster_ddl(spec.cluster_columns))
+
+        # partition_expiration_days is only valid on partitioned native tables.
+        # Iceberg and unpartitioned tables silently skip the OPTIONS clause.
+        expiration_days = self.config.partition_expiration_days
+        if (
+            expiration_days is not None
+            and spec.partition_column
+            and self.config.table_format != "iceberg"
+        ):
+            parts.append(
+                f"OPTIONS (partition_expiration_days = {int(expiration_days)})"
+            )
 
         where_sql = self._render_native_load_where(spec, ext_cols)
         select_sql = f"AS SELECT {all_select} FROM {ext_id}"
