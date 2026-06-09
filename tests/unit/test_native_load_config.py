@@ -466,6 +466,9 @@ class TestCsvFieldWarnings:
                 csv_skip_leading_rows=1,
                 csv_quote_character='"',
                 csv_null_marker="\\N",
+                csv_allow_quoted_newlines=True,
+                csv_allow_jagged_rows=True,
+                csv_preserve_ascii_control_characters=True,
             )
         csv_field_warnings = [
             x
@@ -478,8 +481,27 @@ class TestCsvFieldWarnings:
                     "csv_quote_character",
                     "csv_null_marker",
                     "csv_skip_leading_rows",
+                    "csv_allow_quoted_newlines",
+                    "csv_allow_jagged_rows",
+                    "csv_preserve_ascii_control_characters",
                 )
             )
         ]
         assert csv_field_warnings == []
         assert cfg.csv_separator == ";"
+
+    @pytest.mark.parametrize(
+        "field_name",
+        [
+            "csv_allow_quoted_newlines",
+            "csv_allow_jagged_rows",
+            "csv_preserve_ascii_control_characters",
+        ],
+    )
+    def test_new_csv_bool_warns_on_parquet(self, field_name):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _make(file_type="parquet", **{field_name: True})
+        assert any(field_name in str(warning.message) for warning in w)

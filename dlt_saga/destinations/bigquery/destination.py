@@ -170,8 +170,7 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         return resource
 
-    @staticmethod
-    def _apply_native_hints(resource: Any, hints: dict) -> Any:
+    def _apply_native_hints(self, resource: Any, hints: dict) -> Any:
         """Apply hints via bigquery_adapter for native BigQuery tables."""
         from dlt.destinations.adapters import bigquery_adapter
 
@@ -185,6 +184,20 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         if "cluster_columns" in hints and hints["cluster_columns"]:
             adapter_args["cluster"] = hints["cluster_columns"]
+
+        # partition_expiration_days is a destination-level setting carried by
+        # BigQueryDestinationConfig and applies to any partitioned table dlt
+        # creates for this pipeline. dlt's bigquery_adapter honors it on CREATE
+        # only — changes to an existing table are not propagated by dlt and
+        # require a separate ALTER (tracked as a follow-up).
+        if (
+            self.config.partition_expiration_days is not None
+            and "partition_column" in hints
+            and hints["partition_column"]
+        ):
+            adapter_args["partition_expiration_days"] = (
+                self.config.partition_expiration_days
+            )
 
         if adapter_args:
             logger.debug(f"Applying BigQuery adapter with args: {adapter_args}")
@@ -607,6 +620,70 @@ class BigQueryDestination(BigQueryBaseDestination):
             dataset.location = self.config.location
             client.create_dataset(dataset)
 
+    def sync_table_options(self, dataset: str, table: str) -> None:
+        """Reconcile partition_expiration_days against an existing BigQuery table.
+
+        dlt's bigquery_adapter only honors partition_expiration_days on table
+        creation; subsequent changes require an explicit ALTER. This method
+        bridges that gap: it compares the declared value against the table's
+        current ``time_partitioning.expiration_ms`` and updates it when they
+        differ. Setting the config to ``None`` clears the expiration.
+
+        Idempotent — no API call beyond ``get_table`` when nothing needs to
+        change. Silently no-ops on Iceberg tables (which don't expose
+        ``time_partitioning``) and when the target table doesn't exist yet
+        (the CREATE-time path covers first runs).
+
+        Args:
+            dataset: BigQuery dataset name.
+            table: BigQuery table name.
+        """
+        if self.config.table_format == "iceberg":
+            return
+
+        from google.cloud import bigquery
+        from google.cloud.exceptions import NotFound
+
+        client = bigquery.Client(
+            project=self.config.job_project_id, location=self.config.location
+        )
+        table_ref = f"{self.config.project_id}.{dataset}.{table}"
+
+        try:
+            tbl = client.get_table(table_ref)
+        except NotFound:
+            return
+
+        desired_days = self.config.partition_expiration_days
+        desired_ms = desired_days * 86_400_000 if desired_days else None
+
+        if tbl.time_partitioning is None:
+            if desired_days is not None:
+                logger.warning(
+                    "partition_expiration_days=%s declared on %s.%s, but the "
+                    "table is not partitioned; skipping ALTER.",
+                    desired_days,
+                    dataset,
+                    table,
+                )
+            return
+
+        current_ms = tbl.time_partitioning.expiration_ms
+        if current_ms == desired_ms:
+            return
+
+        tbl.time_partitioning.expiration_ms = desired_ms
+        client.update_table(tbl, ["time_partitioning"])
+        logger.info(
+            "Updated partition_expiration_days on %s.%s: %s → %s (days: %s → %s)",
+            dataset,
+            table,
+            current_ms,
+            desired_ms,
+            (current_ms // 86_400_000) if current_ms else None,
+            desired_days,
+        )
+
     # supports_transactions() is intentionally not overridden (returns False).
     # BigQuery supports BEGIN TRANSACTION / COMMIT at the SQL level, but
     # execute_sql() creates a separate query job per call, so transaction
@@ -984,6 +1061,12 @@ class BigQueryDestination(BigQueryBaseDestination):
                 csv_opts.null_markers = [format_options["null_marker"]]
             if "encoding" in format_options:
                 csv_opts.encoding = format_options["encoding"].upper()
+            if format_options.get("allow_quoted_newlines"):
+                csv_opts.allow_quoted_newlines = True
+            if format_options.get("allow_jagged_rows"):
+                csv_opts.allow_jagged_rows = True
+            if format_options.get("preserve_ascii_control_characters"):
+                csv_opts.preserve_ascii_control_characters = True
             ext_config.csv_options = csv_opts
 
         table = bigquery.Table(table_ref)
@@ -1153,6 +1236,18 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         if spec.cluster_columns:
             parts.append(self.cluster_ddl(spec.cluster_columns))
+
+        # partition_expiration_days is only valid on partitioned native tables.
+        # Iceberg and unpartitioned tables silently skip the OPTIONS clause.
+        expiration_days = self.config.partition_expiration_days
+        if (
+            expiration_days is not None
+            and spec.partition_column
+            and self.config.table_format != "iceberg"
+        ):
+            parts.append(
+                f"OPTIONS (partition_expiration_days = {int(expiration_days)})"
+            )
 
         where_sql = self._render_native_load_where(spec, ext_cols)
         select_sql = f"AS SELECT {all_select} FROM {ext_id}"

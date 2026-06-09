@@ -138,6 +138,27 @@ class TestFullRefresh:
 
 
 @pytest.mark.unit
+class TestSyncTargetTableOptions:
+    def test_calls_destination_sync_with_dataset_and_table(self):
+        p = _make_pipeline()
+        p._dataset = "my_dataset"
+        p.table_name = "my_table"
+        p._sync_target_table_options()
+        p.destination.sync_table_options.assert_called_once_with(
+            "my_dataset", "my_table"
+        )
+
+    def test_swallows_errors(self):
+        # A failure on the post-load sync must not fail the load.
+        p = _make_pipeline()
+        p._dataset = "ds"
+        p.table_name = "tbl"
+        p.destination.sync_table_options.side_effect = RuntimeError("boom")
+        # Should not raise.
+        p._sync_target_table_options()
+
+
+@pytest.mark.unit
 class TestBuildFormatOptions:
     def test_empty_for_parquet(self):
         p = _make_pipeline(file_type="parquet")
@@ -154,6 +175,31 @@ class TestBuildFormatOptions:
         p.native_config.max_bad_records = 5
         opts = p._build_format_options()
         assert opts["max_bad_records"] == 5
+
+    def test_csv_allow_quoted_newlines(self):
+        p = _make_pipeline(file_type="csv")
+        p.native_config.csv_allow_quoted_newlines = True
+        opts = p._build_format_options()
+        assert opts["allow_quoted_newlines"] is True
+
+    def test_csv_allow_jagged_rows(self):
+        p = _make_pipeline(file_type="csv")
+        p.native_config.csv_allow_jagged_rows = True
+        opts = p._build_format_options()
+        assert opts["allow_jagged_rows"] is True
+
+    def test_csv_preserve_ascii_control_characters(self):
+        p = _make_pipeline(file_type="csv")
+        p.native_config.csv_preserve_ascii_control_characters = True
+        opts = p._build_format_options()
+        assert opts["preserve_ascii_control_characters"] is True
+
+    def test_csv_new_bools_default_off(self):
+        p = _make_pipeline(file_type="csv")
+        opts = p._build_format_options()
+        assert "allow_quoted_newlines" not in opts
+        assert "allow_jagged_rows" not in opts
+        assert "preserve_ascii_control_characters" not in opts
 
 
 @pytest.mark.unit
