@@ -155,6 +155,31 @@ class TestBuildFormatOptions:
         opts = p._build_format_options()
         assert opts["max_bad_records"] == 5
 
+    def test_csv_allow_quoted_newlines(self):
+        p = _make_pipeline(file_type="csv")
+        p.native_config.csv_allow_quoted_newlines = True
+        opts = p._build_format_options()
+        assert opts["allow_quoted_newlines"] is True
+
+    def test_csv_allow_jagged_rows(self):
+        p = _make_pipeline(file_type="csv")
+        p.native_config.csv_allow_jagged_rows = True
+        opts = p._build_format_options()
+        assert opts["allow_jagged_rows"] is True
+
+    def test_csv_preserve_ascii_control_characters(self):
+        p = _make_pipeline(file_type="csv")
+        p.native_config.csv_preserve_ascii_control_characters = True
+        opts = p._build_format_options()
+        assert opts["preserve_ascii_control_characters"] is True
+
+    def test_csv_new_bools_default_off(self):
+        p = _make_pipeline(file_type="csv")
+        opts = p._build_format_options()
+        assert "allow_quoted_newlines" not in opts
+        assert "allow_jagged_rows" not in opts
+        assert "preserve_ascii_control_characters" not in opts
+
 
 @pytest.mark.unit
 class TestNoNewFiles:

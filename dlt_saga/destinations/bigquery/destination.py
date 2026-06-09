@@ -984,6 +984,12 @@ class BigQueryDestination(BigQueryBaseDestination):
                 csv_opts.null_markers = [format_options["null_marker"]]
             if "encoding" in format_options:
                 csv_opts.encoding = format_options["encoding"].upper()
+            if format_options.get("allow_quoted_newlines"):
+                csv_opts.allow_quoted_newlines = True
+            if format_options.get("allow_jagged_rows"):
+                csv_opts.allow_jagged_rows = True
+            if format_options.get("preserve_ascii_control_characters"):
+                csv_opts.preserve_ascii_control_characters = True
             ext_config.csv_options = csv_opts
 
         table = bigquery.Table(table_ref)

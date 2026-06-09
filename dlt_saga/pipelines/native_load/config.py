@@ -301,6 +301,40 @@ class NativeLoadConfig(BaseConfig):
         metadata={"description": "String that represents NULL values in CSV files."},
     )
 
+    csv_allow_quoted_newlines: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "Allow newlines inside quoted CSV fields. Required for CSVs with "
+                "free-text columns that may contain embedded line breaks; without "
+                "it the parser splits such rows mid-cell and the load fails or "
+                "corrupts data. BigQuery only; ignored by Databricks."
+            )
+        },
+    )
+
+    csv_allow_jagged_rows: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "Accept rows with missing trailing optional columns. Missing values "
+                "are treated as nulls; rows with too many values still fail. "
+                "BigQuery only; ignored by Databricks."
+            )
+        },
+    )
+
+    csv_preserve_ascii_control_characters: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "Preserve embedded ASCII control characters (< 32, excluding tab, "
+                "newline, carriage return) in string values rather than rejecting "
+                "the row. BigQuery only; ignored by Databricks."
+            )
+        },
+    )
+
     # -------------------------------------------------------------------------
     # Validation
     # -------------------------------------------------------------------------
@@ -411,6 +445,11 @@ class NativeLoadConfig(BaseConfig):
             else None,
             "csv_quote_character": self.csv_quote_character,
             "csv_null_marker": self.csv_null_marker,
+            "csv_allow_quoted_newlines": self.csv_allow_quoted_newlines or None,
+            "csv_allow_jagged_rows": self.csv_allow_jagged_rows or None,
+            "csv_preserve_ascii_control_characters": (
+                self.csv_preserve_ascii_control_characters or None
+            ),
         }
         if self.file_type != "csv":
             for name, val in csv_only.items():

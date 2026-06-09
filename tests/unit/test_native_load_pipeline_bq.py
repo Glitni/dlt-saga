@@ -172,6 +172,77 @@ class TestNativeLoadChunkBQ:
 
 
 # ---------------------------------------------------------------------------
+# create_external_table — CSV options
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCreateExternalTableCsvOptions:
+    """Verify CSV format_options propagate through to bigquery.CSVOptions."""
+
+    def _invoke_with_format_options(self, format_options: dict):
+        from unittest.mock import patch
+
+        dest = _make_dest()
+        dest.config = MagicMock()
+        dest.config.job_project_id = "proj"
+        dest.config.project_id = "proj"
+        dest.config.location = "EU"
+
+        captured = []
+        with patch("google.cloud.bigquery.Client") as mock_client:
+            mock_client.return_value.create_table.side_effect = lambda t: (
+                captured.append(t)
+            )
+            BigQueryDestination.create_external_table(
+                dest,
+                dataset="ds",
+                name="ext",
+                source_uris=["gs://bucket/f.csv"],
+                source_format="CSV",
+                autodetect=True,
+                format_options=format_options,
+            )
+        assert len(captured) == 1
+        return captured[0].external_data_configuration.csv_options
+
+    def test_allow_quoted_newlines_propagates(self):
+        opts = self._invoke_with_format_options({"allow_quoted_newlines": True})
+        assert opts.allow_quoted_newlines is True
+
+    def test_allow_jagged_rows_propagates(self):
+        opts = self._invoke_with_format_options({"allow_jagged_rows": True})
+        assert opts.allow_jagged_rows is True
+
+    def test_preserve_ascii_control_characters_propagates(self):
+        opts = self._invoke_with_format_options(
+            {"preserve_ascii_control_characters": True}
+        )
+        assert opts.preserve_ascii_control_characters is True
+
+    def test_new_bools_default_unset(self):
+        # Only field_delimiter passed — the new flags should not be enabled.
+        opts = self._invoke_with_format_options({"field_delimiter": ";"})
+        assert not opts.allow_quoted_newlines
+        assert not opts.allow_jagged_rows
+        assert not opts.preserve_ascii_control_characters
+
+    def test_combined_flags_propagate(self):
+        opts = self._invoke_with_format_options(
+            {
+                "field_delimiter": ";",
+                "allow_quoted_newlines": True,
+                "allow_jagged_rows": True,
+                "preserve_ascii_control_characters": True,
+            }
+        )
+        assert opts.field_delimiter == ";"
+        assert opts.allow_quoted_newlines is True
+        assert opts.allow_jagged_rows is True
+        assert opts.preserve_ascii_control_characters is True
+
+
+# ---------------------------------------------------------------------------
 # _native_load_create_target — CTAS SQL shape
 # ---------------------------------------------------------------------------
 
