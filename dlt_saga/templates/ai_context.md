@@ -182,6 +182,7 @@ merge_strategy: scd2              # For merge disposition
 # Destination hints
 partition_column: date
 cluster_columns: [id, category]
+partition_expiration_days: 365      # BigQuery only — sets time_partitioning.expiration_ms on the created table; reconciled (ALTER) on every subsequent run. Per-pipeline overrides the profile default.
 
 # Row filters (optional) — drop rows during ingest
 filters:
@@ -214,9 +215,23 @@ primary_key: [id]
 historize:
   snapshot_column: _dlt_ingested_at   # default
   ignore_columns: [updated_by]
-  partition_column: "_dlt_valid_from"
+  partition_column: "_dlt_valid_from" # defaults to valid_from_column (see below)
   cluster_columns: [id]
   track_deletions: true
+
+  # Optional: rename the SCD2 output columns. Defaults are _dlt_valid_from /
+  # _dlt_valid_to / _dlt_is_deleted. Set these to match a house standard, e.g.:
+  # valid_from_column: valid_from
+  # valid_to_column: valid_to
+  # is_deleted_column: is_deleted
+
+  # Optional: scope deletion / reappearance detection to a subset of primary_key
+  # — the historize analogue of dlt's SCD2 merge_key. Use when the source unions
+  # independently-delivered partitions (per-instance / per-tenant feeds): a
+  # sibling group's snapshot date won't flag this group's keys as deleted.
+  # Must be a subset of primary_key.
+  # merge_key: [dbinstance]
+
   # Optional: row filter applied only during historize (same schema as top-level
   # filters:, independent of any ingest filter). Useful for partitioning one
   # source table into multiple tenant-scoped histories.
@@ -224,6 +239,29 @@ historize:
   #   - column: tenant_id
   #     value: tenant_a
 ```
+
+Renaming an SCD2 column or changing `merge_key` after the historized table exists is part of the config fingerprint — the framework will refuse the run and prompt for `saga historize --full-refresh`.
+
+### Bulk loading from cloud storage (`native_load`)
+
+For loading large file batches (Parquet, CSV, JSONL) directly into the warehouse — bypassing dlt's extract/normalize — use the built-in `dlt_saga.native_load` adapter. Designed for >1 000 files or >1 GB per run.
+
+```yaml
+adapter: dlt_saga.native_load
+write_disposition: append          # or replace, append+historize, replace+historize
+source_uri: "gs://bucket/raw/"
+file_type: csv                     # csv | parquet | jsonl
+incremental: true                  # opt-in file-level state in _saga_native_load_log
+
+# CSV parsing options (BigQuery only — ignored on Databricks):
+csv_separator: ";"
+csv_quote_character: '"'
+csv_allow_quoted_newlines: true    # required when fields can contain embedded line breaks
+csv_allow_jagged_rows: false       # treat missing trailing fields as null
+csv_preserve_ascii_control_characters: false
+```
+
+Filters compose AND and push down to SQL `WHERE` automatically. Pairs cleanly with `+historize` — the historize layer reads the loaded table as its source.
 
 ## CLI quick reference
 
@@ -269,6 +307,7 @@ default:
       database: my-project
       location: EU
       environment: prod
+      partition_expiration_days: 365   # BigQuery default for any pipeline targeting this profile; pipeline-level value (above) wins.
 ```
 
 Switch targets with `--target prod`. Environment affects naming:
