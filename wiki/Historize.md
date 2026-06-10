@@ -75,6 +75,7 @@ saga historize --select "filesystem__snapshots__companies"
 | `partition_column` | `historize:` | `valid_from_column` | Partition the SCD2 output table |
 | `cluster_columns` | `historize:` | — | Cluster the SCD2 output table |
 | `track_deletions` | `historize:` | `false` | Emit deletion marker rows when a key disappears |
+| `merge_key` | `historize:` | — | Subset of `primary_key` that scopes deletion / reappearance detection. See [Scoping deletion detection (`merge_key`)](#scoping-deletion-detection-merge_key) |
 | `valid_from_column` | `historize:` | `_dlt_valid_from` | Name of the SCD2 valid-from column in the output table |
 | `valid_to_column` | `historize:` | `_dlt_valid_to` | Name of the SCD2 valid-to column in the output table |
 | `is_deleted_column` | `historize:` | `_dlt_is_deleted` | Name of the soft-delete marker column in the output table |
@@ -112,6 +113,44 @@ fingerprint, so the framework prompts for it.
 > historized, but mixing renamed historized tables with default-named ingested tables in one
 > warehouse yields inconsistent column names across sibling tables — pick one convention per
 > warehouse.
+
+### Scoping deletion detection (`merge_key`)
+
+By default, historize treats *every* distinct snapshot date in the source as a checkpoint that
+keys must be present at — if a key is absent from a snapshot that contains other rows, it's
+flagged deleted at that point. That breaks down when the source unions independently-delivered
+partitions sharing one snapshot column (per-instance, per-tenant, per-feed): a snapshot date in
+one partition is "missing" from sibling partitions even though those partitions just didn't deliver
+that day.
+
+`merge_key` scopes deletion and reappearance detection to a subset of `primary_key`. A key in
+group `X` is only flagged deleted if it disappears from a snapshot that contains *other rows in
+group X*. Sibling-group snapshots no longer drive deletions for `X`. Same idea as dlt's own
+`merge_key` in SCD2.
+
+```yaml
+write_disposition: "append+historize"
+primary_key: [dbinstance, id]
+
+historize:
+  snapshot_column: _dlt_source_file_date
+  track_deletions: true
+  merge_key: [dbinstance]
+```
+
+With this setup, `dbinstance = A` skipping a daily snapshot has no effect on `dbinstance = B`'s
+keys, and vice versa. A real deletion within a single instance still fires — the marker sits at
+the next snapshot date *for that instance*.
+
+Constraints:
+
+- `merge_key` must be a subset of `primary_key`. Scoping by a non-PK column would let two distinct
+  keys collide on the scope group and produce inconsistent deletion timing; the validator rejects
+  it.
+- Changing `merge_key` after the historized table exists is part of the config fingerprint, so
+  the framework prompts for a `saga historize --full-refresh`.
+- Pairs with `track_deletions`: `merge_key` refines *when* deletions are recorded, not whether
+  they're recorded at all.
 
 ---
 

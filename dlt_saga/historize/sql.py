@@ -112,6 +112,54 @@ class HistorizeSqlBuilder:
             f"{left}.{self._q(pk)} = {right}.{self._q(pk)}" for pk in self.primary_key
         )
 
+    @property
+    def _merge_key(self) -> List[str]:
+        """Merge key columns (empty when not configured)."""
+        return list(self.config.merge_key or [])
+
+    def _merge_key_cols_raw_with_comma(self) -> str:
+        """Quoted merge_key columns + trailing comma (or ``''``).
+
+        Used in the ``all_snapshots`` projection to keep original column names
+        — so that downstream ``snapshot_sequence`` can both reference them in
+        ``PARTITION BY`` and alias them on the way out.
+        """
+        if not self._merge_key:
+            return ""
+        return self._qcols(self._merge_key) + ", "
+
+    def _merge_key_cols_aliased_with_comma(self) -> str:
+        """``<col> AS seq_<col>, ...`` projection prefix for snapshot_sequence, or ``''``.
+
+        Aliasing with a ``seq_`` prefix keeps merge_key columns distinct from the
+        same-named columns in downstream JOINs (otherwise unqualified references
+        in ``WINDOW`` clauses become ambiguous when ``merge_key ⊆ primary_key``).
+        """
+        if not self._merge_key:
+            return ""
+        return (
+            ", ".join(f"{self._q(c)} AS {self._q(f'seq_{c}')}" for c in self._merge_key)
+            + ", "
+        )
+
+    def _merge_key_partition_clause(self) -> str:
+        """``PARTITION BY <merge_key>`` clause (uses original column names — used
+        inside ``snapshot_sequence`` where the source is ``all_snapshots``)."""
+        if not self._merge_key:
+            return ""
+        return f"PARTITION BY {self._qcols(self._merge_key)} "
+
+    def _merge_key_join_extra(self, ss_alias: str, other_alias: str) -> str:
+        """Extra ``AND`` predicates joining ``snapshot_sequence`` (left) to another
+        alias on the seq-prefixed merge_key columns."""
+        if not self._merge_key:
+            return ""
+        preds = " AND ".join(
+            f"{ss_alias}.{self._q(f'seq_{c}')} = {other_alias}.{self._q(c)}"
+            for c in self._merge_key
+        )
+        return f" AND {preds}"
+
     def build_rollback_sql(
         self, effective_from_date: str, run_id: str, dataset: str
     ) -> List[str]:
@@ -293,19 +341,21 @@ INNER JOIN deduped del_src ON {pk_join_del}
 
 CREATE TEMP TABLE _historize_result AS
 WITH
--- All unique snapshot dates
+-- All unique snapshot dates (per merge_key group when configured).
 all_snapshots AS (
-  SELECT DISTINCT {q_snapshot} AS snapshot_date
+  SELECT DISTINCT {self._merge_key_cols_raw_with_comma()}{q_snapshot} AS snapshot_date
   FROM {src}{filter_where_clause(self.filter_sql)}
 ),
 
 -- Previous/next snapshot per distinct snapshot. Precomputed here so downstream
 -- CTEs can JOIN instead of using a correlated scalar subquery in the same clause
 -- as a window function (unsupported on Spark/Databricks).
+-- When merge_key is set, the window is partitioned by it so a missed delivery
+-- in one group doesn't introduce a "next overall snapshot" for sibling groups.
 snapshot_sequence AS (
-  SELECT snapshot_date AS seq_snapshot_date,
-    LAG(snapshot_date) OVER (ORDER BY snapshot_date) AS prev_snapshot_date,
-    LEAD(snapshot_date) OVER (ORDER BY snapshot_date) AS next_snapshot_date
+  SELECT {self._merge_key_cols_aliased_with_comma()}snapshot_date AS seq_snapshot_date,
+    LAG(snapshot_date) OVER ({self._merge_key_partition_clause()}ORDER BY snapshot_date) AS prev_snapshot_date,
+    LEAD(snapshot_date) OVER ({self._merge_key_partition_clause()}ORDER BY snapshot_date) AS next_snapshot_date
   FROM all_snapshots
 ),
 
@@ -336,7 +386,7 @@ with_context AS (
     LAG({q_snapshot}) OVER (pk_order) AS _prev_snapshot,
     ss.prev_snapshot_date AS _expected_prev_snapshot
   FROM deduped d
-  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = d.{q_snapshot}
+  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = d.{q_snapshot}{self._merge_key_join_extra("ss", "d")}
   WINDOW pk_order AS (PARTITION BY {pk_cols} ORDER BY {q_snapshot})
 ),
 
@@ -391,7 +441,7 @@ with_next_presence AS (
       AS next_key_snapshot,
     ss.next_snapshot_date AS next_overall_snapshot
   FROM key_presence kp
-  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = kp.snapshot_date
+  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = kp.snapshot_date{self._merge_key_join_extra("ss", "kp")}
 ),
 disappearances AS (
   SELECT {pk_cols}, snapshot_date AS last_seen,
@@ -485,19 +535,20 @@ disappearances AS (
 
 CREATE TEMP TABLE _historize_incremental AS
 WITH
--- All snapshots being processed (including reference)
+-- All snapshots being processed (including reference, per merge_key group when configured)
 all_snapshots AS (
-  SELECT DISTINCT {q_snapshot} AS snapshot_date
+  SELECT DISTINCT {self._merge_key_cols_raw_with_comma()}{q_snapshot} AS snapshot_date
   FROM {src}
   WHERE {and_filter(self.filter_sql, snapshot_filter)}
 ),
 
 -- Previous/next snapshot per distinct snapshot (JOINed below instead of using a
 -- correlated subquery alongside window functions — unsupported on Spark/Databricks).
+-- When merge_key is set the window is partitioned by it.
 snapshot_sequence AS (
-  SELECT snapshot_date AS seq_snapshot_date,
-    LAG(snapshot_date) OVER (ORDER BY snapshot_date) AS prev_snapshot_date,
-    LEAD(snapshot_date) OVER (ORDER BY snapshot_date) AS next_snapshot_date
+  SELECT {self._merge_key_cols_aliased_with_comma()}snapshot_date AS seq_snapshot_date,
+    LAG(snapshot_date) OVER ({self._merge_key_partition_clause()}ORDER BY snapshot_date) AS prev_snapshot_date,
+    LEAD(snapshot_date) OVER ({self._merge_key_partition_clause()}ORDER BY snapshot_date) AS next_snapshot_date
   FROM all_snapshots
 ),
 
@@ -529,7 +580,7 @@ with_context AS (
     LAG({q_snapshot}) OVER (pk_order) AS _prev_snapshot,
     ss.prev_snapshot_date AS _expected_prev_snapshot
   FROM deduped d
-  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = d.{q_snapshot}
+  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = d.{q_snapshot}{self._merge_key_join_extra("ss", "d")}
   WINDOW pk_order AS (PARTITION BY {pk_cols} ORDER BY {q_snapshot})
 ),
 
@@ -610,7 +661,7 @@ with_next_key AS (
     LEAD(snapshot_date) OVER (PARTITION BY {pk_cols} ORDER BY snapshot_date) AS next_key_snapshot,
     ss.next_snapshot_date AS next_overall_snapshot
   FROM deletion_candidates dc
-  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = dc.snapshot_date
+  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = dc.snapshot_date{self._merge_key_join_extra("ss", "dc")}
 ),
 deletions AS (
   SELECT {pk_cols}, snapshot_date AS last_seen, next_overall_snapshot AS deleted_at
