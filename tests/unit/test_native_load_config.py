@@ -109,6 +109,58 @@ class TestDateModeValidation:
 
 
 @pytest.mark.unit
+class TestInitialValue:
+    """initial_value seeds the first-run cursor. Validated against
+    filename_date_format; ignored without it (and silently inert on
+    `incremental: false`, like other date settings)."""
+
+    def test_valid_initial_value_accepted(self):
+        cfg = _make(
+            filename_date_regex=r"(\d{4}-\d{2}-\d{2})",
+            filename_date_format="%Y-%m-%d",
+            initial_value="2024-01-01",
+        )
+        assert cfg.initial_value == "2024-01-01"
+
+    def test_initial_value_without_date_fields_raises(self):
+        with pytest.raises(
+            ValueError, match="filename_date_regex and filename_date_format"
+        ):
+            _make(initial_value="2024-01-01")
+
+    def test_initial_value_unparseable_raises(self):
+        with pytest.raises(ValueError, match="does not parse"):
+            _make(
+                filename_date_regex=r"(\d{4}-\d{2}-\d{2})",
+                filename_date_format="%Y-%m-%d",
+                initial_value="not a date",
+            )
+
+    def test_initial_value_wrong_format_raises(self):
+        # Format says ISO; user wrote compact — should fail to parse.
+        with pytest.raises(ValueError, match="does not parse"):
+            _make(
+                filename_date_regex=r"(\d{4}-\d{2}-\d{2})",
+                filename_date_format="%Y-%m-%d",
+                initial_value="20240101",
+            )
+
+    def test_initial_value_warns_on_incremental_false(self, caplog):
+        import logging
+
+        with caplog.at_level(
+            logging.WARNING, logger="dlt_saga.pipelines.native_load.config"
+        ):
+            _make(
+                filename_date_regex=r"(\d{8})",
+                filename_date_format="%Y%m%d",
+                initial_value="20240101",
+                incremental=False,
+            )
+        assert any("initial_value" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.unit
 class TestNumericFloors:
     def test_load_batch_size_floor(self):
         with pytest.raises(ValueError, match="load_batch_size"):

@@ -422,6 +422,25 @@ class NativeLoadConfig(BaseConfig):
                     f"filename_date_format is not a valid strftime string: {exc}"
                 ) from exc
 
+        if self.initial_value is not None:
+            if not has_format:
+                raise ValueError(
+                    "initial_value requires filename_date_regex and "
+                    "filename_date_format to be set (it's parsed via the latter)."
+                )
+            import datetime
+
+            try:
+                datetime.datetime.strptime(
+                    self.initial_value,
+                    self.filename_date_format,  # type: ignore[arg-type]
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"initial_value {self.initial_value!r} does not parse against "
+                    f"filename_date_format={self.filename_date_format!r}: {exc}"
+                ) from exc
+
     def _validate_numeric_floors(self) -> None:
         if self.load_batch_size < 1:
             raise ValueError("load_batch_size must be >= 1")
@@ -477,6 +496,8 @@ class NativeLoadConfig(BaseConfig):
                 logger.warning(
                     "date_lookback_days is set but incremental=false; ignored."
                 )
+            if self.initial_value is not None:
+                logger.warning("initial_value is set but incremental=false; ignored.")
             if self.partition_prefix_pattern is not None:
                 logger.warning(
                     "partition_prefix_pattern is set but incremental=false; ignored."

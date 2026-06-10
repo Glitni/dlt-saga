@@ -351,17 +351,36 @@ class NativeLoadPipeline(BasePipeline):
         sorted_keys = sorted(files_by_cursor.keys())
         return {k: files_by_cursor[k] for k in sorted_keys}
 
+    def _effective_first_run_cursor(
+        self, last_cursor_str: Optional[str]
+    ) -> Optional[str]:
+        """Return ``last_cursor_str``, falling back to ``initial_value`` on first run.
+
+        On the first run no state-log entry exists for this pipeline, so
+        ``last_cursor_str`` is ``None``. When the user has configured an
+        ``initial_value`` to seed a historical backfill, return it instead so
+        the partition walk / GCS start_offset starts from that date.
+
+        Once the state log has any entry for this pipeline, ``last_cursor_str``
+        is non-empty and wins — ``initial_value`` is effectively ignored after
+        the first successful run.
+        """
+        if last_cursor_str:
+            return last_cursor_str
+        return self.native_config.initial_value
+
     def _compute_gcs_start_offset(
         self, last_cursor_str: Optional[str], cursor_fmt: str
     ) -> Optional[str]:
         """Compute a GCS-style lexicographic start_offset from the last cursor."""
-        if not last_cursor_str:
+        seed = self._effective_first_run_cursor(last_cursor_str)
+        if not seed:
             return None
         filename_prefix = self._resolve_date_filename_prefix()
         if filename_prefix is None:
             return None
         try:
-            last_dt = datetime.strptime(last_cursor_str, cursor_fmt)
+            last_dt = datetime.strptime(seed, cursor_fmt)
             lookback_dt = last_dt - timedelta(
                 days=self.native_config.date_lookback_days
             )
@@ -380,19 +399,25 @@ class NativeLoadPipeline(BasePipeline):
     ) -> list:
         """Build (uri, None) pairs for each relevant date partition.
 
-        Walks dates from last_cursor - lookback_days to today and formats them
-        through partition_prefix_pattern.  Tokens: {year}, {month}, {day}, {hour}.
-        When {hour} is present, all 24 hours are emitted per day.
+        Walks dates from the effective cursor - lookback_days to today and
+        formats them through partition_prefix_pattern. Tokens: {year}, {month},
+        {day}, {hour}. When {hour} is present, all 24 hours are emitted per day.
+
+        On the first run the effective cursor is ``initial_value`` (if set),
+        otherwise the start date falls back to today. Partitions that don't
+        exist in the bucket walk produce no files — extra dates are harmless,
+        just slower.
         """
         pattern = self.native_config.partition_prefix_pattern
         source_uri = self.native_config.source_uri
         today = datetime.now(timezone.utc).date()
+        seed = self._effective_first_run_cursor(last_cursor_str)
 
-        if last_cursor_str:
+        if seed:
             try:
-                last_dt = datetime.strptime(last_cursor_str, cursor_fmt)
+                seed_dt = datetime.strptime(seed, cursor_fmt)
                 start_date = (
-                    last_dt - timedelta(days=self.native_config.date_lookback_days)
+                    seed_dt - timedelta(days=self.native_config.date_lookback_days)
                 ).date()
             except Exception:
                 start_date = today
