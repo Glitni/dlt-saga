@@ -1,3 +1,18 @@
+## 0.3.0 — 2026-06-10
+
+### Added
+- Add merge_key to historize for scoped deletion detection (#69)
+- Configurable SCD2 column names in historize (#53)
+- Sync partition_expiration_days on existing BigQuery tables (#68)
+- Add partition_expiration_days to BigQuery destination (#67)
+- Add CSV quoted-newlines and parity options to native_load (#64)
+
+
+### Fixed
+- Surface partition_expiration_days in generated JSON schemas (#74)
+- Avoid correlated subquery in window clause (Databricks historize) (#55)
+- Skip adapter validation for historize-only pipelines (#54)
+
 ## 0.2.9 — 2026-06-03
 
 ### Added
