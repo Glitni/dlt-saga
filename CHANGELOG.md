@@ -1,3 +1,12 @@
+## 0.3.1 — 2026-06-10
+
+### Added
+- Honor initial_value in native_load for first-run backfill (#78)
+
+
+### Fixed
+- Collapse write_disposition to a single source of truth (#80)
+
 ## 0.3.0 — 2026-06-10
 
 ### Added
