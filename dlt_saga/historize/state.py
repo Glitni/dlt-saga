@@ -183,6 +183,10 @@ class HistorizeStateManager:
             "valid_to_column": config.valid_to_column,
             "is_deleted_column": config.is_deleted_column,
             "partition_column": config.partition_column,
+            # merge_key scopes deletion / reappearance detection. Changing it
+            # changes which historical rows would be marked as deleted vs. open
+            # for any historical replay, so it mandates a full refresh.
+            "merge_key": sorted(config.merge_key) if config.merge_key else [],
             # Filters affect *which* rows enter the historized table.  A
             # change requires a full rebuild — otherwise rows that no
             # longer pass the filter would survive as stale history.

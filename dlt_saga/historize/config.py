@@ -147,6 +147,23 @@ class HistorizeConfig:
         },
     )
 
+    merge_key: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Columns that scope deletion detection and gap-driven reappearance "
+                "logic — the historize analogue of dlt's SCD2 merge_key. Must be a "
+                "subset of primary_key. When set, a key is considered deleted only "
+                "if it disappears from a snapshot containing other rows that share "
+                "the same merge_key value; snapshots from sibling groups don't "
+                "drive deletions or reappearances for this group. Use when the "
+                "source unions independently-delivered partitions sharing one "
+                "snapshot column (per-instance / per-tenant feeds). Defaults to "
+                "None (global scope, current behavior)."
+            )
+        },
+    )
+
     table_format: Optional[str] = field(
         default=None,
         metadata={
@@ -184,6 +201,8 @@ class HistorizeConfig:
             self.ignore_columns = [self.ignore_columns]
         if isinstance(self.cluster_columns, str):
             self.cluster_columns = [self.cluster_columns]
+        if isinstance(self.merge_key, str):
+            self.merge_key = [self.merge_key]
         # partition_column defaults to the SCD2 valid-from column when not set.
         if not self.partition_column:
             self.partition_column = self.valid_from_column
@@ -209,6 +228,12 @@ class HistorizeConfig:
                 if not _SQL_IDENT.match(col):
                     raise ValueError(
                         f"cluster_columns contains invalid SQL identifier: '{col}'"
+                    )
+        if self.merge_key:
+            for col in self.merge_key:
+                if not _SQL_IDENT.match(col):
+                    raise ValueError(
+                        f"merge_key contains invalid SQL identifier: '{col}'"
                     )
 
     @classmethod
@@ -264,6 +289,18 @@ class HistorizeConfig:
                 "track_columns must be either omitted (track all columns) or a "
                 "non-empty list. To track specific columns, list them explicitly."
             )
+
+        if self.merge_key:
+            pk_set = set(self.primary_key or [])
+            extras = [c for c in self.merge_key if c not in pk_set]
+            if extras:
+                raise ValueError(
+                    f"merge_key columns {extras!r} must be a subset of "
+                    f"primary_key {list(self.primary_key or [])!r}. "
+                    "Scoping deletion detection by a non-PK column would let two "
+                    "distinct keys collide on the scope group and produce "
+                    "inconsistent deletion timing."
+                )
 
         if config_dict:
             source_table = config_dict.get("source_table")
