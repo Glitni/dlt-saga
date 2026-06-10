@@ -677,6 +677,109 @@ class TestPartitionPrefixWalk:
         assert "23" in hours
 
 
+@pytest.mark.unit
+class TestInitialValueSeedsFirstRun:
+    """initial_value seeds the first-run partition walk and GCS start_offset
+    when no state-log entry exists yet. Once a real cursor is present,
+    initial_value is ignored."""
+
+    def test_partition_uris_seeded_from_initial_value(self):
+        from datetime import datetime, timedelta, timezone
+
+        p = _make_pipeline()
+        p.native_config.partition_prefix_pattern = (
+            "year={year}/month={month}/day={day}/"
+        )
+        p.native_config.date_lookback_days = 0
+        p.native_config.source_uri = "gs://bucket/prefix/"
+        # Seed first run from ~5 days ago.
+        seed_date = datetime.now(timezone.utc).date() - timedelta(days=5)
+        p.native_config.initial_value = seed_date.strftime("%Y%m%d")
+
+        # last_cursor=None simulates first run.
+        uris = p._build_partition_uris(None, "%Y%m%d")
+        # Walks 6 days inclusive (seed → today).
+        assert len(uris) == 6
+        uri_strings = [u for u, _ in uris]
+        # Earliest partition matches the seed date.
+        assert any(
+            f"year={seed_date.year:04d}" in u
+            and f"month={seed_date.month:02d}" in u
+            and f"day={seed_date.day:02d}" in u
+            for u in uri_strings
+        )
+
+    def test_partition_uris_predating_bucket_walks_empty_partitions(self):
+        """initial_value earlier than any bucket data is harmless — extra
+        partitions just list empty. The discovery layer doesn't fail."""
+        from datetime import datetime, timedelta, timezone
+
+        p = _make_pipeline()
+        p.native_config.partition_prefix_pattern = (
+            "year={year}/month={month}/day={day}/"
+        )
+        p.native_config.date_lookback_days = 0
+        p.native_config.source_uri = "gs://bucket/prefix/"
+        # Two years in the past.
+        seed_date = datetime.now(timezone.utc).date() - timedelta(days=730)
+        p.native_config.initial_value = seed_date.strftime("%Y%m%d")
+
+        # Should produce one partition per day in the range without raising.
+        uris = p._build_partition_uris(None, "%Y%m%d")
+        assert len(uris) >= 730  # at least 730 partitions; today inclusive may add 1
+        # All formatted as the configured pattern; no exception.
+        assert all(uri.startswith("gs://bucket/prefix/year=") for uri, _ in uris)
+
+    def test_real_cursor_wins_over_initial_value(self):
+        """When the state log has a cursor, initial_value is ignored — even if
+        the user left it in the config after the first backfill."""
+        from datetime import datetime, timedelta, timezone
+
+        p = _make_pipeline()
+        p.native_config.partition_prefix_pattern = (
+            "year={year}/month={month}/day={day}/"
+        )
+        p.native_config.date_lookback_days = 0
+        p.native_config.source_uri = "gs://bucket/prefix/"
+        # initial_value points far in the past; real cursor is recent.
+        p.native_config.initial_value = "20200101"
+        recent = (datetime.now(timezone.utc).date() - timedelta(days=2)).strftime(
+            "%Y%m%d"
+        )
+
+        uris = p._build_partition_uris(recent, "%Y%m%d")
+        # Only 3 partitions (2 days ago, yesterday, today) — not back to 2020.
+        assert len(uris) == 3
+
+    def test_no_seed_falls_back_to_today(self):
+        """When neither last_cursor nor initial_value is set, first-run behavior
+        is unchanged (today only)."""
+        p = _make_pipeline()
+        p.native_config.partition_prefix_pattern = (
+            "year={year}/month={month}/day={day}/"
+        )
+        p.native_config.date_lookback_days = 0
+        p.native_config.source_uri = "gs://bucket/prefix/"
+        p.native_config.initial_value = None
+
+        uris = p._build_partition_uris(None, "%Y%m%d")
+        assert len(uris) == 1
+
+    def test_gcs_start_offset_uses_initial_value(self):
+        """Without partition_prefix_pattern, initial_value drives the GCS
+        lexicographic start_offset on first run."""
+        p = _make_pipeline()
+        p.native_config.partition_prefix_pattern = None
+        p.native_config.date_lookback_days = 0
+        p.native_config.source_uri = "gs://bucket/prefix/"
+        p.native_config.initial_value = "20240101"
+        # Skip the auto-detect roundtrip by setting the prefix explicitly.
+        p.native_config.date_filename_prefix = "data_"
+
+        offset = p._compute_gcs_start_offset(None, "%Y%m%d")
+        assert offset == "prefix/data_20240101"
+
+
 # ---------------------------------------------------------------------------
 # Phase 14 — replace mode + incremental flag
 # ---------------------------------------------------------------------------
