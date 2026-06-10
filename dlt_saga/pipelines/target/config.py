@@ -207,6 +207,23 @@ class TargetConfig:
             "maxItems": 4,
         },
     )
+    partition_expiration_days: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "BigQuery only. Partition expiration in days; maps to "
+                "time_partitioning.expiration_ms on the created table. Honored "
+                "on first CREATE TABLE (via bigquery_adapter for dlt-managed "
+                "pipelines and an OPTIONS clause for native_load CTAS) and "
+                "reconciled on every subsequent run — changing or unsetting "
+                "the value emits ALTER TABLE ... SET OPTIONS against the "
+                "existing table. Per-pipeline value overrides the profile "
+                "default. Has no effect on Iceberg tables or non-BigQuery "
+                "destinations (silently ignored)."
+            ),
+            "minimum": 1,
+        },
+    )
 
     # Additional hints
     columns: Optional[Dict[str, Dict[str, Any]]] = field(
