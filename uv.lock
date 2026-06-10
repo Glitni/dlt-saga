@@ -565,8 +565,8 @@ name = "databricks-zerobus-ingest-sdk"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "protobuf" },
-    { name = "requests" },
+    { name = "protobuf", marker = "sys_platform != 'emscripten'" },
+    { name = "requests", marker = "sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f5/e6/ea97f344b8a1961ef44b9de8dc5c1bc4ad545dc6e4ab8667216dfa3b7f7d/databricks_zerobus_ingest_sdk-1.3.0.tar.gz", hash = "sha256:800d4bf522704d4c99e39b6e72035b6b436b8e11e8b4947030f2fdb024e8d57c", size = 65475, upload-time = "2026-05-24T20:12:54.808Z" }
 wheels = [
@@ -674,7 +674,7 @@ sftp = [
 
 [[package]]
 name = "dlt-saga"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "connectorx" },
