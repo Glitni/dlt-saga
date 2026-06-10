@@ -401,7 +401,7 @@ class PipelineConfig:
 
         Examples:
             "append+historize" → "append"
-            "merge+historize" → "merge"
+            "replace+historize" → "replace"
             "historize" → "historize" (no ingest, historize-only)
             "append" → "append"
         """

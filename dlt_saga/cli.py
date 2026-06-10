@@ -1126,7 +1126,7 @@ def historize(
     """Historize snapshot data into SCD2 tables.
 
     Selects pipelines whose write_disposition contains "historize"
-    (append+historize, merge+historize, or historize).
+    (append+historize, replace+historize, or historize).
 
     Examples:
         saga historize --select "tag:daily"                          # Daily pipelines

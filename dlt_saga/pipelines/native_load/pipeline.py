@@ -60,6 +60,13 @@ class NativeLoadPipeline(BasePipeline):
         self._is_replace: bool = base_disp == "replace"
         self._incremental: bool = self.native_config.incremental
 
+        if self._is_replace and self._incremental:
+            raise ValueError(
+                "incremental=True is not supported with write_disposition='replace': "
+                "replace truncates the target each run, so per-run file dedup would lose "
+                "data. Use write_disposition='append' if you want incremental loading."
+            )
+
         from dlt_saga.destinations.factory import DestinationFactory
 
         destination_type = self.context.get_destination_type()
@@ -530,7 +537,7 @@ class NativeLoadPipeline(BasePipeline):
         chunk_label = self._format_chunk_label(chunk, chunk_num, total_chunks)
         self.logger.info(chunk_label)
 
-        base_disp = self.native_config.write_disposition.replace("+historize", "")
+        base_disp = "replace" if self._is_replace else "append"
         spec = NativeLoadSpec(
             target_dataset=self._dataset,
             target_table=self.table_name,

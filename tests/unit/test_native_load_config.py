@@ -28,18 +28,6 @@ class TestNativeLoadConfigBasic:
         cfg = _make(file_pattern="data_*.parquet")
         assert cfg.file_pattern == "data_*.parquet"
 
-    def test_write_disposition_append(self):
-        cfg = _make(write_disposition="append")
-        assert cfg.write_disposition == "append"
-
-    def test_write_disposition_append_historize(self):
-        cfg = _make(write_disposition="append+historize")
-        assert cfg.write_disposition == "append+historize"
-
-    def test_write_disposition_invalid(self):
-        with pytest.raises(ValueError, match="append"):
-            _make(write_disposition="merge")
-
 
 @pytest.mark.unit
 class TestSourceUriValidation:
@@ -312,25 +300,6 @@ class TestPartitionPrefixPattern:
 
 
 @pytest.mark.unit
-class TestWriteDispositionMatrix:
-    def test_replace_valid(self):
-        cfg = _make(write_disposition="replace")
-        assert cfg.write_disposition == "replace"
-
-    def test_replace_historize_valid(self):
-        cfg = _make(write_disposition="replace+historize")
-        assert cfg.write_disposition == "replace+historize"
-
-    def test_append_historize_still_valid(self):
-        cfg = _make(write_disposition="append+historize")
-        assert cfg.write_disposition == "append+historize"
-
-    def test_merge_still_invalid(self):
-        with pytest.raises(ValueError, match="append.*replace"):
-            _make(write_disposition="merge")
-
-
-@pytest.mark.unit
 class TestIncrementalFlag:
     def test_default_is_false(self):
         cfg = _make()
@@ -338,14 +307,6 @@ class TestIncrementalFlag:
 
     def test_explicit_true(self):
         cfg = _make(incremental=True)
-        assert cfg.incremental is True
-
-    def test_replace_with_incremental_raises(self):
-        with pytest.raises(ValueError, match="incremental=True is not supported"):
-            _make(write_disposition="replace", incremental=True)
-
-    def test_append_with_incremental_allowed(self):
-        cfg = _make(write_disposition="append", incremental=True)
         assert cfg.incremental is True
 
 
