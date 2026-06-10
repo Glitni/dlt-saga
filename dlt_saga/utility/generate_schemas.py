@@ -158,6 +158,10 @@ def _add_metadata_fields(schema, metadata):
         "format",
         "enum",
         "maxItems",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
         "oneOf",
         "items",
     ]
@@ -486,6 +490,16 @@ def _build_profiles_schema(
     yaml_target_props["storage_path"] = {
         "type": "string",
         "description": "Cloud storage path for Iceberg tables (e.g., 'gs://bucket/path')",
+    }
+    yaml_target_props["partition_expiration_days"] = {
+        "type": "integer",
+        "minimum": 1,
+        "description": (
+            "BigQuery only. Default partition expiration (in days) for partitioned "
+            "tables created by pipelines targeting this profile. Pipeline-level "
+            "value overrides this. Honored on CREATE TABLE and reconciled (ALTER) "
+            "on every subsequent run. No effect on Iceberg or non-BigQuery targets."
+        ),
     }
 
     # ---- Databricks-specific fields ----

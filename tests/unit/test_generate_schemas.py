@@ -145,3 +145,47 @@ class TestGenerateSchemasOutput:
         assert "profiles_config.json" in file_names
         assert "saga_project_config.json" in file_names
         assert "packages_config.json" in file_names
+
+    def test_partition_expiration_days_in_pipeline_schemas(self, tmp_path):
+        """Pipeline-level override surfaces on every per-pipeline schema (mirrors
+        partition_column / cluster_columns, which also live on TargetConfig)."""
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        for schema_path in tmp_path.glob("*_config.json"):
+            # Skip the static base and the project-level schemas; only check
+            # source-pipeline schemas (which include TargetConfig fields).
+            if schema_path.name in {
+                "dlt_common.json",
+                "profiles_config.json",
+                "saga_project_config.json",
+                "packages_config.json",
+            }:
+                continue
+            data = json.loads(schema_path.read_text(encoding="utf-8"))
+            props = data.get("properties", {})
+            assert "partition_expiration_days" in props, (
+                f"{schema_path.name} missing partition_expiration_days "
+                f"(should be inherited from TargetConfig)"
+            )
+            field = props["partition_expiration_days"]
+            assert field.get("type") == "integer"
+            assert field.get("minimum") == 1
+            assert "BigQuery" in field.get("description", "")
+
+    def test_partition_expiration_days_in_profile_target(self, tmp_path):
+        """Profile-level default surfaces under each target's properties."""
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        data = json.loads(
+            (tmp_path / "profiles_config.json").read_text(encoding="utf-8")
+        )
+        target_props = data["additionalProperties"]["properties"]["outputs"][
+            "additionalProperties"
+        ]["properties"]
+        assert "partition_expiration_days" in target_props
+        field = target_props["partition_expiration_days"]
+        assert field["type"] == "integer"
+        assert field["minimum"] == 1
+        assert "BigQuery" in field["description"]
