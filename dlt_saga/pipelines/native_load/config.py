@@ -32,18 +32,6 @@ class NativeLoadConfig(BaseConfig):
     ``write_disposition`` and ``dlt.sources.incremental``.
     """
 
-    write_disposition: str = field(
-        default="append",
-        metadata={
-            "description": (
-                "Table-level write semantics. Use `incremental: true` for "
-                "file-level state tracking (separate concern, mirroring dlt's "
-                "split between write_disposition and dlt.sources.incremental)."
-            ),
-            "enum": ["append", "replace", "append+historize", "replace+historize"],
-        },
-    )
-
     # -------------------------------------------------------------------------
     # Source
     # -------------------------------------------------------------------------
@@ -348,7 +336,6 @@ class NativeLoadConfig(BaseConfig):
         elif self.tags is None:
             self.tags = []
 
-        self._validate_write_disposition()
         self._validate_source_uri()
         self._validate_file_type()
         self._validate_date_fields()
@@ -357,20 +344,6 @@ class NativeLoadConfig(BaseConfig):
         self._validate_csv_fields()
         self._validate_table_format()
         self._validate_inert_date_settings()
-
-    def _validate_write_disposition(self) -> None:
-        base = self.write_disposition.replace("+historize", "")
-        if base not in ("append", "replace"):
-            raise ValueError(
-                f"native_load only supports write_disposition 'append', 'replace', "
-                f"'append+historize', or 'replace+historize', got: {self.write_disposition!r}"
-            )
-        if base == "replace" and self.incremental:
-            raise ValueError(
-                "incremental=True is not supported with write_disposition='replace': "
-                "replace truncates the target each run, so per-run file dedup would lose "
-                "data. Use write_disposition='append' if you want incremental loading."
-            )
 
     def _validate_source_uri(self) -> None:
         if not self.source_uri:

@@ -805,6 +805,40 @@ class TestReplaceModeInit:
 
 
 @pytest.mark.unit
+class TestWriteDispositionRuntimeValidation:
+    """`write_disposition` is declared on TargetConfig (union enum); native_load
+    narrows at construction time in NativeLoadPipeline.__init__."""
+
+    def test_append_valid(self):
+        _make_pipeline(write_disposition="append")
+
+    def test_replace_valid(self):
+        _make_pipeline(write_disposition="replace")
+
+    def test_append_historize_valid(self):
+        _make_pipeline(write_disposition="append+historize")
+
+    def test_replace_historize_valid(self):
+        _make_pipeline(write_disposition="replace+historize")
+
+    def test_merge_rejected(self):
+        with pytest.raises(ValueError, match="native_load adapter only supports"):
+            _make_pipeline(write_disposition="merge")
+
+    def test_historize_only_rejected(self):
+        with pytest.raises(ValueError, match="native_load adapter only supports"):
+            _make_pipeline(write_disposition="historize")
+
+    def test_replace_with_incremental_rejected(self):
+        with pytest.raises(ValueError, match="incremental=True is not supported"):
+            _make_pipeline(write_disposition="replace", incremental=True)
+
+    def test_append_with_incremental_allowed(self):
+        p = _make_pipeline(write_disposition="append", incremental=True)
+        assert p._incremental is True
+
+
+@pytest.mark.unit
 class TestReplaceModeRun:
     def test_replace_forces_target_exists_false(self):
         """replace mode: _target_exists is reset to False at run start, not checked."""

@@ -14,13 +14,12 @@ from dlt_saga.pipeline_config import PipelineConfig
 
 logger = logging.getLogger(__name__)
 
-# All valid write_disposition values
+# All valid write_disposition values.
 VALID_WRITE_DISPOSITIONS = {
     "append",
     "merge",
     "replace",
     "append+historize",
-    "merge+historize",
     "replace+historize",
     "historize",
 }
