@@ -22,6 +22,30 @@ def _escape(value: str) -> str:
     return value.replace("'", "''").replace("\\", "\\\\")
 
 
+def _group_into_task_units(
+    pipeline_configs: List[PipelineConfig],
+) -> List[List[PipelineConfig]]:
+    """Bundle pipelines into task units for orchestration.
+
+    Each task unit becomes one task index — either a single pipeline (no
+    ``task_group``) or all pipelines sharing the same ``task_group``. Group
+    membership preserves first-seen order so task-group composition is
+    deterministic; cross-unit ordering is decided later by interleaving.
+    """
+    grouped: Dict[str, List[PipelineConfig]] = {}
+    units: List[List[PipelineConfig]] = []
+    for config in pipeline_configs:
+        task_group = config.config_dict.get("task_group")
+        if task_group:
+            if task_group not in grouped:
+                grouped[task_group] = []
+                units.append(grouped[task_group])
+            grouped[task_group].append(config)
+        else:
+            units.append([config])
+    return units
+
+
 @dataclass
 class ExecutionMetadata:
     """Execution-level metadata for an orchestration run.
@@ -214,27 +238,35 @@ class ExecutionPlanManager:
         return overrides
 
     @staticmethod
-    def _interleave_by_dataset(
-        configs: List[PipelineConfig],
-    ) -> List[PipelineConfig]:
-        """Interleave pipelines by target dataset (schema_name).
+    def _interleave_task_units(
+        task_units: List[List[PipelineConfig]],
+    ) -> List[List[PipelineConfig]]:
+        """Round-robin a list of task units across destination schemas.
 
-        Round-robins across datasets so that consecutive task indices write
-        to different BigQuery datasets, avoiding bursts of concurrent writes
-        to the same ``_dlt_pipeline_state`` table.
+        A task unit is the list of pipelines that share a single Cloud Run
+        task — either a one-element list (a singleton pipeline) or a
+        task_group's pipelines. Consecutive task indices should target
+        different schemas so that Cloud Run's parallelism cap doesn't fire
+        N simultaneous writers at the same ``_dlt_pipeline_state`` table
+        (a contention point on every dlt destination, regardless of vendor).
+
+        A unit's schema key is taken from its first pipeline. Task groups
+        with mixed schemas (rare) are bucketed by that first pipeline; no
+        worse than today's behavior where they weren't interleaved at all.
         """
-        by_schema: Dict[str, List[PipelineConfig]] = {}
-        for config in configs:
-            by_schema.setdefault(config.schema_name, []).append(config)
+        by_schema: Dict[str, List[List[PipelineConfig]]] = {}
+        for unit in task_units:
+            schema_key = unit[0].schema_name if unit else ""
+            by_schema.setdefault(schema_key, []).append(unit)
 
-        interleaved: List[PipelineConfig] = []
-        iters = [iter(cfgs) for cfgs in by_schema.values()]
+        interleaved: List[List[PipelineConfig]] = []
+        iters = [iter(units) for units in by_schema.values()]
         while iters:
             remaining = []
             for it in iters:
-                cfg = next(it, None)
-                if cfg is not None:
-                    interleaved.append(cfg)
+                unit = next(it, None)
+                if unit is not None:
+                    interleaved.append(unit)
                     remaining.append(it)
             iters = remaining
         return interleaved
@@ -280,29 +312,23 @@ class ExecutionPlanManager:
                 "schema_name": config.schema_name,
             }
 
-        # Group pipelines by task_group
-        grouped_pipelines: Dict[str, List[PipelineConfig]] = {}
-        ungrouped_pipelines = []
-
-        for config in pipeline_configs:
-            task_group = config.config_dict.get("task_group")
-            if task_group:
-                if task_group not in grouped_pipelines:
-                    grouped_pipelines[task_group] = []
-                grouped_pipelines[task_group].append(config)
-            else:
-                ungrouped_pipelines.append(config)
-
-        # Assign task indices: groups first, then ungrouped pipelines
+        # Build task units: every singleton is a 1-element unit, every
+        # task_group is an N-element unit. Round-robin across them by
+        # destination schema so consecutive task indices target different
+        # schemas — see ``_interleave_task_units`` and #85.
+        task_units = _group_into_task_units(pipeline_configs)
         rows_to_insert = []
-        task_index = 0
 
-        for task_group, group_configs in grouped_pipelines.items():
-            logger.info(
-                f"Task group '{task_group}': {len(group_configs)} pipelines "
-                f"will run in parallel in task {task_index}"
-            )
-            for config in group_configs:
+        for task_index, unit in enumerate(self._interleave_task_units(task_units)):
+            if len(unit) > 1:
+                # Surface the group name from the first pipeline (all members
+                # share it). Helpful for operators tailing logs.
+                group_name = unit[0].config_dict.get("task_group")
+                logger.info(
+                    f"Task group '{group_name}': {len(unit)} pipelines "
+                    f"will run in parallel in task {task_index}"
+                )
+            for config in unit:
                 rows_to_insert.append(
                     {
                         "execution_id": execution_id,
@@ -314,21 +340,6 @@ class ExecutionPlanManager:
                         "status": "pending",
                     }
                 )
-            task_index += 1
-
-        for config in self._interleave_by_dataset(ungrouped_pipelines):
-            rows_to_insert.append(
-                {
-                    "execution_id": execution_id,
-                    "task_index": task_index,
-                    "pipeline_type": config.pipeline_group,
-                    "pipeline_identifier": config.identifier,
-                    "table_name": config.table_name,
-                    "config_json": json.dumps(_build_stored_config(config)),
-                    "status": "pending",
-                }
-            )
-            task_index += 1
 
         if config_overrides:
             override_summary = ", ".join(

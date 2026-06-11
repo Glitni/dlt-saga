@@ -49,7 +49,7 @@ class _RecordingDestination:
         return []
 
 
-def _make_config(name: str, **extra) -> PipelineConfig:
+def _make_config(name: str, schema_name: str = "dlt_api", **extra) -> PipelineConfig:
     return PipelineConfig(
         pipeline_group="api",
         pipeline_name=f"api__{name}",
@@ -58,7 +58,7 @@ def _make_config(name: str, **extra) -> PipelineConfig:
         config_dict={"write_disposition": "append", **extra},
         enabled=True,
         tags=[],
-        schema_name="dlt_api",
+        schema_name=schema_name,
     )
 
 
@@ -196,6 +196,101 @@ class TestExecutionIdControl:
         # Check that the execution_id appears in the SQL calls
         all_sql = " ".join(dest.sql_calls)
         assert execution_id in all_sql
+
+
+# ---------------------------------------------------------------------------
+# Task-unit interleaving across groups and singletons (issue #85)
+# ---------------------------------------------------------------------------
+
+
+def _task_index_for(sql_calls: list[str], pipeline_name: str) -> int:
+    """Recover the task_index assigned to a given pipeline_name in the INSERT."""
+    rows = _extract_stored_configs(sql_calls)
+    target = next(r for r in rows if r.get("pipeline_name") == pipeline_name)
+    # The INSERT clause for that row contains the task_index literal — find it
+    # by scanning for the row's pipeline identifier.
+    for sql in sql_calls:
+        if target["pipeline_name"] not in sql:
+            continue
+        # Split by row separator and find the chunk mentioning this pipeline.
+        chunks = sql.split("(CURRENT_TIMESTAMP()")
+        for chunk in chunks[1:]:
+            if target["pipeline_name"] not in chunk:
+                continue
+            parts = [p.strip() for p in chunk.split(",")]
+            # parts: ['', '<exec_id>', '<task_index>', ...]
+            return int(parts[2].strip())
+    raise AssertionError(f"task_index not found for {pipeline_name}")
+
+
+@pytest.mark.unit
+class TestTaskUnitInterleaving:
+    """Task groups participate in schema-interleaving alongside singletons."""
+
+    def test_mixed_groups_and_singletons_interleave_by_schema(self):
+        """Same-schema groups get diluted by other-schema units (issue #85)."""
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        configs = [
+            _make_config("g1a", schema_name="schema_A", task_group="g1"),
+            _make_config("g1b", schema_name="schema_A", task_group="g1"),
+            _make_config("g2a", schema_name="schema_A", task_group="g2"),
+            _make_config("g2b", schema_name="schema_A", task_group="g2"),
+            _make_config("single_b", schema_name="schema_B"),
+            _make_config("single_c", schema_name="schema_C"),
+        ]
+        manager.create_execution_plan(configs)
+
+        # Build task_index -> schema by reading back what we persisted.
+        schema_by_task: dict[int, str] = {}
+        for cfg in configs:
+            ti = _task_index_for(dest.sql_calls, cfg.pipeline_name)
+            # Every member of a group shares the same task_index; the schema
+            # we assert against is the unit's first-pipeline schema.
+            schema_by_task.setdefault(ti, cfg.schema_name)
+
+        ordered_schemas = [schema_by_task[i] for i in sorted(schema_by_task)]
+        # No two consecutive units should share a schema with the prior unit.
+        for prev, curr in zip(ordered_schemas, ordered_schemas[1:]):
+            assert prev != curr, f"Same-schema clustering not fixed: {ordered_schemas}"
+
+    def test_all_singletons_match_previous_interleave(self):
+        """Regression: singleton-only plans keep today's round-robin order."""
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        configs = [
+            _make_config("a", schema_name="schema_A"),
+            _make_config("b", schema_name="schema_A"),
+            _make_config("c", schema_name="schema_B"),
+            _make_config("d", schema_name="schema_B"),
+        ]
+        manager.create_execution_plan(configs)
+
+        idx_a = _task_index_for(dest.sql_calls, "api__a")
+        idx_b = _task_index_for(dest.sql_calls, "api__b")
+        idx_c = _task_index_for(dest.sql_calls, "api__c")
+        idx_d = _task_index_for(dest.sql_calls, "api__d")
+        # A0, B0, A1, B1
+        assert (idx_a, idx_c, idx_b, idx_d) == (0, 1, 2, 3)
+
+    def test_all_same_schema_groups_stable_order(self):
+        """Single-schema groups can't be interleaved — order stays declared."""
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        configs = [
+            _make_config("a", schema_name="schema_A", task_group="g1"),
+            _make_config("b", schema_name="schema_A", task_group="g2"),
+            _make_config("c", schema_name="schema_A", task_group="g3"),
+        ]
+        manager.create_execution_plan(configs)
+
+        idx_a = _task_index_for(dest.sql_calls, "api__a")
+        idx_b = _task_index_for(dest.sql_calls, "api__b")
+        idx_c = _task_index_for(dest.sql_calls, "api__c")
+        assert (idx_a, idx_b, idx_c) == (0, 1, 2)
 
 
 # ---------------------------------------------------------------------------
