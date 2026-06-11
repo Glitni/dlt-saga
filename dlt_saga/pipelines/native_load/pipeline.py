@@ -494,29 +494,15 @@ class NativeLoadPipeline(BasePipeline):
 
     def _load_files(self, files_by_cursor: dict) -> int:
         flat: list = [(f, cv) for cv, files in files_by_cursor.items() for f in files]
+        if not flat:
+            return 0
         batch = self.native_config.load_batch_size
+        total_chunks = (len(flat) + batch - 1) // batch
 
-        # Group by parent directory so each COPY INTO chunk has a single source prefix.
-        # This avoids the multi-prefix problem on date-partitioned ADLS/GCS sources
-        # where a naive slice could span e.g. day=01/ and day=02/ subdirectories.
-        from collections import defaultdict
-
-        grouped: dict = defaultdict(list)
-        for f, cv in flat:
-            parent = f.full_uri.rsplit("/", 1)[0]
-            grouped[parent].append((f, cv))
-
-        total_chunks = sum(
-            max(1, (len(items) + batch - 1) // batch) for items in grouped.values()
-        )
         total_rows = 0
-        chunk_num = 0
-        for items in grouped.values():
-            for i in range(0, len(items), batch):
-                chunk_num += 1
-                total_rows += self._load_chunk(
-                    items[i : i + batch], chunk_num, total_chunks
-                )
+        for chunk_num in range(1, total_chunks + 1):
+            i = (chunk_num - 1) * batch
+            total_rows += self._load_chunk(flat[i : i + batch], chunk_num, total_chunks)
         return total_rows
 
     def _load_chunk(self, chunk: list, chunk_num: int, total_chunks: int) -> int:

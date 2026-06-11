@@ -346,8 +346,11 @@ class TestFlatModeDiscovery:
 
 
 @pytest.mark.unit
-class TestLoadFilesParentGrouping:
-    """Phase 4A — _load_files groups by parent dir before batching."""
+class TestLoadFilesChunking:
+    """`_load_files` chunks purely by `load_batch_size` — parent-directory
+    homogeneity is not a requirement of either destination (BigQuery's
+    `create_external_table` accepts arbitrary URIs; Databricks' COPY INTO
+    falls back to the configured `source_uri` root for multi-prefix chunks)."""
 
     def _make_obj(self, uri: str) -> StorageObject:
         return StorageObject(
@@ -358,7 +361,14 @@ class TestLoadFilesParentGrouping:
             updated=None,
         )
 
-    def test_single_parent_dir_one_chunk(self):
+    def test_empty_input_no_chunks(self):
+        p = _make_pipeline(load_batch_size=10)
+        p._load_chunk = MagicMock(return_value=0)
+        rows = p._load_files({})
+        assert rows == 0
+        p._load_chunk.assert_not_called()
+
+    def test_under_batch_size_one_chunk(self):
         p = _make_pipeline(load_batch_size=10)
         files = {
             None: [
@@ -368,35 +378,76 @@ class TestLoadFilesParentGrouping:
         }
         p._load_chunk = MagicMock(return_value=0)
         p._load_files(files)
-        # Both files share the same parent → one chunk
         assert p._load_chunk.call_count == 1
 
-    def test_two_parent_dirs_two_chunks(self):
-        p = _make_pipeline(load_batch_size=10)
+    def test_cross_partition_single_chunk_under_batch(self):
+        """Files spanning many parent directories collapse into one chunk
+        when their total fits in `load_batch_size` — the historical
+        per-parent grouping no longer fragments date-partitioned loads."""
+        p = _make_pipeline(load_batch_size=100)
         files = {
-            None: [
-                self._make_obj("gs://bucket/prefix/day=01/file1.parquet"),
-                self._make_obj("gs://bucket/prefix/day=02/file2.parquet"),
-            ]
+            "2025-01-01": [
+                self._make_obj("gs://bucket/prefix/2025-01-01/a.parquet"),
+                self._make_obj("gs://bucket/prefix/2025-01-01/b.parquet"),
+            ],
+            "2025-01-02": [
+                self._make_obj("gs://bucket/prefix/2025-01-02/c.parquet"),
+            ],
+            "2025-01-03": [
+                self._make_obj("gs://bucket/prefix/2025-01-03/d.parquet"),
+                self._make_obj("gs://bucket/prefix/2025-01-03/e.parquet"),
+            ],
         }
         p._load_chunk = MagicMock(return_value=0)
         p._load_files(files)
-        # Different parent dirs → two chunks
-        assert p._load_chunk.call_count == 2
+        # 5 files across 3 partitions, batch=100 → 1 chunk total.
+        assert p._load_chunk.call_count == 1
+        # That single chunk carries all 5 files.
+        chunk_items = p._load_chunk.call_args.args[0]
+        assert len(chunk_items) == 5
 
-    def test_batch_size_respected_within_group(self):
+    def test_batch_size_chunks_across_partitions(self):
+        """When the total exceeds `load_batch_size`, chunks are sized purely
+        by batch — independent of how files are distributed across partitions."""
         p = _make_pipeline(load_batch_size=2)
         files = {
-            None: [
-                self._make_obj("gs://bucket/prefix/day=01/file1.parquet"),
-                self._make_obj("gs://bucket/prefix/day=01/file2.parquet"),
-                self._make_obj("gs://bucket/prefix/day=01/file3.parquet"),
-            ]
+            "2025-01-01": [
+                self._make_obj("gs://bucket/prefix/2025-01-01/a.parquet"),
+                self._make_obj("gs://bucket/prefix/2025-01-01/b.parquet"),
+            ],
+            "2025-01-02": [
+                self._make_obj("gs://bucket/prefix/2025-01-02/c.parquet"),
+                self._make_obj("gs://bucket/prefix/2025-01-02/d.parquet"),
+            ],
+            "2025-01-03": [
+                self._make_obj("gs://bucket/prefix/2025-01-03/e.parquet"),
+            ],
         }
         p._load_chunk = MagicMock(return_value=0)
         p._load_files(files)
-        # One group of 3 files, batch_size=2 → 2 chunks
-        assert p._load_chunk.call_count == 2
+        # 5 files at batch=2 → ceil(5/2) = 3 chunks (not 3 per partition,
+        # and not 5 because parents differ).
+        assert p._load_chunk.call_count == 3
+        sizes = [c.args[0] for c in p._load_chunk.call_args_list]
+        assert [len(s) for s in sizes] == [2, 2, 1]
+
+    def test_chunk_label_total_matches_actual(self):
+        """The (chunk_num, total_chunks) pair passed to `_load_chunk` agrees
+        with the actual number of chunks produced — the historical mismatch
+        between the initial 'loading in N chunk(s)' log and the per-chunk
+        labels is gone."""
+        p = _make_pipeline(load_batch_size=2)
+        files = {
+            None: [self._make_obj(f"gs://bucket/prefix/f{i}.parquet") for i in range(5)]
+        }
+        p._load_chunk = MagicMock(return_value=0)
+        p._load_files(files)
+        # Every call should report total=3.
+        totals = {c.args[2] for c in p._load_chunk.call_args_list}
+        assert totals == {3}
+        # And chunk_num should run 1..3.
+        chunk_nums = [c.args[1] for c in p._load_chunk.call_args_list]
+        assert chunk_nums == [1, 2, 3]
 
 
 @pytest.mark.unit
