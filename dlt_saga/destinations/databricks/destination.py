@@ -419,7 +419,18 @@ class DatabricksDestination(Destination):
         table_id = self.get_full_table_id(schema, table_name)
         self.execute_sql(f"DROP TABLE IF EXISTS {table_id}")
 
+        from dlt.common.normalizers.naming.snake_case import NamingConvention
+
         from dlt_saga.project_config import get_load_info_table_name
+
+        # _dlt_version is keyed by the dlt *schema* name, which is the pipeline name
+        # normalized by dlt's naming (e.g. "a__b" -> "a_b"). _dlt_pipeline_state and the
+        # load-info table are keyed by the raw pipeline_name. Using pipeline_name for
+        # _dlt_version leaves its row behind, so dlt thinks the (dropped) table still
+        # exists and the next COPY INTO fails. (DuckDB/BigQuery already normalize.)
+        normalized_schema = NamingConvention(max_length=64).normalize_identifier(
+            pipeline_name
+        )
 
         for meta_table in (
             "_dlt_pipeline_state",
@@ -428,10 +439,13 @@ class DatabricksDestination(Destination):
         ):
             meta_id = self.get_full_table_id(schema, meta_table)
             try:
-                col = "pipeline_name" if meta_table != "_dlt_version" else "schema_name"
+                if meta_table == "_dlt_version":
+                    col, value = "schema_name", normalized_schema
+                else:
+                    col, value = "pipeline_name", pipeline_name
                 self._execute_parameterised(
                     f"DELETE FROM {meta_id} WHERE `{col}` = ?",
-                    [pipeline_name],
+                    [value],
                 )
             except Exception as e:
                 logger.debug("Could not clean %s: %s", meta_id, e)

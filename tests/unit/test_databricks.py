@@ -942,3 +942,44 @@ class TestDatabricksGetAccessManager:
         mgr1 = dest.get_access_manager()
         mgr2 = dest.get_access_manager()
         assert mgr1 is mgr2
+
+
+@pytest.mark.unit
+class TestResetDestinationState:
+    """Full-refresh metadata cleanup."""
+
+    def _capture_reset(self, pipeline_name="grp__tbl", table_name="tbl"):
+        dest = _make_destination(schema_name="my_schema")
+        dest.execute_sql = MagicMock()  # swallow the DROP TABLE
+        calls = []
+        dest._execute_parameterised = MagicMock(
+            side_effect=lambda sql, params, dataset_name=None: calls.append(
+                (sql, params)
+            )
+        )
+        dest.reset_destination_state(pipeline_name=pipeline_name, table_name=table_name)
+        return calls
+
+    def test_dlt_version_cleanup_uses_normalized_schema_name(self):
+        """_dlt_version is keyed by the dlt schema name (pipeline name normalized,
+        collapsing '__' -> '_'), not the raw pipeline_name. Using the raw name left
+        the row behind, so dlt skipped CREATE TABLE and COPY INTO failed on Databricks."""
+        from dlt.common.normalizers.naming.snake_case import NamingConvention
+
+        calls = self._capture_reset(pipeline_name="grp__tbl")
+
+        expected_schema = NamingConvention(max_length=64).normalize_identifier(
+            "grp__tbl"
+        )
+        assert expected_schema != "grp__tbl"  # normalization actually collapses "__"
+
+        version = [(s, p) for s, p in calls if "_dlt_version" in s]
+        assert version, "expected a _dlt_version cleanup DELETE"
+        sql, params = version[0]
+        assert "schema_name" in sql
+        assert params == [expected_schema]
+
+    def test_pipeline_keyed_tables_use_raw_pipeline_name(self):
+        calls = self._capture_reset(pipeline_name="grp__tbl")
+        state = [(s, p) for s, p in calls if "_dlt_pipeline_state" in s]
+        assert state and state[0][1] == ["grp__tbl"]
