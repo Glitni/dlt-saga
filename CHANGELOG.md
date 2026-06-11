@@ -1,3 +1,8 @@
+## 0.3.3 — 2026-06-11
+
+### Fixed
+- Interleave task groups by schema alongside singletons (#86)
+
 ## 0.3.2 — 2026-06-11
 
 ### Fixed
