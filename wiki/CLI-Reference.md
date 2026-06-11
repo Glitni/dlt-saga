@@ -183,6 +183,7 @@ saga worker [OPTIONS]
 | `--execution-id TEXT` | `SAGA_EXECUTION_ID` | Execution plan ID |
 | `--task-index INT` | `CLOUD_RUN_TASK_INDEX` → `SAGA_TASK_INDEX` | Task index to execute |
 | `-c, --command TEXT` | `SAGA_WORKER_COMMAND` (default: `ingest`) | Command to run |
+| `-w, --workers INT` | `SAGA_WORKER_CONCURRENCY` → `orchestration.worker_concurrency` (default: `4`) | Cap on parallel pipelines per task |
 | `--full-refresh` | — | Drop state/tables and reload from scratch |
 | `-f, --force` | — | Force execution |
 | `--start-value-override TEXT` | — | Override incremental start value |

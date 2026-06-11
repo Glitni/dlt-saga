@@ -51,6 +51,7 @@ class CloudRunJobTrigger:
         debug_logging: bool = False,
         worker_command: str = "ingest",
         force: bool = False,
+        worker_concurrency: Optional[int] = None,
     ) -> str:
         """Trigger a Cloud Run Job execution with specified task count.
 
@@ -62,6 +63,9 @@ class CloudRunJobTrigger:
                 when source data hasn't changed. ``--full-refresh`` is
                 intentionally not propagated — that flag mutates destination
                 state and requires interactive confirmation.
+            worker_concurrency: Per-task concurrency cap. Forwarded as
+                ``SAGA_WORKER_CONCURRENCY`` so workers receiving a multi-
+                pipeline ``task_group`` cap in-task parallelism.
 
         Returns:
             execution_name: Full resource name of the created execution
@@ -90,6 +94,13 @@ class CloudRunJobTrigger:
 
         if force:
             env_vars.append(run_v2.EnvVar(name="SAGA_FORCE", value="true"))
+
+        if worker_concurrency is not None:
+            env_vars.append(
+                run_v2.EnvVar(
+                    name="SAGA_WORKER_CONCURRENCY", value=str(worker_concurrency)
+                )
+            )
 
         # Create container overrides with environment variables
         container_overrides = [
@@ -131,6 +142,7 @@ def trigger_distributed_execution(
     debug_logging: bool = False,
     worker_command: str = "ingest",
     force: bool = False,
+    worker_concurrency: Optional[int] = None,
 ) -> str:
     """Convenience function to trigger a distributed execution.
 
@@ -143,6 +155,8 @@ def trigger_distributed_execution(
         debug_logging: Enable debug logging in worker tasks
         worker_command: Command for workers to execute (ingest, historize, or run)
         force: Bypass change detection in worker tasks (forwarded as SAGA_FORCE).
+        worker_concurrency: In-task parallelism cap for workers (forwarded as
+            SAGA_WORKER_CONCURRENCY).
 
     Returns:
         execution_name: Full resource name of the created execution
@@ -177,4 +191,5 @@ def trigger_distributed_execution(
         debug_logging=debug_logging,
         worker_command=worker_command,
         force=force,
+        worker_concurrency=worker_concurrency,
     )

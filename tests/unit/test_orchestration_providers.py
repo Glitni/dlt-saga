@@ -40,6 +40,7 @@ class TestStdoutProvider:
             task_count=5,
             command="run",
             debug=True,
+            worker_concurrency=2,
         )
 
         captured = capsys.readouterr()
@@ -48,6 +49,7 @@ class TestStdoutProvider:
         assert output["execution_id"] == "abc-123"
         assert output["task_count"] == 5
         assert output["command"] == "run"
+        assert output["worker_concurrency"] == 2
         assert result.execution_reference == "stdout:abc-123"
 
     def test_trigger_defaults(self, capsys):
@@ -58,6 +60,7 @@ class TestStdoutProvider:
         output = json.loads(captured.out)
 
         assert output["command"] == "ingest"
+        assert output["worker_concurrency"] is None
         assert result.execution_reference == "stdout:x"
 
 
@@ -142,9 +145,33 @@ class TestCloudRunProvider:
             debug_logging=True,
             worker_command="historize",
             force=False,
+            worker_concurrency=None,
         )
         assert (
             result.execution_reference == "projects/p/locations/r/jobs/j/executions/e"
+        )
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("dlt_saga.utility.orchestration.cloud_run_trigger.CloudRunJobTrigger")
+    def test_trigger_forwards_worker_concurrency(self, mock_trigger_cls):
+        mock_instance = MagicMock()
+        mock_instance.trigger_execution.return_value = "ref"
+        mock_trigger_cls.return_value = mock_instance
+
+        provider = CloudRunProvider(project_id="p", region="r", job_name="j")
+        provider.trigger(
+            execution_id="exec-1",
+            task_count=1,
+            worker_concurrency=2,
+        )
+
+        mock_instance.trigger_execution.assert_called_once_with(
+            execution_id="exec-1",
+            task_count=1,
+            debug_logging=False,
+            worker_command="ingest",
+            force=False,
+            worker_concurrency=2,
         )
 
 
@@ -161,7 +188,15 @@ class TestOrchestrationProviderInterface:
 
     def test_custom_provider(self):
         class TestProvider(OrchestrationProvider):
-            def trigger(self, execution_id, task_count, command="ingest", debug=False):
+            def trigger(
+                self,
+                execution_id,
+                task_count,
+                command="ingest",
+                debug=False,
+                force=False,
+                worker_concurrency=None,
+            ):
                 return TriggerResult(execution_reference=f"test:{execution_id}")
 
         provider = TestProvider()
@@ -409,3 +444,172 @@ class TestGetWorkerEnvironment:
         # Newer typer versions raise typer.Exit (typer._click.exceptions.Exit)
         with pytest.raises(typer.Exit):
             _get_worker_environment()
+
+
+# ---------------------------------------------------------------------------
+# _resolve_worker_concurrency precedence chain
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestResolveWorkerConcurrency:
+    """Precedence: CLI override > env var > saga_project.yml > default 4."""
+
+    def setup_method(self):
+        from dlt_saga.project_config import _reset_cache
+
+        _reset_cache()
+
+    def teardown_method(self):
+        from dlt_saga.project_config import _reset_cache
+
+        _reset_cache()
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_default_when_nothing_set(self, tmp_path, monkeypatch):
+        from dlt_saga.cli import (
+            _DEFAULT_WORKER_CONCURRENCY,
+            _resolve_worker_concurrency,
+        )
+
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_worker_concurrency() == _DEFAULT_WORKER_CONCURRENCY
+
+    @patch.dict("os.environ", {"SAGA_WORKER_CONCURRENCY": "2"}, clear=True)
+    def test_env_var_used(self, tmp_path, monkeypatch):
+        from dlt_saga.cli import _resolve_worker_concurrency
+
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_worker_concurrency() == 2
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_project_config_used(self, tmp_path, monkeypatch):
+        from dlt_saga.cli import _resolve_worker_concurrency
+
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text(
+            "orchestration:\n  provider: cloud_run\n  worker_concurrency: 3\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_worker_concurrency() == 3
+
+    @patch.dict("os.environ", {"SAGA_WORKER_CONCURRENCY": "5"}, clear=True)
+    def test_env_var_overrides_project_config(self, tmp_path, monkeypatch):
+        from dlt_saga.cli import _resolve_worker_concurrency
+
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text(
+            "orchestration:\n  provider: cloud_run\n  worker_concurrency: 3\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_worker_concurrency() == 5
+
+    @patch.dict("os.environ", {"SAGA_WORKER_CONCURRENCY": "5"}, clear=True)
+    def test_cli_override_wins(self, tmp_path, monkeypatch):
+        from dlt_saga.cli import _resolve_worker_concurrency
+
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text(
+            "orchestration:\n  provider: cloud_run\n  worker_concurrency: 3\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_worker_concurrency(cli_override=1) == 1
+
+    @patch.dict("os.environ", {"SAGA_WORKER_CONCURRENCY": "not-an-int"}, clear=True)
+    def test_invalid_env_var_falls_through(self, tmp_path, monkeypatch):
+        from dlt_saga.cli import (
+            _DEFAULT_WORKER_CONCURRENCY,
+            _resolve_worker_concurrency,
+        )
+
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_worker_concurrency() == _DEFAULT_WORKER_CONCURRENCY
+
+    @patch.dict("os.environ", {"SAGA_WORKER_CONCURRENCY": "0"}, clear=True)
+    def test_non_positive_env_var_falls_through(self, tmp_path, monkeypatch):
+        from dlt_saga.cli import (
+            _DEFAULT_WORKER_CONCURRENCY,
+            _resolve_worker_concurrency,
+        )
+
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_worker_concurrency() == _DEFAULT_WORKER_CONCURRENCY
+
+
+# ---------------------------------------------------------------------------
+# _execute_worker_parallel honors max_workers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestExecuteWorkerParallel:
+    def test_caps_at_max_workers(self):
+        """Concurrency is capped even when there are more configs than workers."""
+        import threading
+
+        from dlt_saga.cli import _execute_worker_parallel
+
+        configs = [_make_config(f"t{i}") for i in range(8)]
+        active_lock = threading.Lock()
+        active_count = {"current": 0, "peak": 0}
+        gate = threading.Event()
+
+        def run_fn(config, log_prefix):
+            with active_lock:
+                active_count["current"] += 1
+                if active_count["current"] > active_count["peak"]:
+                    active_count["peak"] = active_count["current"]
+            gate.wait(timeout=0.5)
+            with active_lock:
+                active_count["current"] -= 1
+            return True
+
+        # Release the gate slightly later so threads pile up first.
+        timer = threading.Timer(0.05, gate.set)
+        timer.start()
+        try:
+            failed = _execute_worker_parallel(
+                configs, task_index=0, label="ingest", run_fn=run_fn, max_workers=2
+            )
+        finally:
+            timer.cancel()
+            gate.set()
+
+        assert failed == []
+        assert active_count["peak"] <= 2
+
+    def test_caps_at_len_configs_when_max_workers_larger(self):
+        """max_workers larger than len(configs) means len(configs) threads, no idle ones."""
+        from dlt_saga.cli import _execute_worker_parallel
+
+        configs = [_make_config("a"), _make_config("b")]
+        ran = []
+
+        def run_fn(config, log_prefix):
+            ran.append(config.table_name)
+            return True
+
+        failed = _execute_worker_parallel(
+            configs, task_index=0, label="ingest", run_fn=run_fn, max_workers=10
+        )
+        assert failed == []
+        assert sorted(ran) == ["a", "b"]
+
+    def test_empty_configs_short_circuits(self):
+        from dlt_saga.cli import _execute_worker_parallel
+
+        called = []
+
+        def run_fn(config, log_prefix):
+            called.append(config)
+            return True
+
+        failed = _execute_worker_parallel(
+            configs=[],
+            task_index=0,
+            label="ingest",
+            run_fn=run_fn,
+            max_workers=4,
+        )
+        assert failed == []
+        assert called == []

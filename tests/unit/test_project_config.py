@@ -169,6 +169,28 @@ class TestGetOrchestrationConfig:
         result = get_orchestration_config()
         assert result.dataset_access is None
 
+    def test_worker_concurrency_defaults_to_none(self, tmp_path, monkeypatch):
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text("orchestration:\n  provider: cloud_run\n")
+        monkeypatch.chdir(tmp_path)
+
+        result = get_orchestration_config()
+        assert result.worker_concurrency is None
+
+    def test_worker_concurrency_parsed_when_present(self, tmp_path, monkeypatch):
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text(
+            "orchestration:\n  provider: cloud_run\n  worker_concurrency: 2\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        result = get_orchestration_config()
+        assert result.worker_concurrency == 2
+
+    def test_worker_concurrency_rejects_zero(self):
+        with pytest.raises(ValueError, match="worker_concurrency must be >= 1"):
+            OrchestrationConfig(worker_concurrency=0)
+
     def test_dataset_access_parsed_when_present(self, tmp_path, monkeypatch):
         yml = tmp_path / "saga_project.yml"
         yml.write_text(
