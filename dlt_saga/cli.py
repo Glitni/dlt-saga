@@ -9,7 +9,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
     from dlt_saga.utility.cli.context import ExecutionContext
@@ -263,49 +263,31 @@ def _build_task_assignments(configs: List[PipelineConfig]) -> List[Dict]:
 
     Returns a list of dicts, one per task, with ``task_index``,
     optional ``task_group``, and ``pipelines`` (list of pipeline names).
+
+    Mirrors ``ExecutionPlanManager.create_execution_plan`` so the dry-run
+    preview matches the persisted plan exactly.
     """
-    grouped: Dict[str, List[PipelineConfig]] = {}
-    ungrouped: List[PipelineConfig] = []
-    for config in configs:
-        tg = config.config_dict.get("task_group")
-        if tg:
-            grouped.setdefault(tg, []).append(config)
-        else:
-            ungrouped.append(config)
+    from dlt_saga.utility.orchestration.execution_plan import (
+        ExecutionPlanManager,
+        _group_into_task_units,
+    )
+
+    units = _group_into_task_units(configs)
+    interleaved = ExecutionPlanManager._interleave_task_units(units)
 
     tasks = []
-    task_index = 0
-    for task_group, group_configs in grouped.items():
-        tasks.append(
-            {
-                "task_index": task_index,
-                "task_group": task_group,
-                "pipelines": [c.pipeline_name for c in group_configs],
-            }
-        )
-        task_index += 1
-    # Interleave ungrouped pipelines by target dataset (schema_name) to
-    # distribute concurrent writes across different datasets (matches
-    # execution_plan.py).
-    by_schema: Dict[str, List[PipelineConfig]] = {}
-    for config in ungrouped:
-        by_schema.setdefault(config.schema_name, []).append(config)
-
-    group_iters = [iter(cfgs) for cfgs in by_schema.values()]
-    while group_iters:
-        remaining = []
-        for it in group_iters:
-            cfg = next(it, None)
-            if cfg is not None:
-                tasks.append(
-                    {
-                        "task_index": task_index,
-                        "pipelines": [cfg.pipeline_name],
-                    }
-                )
-                task_index += 1
-                remaining.append(it)
-        group_iters = remaining
+    for task_index, unit in enumerate(interleaved):
+        task: Dict[str, Any] = {
+            "task_index": task_index,
+            "pipelines": [c.pipeline_name for c in unit],
+        }
+        # Surface the task_group name whenever the unit came from a group,
+        # even a single-pipeline group — preserves the user's labeling so
+        # the preview shows the same identity workers see.
+        group_name = unit[0].config_dict.get("task_group")
+        if group_name:
+            task["task_group"] = group_name
+        tasks.append(task)
     return tasks
 
 

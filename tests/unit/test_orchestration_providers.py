@@ -283,7 +283,9 @@ class TestResolveProvider:
 # ---------------------------------------------------------------------------
 
 
-def _make_config(name: str, task_group: str = None) -> PipelineConfig:
+def _make_config(
+    name: str, task_group: str = None, schema_name: str = ""
+) -> PipelineConfig:
     """Helper to create a minimal PipelineConfig."""
     config_dict = {"base_table_name": name}
     if task_group:
@@ -297,6 +299,7 @@ def _make_config(name: str, task_group: str = None) -> PipelineConfig:
         enabled=True,
         tags=[],
         source_type="file",
+        schema_name=schema_name,
     )
 
 
@@ -372,6 +375,93 @@ class TestBuildTaskAssignments:
         from dlt_saga.cli import _build_task_assignments
 
         assert _build_task_assignments([]) == []
+
+    def test_task_groups_interleave_by_schema(self):
+        """Multiple groups in different schemas round-robin by schema."""
+        from dlt_saga.cli import _build_task_assignments
+
+        configs = [
+            _make_config("a", task_group="g1", schema_name="schema_A"),
+            _make_config("b", task_group="g1", schema_name="schema_A"),
+            _make_config("c", task_group="g2", schema_name="schema_A"),
+            _make_config("d", task_group="g3", schema_name="schema_B"),
+        ]
+        tasks = _build_task_assignments(configs)
+
+        assert len(tasks) == 3
+        # Bucket A had 2 groups, bucket B had 1 — round-robin starts with A.
+        assert tasks[0]["task_group"] == "g1"
+        assert tasks[1]["task_group"] == "g3"  # schema_B unit diluted between A's
+        assert tasks[2]["task_group"] == "g2"
+
+    def test_groups_and_singletons_interleave_together(self):
+        """Same-schema groups get diluted by other-schema singletons (issue #85)."""
+        from dlt_saga.cli import _build_task_assignments
+
+        configs = [
+            _make_config("g1a", task_group="g1", schema_name="schema_A"),
+            _make_config("g1b", task_group="g1", schema_name="schema_A"),
+            _make_config("g2a", task_group="g2", schema_name="schema_A"),
+            _make_config("g2b", task_group="g2", schema_name="schema_A"),
+            _make_config("single_b", schema_name="schema_B"),
+            _make_config("single_c", schema_name="schema_C"),
+        ]
+        tasks = _build_task_assignments(configs)
+
+        schemas_per_task = []
+        for task in tasks:
+            # Use the first pipeline's schema as the bucket key for assertion.
+            name = task["pipelines"][0]
+            if name.startswith("test__g1"):
+                schemas_per_task.append("A")
+            elif name.startswith("test__g2"):
+                schemas_per_task.append("A")
+            elif "single_b" in name:
+                schemas_per_task.append("B")
+            elif "single_c" in name:
+                schemas_per_task.append("C")
+        # Consecutive same-schema runs of length > 1 mean clustering wasn't fixed.
+        max_run = 1
+        run = 1
+        for prev, curr in zip(schemas_per_task, schemas_per_task[1:]):
+            if prev == curr:
+                run += 1
+                max_run = max(max_run, run)
+            else:
+                run = 1
+        assert max_run == 1, (
+            f"Same-schema task units should not cluster, got order {schemas_per_task}"
+        )
+
+    def test_singletons_only_preserves_existing_interleave(self):
+        """Regression: an all-singleton plan must order identically to today."""
+        from dlt_saga.cli import _build_task_assignments
+
+        configs = [
+            _make_config("a", schema_name="schema_A"),
+            _make_config("b", schema_name="schema_A"),
+            _make_config("c", schema_name="schema_B"),
+            _make_config("d", schema_name="schema_B"),
+        ]
+        tasks = _build_task_assignments(configs)
+
+        names = [t["pipelines"][0] for t in tasks]
+        # Old behavior was schema-round-robin: A0, B0, A1, B1 (insertion order
+        # within each bucket).
+        assert names == ["test__a", "test__c", "test__b", "test__d"]
+
+    def test_all_same_schema_groups_keep_stable_order(self):
+        """When every group lives in one schema, fall back to declaration order."""
+        from dlt_saga.cli import _build_task_assignments
+
+        configs = [
+            _make_config("a", task_group="g1", schema_name="schema_A"),
+            _make_config("b", task_group="g2", schema_name="schema_A"),
+            _make_config("c", task_group="g3", schema_name="schema_A"),
+        ]
+        tasks = _build_task_assignments(configs)
+
+        assert [t["task_group"] for t in tasks] == ["g1", "g2", "g3"]
 
 
 # ---------------------------------------------------------------------------
