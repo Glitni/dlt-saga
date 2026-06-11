@@ -44,6 +44,7 @@ class OrchestrationProvider(ABC):
         command: str = "ingest",
         debug: bool = False,
         force: bool = False,
+        worker_concurrency: Optional[int] = None,
     ) -> TriggerResult:
         """Trigger workers to execute an execution plan.
 
@@ -55,6 +56,9 @@ class OrchestrationProvider(ABC):
             force: Bypass change detection in workers (forwarded so that
                 the worker side sees ``--force`` even though Cloud Run only
                 runs the bare ``saga`` CLI).
+            worker_concurrency: In-task parallelism cap for each worker,
+                forwarded so that a multi-pipeline ``task_group`` doesn't
+                fan out to as many threads as it has pipelines.
 
         Returns:
             TriggerResult with a reference to the triggered execution.
@@ -100,6 +104,7 @@ class CloudRunProvider(OrchestrationProvider):
         command: str = "ingest",
         debug: bool = False,
         force: bool = False,
+        worker_concurrency: Optional[int] = None,
     ) -> TriggerResult:
         from dlt_saga.utility.orchestration.cloud_run_trigger import CloudRunJobTrigger
 
@@ -114,6 +119,7 @@ class CloudRunProvider(OrchestrationProvider):
             debug_logging=debug,
             worker_command=command,
             force=force,
+            worker_concurrency=worker_concurrency,
         )
         return TriggerResult(execution_reference=execution_name)
 
@@ -180,17 +186,20 @@ class StdoutProvider(OrchestrationProvider):
         command: str = "ingest",
         debug: bool = False,
         force: bool = False,
+        worker_concurrency: Optional[int] = None,
     ) -> TriggerResult:
         output = {
             "execution_id": execution_id,
             "task_count": task_count,
             "command": command,
             "force": force,
+            "worker_concurrency": worker_concurrency,
         }
         # JSON goes to stdout; status messages go to stderr via logger
         print(json.dumps(output))
         logger.info(
             "Execution plan ready for external orchestrator: "
-            f"{task_count} task(s), command={command}, force={force}"
+            f"{task_count} task(s), command={command}, force={force}, "
+            f"worker_concurrency={worker_concurrency}"
         )
         return TriggerResult(execution_reference=f"stdout:{execution_id}")

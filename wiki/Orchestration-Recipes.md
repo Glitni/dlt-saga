@@ -354,10 +354,29 @@ orchestration:
   provider: cloud_run
   job_name: adp-dlt-ingest-daily
   schema: dlt_orchestration            # optional override
+  worker_concurrency: 4                # optional — see "Capping in-task fan-out" below
   dataset_access:
     - "READER:serviceAccount:airflow-runner@<project>.iam.gserviceaccount.com"
     - "READER:group:data-platform@example.com"
 ```
+
+### Capping in-task fan-out
+
+When a `task_group` assigns multiple pipelines to the same worker task, the worker
+runs those pipelines concurrently in a thread pool. Without a cap, the pool sizes
+itself to the number of assigned pipelines — which can OOM a Cloud Run task when
+the group is large (e.g. an 18-pipeline group inside a 2 GB container loading
+parquet files into memory).
+
+Precedence (highest first):
+
+1. `--workers N` on the orchestrator command (`saga ingest --orchestrate --workers N`).
+2. `SAGA_WORKER_CONCURRENCY` env var on the worker.
+3. `orchestration.worker_concurrency` in `saga_project.yml`.
+4. Default `4`.
+
+The orchestrator's `--workers` is forwarded to each Cloud Run task as
+`SAGA_WORKER_CONCURRENCY`, so a single flag on the trigger reaches every worker.
 
 `saga update-access` applies these entries to the orchestration schema alongside the per-pipeline `pipelines.dataset_access` grants. Same string format. Applied in prod only — matches the per-pipeline behaviour. Without this, an external orchestrator querying the execution plan tables will see `PERMISSION_DENIED` even though saga creates the schema itself.
 

@@ -292,3 +292,21 @@ class TestForcePropagation:
         env = request.overrides.container_overrides[0].env
         names = {e["name"] for e in env}
         assert "SAGA_FORCE" not in names
+
+    def test_cloud_run_trigger_emits_worker_concurrency_env_var(self):
+        """worker_concurrency must reach workers via SAGA_WORKER_CONCURRENCY."""
+        request = self._run_trigger_with_fake_run_v2(
+            execution_id="exec-2", task_count=4, worker_concurrency=2
+        )
+        env = request.overrides.container_overrides[0].env
+        names = {e["name"]: e["value"] for e in env}
+        assert names.get("SAGA_WORKER_CONCURRENCY") == "2"
+
+    def test_cloud_run_trigger_omits_worker_concurrency_when_none(self):
+        """When worker_concurrency is unset, no env var is sent (worker uses defaults)."""
+        request = self._run_trigger_with_fake_run_v2(
+            execution_id="exec-3", task_count=1
+        )
+        env = request.overrides.container_overrides[0].env
+        names = {e["name"] for e in env}
+        assert "SAGA_WORKER_CONCURRENCY" not in names

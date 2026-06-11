@@ -42,6 +42,48 @@ configure_cli_logging()
 
 logger = logging.getLogger(__name__)
 
+# Default cap on per-worker in-task parallelism. Keeps memory predictable
+# when a large ``task_group`` would otherwise fan out to as many threads as
+# there are pipelines (see #82).
+_DEFAULT_WORKER_CONCURRENCY = 4
+
+
+def _resolve_worker_concurrency(cli_override: Optional[int] = None) -> int:
+    """Resolve the worker concurrency cap.
+
+    Precedence (highest first):
+      1. ``cli_override`` (passed by the CLI when ``--workers`` is set).
+      2. ``SAGA_WORKER_CONCURRENCY`` env var (set by the orchestrator on
+         each Cloud Run task — this is how the orchestrator's ``--workers``
+         reaches the worker).
+      3. ``saga_project.yml: orchestration.worker_concurrency``.
+      4. ``_DEFAULT_WORKER_CONCURRENCY``.
+    """
+    if cli_override is not None:
+        return max(1, cli_override)
+
+    env_value = get_env("SAGA_WORKER_CONCURRENCY")
+    if env_value:
+        try:
+            parsed = int(env_value)
+            if parsed >= 1:
+                return parsed
+            logger.warning(
+                "Ignoring SAGA_WORKER_CONCURRENCY=%s (must be >= 1)", env_value
+            )
+        except ValueError:
+            logger.warning(
+                "Ignoring SAGA_WORKER_CONCURRENCY=%s (not an integer)", env_value
+            )
+
+    from dlt_saga.project_config import get_orchestration_config
+
+    project_value = get_orchestration_config().worker_concurrency
+    if project_value is not None:
+        return project_value
+
+    return _DEFAULT_WORKER_CONCURRENCY
+
 
 def _version_callback(value: bool):
     if value:
@@ -315,6 +357,7 @@ def run_orchestrator_mode(
     start_value_override: Optional[str] = None,
     end_value_override: Optional[str] = None,
     force: bool = False,
+    workers: Optional[int] = None,
 ):
     """Run in orchestrator mode: create execution plan and trigger workers.
 
@@ -327,6 +370,11 @@ def run_orchestrator_mode(
             bypass change detection. (``full_refresh`` deliberately is *not*
             propagated — it requires interactive confirmation and must run
             from a local orchestrator.)
+        workers: Per-task concurrency cap. Forwarded to workers as
+            ``SAGA_WORKER_CONCURRENCY`` so multi-pipeline ``task_group``s
+            don't fan out to as many threads as they have pipelines.
+            When ``None``, falls back to ``saga_project.yml`` config and
+            then the framework default — same precedence the worker uses.
     """
     from dlt_saga.utility.naming import get_execution_plan_schema
     from dlt_saga.utility.orchestration.execution_plan import (
@@ -368,6 +416,8 @@ def run_orchestrator_mode(
     task_count = _calculate_task_count(all_configs)
     logger.info("Task allocation: %d total tasks", task_count)
 
+    resolved_workers = _resolve_worker_concurrency(workers)
+
     try:
         result = provider.trigger(
             execution_id=execution_id,
@@ -375,8 +425,13 @@ def run_orchestrator_mode(
             command=command,
             debug=debug_logging,
             force=force,
+            worker_concurrency=resolved_workers,
         )
-        logger.info("Triggered execution: %s", result.execution_reference)
+        logger.info(
+            "Triggered execution: %s (worker concurrency: %d)",
+            result.execution_reference,
+            resolved_workers,
+        )
     except Exception as e:
         logger.error("Failed to trigger workers: %s", e)
         raise typer.Exit(1)
@@ -445,6 +500,7 @@ def _execute_worker_parallel(
     task_index: int,
     label: str,
     run_fn: Callable[[PipelineConfig, str], bool],
+    max_workers: int = _DEFAULT_WORKER_CONCURRENCY,
 ) -> List[tuple[str, str]]:
     """Execute pipelines in parallel within a worker task.
 
@@ -453,6 +509,11 @@ def _execute_worker_parallel(
         task_index: Worker task index for log prefixes.
         label: Phase label for logging (e.g. "ingest", "historize").
         run_fn: Callable(config, log_prefix) -> bool (True=success).
+        max_workers: Cap on concurrent threads inside this worker. Capped
+            again at ``len(configs)`` since there's no point spawning more
+            threads than pipelines. Defaults to ``_DEFAULT_WORKER_CONCURRENCY``
+            so a large ``task_group`` can't OOM the worker container by
+            spawning one thread per pipeline.
 
     Returns:
         List of (table_name, error_message) tuples for failed pipelines.
@@ -460,16 +521,19 @@ def _execute_worker_parallel(
     if not configs:
         return []
 
+    effective_workers = max(1, min(len(configs), max_workers))
+
     if len(configs) > 1:
         logger.info(
-            "[Task %d] Running %d %s pipelines in parallel",
+            "[Task %d] Running %d %s pipelines (concurrency=%d)",
             task_index,
             len(configs),
             label,
+            effective_workers,
         )
 
     failed_pipelines: List[tuple[str, str]] = []
-    with ThreadPoolExecutor(max_workers=len(configs)) as executor:
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
         future_to_config = {}
         for i, config in enumerate(configs, 1):
             log_prefix = _worker_log_prefix(task_index, i, len(configs))
@@ -493,17 +557,22 @@ def _execute_worker_parallel(
 
 
 def _execute_worker_ingest(
-    pipeline_configs: List[PipelineConfig], task_index: int
+    pipeline_configs: List[PipelineConfig],
+    task_index: int,
+    max_workers: int = _DEFAULT_WORKER_CONCURRENCY,
 ) -> List[tuple[str, str]]:
     """Execute ingest for assigned pipelines."""
     configs = [c for c in pipeline_configs if c.ingest_enabled]
-    return _execute_worker_parallel(configs, task_index, "ingest", _run_pipeline_safe)
+    return _execute_worker_parallel(
+        configs, task_index, "ingest", _run_pipeline_safe, max_workers=max_workers
+    )
 
 
 def _execute_worker_historize(
     pipeline_configs: List[PipelineConfig],
     task_index: int,
     full_refresh: bool = False,
+    max_workers: int = _DEFAULT_WORKER_CONCURRENCY,
 ) -> List[tuple[str, str]]:
     """Execute historize for assigned pipelines."""
     configs = [c for c in pipeline_configs if c.historize_enabled]
@@ -511,19 +580,24 @@ def _execute_worker_historize(
     def _run(config: PipelineConfig, log_prefix: str) -> bool:
         return _run_historize_safe(config, full_refresh, log_prefix)
 
-    return _execute_worker_parallel(configs, task_index, "historize", _run)
+    return _execute_worker_parallel(
+        configs, task_index, "historize", _run, max_workers=max_workers
+    )
 
 
 def _execute_worker_run(
     pipeline_configs: List[PipelineConfig],
     task_index: int,
     full_refresh: bool = False,
+    max_workers: int = _DEFAULT_WORKER_CONCURRENCY,
 ) -> List[tuple[str, str]]:
     """Execute ingest then historize for assigned pipelines."""
     failed_pipelines = []
 
     # Run ingest first
-    ingest_failed = _execute_worker_ingest(pipeline_configs, task_index)
+    ingest_failed = _execute_worker_ingest(
+        pipeline_configs, task_index, max_workers=max_workers
+    )
     failed_pipelines.extend(ingest_failed)
     failed_names = {name for name, _ in ingest_failed}
 
@@ -542,7 +616,7 @@ def _execute_worker_run(
             )
 
     historize_failed = _execute_worker_historize(
-        historize_configs, task_index, full_refresh
+        historize_configs, task_index, full_refresh, max_workers=max_workers
     )
     failed_pipelines.extend(historize_failed)
 
@@ -579,6 +653,7 @@ def run_worker_mode(
     execution_id: Optional[str] = None,
     task_index: Optional[int] = None,
     worker_command: Optional[str] = None,
+    workers: Optional[int] = None,
 ):
     """Run in worker mode: read assignment from execution plan and execute.
 
@@ -586,6 +661,9 @@ def run_worker_mode(
         execution_id: Explicit execution ID (falls back to SAGA_EXECUTION_ID).
         task_index: Explicit task index (falls back to CLOUD_RUN_TASK_INDEX / SAGA_TASK_INDEX).
         worker_command: Explicit command (falls back to SAGA_WORKER_COMMAND, default "ingest").
+        workers: Explicit per-task concurrency cap (falls back to
+            ``SAGA_WORKER_CONCURRENCY`` → ``saga_project.yml`` →
+            ``_DEFAULT_WORKER_CONCURRENCY``).
     """
     from dlt_saga.utility.naming import get_execution_plan_schema
     from dlt_saga.utility.orchestration.execution_plan import ExecutionPlanManager
@@ -593,12 +671,14 @@ def run_worker_mode(
     execution_id, task_index = _get_worker_environment(execution_id, task_index)
     worker_command = worker_command or get_env("SAGA_WORKER_COMMAND", "ingest")
     full_refresh = get_execution_context().full_refresh
+    max_workers = _resolve_worker_concurrency(workers)
 
     logger.info(
-        "Worker mode: Task %d for execution %s (command: %s)",
+        "Worker mode: Task %d for execution %s (command: %s, concurrency: %d)",
         task_index,
         execution_id,
         worker_command,
+        max_workers,
     )
 
     plan_dataset = get_execution_plan_schema()
@@ -620,15 +700,17 @@ def run_worker_mode(
 
     if worker_command == "historize":
         failed_pipelines = _execute_worker_historize(
-            pipeline_configs, task_index, full_refresh
+            pipeline_configs, task_index, full_refresh, max_workers=max_workers
         )
     elif worker_command == "run":
         failed_pipelines = _execute_worker_run(
-            pipeline_configs, task_index, full_refresh
+            pipeline_configs, task_index, full_refresh, max_workers=max_workers
         )
     else:
         # Default: ingest only (backward compatible)
-        failed_pipelines = _execute_worker_ingest(pipeline_configs, task_index)
+        failed_pipelines = _execute_worker_ingest(
+            pipeline_configs, task_index, max_workers=max_workers
+        )
 
     _update_worker_status(
         plan_manager, execution_id, task_index, pipeline_configs, failed_pipelines
@@ -1053,6 +1135,7 @@ def ingest(
                 start_value_override=start_value_override,
                 end_value_override=end_value_override,
                 force=force,
+                workers=workers,
             ),
         )
         return
@@ -1185,6 +1268,7 @@ def historize(
                 target=target,
                 provider=provider,
                 force=force,
+                workers=workers,
             ),
         )
         return
@@ -1333,6 +1417,7 @@ def _run_orchestrate(
     in_cloud_run: bool,
     start_value_override: Optional[str],
     end_value_override: Optional[str],
+    workers: int,
 ) -> None:
     """Handle the orchestrator path for ``saga run``.
 
@@ -1383,6 +1468,7 @@ def _run_orchestrate(
             start_value_override=start_value_override,
             end_value_override=end_value_override,
             force=force,
+            workers=workers,
         ),
     )
 
@@ -1490,6 +1576,7 @@ def run(
             in_cloud_run=in_cloud_run,
             start_value_override=start_value_override,
             end_value_override=end_value_override,
+            workers=workers,
         )
         return
 
@@ -1862,6 +1949,16 @@ def worker(
         "-c",
         help="Command to execute: ingest, historize, or run (fallback: SAGA_WORKER_COMMAND, default: ingest)",
     ),
+    workers: Optional[int] = typer.Option(
+        None,
+        "--workers",
+        "-w",
+        help=(
+            "Cap on parallel pipelines within this worker task. "
+            "Fallback: SAGA_WORKER_CONCURRENCY env var, then "
+            "orchestration.worker_concurrency in saga_project.yml, then 4."
+        ),
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="Profile to use from profiles.yml"
@@ -1908,7 +2005,7 @@ def worker(
     )
     execute_with_impersonation(
         profile_target,
-        lambda: run_worker_mode(execution_id, task_index, command),
+        lambda: run_worker_mode(execution_id, task_index, command, workers=workers),
     )
 
 

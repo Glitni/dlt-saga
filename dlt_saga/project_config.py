@@ -232,6 +232,27 @@ class OrchestrationConfig:
             ),
         },
     )
+    worker_concurrency: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Maximum number of pipelines a worker runs in parallel "
+                "within a single task. Caps the thread pool used when a "
+                "``task_group`` assigns multiple pipelines to one worker. "
+                "Tune to fit the worker container's memory budget. "
+                "Precedence: CLI ``--workers`` > ``SAGA_WORKER_CONCURRENCY`` "
+                "env var > this field > default 4."
+            ),
+            "minimum": 1,
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if self.worker_concurrency is not None and self.worker_concurrency < 1:
+            raise ValueError(
+                f"orchestration.worker_concurrency must be >= 1, "
+                f"got {self.worker_concurrency}"
+            )
 
     @classmethod
     def from_dict(cls, data: dict) -> "OrchestrationConfig":
@@ -242,6 +263,7 @@ class OrchestrationConfig:
             job_name=data.get("job_name"),
             schema=data.get("schema"),
             dataset_access=data.get("dataset_access"),
+            worker_concurrency=data.get("worker_concurrency"),
         )
 
 
