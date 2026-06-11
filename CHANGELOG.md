@@ -1,3 +1,8 @@
+## 0.3.4 — 2026-06-11
+
+### Fixed
+- Native_load chunks by load_batch_size, not by parent directory (#89)
+
 ## 0.3.3 — 2026-06-11
 
 ### Fixed
