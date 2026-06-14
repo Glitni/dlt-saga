@@ -1,3 +1,8 @@
+## 0.3.5 — 2026-06-14
+
+### Fixed
+- Normalize schema name when cleaning _dlt_version on Databricks full-refresh (#92)
+
 ## 0.3.4 — 2026-06-11
 
 ### Fixed
