@@ -32,7 +32,7 @@ from dlt_saga.utility.cli.common import (
     validate_credentials,
 )
 from dlt_saga.utility.cli.context import get_execution_context
-from dlt_saga.utility.cli.logging import configure_cli_logging
+from dlt_saga.utility.cli.logging import configure_cli_logging, reenable_saga_loggers
 from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.cli.selectors import format_config_list
 from dlt_saga.utility.env import get_env
@@ -822,28 +822,32 @@ def _validate_historize_flags(
 
 
 def _exit_if_failures(result: "SessionResult", command_name: str) -> None:
-    """Log each per-pipeline failure and exit non-zero if any failed.
+    """Surface each per-pipeline failure and exit non-zero if any failed.
 
-    Per-pipeline errors are also logged at the point of failure inside
-    ``Session``, but in parallel runs that line is easy to lose in
-    surrounding output — leaving the operator with just ``exit 1`` and
-    no actionable signal (see #94). Repeat a compact summary at the
-    exit boundary so the captured ``PipelineResult.error`` is always
-    the last thing on stdout before the non-zero exit.
+    Writes the summary with ``typer.echo(err=True)`` rather than the
+    ``logging`` module on purpose. Saga's loggers can be silenced mid-run
+    by any host that calls ``logging.config.dictConfig(...)`` with the
+    default ``disable_existing_loggers=True`` — Airflow's logging init
+    is the most common trigger, but it can come from anywhere in the
+    import graph. A logger-based summary then vanishes silently and the
+    operator is left with a bare ``exit 1`` (see #94, #97). stderr
+    bypasses that whole subsystem.
+
+    Also runs the broader saga-logger rescue here as a defense in depth
+    so subsequent shutdown logging isn't silently dropped.
     """
     if not result.has_failures:
         return
-    logger.error(
-        "%s failed: %d/%d pipeline(s) failed",
-        command_name,
-        result.failed,
-        len(result.pipeline_results),
+    reenable_saga_loggers()
+    typer.echo(
+        f"{command_name} failed: {result.failed}/{len(result.pipeline_results)} "
+        "pipeline(s) failed",
+        err=True,
     )
     for failure in result.failures:
-        logger.error(
-            "  %s: %s",
-            failure.pipeline_name,
-            failure.error or "(no error message)",
+        typer.echo(
+            f"  {failure.pipeline_name}: {failure.error or '(no error message)'}",
+            err=True,
         )
     raise typer.Exit(1)
 

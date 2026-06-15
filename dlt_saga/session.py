@@ -149,6 +149,16 @@ class Session:
 
         load_hooks()
 
+        # Re-enable saga loggers if a host's logging.config.dictConfig has
+        # disabled them. Notably: Airflow (its config init runs with the default
+        # disable_existing_loggers=True), but any caller can do the same. By
+        # the time we get here, all transitive imports for this Session have
+        # happened — so this is the latest natural choke point to undo a
+        # foreign disable before pipelines start logging. See #97.
+        from dlt_saga.utility.cli.logging import reenable_saga_loggers
+
+        reenable_saga_loggers()
+
     # -------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------

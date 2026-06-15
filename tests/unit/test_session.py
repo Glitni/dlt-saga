@@ -608,3 +608,105 @@ class TestExecutionContextScope:
         # Still restored
         assert get_execution_context().force is True
         clear_execution_context()
+
+
+@pytest.mark.unit
+class TestExitIfFailures:
+    """Regression for #94 / #97.
+
+    The CLI failure summary must reach the operator even when a host
+    process (Airflow being the most common example, via its default
+    ``disable_existing_loggers=True`` in ``logging.config.dictConfig``)
+    has disabled saga's loggers mid-run. Two safeguards are tested here:
+
+    * ``_exit_if_failures`` writes to stderr via ``typer.echo`` so the
+      summary is immune to whatever the host did to the logging module.
+    * ``reenable_saga_loggers`` flips ``.disabled`` back off on every
+      ``dlt_saga.*`` logger so subsequent INFO records flow again.
+    """
+
+    def test_failure_reaches_stderr_when_logger_disabled(self, capsys):
+        import typer
+
+        import dlt_saga.cli as cli
+
+        result = SessionResult(
+            pipeline_results=[
+                PipelineResult(pipeline_name="ingest_ok", success=True),
+                PipelineResult(
+                    pipeline_name="broken",
+                    success=False,
+                    error="PERMISSION_DENIED: no MANAGE on table",
+                ),
+            ]
+        )
+
+        cli.logger.disabled = True
+        try:
+            with pytest.raises(typer.Exit):
+                cli._exit_if_failures(result, "Run")
+        finally:
+            cli.logger.disabled = False
+
+        err = capsys.readouterr().err
+        assert "Run failed: 1/2 pipeline(s) failed" in err
+        assert "broken: PERMISSION_DENIED: no MANAGE on table" in err
+
+    def test_no_output_when_all_succeed(self, capsys):
+        import dlt_saga.cli as cli
+
+        result = SessionResult(
+            pipeline_results=[PipelineResult(pipeline_name="ok", success=True)]
+        )
+        cli._exit_if_failures(result, "Run")  # returns, no raise
+        assert capsys.readouterr().err == ""
+
+    def test_rescue_restores_info_flow_after_disable(self):
+        """After ``reenable_saga_loggers`` runs, an INFO record on a previously
+        disabled ``dlt_saga.*`` logger must reach an attached handler.
+
+        Uses an in-memory handler on a private logger so the test is independent
+        of root handlers (which a real foreign ``dictConfig`` would also have
+        replaced — out of scope here)."""
+        import io
+        import logging
+
+        from dlt_saga.utility.cli.logging import reenable_saga_loggers
+
+        target = logging.getLogger("dlt_saga.test_rescue_flow")
+        target.setLevel(logging.INFO)
+        target.propagate = False
+        sink = io.StringIO()
+        handler = logging.StreamHandler(sink)
+        handler.setLevel(logging.INFO)
+        target.addHandler(handler)
+
+        try:
+            target.disabled = True
+            target.info("silenced before rescue")
+            assert sink.getvalue() == ""
+
+            reenable_saga_loggers()
+
+            assert target.disabled is False
+            target.info("restored after rescue")
+            assert "restored after rescue" in sink.getvalue()
+        finally:
+            target.removeHandler(handler)
+            target.disabled = False
+
+    def test_rescue_leaves_foreign_loggers_alone(self):
+        """The rescue must only touch ``dlt_saga.*`` loggers — third-party
+        loggers that the host explicitly intends to keep disabled must remain
+        disabled."""
+        import logging
+
+        from dlt_saga.utility.cli.logging import reenable_saga_loggers
+
+        foreign = logging.getLogger("third_party.test_unaffected")
+        foreign.disabled = True
+        try:
+            reenable_saga_loggers()
+            assert foreign.disabled is True
+        finally:
+            foreign.disabled = False
