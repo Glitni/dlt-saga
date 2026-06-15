@@ -822,28 +822,26 @@ def _validate_historize_flags(
 
 
 def _exit_if_failures(result: "SessionResult", command_name: str) -> None:
-    """Log each per-pipeline failure and exit non-zero if any failed.
+    """Report each per-pipeline failure and exit non-zero if any failed.
 
-    Per-pipeline errors are also logged at the point of failure inside
-    ``Session``, but in parallel runs that line is easy to lose in
-    surrounding output — leaving the operator with just ``exit 1`` and
-    no actionable signal (see #94). Repeat a compact summary at the
-    exit boundary so the captured ``PipelineResult.error`` is always
-    the last thing on stdout before the non-zero exit.
+    Writes the summary with ``typer.echo(err=True)`` rather than ``logger.*``
+    on purpose: a third-party logging ``dictConfig`` — notably Airflow's, which
+    defaults to ``disable_existing_loggers=True`` — can disable saga's loggers
+    mid-run (e.g. when ``Session`` import pulls in Airflow). A logger-based
+    summary then vanishes silently, leaving the operator with a bare ``exit 1``
+    (see #94). Writing straight to stderr is immune to that.
     """
     if not result.has_failures:
         return
-    logger.error(
-        "%s failed: %d/%d pipeline(s) failed",
-        command_name,
-        result.failed,
-        len(result.pipeline_results),
+    typer.echo(
+        f"{command_name} failed: {result.failed}/{len(result.pipeline_results)} "
+        "pipeline(s) failed",
+        err=True,
     )
     for failure in result.failures:
-        logger.error(
-            "  %s: %s",
-            failure.pipeline_name,
-            failure.error or "(no error message)",
+        typer.echo(
+            f"  {failure.pipeline_name}: {failure.error or '(no error message)'}",
+            err=True,
         )
     raise typer.Exit(1)
 

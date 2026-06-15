@@ -608,3 +608,49 @@ class TestExecutionContextScope:
         # Still restored
         assert get_execution_context().force is True
         clear_execution_context()
+
+
+@pytest.mark.unit
+class TestExitIfFailures:
+    """`_exit_if_failures` must surface the failure on stderr even when saga's
+    loggers have been disabled by a third-party logging dictConfig — notably
+    Airflow's (disable_existing_loggers=True), which fires when Session import
+    pulls in Airflow. Regression for #94: a logger-based summary (#95) is silently
+    dropped in that state, leaving a bare `exit 1`.
+    """
+
+    def test_failure_reaches_stderr_when_logger_disabled(self, capsys):
+        import typer
+
+        import dlt_saga.cli as cli
+
+        result = SessionResult(
+            pipeline_results=[
+                PipelineResult(pipeline_name="ingest_ok", success=True),
+                PipelineResult(
+                    pipeline_name="broken",
+                    success=False,
+                    error="PERMISSION_DENIED: no MANAGE on table",
+                ),
+            ]
+        )
+
+        cli.logger.disabled = True  # what Airflow's dictConfig does to saga loggers
+        try:
+            with pytest.raises(typer.Exit):
+                cli._exit_if_failures(result, "Run")
+        finally:
+            cli.logger.disabled = False
+
+        err = capsys.readouterr().err
+        assert "Run failed: 1/2 pipeline(s) failed" in err
+        assert "broken: PERMISSION_DENIED: no MANAGE on table" in err
+
+    def test_no_output_when_all_succeed(self, capsys):
+        import dlt_saga.cli as cli
+
+        result = SessionResult(
+            pipeline_results=[PipelineResult(pipeline_name="ok", success=True)]
+        )
+        cli._exit_if_failures(result, "Run")  # returns, no raise
+        assert capsys.readouterr().err == ""
