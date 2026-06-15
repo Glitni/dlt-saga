@@ -247,6 +247,33 @@ def configure_cli_logging() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
+def reenable_saga_loggers() -> None:
+    """Clear ``.disabled`` on every ``dlt_saga.*`` logger.
+
+    Python's ``logging.config.dictConfig(...)`` defaults to
+    ``disable_existing_loggers=True``, which sets ``.disabled = True`` on
+    every logger that existed before the call. When something in saga's
+    import graph triggers such a config — Airflow's logging init is the
+    most common case, but the same can come from any host application —
+    saga's own loggers are silenced mid-run. Both console and file output
+    vanish, including the operator-facing failure summary.
+
+    Re-enabling our own namespace restores intended behavior. Records
+    still propagate to whatever root handlers the foreign config installed
+    (Airflow's task-log handlers, etc.), so this does not fight the host —
+    it just stops the host from accidentally silencing us.
+
+    Idempotent. Safe to call from any thread; flipping a boolean on a
+    ``Logger`` is not a critical section.
+    """
+    manager = logging.Logger.manager
+    for name, lg in list(manager.loggerDict.items()):
+        if (name == "dlt_saga" or name.startswith("dlt_saga.")) and isinstance(
+            lg, logging.Logger
+        ):
+            lg.disabled = False
+
+
 def set_console_verbose(verbose: bool) -> None:
     """Toggle the console handler between INFO and DEBUG.
 
