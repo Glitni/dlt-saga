@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
+    from dlt_saga.session import SessionResult
     from dlt_saga.utility.cli.context import ExecutionContext
     from dlt_saga.utility.cli.profiles import ProfileTarget
     from dlt_saga.utility.orchestration.providers import OrchestrationProvider
@@ -816,6 +817,38 @@ def _validate_historize_flags(
 
 
 # ---------------------------------------------------------------------------
+# Exit-boundary failure reporting
+# ---------------------------------------------------------------------------
+
+
+def _exit_if_failures(result: "SessionResult", command_name: str) -> None:
+    """Log each per-pipeline failure and exit non-zero if any failed.
+
+    Per-pipeline errors are also logged at the point of failure inside
+    ``Session``, but in parallel runs that line is easy to lose in
+    surrounding output — leaving the operator with just ``exit 1`` and
+    no actionable signal (see #94). Repeat a compact summary at the
+    exit boundary so the captured ``PipelineResult.error`` is always
+    the last thing on stdout before the non-zero exit.
+    """
+    if not result.has_failures:
+        return
+    logger.error(
+        "%s failed: %d/%d pipeline(s) failed",
+        command_name,
+        result.failed,
+        len(result.pipeline_results),
+    )
+    for failure in result.failures:
+        logger.error(
+            "  %s: %s",
+            failure.pipeline_name,
+            failure.error or "(no error message)",
+        )
+    raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Historize pipeline execution helpers
 # ---------------------------------------------------------------------------
 
@@ -1139,8 +1172,7 @@ def ingest(
     except AuthenticationError as e:
         logger.error(str(e))
         raise typer.Exit(1)
-    if result.has_failures:
-        raise typer.Exit(1)
+    _exit_if_failures(result, "Ingest")
 
 
 @app.command()
@@ -1271,8 +1303,7 @@ def historize(
     except AuthenticationError as e:
         logger.error(str(e))
         raise typer.Exit(1)
-    if result.has_failures:
-        raise typer.Exit(1)
+    _exit_if_failures(result, "Historize")
 
 
 @app.command("update-access")
@@ -1616,8 +1647,7 @@ def run(
         logger.error(str(e))
         raise typer.Exit(1)
 
-    if SessionResult(pipeline_results=all_results).has_failures:
-        raise typer.Exit(1)
+    _exit_if_failures(SessionResult(pipeline_results=all_results), "Run")
 
 
 @app.command()
