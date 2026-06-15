@@ -1,3 +1,8 @@
+## 0.3.6 — 2026-06-15
+
+### Fixed
+- Surface per-pipeline errors at CLI exit boundary (#95)
+
 ## 0.3.5 — 2026-06-14
 
 ### Fixed
