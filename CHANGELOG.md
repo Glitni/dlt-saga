@@ -1,3 +1,8 @@
+## 0.3.7 — 2026-06-15
+
+### Fixed
+- Cli survives third-party logging.dictConfig that disables saga loggers (#99)
+
 ## 0.3.6 — 2026-06-15
 
 ### Fixed
