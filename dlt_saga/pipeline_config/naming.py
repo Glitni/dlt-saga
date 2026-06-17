@@ -41,7 +41,7 @@ module that defines one or more of:
 
 - ``generate_schema_name(segments, environment, default_schema, *, layer="ingest") -> str``
 - ``generate_table_name(segments, environment, *, layer="ingest") -> str``
-- ``generate_target_location(segments, environment, default_storage_root, *, layer="ingest", dataset=None, table=None) -> Optional[str]``
+- ``generate_target_location(segments, environment, default_storage_root, *, layer="ingest", schema=None, table=None) -> Optional[str]``
 
 Missing functions fall back to the defaults below. Modules whose hook
 signature predates ``layer`` are still supported — calls retry without

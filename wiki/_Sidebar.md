@@ -18,4 +18,5 @@
 - [Performance](Performance)
 
 **Extending**
+- [Custom Naming](Custom-Naming)
 - [Plugin Development](Plugin-Development)
