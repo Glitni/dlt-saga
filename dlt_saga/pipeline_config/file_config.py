@@ -19,7 +19,9 @@ from dlt_saga.pipeline_config.base_config import (
     PipelineConfig,
     parse_tags,
 )
+from dlt_saga.pipeline_config.compat import normalize_config_aliases
 from dlt_saga.pipeline_config.naming import (
+    call_hook,
     default_generate_schema_name,
     default_generate_table_name,
     load_naming_module,
@@ -82,6 +84,10 @@ class FilePipelineConfig(ConfigSource):
         try:
             with open(self.project_config_path, "r") as f:
                 config = yaml.safe_load(f) or {}
+                # Rewrite legacy config keys (e.g. dataset_access → schema_access)
+                # before the hierarchical merge runs so mixed-name trees compose
+                # correctly.
+                normalize_config_aliases(config)
                 logger.debug(f"Loaded project config from {self.project_config_path}")
                 return config
         except Exception as e:
@@ -136,11 +142,13 @@ class FilePipelineConfig(ConfigSource):
                 break
         return parts
 
-    def resolve_schema_name(self, config_path: str) -> str:
+    def resolve_schema_name(self, config_path: str, *, layer: str = "ingest") -> str:
         """Resolve schema name for a config file.
 
         Uses the custom naming module if one is configured; otherwise falls
-        back to :func:`default_generate_schema_name`.
+        back to :func:`default_generate_schema_name`. The ``layer`` keyword
+        is forwarded to custom modules so they can produce distinct shapes
+        per layer (``"ingest"`` vs ``"historize"``).
         """
         segments = self.get_naming_segments(config_path)
         environment = get_environment()
@@ -148,22 +156,34 @@ class FilePipelineConfig(ConfigSource):
 
         module = load_naming_module(self.project_config)
         if module and hasattr(module, "generate_schema_name"):
-            return module.generate_schema_name(segments, environment, default_schema)
-        return default_generate_schema_name(segments, environment, default_schema)
+            return call_hook(
+                module.generate_schema_name,
+                segments,
+                environment,
+                default_schema,
+                layer=layer,
+            )
+        return default_generate_schema_name(
+            segments, environment, default_schema, layer=layer
+        )
 
-    def resolve_table_name(self, config_path: str) -> str:
+    def resolve_table_name(self, config_path: str, *, layer: str = "ingest") -> str:
         """Resolve table name for a config file.
 
         Uses the custom naming module if one is configured; otherwise falls
-        back to :func:`default_generate_table_name`.
+        back to :func:`default_generate_table_name`. The ``layer`` keyword
+        is forwarded to custom modules so they can produce distinct shapes
+        per layer (``"ingest"`` vs ``"historize"``).
         """
         segments = self.get_naming_segments(config_path)
         environment = get_environment()
 
         module = load_naming_module(self.project_config)
         if module and hasattr(module, "generate_table_name"):
-            return module.generate_table_name(segments, environment)
-        return default_generate_table_name(segments, environment)
+            return call_hook(
+                module.generate_table_name, segments, environment, layer=layer
+            )
+        return default_generate_table_name(segments, environment, layer=layer)
 
     # =========================================================================
     # Discovery
@@ -293,6 +313,10 @@ class FilePipelineConfig(ConfigSource):
         with open(config_path) as f:
             file_config = yaml.safe_load(f) or {}
 
+        # Rewrite legacy config keys (e.g. dataset_access → schema_access)
+        # before the hierarchical merge so mixed-name trees compose correctly.
+        normalize_config_aliases(file_config)
+
         # Apply hierarchical resolution (dlt_project.yml defaults)
         resolved_config = self._resolve_config(config_path, file_config)
 
@@ -349,7 +373,7 @@ class FilePipelineConfig(ConfigSource):
         """Check if value is a dict representing a path segment (has lowercase keys).
 
         Strips the '+' inherit prefix before checking, since folder hierarchy
-        configs often use '+key:' syntax (e.g., '+dataset_access:').
+        configs often use '+key:' syntax (e.g., '+schema_access:').
         """
         return isinstance(value, dict) and any(
             k.lstrip("+")[:1].islower() for k in value.keys() if k.lstrip("+")

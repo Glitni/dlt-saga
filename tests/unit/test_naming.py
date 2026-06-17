@@ -389,6 +389,145 @@ class TestDefaultGenerateTargetLocation:
 
 
 @pytest.mark.unit
+class TestNamingHooksLayerKwarg:
+    """Default generators accept and ignore ``layer``; custom hooks see it."""
+
+    def test_default_schema_name_accepts_layer(self):
+        from dlt_saga.pipeline_config.naming import default_generate_schema_name
+
+        ingest = default_generate_schema_name(
+            ["google_sheets"], "prod", "dlt_dev", layer="ingest"
+        )
+        historize = default_generate_schema_name(
+            ["google_sheets"], "prod", "dlt_dev", layer="historize"
+        )
+        # Default impl is layer-agnostic — same result either way.
+        assert ingest == historize == "dlt_google_sheets"
+
+    def test_default_table_name_accepts_layer(self):
+        from dlt_saga.pipeline_config.naming import default_generate_table_name
+
+        ingest = default_generate_table_name(
+            ["google_sheets", "salgsmal"], "prod", layer="ingest"
+        )
+        historize = default_generate_table_name(
+            ["google_sheets", "salgsmal"], "prod", layer="historize"
+        )
+        assert ingest == historize == "salgsmal"
+
+    def test_default_target_location_accepts_layer(self):
+        from dlt_saga.pipeline_config import default_generate_target_location
+
+        uri = default_generate_target_location(
+            ["g", "t"], "prod", "gs://bucket/lake/", layer="historize"
+        )
+        # Default is layer-agnostic — same shape either way.
+        assert uri == "gs://bucket/lake/g/t/"
+
+    def test_target_location_schema_and_table_override_segments(self):
+        """``schema`` / ``table`` kwargs win over segment-derived names —
+        the BigQuery/BigLake URI builder calls without segments."""
+        from dlt_saga.pipeline_config import default_generate_target_location
+
+        uri = default_generate_target_location(
+            [],
+            "prod",
+            "gs://bucket/lake/",
+            schema="dlt_google_sheets_historized",
+            table="salgsmal",
+            layer="historize",
+        )
+        assert uri == "gs://bucket/lake/dlt_google_sheets_historized/salgsmal/"
+
+
+@pytest.mark.unit
+class TestCallHookSignatureTolerance:
+    """``call_hook`` strips kwargs that the target's signature doesn't accept."""
+
+    def test_strips_unknown_kwarg(self):
+        from dlt_saga.pipeline_config.naming import call_hook
+
+        def legacy(segments, environment, default):
+            return f"{segments[0]}/{environment}/{default}"
+
+        # `layer` is not in legacy's signature — must be dropped, not raised.
+        result = call_hook(legacy, ["g"], "prod", "dlt_dev", layer="historize")
+        assert result == "g/prod/dlt_dev"
+
+    def test_passes_known_kwarg(self):
+        from dlt_saga.pipeline_config.naming import call_hook
+
+        def modern(segments, environment, *, layer="ingest"):
+            return f"{segments[0]}-{layer}"
+
+        assert call_hook(modern, ["g"], "prod", layer="historize") == "g-historize"
+
+    def test_var_keyword_passes_through(self):
+        from dlt_saga.pipeline_config.naming import call_hook
+
+        captured = {}
+
+        def absorbs(segments, environment, **kwargs):
+            captured.update(kwargs)
+            return "ok"
+
+        result = call_hook(absorbs, ["g"], "prod", layer="historize", extra=True)
+        assert result == "ok"
+        assert captured == {"layer": "historize", "extra": True}
+
+
+@pytest.mark.unit
+class TestFilePipelineConfigLayerForwarding:
+    """``FilePipelineConfig.resolve_*`` forward ``layer`` to custom hooks."""
+
+    def test_resolve_schema_name_forwards_layer(self):
+        from dlt_saga.pipeline_config.file_config import FilePipelineConfig
+
+        custom = ModuleType("custom_layer_naming")
+
+        def generate_schema_name(segments, environment, default, *, layer="ingest"):
+            return f"{segments[0]}_{layer}"
+
+        custom.generate_schema_name = generate_schema_name
+
+        fpc = FilePipelineConfig()
+        with patch(
+            "dlt_saga.pipeline_config.file_config.load_naming_module",
+            return_value=custom,
+        ):
+            assert (
+                fpc.resolve_schema_name(
+                    "configs/google_sheets/x.yml", layer="historize"
+                )
+                == "google_sheets_historize"
+            )
+            assert (
+                fpc.resolve_schema_name("configs/google_sheets/x.yml")
+                == "google_sheets_ingest"
+            )
+
+    def test_resolve_table_name_forwards_layer(self):
+        from dlt_saga.pipeline_config.file_config import FilePipelineConfig
+
+        custom = ModuleType("custom_layer_naming_table")
+
+        def generate_table_name(segments, environment, *, layer="ingest"):
+            return f"{segments[-1]}_{layer}"
+
+        custom.generate_table_name = generate_table_name
+
+        fpc = FilePipelineConfig()
+        with patch(
+            "dlt_saga.pipeline_config.file_config.load_naming_module",
+            return_value=custom,
+        ):
+            assert (
+                fpc.resolve_table_name("configs/api/x.yml", layer="historize")
+                == "x_historize"
+            )
+
+
+@pytest.mark.unit
 class TestGetExecutionPlanSchema:
     @pytest.mark.parametrize(
         "is_prod, env_schema, expected",

@@ -591,9 +591,15 @@ class TestResolveTargetLocation:
             result = p._resolve_target_location()
 
         assert result == "abfss://lake/custom/g/t/"
-        # Hook receives the segment list, not the path string
+        # Hook receives the segment list plus layer/schema/table context so
+        # custom modules can shape URIs per layer or per warehouse target.
         hook_module.generate_target_location.assert_called_once_with(
-            ["g", "t"], "prod", "abfss://lake/raw/"
+            ["g", "t"],
+            "prod",
+            "abfss://lake/raw/",
+            layer="ingest",
+            schema="my_dataset",
+            table="g__t",
         )
 
     def test_naming_module_hook_returns_none_falls_through(self):

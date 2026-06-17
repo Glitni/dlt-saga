@@ -403,6 +403,12 @@ class ProfilesConfig:
         except Exception as e:
             raise ValueError(f"Failed to parse profiles.yml: {e}") from e
 
+        # Rewrite legacy config keys (e.g. dataset_access → schema_access)
+        # so downstream consumers only see canonical names.
+        from dlt_saga.pipeline_config.compat import normalize_config_aliases
+
+        normalize_config_aliases(profiles_data)
+
         if not profiles_data:
             raise ValueError("profiles.yml is empty")
 

@@ -26,7 +26,7 @@ class BigQueryDestinationConfig(DestinationConfig):
     destination_type: str = "bigquery"
     location: str = "EU"
     dataset_name: Optional[str] = None
-    dataset_access: Optional[List[str]] = None  # Dataset access control entries
+    schema_access: Optional[List[str]] = None  # Schema-level access control entries
     table_format: str = "native"  # "native" or "iceberg"
     storage_path: Optional[str] = None  # Required for Iceberg tables (gs://bucket/path)
     # Partition expiration in days. Maps to time_partitioning.expiration_ms on
@@ -73,7 +73,7 @@ class BigQueryDestinationConfig(DestinationConfig):
 
         Args:
             data: Configuration dictionary with keys: project_id, location, dataset_name,
-                  dataset_access, table_format, storage_path
+                  schema_access (alias: dataset_access), table_format, storage_path
 
         Returns:
             BigQueryDestinationConfig instance
@@ -84,7 +84,7 @@ class BigQueryDestinationConfig(DestinationConfig):
             billing_project_id=data.get("billing_project_id"),
             location=data.get("location", "EU"),
             dataset_name=data.get("dataset_name"),
-            dataset_access=data.get("dataset_access"),
+            schema_access=data.get("schema_access") or data.get("dataset_access"),
             table_format=data.get("table_format", "native"),
             storage_path=data.get("storage_path"),
             partition_expiration_days=data.get("partition_expiration_days"),
@@ -104,7 +104,7 @@ class BigQueryDestinationConfig(DestinationConfig):
             dataset_name: already resolved by ConfigSource (e.g., FilePipelineConfig)
             table_format: config_dict > context (profile) > "native"
             storage_path: context (profile) — required for iceberg
-            dataset_access: config_dict (from dlt_project.yml)
+            schema_access: config_dict (from dlt_project.yml)
         """
         from dlt_saga.utility.env import get_env
 
@@ -150,7 +150,8 @@ class BigQueryDestinationConfig(DestinationConfig):
             billing_project_id=billing_project_id,
             location=location,
             dataset_name=config_dict.get("schema_name"),
-            dataset_access=config_dict.get("dataset_access"),
+            schema_access=config_dict.get("schema_access")
+            or config_dict.get("dataset_access"),
             table_format=table_format,
             storage_path=storage_path,
             partition_expiration_days=partition_expiration_days,

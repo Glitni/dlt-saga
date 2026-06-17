@@ -24,7 +24,7 @@ class DatabricksDestinationConfig(DestinationConfig):
     http_path: str = ""
     catalog: str = ""
     schema_name: Optional[str] = None
-    dataset_access: Optional[List[str]] = None
+    schema_access: Optional[List[str]] = None
     auth_mode: Optional[str] = None  # "pat", "m2m", "u2m", or None (SDK auto-detect)
     access_token: Optional[str] = None  # PAT only; resolved via SecretResolver
     client_id: Optional[str] = None  # M2M only
@@ -90,7 +90,7 @@ class DatabricksDestinationConfig(DestinationConfig):
             http_path=data["http_path"],
             catalog=data.get("catalog") or data.get("database", ""),
             schema_name=data.get("schema_name"),
-            dataset_access=data.get("dataset_access"),
+            schema_access=data.get("schema_access") or data.get("dataset_access"),
             auth_mode=data.get("auth_mode"),
             access_token=data.get("access_token"),
             client_id=data.get("client_id"),
@@ -144,7 +144,8 @@ class DatabricksDestinationConfig(DestinationConfig):
             http_path=http_path,
             catalog=catalog,
             schema_name=config_dict.get("schema_name"),
-            dataset_access=config_dict.get("dataset_access"),
+            schema_access=config_dict.get("schema_access")
+            or config_dict.get("dataset_access"),
             auth_mode=dc.get("auth_mode"),
             access_token=access_token,
             client_id=dc.get("client_id"),

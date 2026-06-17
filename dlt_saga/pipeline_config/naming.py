@@ -23,6 +23,15 @@ for ``configs/google_sheets/asm/salgsmal.yml``. Other config sources
 (database-backed, SharePoint-backed, …) produce their own segments from
 whatever identifier shape they use; the naming functions don't care.
 
+Layer keyword
+-------------
+
+Every hook accepts ``layer`` — ``"ingest"`` (default) or ``"historize"``.
+The framework calls the same hook for both layers so a custom naming
+module can produce distinct shapes per layer (e.g. ``dlt_<group>_raw``
+for ingest, ``dlt_<group>_historized`` for historize). The default
+implementations ignore ``layer`` and return the same value either way.
+
 Custom naming module
 --------------------
 
@@ -30,18 +39,21 @@ Users override any subset of these defaults by pointing
 ``naming_module: <importable.module>`` in ``saga_project.yml`` at a Python
 module that defines one or more of:
 
-- ``generate_schema_name(segments, environment, default_schema) -> str``
-- ``generate_table_name(segments, environment) -> str``
-- ``generate_target_location(segments, environment, default_storage_root) -> Optional[str]``
+- ``generate_schema_name(segments, environment, default_schema, *, layer="ingest") -> str``
+- ``generate_table_name(segments, environment, *, layer="ingest") -> str``
+- ``generate_target_location(segments, environment, default_storage_root, *, layer="ingest", dataset=None, table=None) -> Optional[str]``
 
-Missing functions fall back to the defaults below. Users typically import
-these defaults inside their custom module and wrap them with their own
-logic — see the docstrings on each function for examples.
+Missing functions fall back to the defaults below. Modules whose hook
+signature predates ``layer`` are still supported — calls retry without
+the keyword. Users typically import these defaults inside their custom
+module and wrap them with their own logic — see the docstrings on each
+function for examples.
 """
 
 import importlib
+import inspect
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -94,32 +106,70 @@ def load_naming_module(project_config: Dict[str, Any]) -> Any:
         return _naming_module
 
 
+def call_hook(func: Callable, /, *args: Any, **kwargs: Any) -> Any:
+    """Invoke a naming-module hook, tolerating older signatures.
+
+    Hook contracts grow over time — ``layer`` and the URI ``dataset``/``table``
+    kwargs were added after the initial release. To keep custom modules
+    written against earlier signatures working, drop kwargs the hook
+    doesn't accept (anything not in its signature and not absorbed by a
+    ``**kwargs`` catch-all) before calling. Positional args pass through
+    unchanged.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return func(*args, **kwargs)
+
+    params = sig.parameters
+    accepts_kwargs = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    if accepts_kwargs:
+        return func(*args, **kwargs)
+
+    filtered = {k: v for k, v in kwargs.items() if k in params}
+    return func(*args, **filtered)
+
+
 def _sanitize_segment(s: str) -> str:
     """Lowercase and replace common SQL-unsafe separators with underscores."""
     return s.lower().replace("-", "_").replace(" ", "_")
 
 
 def default_generate_schema_name(
-    segments: List[str], environment: str, default_schema: str
+    segments: List[str],
+    environment: str,
+    default_schema: str,
+    *,
+    layer: str = "ingest",
 ) -> str:
     """Default schema name generation from config identifier segments.
 
     Prod: ``dlt_{segments[0]}`` (e.g. ``dlt_google_sheets``).
     Dev: ``default_schema`` (from profile or ``SAGA_SCHEMA_NAME``).
 
+    The default ignores ``layer``: ingest and historize share one dataset.
+    Override in a custom naming module to produce distinct shapes per
+    layer (e.g. ``dlt_<group>_raw`` vs ``dlt_<group>_historized``).
+
     Args:
         segments: Ordered identifier segments. ``segments[0]`` is the group.
             Empty list falls back to ``"default"``.
         environment: Current environment (``"prod"`` or ``"dev"``).
         default_schema: Dev schema name from profile/env var.
+        layer: ``"ingest"`` (default) or ``"historize"``. Ignored here.
     """
+    del layer  # default behavior is layer-agnostic
     if environment == "prod":
         first_segment = segments[0] if segments else "default"
         return f"dlt_{first_segment}"
     return default_schema
 
 
-def default_generate_table_name(segments: List[str], environment: str) -> str:
+def default_generate_table_name(
+    segments: List[str], environment: str, *, layer: str = "ingest"
+) -> str:
     """Default table name generation from config identifier segments.
 
     Prod: ``segments[1:]`` joined with ``__`` (or ``segments[0]`` when there's
@@ -129,11 +179,19 @@ def default_generate_table_name(segments: List[str], environment: str) -> str:
     Inner segments are lowercased and have ``-`` / spaces replaced with ``_``
     so they're safe to use as SQL identifiers.
 
+    The default ignores ``layer``: the historized table's name is derived
+    by ``HistorizeConfig.output_table_suffix`` (or ``placement: schema_suffix``)
+    rather than by re-running this hook. A custom naming module that
+    returns a distinct name for ``layer="historize"`` is honoured by the
+    historize factory and overrides the suffix-based default.
+
     Args:
         segments: Ordered identifier segments. Empty list returns
             ``"default_data"``.
         environment: Current environment (``"prod"`` or ``"dev"``).
+        layer: ``"ingest"`` (default) or ``"historize"``. Ignored here.
     """
+    del layer  # default behavior is layer-agnostic
     if not segments:
         return "default_data"
 
@@ -156,6 +214,8 @@ def resolve_table_name_with_leaf(
     leaf: str,
     environment: str,
     project_config: Optional[Dict[str, Any]] = None,
+    *,
+    layer: str = "ingest",
 ) -> str:
     """Run the canonical table-name generator with the leaf segment replaced.
 
@@ -164,8 +224,10 @@ def resolve_table_name_with_leaf(
     new_segments = list(segments[:-1]) + [leaf] if segments else [leaf]
     module = load_naming_module(project_config) if project_config else None
     if module and hasattr(module, "generate_table_name"):
-        return module.generate_table_name(new_segments, environment)
-    return default_generate_table_name(new_segments, environment)
+        return call_hook(
+            module.generate_table_name, new_segments, environment, layer=layer
+        )
+    return default_generate_table_name(new_segments, environment, layer=layer)
 
 
 def default_generate_target_location(
@@ -174,35 +236,56 @@ def default_generate_target_location(
     default_storage_root: Optional[str],
     pipeline_group: Optional[str] = None,
     table_name: Optional[str] = None,
+    *,
+    layer: str = "ingest",
+    schema: Optional[str] = None,
+    table: Optional[str] = None,
 ) -> Optional[str]:
-    """Default external-table LOCATION generation for native_load on Databricks.
+    """Default external-table LOCATION generation.
 
-    Returns ``<default_storage_root>/<pipeline_group>/<table_name>/`` or
+    Returns ``<default_storage_root>/<schema_or_group>/<table>/`` or
     ``None`` when no ``default_storage_root`` is configured (caller should
     then fall back to a managed table).
 
-    The kwargs ``pipeline_group`` and ``table_name`` exist so callers that
-    have already resolved them (e.g. through a custom ``generate_table_name``)
-    can pass them in; when omitted, both are derived from ``segments`` using
-    framework defaults.
+    Resolution for the path components:
+
+    - **Folder segment**: ``schema`` when provided (covers the BigQuery
+      / BigLake call sites that don't carry naming segments), otherwise
+      ``pipeline_group`` when provided, otherwise ``segments[0]``.
+    - **Table segment**: ``table`` when provided, otherwise ``table_name``,
+      otherwise ``default_generate_table_name(segments, environment)``.
+
+    The default ignores ``layer``: it returns the same shape for ingest
+    and historize. Custom naming modules can use ``layer`` to inject a
+    layer-specific subfolder (e.g. ``…/raw/<schema>/<table>/`` vs
+    ``…/historized/<schema>/<table>/``).
 
     Args:
         segments: Ordered identifier segments. ``segments[0]`` is the group.
+            May be empty when the caller doesn't carry segments (e.g. the
+            BigQuery Iceberg URI builder, which only knows schema / table).
         environment: Current environment (``"prod"`` or ``"dev"``).
-        default_storage_root: Profile's ``storage_root`` (e.g.
-            ``"abfss://lake@<account>.dfs.core.windows.net/raw/"``) or ``None``.
+        default_storage_root: Profile's ``storage_root`` / ``storage_path``
+            (e.g. ``"gs://bucket/lake/"``) or ``None``.
         pipeline_group: Optional pre-resolved pipeline group; defaults to
             ``segments[0]``.
         table_name: Optional pre-resolved table name; defaults to
             ``default_generate_table_name(segments, environment)``.
+        layer: ``"ingest"`` (default) or ``"historize"``. Ignored here.
+        schema: Resolved warehouse schema name. Used as the folder
+            segment when set — takes precedence over ``pipeline_group``
+            / ``segments[0]``.
+        table: Resolved warehouse table name. Used as the table segment
+            when set — takes precedence over ``table_name``.
 
     Returns:
         Full external-table URI, or ``None`` to indicate "use a managed table".
     """
+    del layer  # default behavior is layer-agnostic
     if not default_storage_root:
         return None
-    if pipeline_group is None:
-        pipeline_group = segments[0] if segments else "default"
-    if table_name is None:
-        table_name = default_generate_table_name(segments, environment)
-    return f"{default_storage_root.rstrip('/')}/{pipeline_group}/{table_name}/"
+    folder = schema or pipeline_group or (segments[0] if segments else "default")
+    leaf = table or table_name
+    if leaf is None:
+        leaf = default_generate_table_name(segments, environment)
+    return f"{default_storage_root.rstrip('/')}/{folder}/{leaf}/"
