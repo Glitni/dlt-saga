@@ -1,3 +1,12 @@
+## 0.4.0 — 2026-06-17
+
+### Added
+- Layer-aware naming hooks, BigLake URI routing, historize_schema_access overlay, dataset_access rename (#103)
+
+
+### Changed
+- Collapse build_historize_create_table_sql signature into MaterializationHints dataclass (#104)
+
 ## 0.3.7 — 2026-06-15
 
 ### Fixed
