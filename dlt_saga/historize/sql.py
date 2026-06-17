@@ -12,6 +12,7 @@ Adapts patterns from:
 import logging
 from typing import Any, List, Optional
 
+from dlt_saga.destinations.base import MaterializationHints
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.utility.filters import and_filter, filter_where_clause
 
@@ -269,15 +270,10 @@ class HistorizeSqlBuilder:
             f"WHERE FALSE"
         )
 
-        table_format = self.config.table_format or "native"
-
-        return self.destination.build_historize_create_table_sql(
-            create_clause=create_stmt,
-            target_table_id=tgt,
-            select_body=select_body,
+        hints = MaterializationHints(
             partition_column=self.config.partition_column,
             cluster_columns=self.config.cluster_columns,
-            table_format=table_format,
+            table_format=self.config.table_format or "native",
             table_name=self.target_table_name,
             schema=self.target_schema,
             source_database=self.source_database,
@@ -286,6 +282,13 @@ class HistorizeSqlBuilder:
             valid_from_column=self.valid_from,
             valid_to_column=self.valid_to,
             is_deleted_column=self.is_deleted,
+        )
+
+        return self.destination.build_historize_create_table_sql(
+            create_clause=create_stmt,
+            target_table_id=tgt,
+            select_body=select_body,
+            hints=hints,
         )
 
     def build_full_reprocess_sql(self, value_columns: List[str]) -> str:

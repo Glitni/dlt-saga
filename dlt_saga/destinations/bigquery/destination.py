@@ -2,10 +2,13 @@
 
 import logging
 from datetime import datetime
-from typing import Any, Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 from dlt_saga.destinations.bigquery.base import BigQueryBaseDestination
 from dlt_saga.destinations.bigquery.config import BigQueryDestinationConfig
+
+if TYPE_CHECKING:
+    from dlt_saga.destinations.base import MaterializationHints
 
 logger = logging.getLogger(__name__)
 
@@ -709,17 +712,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         create_clause: str,
         target_table_id: str,
         select_body: str,
-        partition_column: Optional[str],
-        cluster_columns: Optional[List[str]],
-        table_format: str = "native",
-        table_name: str = "",
-        schema: str = "",
-        source_database: str = "",
-        source_schema: str = "",
-        source_table: str = "",
-        valid_from_column: str = "_dlt_valid_from",
-        valid_to_column: str = "_dlt_valid_to",
-        is_deleted_column: str = "_dlt_is_deleted",
+        hints: "MaterializationHints",
     ) -> str:
         """Build CREATE TABLE DDL for a BigQuery historize target table.
 
@@ -727,22 +720,9 @@ class BigQueryDestination(BigQueryBaseDestination):
         Iceberg: explicit column definitions + BigLake OPTIONS (CTAS not supported
         for managed Iceberg tables with OPTIONS in the same statement).
         """
-        if table_format != "iceberg":
+        if hints.table_format != "iceberg":
             return super().build_historize_create_table_sql(
-                create_clause,
-                target_table_id,
-                select_body,
-                partition_column,
-                cluster_columns,
-                table_format,
-                table_name,
-                schema,
-                source_database,
-                source_schema,
-                source_table,
-                valid_from_column,
-                valid_to_column,
-                is_deleted_column,
+                create_clause, target_table_id, select_body, hints
             )
 
         # BigQuery Iceberg: explicit CREATE TABLE (no CTAS)
@@ -751,9 +731,9 @@ class BigQueryDestination(BigQueryBaseDestination):
                 "storage_path is required for BigQuery Iceberg historize tables. "
                 "Configure it in the profile or profile.historize.storage_path."
             )
-        target_dataset = schema or self.config.dataset_name or ""
+        target_dataset = hints.schema or self.config.dataset_name or ""
         storage_uri = self._resolve_storage_uri(
-            target_dataset, table_name, layer="historize"
+            target_dataset, hints.table_name, layer="historize"
         )
 
         # Fetch source column names + types for explicit column definitions
@@ -764,14 +744,16 @@ class BigQueryDestination(BigQueryBaseDestination):
         # name as a renamed SCD2 column doesn't collide with the explicit
         # definition added below (duplicate column → BigQuery rejects the DDL).
         excludes = self._HISTORIZE_EXCLUDE_COLS | {
-            valid_from_column,
-            valid_to_column,
-            is_deleted_column,
+            hints.valid_from_column,
+            hints.valid_to_column,
+            hints.is_deleted_column,
         }
         col_defs: List[str] = []
-        if source_schema and source_table:
-            src_db = source_database or self.config.project_id
-            cols_sql = self.columns_query(src_db, source_schema, source_table)
+        if hints.source_schema and hints.source_table:
+            src_db = hints.source_database or self.config.project_id
+            cols_sql = self.columns_query(
+                src_db, hints.source_schema, hints.source_table
+            )
             rows = self.execute_sql(cols_sql)
             for row in rows:
                 if row.column_name not in excludes:
@@ -779,9 +761,9 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         col_defs.extend(
             [
-                f"  `{valid_from_column}` {ts_type}",
-                f"  `{valid_to_column}` {ts_type}",
-                f"  `{is_deleted_column}` {bool_type}",
+                f"  `{hints.valid_from_column}` {ts_type}",
+                f"  `{hints.valid_to_column}` {ts_type}",
+                f"  `{hints.is_deleted_column}` {bool_type}",
             ]
         )
 
@@ -789,10 +771,10 @@ class BigQueryDestination(BigQueryBaseDestination):
         parts.append(",\n".join(col_defs))
         parts.append(")")
 
-        if partition_column:
-            parts.append(self.partition_ddl(partition_column))
-        if cluster_columns:
-            parts.append(self.cluster_ddl(cluster_columns))
+        if hints.partition_column:
+            parts.append(self.partition_ddl(hints.partition_column))
+        if hints.cluster_columns:
+            parts.append(self.cluster_ddl(hints.cluster_columns))
 
         parts.extend(
             [

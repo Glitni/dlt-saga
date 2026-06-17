@@ -132,6 +132,7 @@ class TestBigQueryIcebergRenameCollision:
     explicit SCD2 column wins, the source-side same-name column is dropped."""
 
     def _invoke(self, source_cols, **rename):
+        from dlt_saga.destinations.base import MaterializationHints
         from dlt_saga.destinations.bigquery.config import BigQueryDestinationConfig
         from dlt_saga.destinations.bigquery.destination import BigQueryDestination
 
@@ -149,12 +150,9 @@ class TestBigQueryIcebergRenameCollision:
         ]
         dest.partition_ddl.side_effect = lambda c: f"PARTITION BY DATE({c})"
 
-        return BigQueryDestination.build_historize_create_table_sql(
-            dest,
-            create_clause="CREATE TABLE",
-            target_table_id="proj.ds.tgt",
-            select_body="ignored",
-            partition_column=rename.get("valid_from_column", "_dlt_valid_from"),
+        valid_from = rename.get("valid_from_column", "_dlt_valid_from")
+        hints = MaterializationHints(
+            partition_column=valid_from,
             cluster_columns=None,
             table_format="iceberg",
             table_name="tgt",
@@ -162,9 +160,16 @@ class TestBigQueryIcebergRenameCollision:
             source_database="proj",
             source_schema="ds",
             source_table="src",
-            valid_from_column=rename.get("valid_from_column", "_dlt_valid_from"),
+            valid_from_column=valid_from,
             valid_to_column=rename.get("valid_to_column", "_dlt_valid_to"),
             is_deleted_column=rename.get("is_deleted_column", "_dlt_is_deleted"),
+        )
+        return BigQueryDestination.build_historize_create_table_sql(
+            dest,
+            create_clause="CREATE TABLE",
+            target_table_id="proj.ds.tgt",
+            select_body="ignored",
+            hints=hints,
         )
 
     def test_source_column_colliding_with_renamed_is_deleted_is_dropped(self):

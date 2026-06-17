@@ -62,6 +62,55 @@ class NativeLoadResult:
     rows_by_uri: dict = field(default_factory=dict)
 
 
+# ---------------------------------------------------------------------------
+# Historize materialization contract
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MaterializationHints:
+    """Hints passed to ``Destination.build_historize_create_table_sql``.
+
+    Bundles the partition/cluster/format/source-table/column-name fields the
+    historize SQL builder hands to each destination.  Keeps the
+    ``build_historize_create_table_sql`` signature stable as new fields are
+    added (storage-URI overrides, KMS keys, table properties, retention
+    classes, …): one struct to extend, one shape for every destination to
+    consume.
+
+    Not every field is read by every destination — the BigQuery Iceberg path
+    uses the SCD2 column-name fields and the source-table fields to emit
+    explicit column DDL; CTAS-based paths (BigQuery native, Databricks)
+    take the column names straight from ``select_body``.  Destinations
+    should ignore fields they don't need.
+    """
+
+    # Partition / cluster
+    partition_column: Optional[str] = None
+    cluster_columns: Optional[list] = None
+
+    # Resolved table format ("native", "iceberg", "delta", "delta_uniform").
+    table_format: str = "native"
+
+    # Target table identity (used for storage-URI construction).
+    table_name: str = ""
+    schema: str = ""
+
+    # Source table identity (used by destinations that emit explicit column
+    # DDL — they query INFORMATION_SCHEMA to project source columns onto
+    # the historize target).
+    source_database: str = ""
+    source_schema: str = ""
+    source_table: str = ""
+
+    # SCD2 column names.  Only destinations that emit explicit column DDL
+    # (BigQuery Iceberg today) consult these; CTAS paths read the names
+    # straight from ``select_body``.
+    valid_from_column: str = "_dlt_valid_from"
+    valid_to_column: str = "_dlt_valid_to"
+    is_deleted_column: str = "_dlt_is_deleted"
+
+
 class Destination(ABC):
     """Abstract base class for all destination implementations.
 
@@ -743,17 +792,7 @@ class Destination(ABC):
         create_clause: str,
         target_table_id: str,
         select_body: str,
-        partition_column: Optional[str],
-        cluster_columns: Optional[list],
-        table_format: str = "native",
-        table_name: str = "",
-        schema: str = "",
-        source_database: str = "",
-        source_schema: str = "",
-        source_table: str = "",
-        valid_from_column: str = "_dlt_valid_from",
-        valid_to_column: str = "_dlt_valid_to",
-        is_deleted_column: str = "_dlt_is_deleted",
+        hints: "MaterializationHints",
     ) -> str:
         """Build the CREATE TABLE DDL for a historize target table.
 
@@ -765,25 +804,20 @@ class Destination(ABC):
             create_clause: ``CREATE OR REPLACE TABLE`` or ``CREATE TABLE IF NOT EXISTS``.
             target_table_id: Fully-qualified target table identifier.
             select_body: The ``SELECT ... FROM src WHERE FALSE`` body for CTAS.
-            partition_column: Raw partition column name (or None).
-            cluster_columns: Raw cluster column list (or None).
-            table_format: Resolved table format ("native", "iceberg", "delta", "delta_uniform").
-            table_name: Bare target table name (for storage URI construction).
-            schema: Bare target schema/dataset name (for storage URI construction).
-            source_database: Source database/project (for column-type discovery).
-            source_schema: Source schema/dataset (for column-type discovery).
-            source_table: Source table name (for column-type discovery).
-            valid_from_column: SCD2 valid-from column name (defaults to ``_dlt_valid_from``).
-            valid_to_column: SCD2 valid-to column name (defaults to ``_dlt_valid_to``).
-            is_deleted_column: Soft-delete marker column name (defaults to ``_dlt_is_deleted``).
-                Only destinations that emit explicit column DDL (e.g. BigQuery Iceberg) need these;
-                CTAS paths take the names from ``select_body``.
+            hints: Materialization hints (partition, cluster, format,
+                source-table identity, SCD2 column names). Adding new
+                hint fields means extending :class:`MaterializationHints`
+                — the signature here stays stable.
 
         Returns:
             Complete DDL string ready for execution.
         """
-        partition = self.partition_ddl(partition_column) if partition_column else ""
-        cluster = self.cluster_ddl(cluster_columns) if cluster_columns else ""
+        partition = (
+            self.partition_ddl(hints.partition_column) if hints.partition_column else ""
+        )
+        cluster = (
+            self.cluster_ddl(hints.cluster_columns) if hints.cluster_columns else ""
+        )
         parts = [f"{create_clause} {target_table_id}"]
         if partition:
             parts.append(partition)

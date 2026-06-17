@@ -6,10 +6,13 @@ import logging
 import threading
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from dlt_saga.destinations.base import Destination
 from dlt_saga.destinations.databricks.config import DatabricksDestinationConfig
+
+if TYPE_CHECKING:
+    from dlt_saga.destinations.base import MaterializationHints
 
 logger = logging.getLogger(__name__)
 
@@ -455,17 +458,7 @@ class DatabricksDestination(Destination):
         create_clause: str,
         target_table_id: str,
         select_body: str,
-        partition_column: Optional[str],
-        cluster_columns: Optional[list],
-        table_format: str = "native",
-        table_name: str = "",
-        schema: str = "",
-        source_database: str = "",
-        source_schema: str = "",
-        source_table: str = "",
-        valid_from_column: str = "_dlt_valid_from",
-        valid_to_column: str = "_dlt_valid_to",
-        is_deleted_column: str = "_dlt_is_deleted",
+        hints: "MaterializationHints",
     ) -> str:
         """Build CREATE TABLE DDL for a Databricks historize target table.
 
@@ -474,14 +467,17 @@ class DatabricksDestination(Destination):
         - iceberg: USING ICEBERG; cluster_columns raises a clear error.
         - delta_uniform: USING DELTA + TBLPROPERTIES for Iceberg compatibility.
 
-        The valid_from/valid_to/is_deleted column-name params are accepted for API parity
-        with the base/BigQuery signatures but unused here: the Databricks CTAS reads the SCD2
-        column names straight from ``select_body``, which the SQL builder already renders with
-        the configured names.
+        The ``hints.valid_from_column`` / ``valid_to_column`` / ``is_deleted_column``
+        fields are accepted for API parity with the base/BigQuery contract but unused
+        here: the Databricks CTAS reads the SCD2 column names straight from
+        ``select_body``, which the SQL builder already renders with the configured
+        names.
         """
-        effective_format = table_format if table_format != "native" else "delta"
+        effective_format = (
+            hints.table_format if hints.table_format != "native" else "delta"
+        )
 
-        if effective_format == "iceberg" and cluster_columns:
+        if effective_format == "iceberg" and hints.cluster_columns:
             raise ValueError(
                 "Databricks Iceberg tables do not support cluster_columns. "
                 "Remove 'cluster_columns' from the historize section of this pipeline "
@@ -496,10 +492,10 @@ class DatabricksDestination(Destination):
 
         parts = [f"{create_clause} {target_table_id}", using_clause]
 
-        if partition_column and not cluster_columns:
-            parts.append(self.partition_ddl(partition_column))
-        if cluster_columns and effective_format != "iceberg":
-            parts.append(self.cluster_ddl(cluster_columns))
+        if hints.partition_column and not hints.cluster_columns:
+            parts.append(self.partition_ddl(hints.partition_column))
+        if hints.cluster_columns and effective_format != "iceberg":
+            parts.append(self.cluster_ddl(hints.cluster_columns))
 
         if effective_format == "delta_uniform":
             parts.append(
