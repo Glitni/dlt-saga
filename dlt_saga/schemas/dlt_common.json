@@ -96,9 +96,9 @@
       }
     },
 
-    "dataset_access_list": {
+    "schema_access_list": {
       "type": "array",
-      "description": "List of BigQuery dataset access entries. Supports IAM entries (ROLE:entity_type:email), authorized datasets (AUTHORIZED_DATASET:project.dataset), and authorized views (AUTHORIZED_VIEW:project.dataset.view)",
+      "description": "List of schema-level access entries. On BigQuery: ROLE:entity_type:email, AUTHORIZED_DATASET:project.dataset, or AUTHORIZED_VIEW:project.dataset.view.",
       "items": {
         "type": "string",
         "pattern": "^((OWNER|WRITER|READER):(serviceAccount|user|group):.+@.+\\..+|(AUTHORIZED_DATASET|AUTHORIZED_VIEW):.+\\..+)$"

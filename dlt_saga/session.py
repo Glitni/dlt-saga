@@ -294,8 +294,8 @@ class Session:
     ) -> SessionResult:
         """Update access controls (e.g., BigQuery IAM policies) without running pipelines.
 
-        Syncs per-pipeline ``dataset_access`` (under ``pipelines:`` in
-        saga_project.yml) and, if configured, ``orchestration.dataset_access``
+        Syncs per-pipeline ``schema_access`` (under ``pipelines:`` in
+        saga_project.yml) and, if configured, ``orchestration.schema_access``
         on the orchestration schema — letting external orchestrators (Airflow,
         Dagster, Prefect) read the execution plan they triggered.
 
@@ -336,7 +336,7 @@ class Session:
 
     @staticmethod
     def _apply_orchestration_access() -> None:
-        """Apply ``orchestration.dataset_access`` to the orchestration schema.
+        """Apply ``orchestration.schema_access`` to the orchestration schema.
 
         No-op when the field is unset or when the destination doesn't support
         orchestration (only BigQuery today — the Cloud Run provider writes the
@@ -347,9 +347,9 @@ class Session:
         from dlt_saga.utility.naming import get_execution_plan_schema
 
         orchestration_config = get_orchestration_config()
-        if not orchestration_config.dataset_access:
+        if not orchestration_config.schema_access:
             logger.debug(
-                "No orchestration.dataset_access configured; "
+                "No orchestration.schema_access configured; "
                 "skipping orchestration schema access sync"
             )
             return
@@ -358,7 +358,7 @@ class Session:
         destination_type = context.get_destination_type()
         if destination_type != "bigquery":
             logger.warning(
-                "orchestration.dataset_access is set but destination type "
+                "orchestration.schema_access is set but destination type "
                 "%r does not support orchestration access sync; skipping. "
                 "Apply the grant out-of-band for now.",
                 destination_type,
@@ -368,7 +368,7 @@ class Session:
         project_id = context.get_database()
         if not project_id:
             logger.warning(
-                "Cannot apply orchestration.dataset_access: no project "
+                "Cannot apply orchestration.schema_access: no project "
                 "configured in the execution context"
             )
             return
@@ -378,21 +378,21 @@ class Session:
         schema = get_execution_plan_schema()
         location = context.get_location() or "EU"
 
-        # No "Applying orchestration.dataset_access …" log here — the
+        # No "Applying orchestration.schema_access …" log here — the
         # downstream `Updated access controls for dataset X` line (from
         # `_update_access_if_needed`) names the dataset and shows the diff.
         # Silence on no-op runs is consistent with the per-pipeline path.
         logger.debug(
-            "Applying orchestration.dataset_access to %s.%s (%d entries)",
+            "Applying orchestration.schema_access to %s.%s (%d entries)",
             project_id,
             schema,
-            len(orchestration_config.dataset_access),
+            len(orchestration_config.schema_access),
         )
         BigQueryBaseDestination._sync_dataset_and_access_static(
             project_id=project_id,
             location=location,
             dataset_name=schema,
-            dataset_access=orchestration_config.dataset_access,
+            schema_access=orchestration_config.schema_access,
         )
 
     # -------------------------------------------------------------------

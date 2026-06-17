@@ -88,7 +88,7 @@ def _running_principal_email() -> Optional[str]:
 
 
 def _suggest_owner_entry(principal: str) -> str:
-    """Render the ``dataset_access:`` YAML entry that grants OWNER to
+    """Render the ``schema_access:`` YAML entry that grants OWNER to
     ``principal``, using the entity-type prefix saga's parser expects
     (``serviceAccount:`` vs ``user:``)."""
     prefix = (
@@ -98,16 +98,16 @@ def _suggest_owner_entry(principal: str) -> str:
 
 
 class DatasetAccessLockoutError(RuntimeError):
-    """Raised when a ``dataset_access:`` change would remove OWNER from the
+    """Raised when a ``schema_access:`` change would remove OWNER from the
     principal running the update — the change would lock saga out of any
     future access syncs on the same dataset (no permission to modify the
     access policy)."""
 
 
 class DatasetAccessMissingOwnerError(RuntimeError):
-    """Raised when ``dataset_access:`` has no OWNER entry at all. BigQuery
+    """Raised when ``schema_access:`` has no OWNER entry at all. BigQuery
     auto-adds the creating SA as ``OWNER:userByEmail:<sa>`` when a dataset
-    is created; applying a ``dataset_access:`` that omits OWNER strips
+    is created; applying a ``schema_access:`` that omits OWNER strips
     that entry, leaving the dataset with no managed owner. If the creating
     SA is also the one running ``saga update-access`` the result is an
     unrecoverable lockout (see :class:`DatasetAccessLockoutError`); even
@@ -430,7 +430,7 @@ class BigQueryBaseDestination(Destination):
             project_id=self.config.project_id,
             location=self.config.location,
             dataset_name=dataset_name,
-            dataset_access=self.config.dataset_access,
+            schema_access=self.config.schema_access,
         )
         BigQueryBaseDestination._synced_datasets.add(cache_key)
 
@@ -439,7 +439,7 @@ class BigQueryBaseDestination(Destination):
         project_id: str,
         location: str,
         dataset_name: str,
-        dataset_access: Optional[List[str]] = None,
+        schema_access: Optional[List[str]] = None,
         client: Any = None,
     ) -> None:
         """Sync BigQuery dataset existence and access controls (static implementation).
@@ -451,7 +451,7 @@ class BigQueryBaseDestination(Destination):
             project_id: GCP project ID
             location: BigQuery location (e.g., "EU", "US")
             dataset_name: Name of the dataset to ensure exists
-            dataset_access: Optional dataset-level access control list
+            schema_access: Optional dataset-level access control list
             client: Optional BigQuery client to reuse (avoids creating a new one)
         """
         from google.cloud.exceptions import NotFound
@@ -463,7 +463,7 @@ class BigQueryBaseDestination(Destination):
                 project_id, location
             )
             access_entries = BigQueryBaseDestination._prepare_access_entries(
-                dataset_access, dataset_name
+                schema_access, dataset_name
             )
 
             # Step 1: Ensure dataset exists; create if missing
@@ -510,9 +510,9 @@ class BigQueryBaseDestination(Destination):
 
     @staticmethod
     def _prepare_access_entries(
-        dataset_access: Optional[List[str]], dataset_name: str
+        schema_access: Optional[List[str]], dataset_name: str
     ) -> Optional[List[Any]]:
-        """Parse + validate + filter ``dataset_access`` for a given dataset.
+        """Parse + validate + filter ``schema_access`` for a given dataset.
 
         Returns ``None`` when no access management should happen (no list
         declared, or non-prod environment). Validation refuses lists with
@@ -521,9 +521,9 @@ class BigQueryBaseDestination(Destination):
         """
         from dlt_saga.utility.naming import get_environment
 
-        if not dataset_access or get_environment() != "prod":
+        if not schema_access or get_environment() != "prod":
             return None
-        entries = BigQueryBaseDestination._parse_dataset_access_static(dataset_access)
+        entries = BigQueryBaseDestination._parse_dataset_access_static(schema_access)
         BigQueryBaseDestination._require_owner_entry(entries, dataset_name)
         return BigQueryBaseDestination._filter_staging_access_entries(
             entries, dataset_name
@@ -579,7 +579,7 @@ class BigQueryBaseDestination(Destination):
 
     @staticmethod
     def _require_owner_entry(access_entries: List[Any], dataset_name: str) -> None:
-        """Refuse a ``dataset_access:`` list that declares no OWNER.
+        """Refuse a ``schema_access:`` list that declares no OWNER.
 
         BigQuery auto-adds the creating SA as a managed OWNER entry; if
         the desired list has no OWNER at all, applying it strips that
@@ -602,13 +602,13 @@ class BigQueryBaseDestination(Destination):
         principal = _running_principal_email()
         if principal:
             hint = (
-                "Add an OWNER entry to dataset_access: — typically the "
+                "Add an OWNER entry to schema_access: — typically the "
                 "service account running saga update-access, e.g.:\n"
                 f'    - "{_suggest_owner_entry(principal)}"'
             )
         else:
             hint = (
-                "Add an OWNER entry to dataset_access: — typically the "
+                "Add an OWNER entry to schema_access: — typically the "
                 "service account that runs saga update-access."
             )
 
@@ -623,9 +623,9 @@ class BigQueryBaseDestination(Destination):
             context.access_config_error_count += 1
         else:
             raise DatasetAccessMissingOwnerError(
-                f"Refusing to apply dataset_access for dataset {dataset_name!r}: "
+                f"Refusing to apply schema_access for dataset {dataset_name!r}: "
                 f"no OWNER entry is declared. BigQuery adds the creating SA as OWNER "
-                f"automatically, and applying a dataset_access list without OWNER strips "
+                f"automatically, and applying a schema_access list without OWNER strips "
                 f"that entry — leaving the dataset with no managed owner. " + hint
             )
 
@@ -675,9 +675,9 @@ class BigQueryBaseDestination(Destination):
             return
 
         suggested = _suggest_owner_entry(principal)
-        hint = f'Add this entry to dataset_access:\n    - "{suggested}"'
+        hint = f'Add this entry to schema_access:\n    - "{suggested}"'
         error_msg = (
-            f"Configured dataset_access for {dataset_name!r} would remove OWNER from "
+            f"Configured schema_access for {dataset_name!r} would remove OWNER from "
             f"running principal ({principal}). " + hint
         )
 
@@ -691,11 +691,11 @@ class BigQueryBaseDestination(Destination):
         else:
             raise DatasetAccessLockoutError(
                 f"Refusing to update access on dataset {dataset_name!r}: the "
-                f"configured dataset_access would remove OWNER from the "
+                f"configured schema_access would remove OWNER from the "
                 f"principal running this update ({principal}), which would "
                 f"lock saga out of future access syncs on this dataset "
                 f"(recovery requires a project-Owner to re-grant manually). "
-                f"Add this entry to dataset_access: and re-run:\n"
+                f"Add this entry to schema_access: and re-run:\n"
                 f'    - "{suggested}"'
             )
 
@@ -789,7 +789,7 @@ class BigQueryBaseDestination(Destination):
 
         context = get_execution_context()
 
-        # Collect all unique (project, location, dataset_name, dataset_access) combinations
+        # Collect all unique (project, location, dataset_name, schema_access) combinations
         datasets_to_create = set()
 
         for config in pipeline_configs:
@@ -799,7 +799,7 @@ class BigQueryBaseDestination(Destination):
                 "location", "EU"
             )
             dataset_name = config.schema_name
-            dataset_access = config.config_dict.get("dataset_access")
+            schema_access = config.config_dict.get("schema_access")
 
             if project and dataset_name:
                 datasets_to_create.add(
@@ -807,7 +807,7 @@ class BigQueryBaseDestination(Destination):
                         project,
                         location,
                         dataset_name,
-                        tuple(dataset_access) if dataset_access else None,
+                        tuple(schema_access) if schema_access else None,
                     )
                 )
 
@@ -823,10 +823,10 @@ class BigQueryBaseDestination(Destination):
                 project,
                 location,
                 dataset_name,
-                dataset_access_tuple,
+                schema_access_tuple,
             ) in datasets_to_create:
-                dataset_access = (
-                    list(dataset_access_tuple) if dataset_access_tuple else None
+                schema_access = (
+                    list(schema_access_tuple) if schema_access_tuple else None
                 )
 
                 # Use static method to sync dataset and access
@@ -834,7 +834,7 @@ class BigQueryBaseDestination(Destination):
                     project_id=project,
                     location=location,
                     dataset_name=dataset_name,
-                    dataset_access=dataset_access,
+                    schema_access=schema_access,
                     client=client,
                 )
 

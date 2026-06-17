@@ -235,7 +235,7 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         context = get_execution_context()
 
-        # Collect all unique (project, location, dataset_name, dataset_access) combinations
+        # Collect all unique (project, location, dataset_name, schema_access) combinations
         datasets_to_create = set()
 
         for config in pipeline_configs:
@@ -246,7 +246,7 @@ class BigQueryDestination(BigQueryBaseDestination):
             )
             # schema_name is already resolved by ConfigSource during discovery
             dataset_name = config.schema_name
-            dataset_access = config.config_dict.get("dataset_access")
+            schema_access = config.config_dict.get("schema_access")
 
             if project and dataset_name:
                 # Add main dataset
@@ -255,7 +255,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                         project,
                         location,
                         dataset_name,
-                        tuple(dataset_access) if dataset_access else None,
+                        tuple(schema_access) if schema_access else None,
                     )
                 )
 
@@ -266,7 +266,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                         project,
                         location,
                         staging_dataset_name,
-                        tuple(dataset_access) if dataset_access else None,
+                        tuple(schema_access) if schema_access else None,
                     )
                 )
 
@@ -286,10 +286,10 @@ class BigQueryDestination(BigQueryBaseDestination):
                 project,
                 location,
                 dataset_name,
-                dataset_access_tuple,
+                schema_access_tuple,
             ) in datasets_to_create:
-                dataset_access = (
-                    list(dataset_access_tuple) if dataset_access_tuple else None
+                schema_access = (
+                    list(schema_access_tuple) if schema_access_tuple else None
                 )
 
                 # Use static method to sync dataset and access
@@ -297,7 +297,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                     project_id=project,
                     location=location,
                     dataset_name=dataset_name,
-                    dataset_access=dataset_access,
+                    schema_access=schema_access,
                     client=client,
                 )
                 cls._synced_datasets.add((project, dataset_name))
@@ -746,14 +746,15 @@ class BigQueryDestination(BigQueryBaseDestination):
             )
 
         # BigQuery Iceberg: explicit CREATE TABLE (no CTAS)
-        storage_path = self.config.storage_path
-        if not storage_path:
+        if not self.config.storage_path:
             raise ValueError(
                 "storage_path is required for BigQuery Iceberg historize tables. "
                 "Configure it in the profile or profile.historize.storage_path."
             )
-        target_dataset = schema or self.config.dataset_name
-        storage_uri = f"{storage_path.rstrip('/')}/{target_dataset}/{table_name}/"
+        target_dataset = schema or self.config.dataset_name or ""
+        storage_uri = self._resolve_storage_uri(
+            target_dataset, table_name, layer="historize"
+        )
 
         # Fetch source column names + types for explicit column definitions
         ts_type = self.type_name("timestamp")
@@ -1418,27 +1419,83 @@ class BigQueryDestination(BigQueryBaseDestination):
 
     # Iceberg-specific methods
 
-    def _get_storage_uri(self, table_name: str) -> str:
-        """Get GCS storage URI for an Iceberg table.
+    def _resolve_storage_uri(
+        self, dataset: str, table_name: str, *, layer: str = "ingest"
+    ) -> str:
+        """Resolve the GCS storage URI for a BigLake Iceberg table.
+
+        Routes through ``naming_module.generate_target_location`` so a
+        project can shape the URI per layer (e.g. ``…/raw/…`` vs
+        ``…/historized/…``), per tenant, or per environment.  The framework
+        default keeps the historical ``{storage_path}/{dataset}/{table}/``
+        layout unchanged.
 
         Args:
-            table_name: Table name
+            dataset: Target BigQuery dataset.
+            table_name: Target table name within the dataset.
+            layer: ``"ingest"`` (default) or ``"historize"``.
 
         Returns:
-            Storage URI in format gs://bucket/base_path/dataset/table/
+            Fully-qualified ``gs://`` URI with trailing slash.
         """
         storage_path = self.config.storage_path
-        if not storage_path.startswith("gs://"):
-            raise ValueError(f"storage_path must start with gs://: {storage_path}")
+        if not storage_path or not storage_path.startswith("gs://"):
+            raise ValueError(f"storage_path must start with gs://: {storage_path!r}")
 
-        # Ensure trailing slash
-        if not storage_path.endswith("/"):
-            storage_path = f"{storage_path}/"
+        from dlt_saga.pipeline_config import default_generate_target_location
+        from dlt_saga.pipeline_config.naming import call_hook, load_naming_module
+        from dlt_saga.project_config import get_project_config
+        from dlt_saga.utility.naming import get_environment
 
-        # Storage URI pattern: {storage_path}{dataset}/{table}/
-        # e.g., gs://bucket/dlt/dataset_name/table_name/
-        storage_uri = f"{storage_path}{self.config.dataset_name}/{table_name}/"
-        return storage_uri
+        try:
+            project_config = get_project_config()
+            naming_module_name = project_config.naming_module
+        except Exception:
+            naming_module_name = None
+
+        module = (
+            load_naming_module({"naming_module": naming_module_name})
+            if naming_module_name
+            else None
+        )
+        if module and hasattr(module, "generate_target_location"):
+            try:
+                uri = call_hook(
+                    module.generate_target_location,
+                    [],
+                    get_environment(),
+                    storage_path,
+                    layer=layer,
+                    schema=dataset,
+                    table=table_name,
+                )
+                if uri:
+                    return uri
+            except Exception as exc:
+                logger.debug("naming_module.generate_target_location() raised: %s", exc)
+
+        uri = default_generate_target_location(
+            [],
+            get_environment(),
+            storage_path,
+            layer=layer,
+            schema=dataset,
+            table=table_name,
+        )
+        # default_generate_target_location returns None only when
+        # default_storage_root is falsy — already guarded above.
+        assert uri is not None  # noqa: S101 — narrowing for type-checker
+        return uri
+
+    def _get_storage_uri(self, table_name: str) -> str:
+        """Get the GCS storage URI for an ingest-layer Iceberg table.
+
+        Thin wrapper around :meth:`_resolve_storage_uri` for ingest-layer
+        callers.
+        """
+        return self._resolve_storage_uri(
+            self.config.dataset_name or "", table_name, layer="ingest"
+        )
 
     # Mapping from dlt data types to BigQuery SQL types
     DLT_TO_BIGQUERY_TYPE = {

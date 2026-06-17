@@ -217,18 +217,19 @@ class OrchestrationConfig:
             ),
         },
     )
-    dataset_access: Optional[List[str]] = field(
+    schema_access: Optional[List[str]] = field(
         default=None,
         metadata={
             "description": (
                 "Access entries applied to the orchestration schema by "
                 "``saga update-access``. Same string format as "
-                "``pipelines.dataset_access`` (e.g. "
+                "``pipelines.schema_access`` (e.g. "
                 "``READER:serviceAccount:<email>``). Use this to grant "
                 "external orchestrators (Airflow, Dagster, Prefect) read "
                 "access on the execution plan tables so they can wait on "
                 "and inspect runs they triggered. Applied in prod only — "
-                "matches the per-pipeline access behaviour."
+                "matches the per-pipeline access behaviour. The legacy "
+                "``dataset_access`` key is accepted as a read-time alias."
             ),
         },
     )
@@ -262,7 +263,7 @@ class OrchestrationConfig:
             region=data.get("region"),
             job_name=data.get("job_name"),
             schema=data.get("schema"),
-            dataset_access=data.get("dataset_access"),
+            schema_access=data.get("schema_access") or data.get("dataset_access"),
             worker_concurrency=data.get("worker_concurrency"),
         )
 
@@ -448,6 +449,15 @@ def get_project_config() -> SagaProjectConfig:
         logger.warning(f"Failed to read saga_project.yml: {e}")
         _project_config = SagaProjectConfig()
         return _project_config
+
+    # Rewrite legacy config keys (e.g. dataset_access → schema_access) so
+    # downstream consumers only see canonical names. The same normalisation
+    # runs in FilePipelineConfig for per-pipeline configs; doing it here too
+    # covers callers that read project config without going through the file
+    # config source.
+    from dlt_saga.pipeline_config.compat import normalize_config_aliases
+
+    normalize_config_aliases(data)
 
     _project_config = SagaProjectConfig.from_dict(data)
     return _project_config

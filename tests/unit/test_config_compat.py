@@ -1,0 +1,89 @@
+"""Unit tests for config-key alias normalization."""
+
+import logging
+
+import pytest
+
+from dlt_saga.pipeline_config.compat import normalize_config_aliases
+
+
+@pytest.mark.unit
+class TestNormalizeConfigAliases:
+    def test_renames_dataset_access_at_top_level(self):
+        data = {
+            "dataset_access": [
+                "OWNER:serviceAccount:sa@p.iam.gserviceaccount.com",
+            ],
+        }
+        normalize_config_aliases(data)
+        assert "schema_access" in data
+        assert "dataset_access" not in data
+
+    def test_renames_plus_prefixed_form(self):
+        data = {"+dataset_access": ["READER:group:analysts@example.com"]}
+        normalize_config_aliases(data)
+        assert "+schema_access" in data
+        assert "+dataset_access" not in data
+
+    def test_renames_nested(self):
+        data = {
+            "pipelines": {
+                "dataset_access": ["OWNER:serviceAccount:sa@p.iam.gserviceaccount.com"],
+                "filesystem": {
+                    "+dataset_access": [
+                        "AUTHORIZED_DATASET:proj.dlt_filesystem",
+                    ],
+                },
+            },
+        }
+        normalize_config_aliases(data)
+        assert "schema_access" in data["pipelines"]
+        assert "dataset_access" not in data["pipelines"]
+        assert "+schema_access" in data["pipelines"]["filesystem"]
+        assert "+dataset_access" not in data["pipelines"]["filesystem"]
+
+    def test_canonical_wins_when_both_set(self, caplog):
+        data = {
+            "dataset_access": ["OWNER:legacy"],
+            "schema_access": ["OWNER:canonical"],
+        }
+        with caplog.at_level(logging.WARNING):
+            normalize_config_aliases(data)
+        # Canonical preserved; legacy dropped.
+        assert data == {"schema_access": ["OWNER:canonical"]}
+        # A warning surfaces the conflict so it's not silent.
+        assert any("takes precedence" in r.message for r in caplog.records)
+
+    def test_silent_on_pure_alias_rewrite(self, caplog):
+        """A clean legacy → canonical rewrite emits no log lines at WARNING+."""
+        data = {"dataset_access": ["OWNER:serviceAccount:sa@p.iam.gserviceaccount.com"]}
+        with caplog.at_level(logging.WARNING):
+            normalize_config_aliases(data)
+        assert caplog.records == []
+
+    def test_no_mutation_when_no_legacy_keys(self):
+        data = {
+            "schema_access": ["OWNER:canonical"],
+            "pipelines": {"other_key": "value"},
+        }
+        normalize_config_aliases(data)
+        assert data == {
+            "schema_access": ["OWNER:canonical"],
+            "pipelines": {"other_key": "value"},
+        }
+
+    def test_handles_lists_of_dicts(self):
+        data = {
+            "items": [
+                {"dataset_access": ["OWNER:in-list"]},
+                {"other": "value"},
+            ],
+        }
+        normalize_config_aliases(data)
+        assert data["items"][0] == {"schema_access": ["OWNER:in-list"]}
+        assert data["items"][1] == {"other": "value"}
+
+    def test_non_dict_non_list_input_returns_unchanged(self):
+        assert normalize_config_aliases("string") == "string"
+        assert normalize_config_aliases(42) == 42
+        assert normalize_config_aliases(None) is None

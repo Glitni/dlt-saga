@@ -486,7 +486,7 @@ class TestApplyOrchestrationAccess:
         with (
             patch(
                 "dlt_saga.project_config.get_orchestration_config",
-                return_value=OrchestrationConfig(dataset_access=access),
+                return_value=OrchestrationConfig(schema_access=access),
             ),
             patch("dlt_saga.utility.cli.context.get_execution_context") as mock_ctx,
             patch(
@@ -510,7 +510,7 @@ class TestApplyOrchestrationAccess:
         with (
             patch(
                 "dlt_saga.project_config.get_orchestration_config",
-                return_value=OrchestrationConfig(dataset_access=access),
+                return_value=OrchestrationConfig(schema_access=access),
             ),
             patch("dlt_saga.utility.cli.context.get_execution_context") as mock_ctx,
             patch(
@@ -531,7 +531,7 @@ class TestApplyOrchestrationAccess:
             project_id="amedia-adp-sources",
             location="EU",
             dataset_name="dlt_orchestration",
-            dataset_access=access,
+            schema_access=access,
         )
 
     def test_skips_with_warning_when_no_project_in_context(self, caplog):
@@ -541,7 +541,7 @@ class TestApplyOrchestrationAccess:
         with (
             patch(
                 "dlt_saga.project_config.get_orchestration_config",
-                return_value=OrchestrationConfig(dataset_access=access),
+                return_value=OrchestrationConfig(schema_access=access),
             ),
             patch("dlt_saga.utility.cli.context.get_execution_context") as mock_ctx,
             patch(

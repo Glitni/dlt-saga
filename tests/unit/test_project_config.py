@@ -70,6 +70,21 @@ class TestGetProjectConfig:
         yml = tmp_path / "saga_project.yml"
         yml.write_text(
             "pipelines:\n"
+            "  schema_access:\n"
+            "    - 'OWNER:serviceAccount:sa@proj.iam.gserviceaccount.com'\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        result = get_project_config()
+        assert result.pipelines is not None
+        assert "schema_access" in result.pipelines
+
+    def test_legacy_dataset_access_key_is_normalized(self, tmp_path, monkeypatch):
+        """The legacy ``dataset_access`` key is rewritten to ``schema_access``
+        at YAML load — projects can keep the legacy spelling indefinitely."""
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text(
+            "pipelines:\n"
             "  dataset_access:\n"
             "    - 'OWNER:serviceAccount:sa@proj.iam.gserviceaccount.com'\n"
         )
@@ -77,7 +92,8 @@ class TestGetProjectConfig:
 
         result = get_project_config()
         assert result.pipelines is not None
-        assert "dataset_access" in result.pipelines
+        assert "schema_access" in result.pipelines
+        assert "dataset_access" not in result.pipelines
 
 
 @pytest.mark.unit
@@ -161,13 +177,13 @@ class TestGetOrchestrationConfig:
         assert isinstance(result, OrchestrationConfig)
         assert result.provider is None
 
-    def test_dataset_access_defaults_to_none(self, tmp_path, monkeypatch):
+    def test_schema_access_defaults_to_none(self, tmp_path, monkeypatch):
         yml = tmp_path / "saga_project.yml"
         yml.write_text("orchestration:\n  provider: cloud_run\n")
         monkeypatch.chdir(tmp_path)
 
         result = get_orchestration_config()
-        assert result.dataset_access is None
+        assert result.schema_access is None
 
     def test_worker_concurrency_defaults_to_none(self, tmp_path, monkeypatch):
         yml = tmp_path / "saga_project.yml"
@@ -191,22 +207,38 @@ class TestGetOrchestrationConfig:
         with pytest.raises(ValueError, match="worker_concurrency must be >= 1"):
             OrchestrationConfig(worker_concurrency=0)
 
-    def test_dataset_access_parsed_when_present(self, tmp_path, monkeypatch):
+    def test_schema_access_parsed_when_present(self, tmp_path, monkeypatch):
         yml = tmp_path / "saga_project.yml"
         yml.write_text(
             "orchestration:\n"
             "  provider: cloud_run\n"
-            "  dataset_access:\n"
+            "  schema_access:\n"
             "    - 'READER:serviceAccount:airflow@example.iam.gserviceaccount.com'\n"
             "    - 'READER:group:data@example.com'\n"
         )
         monkeypatch.chdir(tmp_path)
 
         result = get_orchestration_config()
-        assert result.dataset_access == [
+        assert result.schema_access == [
             "READER:serviceAccount:airflow@example.iam.gserviceaccount.com",
             "READER:group:data@example.com",
         ]
+
+    def test_legacy_dataset_access_key_normalized_on_orchestration(
+        self, tmp_path, monkeypatch
+    ):
+        """orchestration.dataset_access (legacy spelling) is read via the alias."""
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text(
+            "orchestration:\n"
+            "  provider: cloud_run\n"
+            "  dataset_access:\n"
+            "    - 'READER:group:data@example.com'\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        result = get_orchestration_config()
+        assert result.schema_access == ["READER:group:data@example.com"]
 
 
 @pytest.mark.unit
@@ -227,7 +259,7 @@ class TestSagaProjectConfigFromDict:
             },
             "naming_module": "my_naming",
             "pipelines": {
-                "dataset_access": [
+                "schema_access": [
                     "OWNER:serviceAccount:sa@proj.iam.gserviceaccount.com"
                 ]
             },
@@ -241,7 +273,7 @@ class TestSagaProjectConfigFromDict:
         assert config.orchestration.region == "eu-north1"
         assert config.orchestration.job_name == "my-job"
         assert config.naming_module == "my_naming"
-        assert "dataset_access" in config.pipelines
+        assert "schema_access" in config.pipelines
 
     def test_empty_dict(self):
         config = SagaProjectConfig.from_dict({})

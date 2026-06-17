@@ -353,15 +353,34 @@ def _patch_pipelines_section(
         {
             "type": "object",
             "properties": {
-                "dataset_access": {
-                    "$ref": "dlt_common.json#/$defs/dataset_access_list",
+                "schema_access": {
+                    "$ref": "dlt_common.json#/$defs/schema_access_list",
                     "description": (
-                        "Project-wide dataset access control "
+                        "Project-wide schema access control "
                         "(applied to all pipeline groups). "
                         "Formats: ROLE:entity_type:email, "
                         "AUTHORIZED_DATASET:project.dataset, "
                         "AUTHORIZED_VIEW:project.dataset.view"
                     ),
+                },
+                "historize_schema_access": {
+                    "$ref": "dlt_common.json#/$defs/schema_access_list",
+                    "description": (
+                        "Overlay added on top of schema_access when granting "
+                        "access on the historize-layer schema. Only meaningful "
+                        "when the historize schema is distinct from the ingest "
+                        "schema (placement: schema_suffix, or a custom "
+                        "naming_module that returns a different name for "
+                        "layer='historize')."
+                    ),
+                },
+                "dataset_access": {
+                    "$ref": "dlt_common.json#/$defs/schema_access_list",
+                    "description": (
+                        "Deprecated alias for schema_access — kept as a "
+                        "read-time alias for backwards compatibility."
+                    ),
+                    "deprecated": True,
                 },
             },
             "additionalProperties": {
@@ -371,23 +390,53 @@ def _patch_pipelines_section(
                     "(e.g., google_sheets, filesystem, api)"
                 ),
                 "properties": {
-                    "dataset_access": {
-                        "$ref": "dlt_common.json#/$defs/dataset_access_list",
+                    "schema_access": {
+                        "$ref": "dlt_common.json#/$defs/schema_access_list",
                         "description": (
-                            "Dataset access control (replaces parent). "
+                            "Schema access control (replaces parent). "
                             "Formats: ROLE:entity_type:email, "
                             "AUTHORIZED_DATASET:project.dataset, "
                             "AUTHORIZED_VIEW:project.dataset.view"
                         ),
                     },
-                    "+dataset_access": {
-                        "$ref": "dlt_common.json#/$defs/dataset_access_list",
+                    "+schema_access": {
+                        "$ref": "dlt_common.json#/$defs/schema_access_list",
                         "description": (
-                            "Dataset access control (merges with parent). "
+                            "Schema access control (merges with parent). "
                             "Formats: ROLE:entity_type:email, "
                             "AUTHORIZED_DATASET:project.dataset, "
                             "AUTHORIZED_VIEW:project.dataset.view"
                         ),
+                    },
+                    "historize_schema_access": {
+                        "$ref": "dlt_common.json#/$defs/schema_access_list",
+                        "description": (
+                            "Overlay added on top of schema_access for the "
+                            "historize schema (replaces parent)."
+                        ),
+                    },
+                    "+historize_schema_access": {
+                        "$ref": "dlt_common.json#/$defs/schema_access_list",
+                        "description": (
+                            "Overlay added on top of schema_access for the "
+                            "historize schema (merges with parent)."
+                        ),
+                    },
+                    "dataset_access": {
+                        "$ref": "dlt_common.json#/$defs/schema_access_list",
+                        "description": (
+                            "Deprecated alias for schema_access — accepted "
+                            "as a read-time alias."
+                        ),
+                        "deprecated": True,
+                    },
+                    "+dataset_access": {
+                        "$ref": "dlt_common.json#/$defs/schema_access_list",
+                        "description": (
+                            "Deprecated alias for +schema_access — accepted "
+                            "as a read-time alias."
+                        ),
+                        "deprecated": True,
                     },
                     "task_group": {
                         "type": "string",
