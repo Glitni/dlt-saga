@@ -7,6 +7,7 @@ import pytest
 from dlt_saga.destinations.base import (
     DerivedColumn,
     Destination,
+    MaterializationHints,
     NativeLoadResult,
     NativeLoadSpec,
 )
@@ -78,6 +79,89 @@ class TestDataclasses:
         assert result.rows_loaded == 100
         assert result.job_id == "job_123"
         assert result.rows_by_uri == {}
+
+    def test_materialization_hints_defaults(self):
+        hints = MaterializationHints()
+        assert hints.partition_column is None
+        assert hints.cluster_columns is None
+        assert hints.table_format == "native"
+        assert hints.table_name == ""
+        assert hints.schema == ""
+        assert hints.source_database == ""
+        assert hints.source_schema == ""
+        assert hints.source_table == ""
+        assert hints.valid_from_column == "_dlt_valid_from"
+        assert hints.valid_to_column == "_dlt_valid_to"
+        assert hints.is_deleted_column == "_dlt_is_deleted"
+
+    def test_materialization_hints_explicit_fields(self):
+        hints = MaterializationHints(
+            partition_column="snapshot_date",
+            cluster_columns=["id"],
+            table_format="iceberg",
+            table_name="orders_historized",
+            schema="dlt_sales",
+            source_database="proj",
+            source_schema="dlt_sales",
+            source_table="orders",
+            valid_from_column="valid_from",
+            valid_to_column="valid_to",
+            is_deleted_column="is_deleted",
+        )
+        assert hints.partition_column == "snapshot_date"
+        assert hints.cluster_columns == ["id"]
+        assert hints.table_format == "iceberg"
+        assert hints.table_name == "orders_historized"
+        assert hints.schema == "dlt_sales"
+        assert hints.source_database == "proj"
+        assert hints.source_schema == "dlt_sales"
+        assert hints.source_table == "orders"
+        assert hints.valid_from_column == "valid_from"
+        assert hints.valid_to_column == "valid_to"
+        assert hints.is_deleted_column == "is_deleted"
+
+
+@pytest.mark.unit
+class TestBuildHistorizeCreateTableSqlDefault:
+    """The base default emits a vanilla CTAS without partition/cluster DDL.
+
+    The base's ``partition_ddl`` / ``cluster_ddl`` return empty strings —
+    destinations opt in by overriding. So even when the hints carry a
+    partition column, the default impl's output excludes it.
+    """
+
+    def test_emits_plain_ctas(self):
+        sql = _ConcreteDestination().build_historize_create_table_sql(
+            "CREATE TABLE IF NOT EXISTS",
+            "proj.ds.tgt",
+            "SELECT 1 AS x WHERE FALSE",
+            MaterializationHints(),
+        )
+        assert (
+            sql
+            == "CREATE TABLE IF NOT EXISTS proj.ds.tgt\nAS\nSELECT 1 AS x WHERE FALSE"
+        )
+
+    def test_ignores_partition_when_dialect_returns_empty(self):
+        """Hints carry the partition column, but the base ``partition_ddl``
+        returns ``""`` for unsupported destinations — that's a signal to
+        skip the clause entirely."""
+        sql = _ConcreteDestination().build_historize_create_table_sql(
+            "CREATE TABLE IF NOT EXISTS",
+            "proj.ds.tgt",
+            "SELECT 1",
+            MaterializationHints(partition_column="snapshot_date"),
+        )
+        assert "PARTITION" not in sql
+
+    def test_create_or_replace_clause_passes_through(self):
+        sql = _ConcreteDestination().build_historize_create_table_sql(
+            "CREATE OR REPLACE TABLE",
+            "proj.ds.tgt",
+            "SELECT 1",
+            MaterializationHints(),
+        )
+        assert sql.startswith("CREATE OR REPLACE TABLE proj.ds.tgt")
 
 
 @pytest.mark.unit
