@@ -530,7 +530,12 @@ def _build_profiles_schema(
     }
     yaml_target_props["billing_project"] = {
         "type": "string",
-        "description": "GCP project used for job execution / billing (BigQuery-specific, defaults to 'database')",
+        "description": (
+            "GCP project used for job execution / billing on saga-issued queries "
+            "(load-info inserts, historize SQL, native-load SQL, IAM sync). "
+            "Does NOT apply to dlt-internal jobs (extract/normalize/load), which "
+            "always bill to 'database'. BigQuery-specific, defaults to 'database'."
+        ),
     }
     yaml_target_props["database_path"] = {
         "type": "string",

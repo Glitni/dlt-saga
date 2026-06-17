@@ -242,3 +242,36 @@ class TestSyncTableOptionsPartitionExpiration:
         assert not any(
             "not partitioned" in record.getMessage() for record in caplog.records
         )
+
+
+@pytest.mark.unit
+class TestCreateDltDestinationProjectId:
+    """`create_dlt_destination` must hand dlt the data project_id, not the
+    billing project. dlt has a single `project_id` field that controls both
+    the client's billing project and dataset/table reference resolution
+    (dlt/destinations/impl/bigquery/sql_client.py:96-200) — passing the
+    billing project makes dlt's internal `create_dataset` call 403 when
+    the running principal lacks `bigquery.datasets.create` on it.
+    """
+
+    def test_passes_data_project_not_billing_project(self):
+        cfg = BigQueryDestinationConfig(
+            project_id="data-proj", billing_project_id="billing-proj"
+        )
+        dest = BigQueryDestination(cfg)
+        with patch("dlt.destinations.bigquery") as mock_bq:
+            dest.create_dlt_destination()
+        kwargs = mock_bq.call_args.kwargs
+        assert kwargs["project_id"] == "data-proj"
+        # Guard against future regressions that would re-route the
+        # billing project into dlt's project_id slot.
+        assert kwargs["project_id"] != cfg.job_project_id or (
+            cfg.project_id == cfg.job_project_id
+        )
+
+    def test_falls_back_to_project_id_when_no_billing(self):
+        cfg = BigQueryDestinationConfig(project_id="only-proj")
+        dest = BigQueryDestination(cfg)
+        with patch("dlt.destinations.bigquery") as mock_bq:
+            dest.create_dlt_destination()
+        assert mock_bq.call_args.kwargs["project_id"] == "only-proj"
