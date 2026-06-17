@@ -355,7 +355,7 @@ orchestration:
   job_name: adp-dlt-ingest-daily
   schema: dlt_orchestration            # optional override
   worker_concurrency: 4                # optional — see "Capping in-task fan-out" below
-  dataset_access:
+  schema_access:
     - "READER:serviceAccount:airflow-runner@<project>.iam.gserviceaccount.com"
     - "READER:group:data-platform@example.com"
 ```
@@ -378,9 +378,11 @@ Precedence (highest first):
 The orchestrator's `--workers` is forwarded to each Cloud Run task as
 `SAGA_WORKER_CONCURRENCY`, so a single flag on the trigger reaches every worker.
 
-`saga update-access` applies these entries to the orchestration schema alongside the per-pipeline `pipelines.dataset_access` grants. Same string format. Applied in prod only — matches the per-pipeline behaviour. Without this, an external orchestrator querying the execution plan tables will see `PERMISSION_DENIED` even though saga creates the schema itself.
+`saga update-access` applies these entries to the orchestration schema alongside the per-pipeline `pipelines.schema_access` grants. Same string format. Applied in prod only — matches the per-pipeline behaviour. Without this, an external orchestrator querying the execution plan tables will see `PERMISSION_DENIED` even though saga creates the schema itself.
 
-> **BigQuery only.** Saga's orchestration provider (Cloud Run) writes the plan to BigQuery, so `orchestration.dataset_access:` is a no-op on other destinations today. When orchestration support arrives for Databricks etc., the same field will dispatch through that destination.
+> **Legacy alias.** The pre-0.4 key `dataset_access:` is still accepted as a silent read-time alias for `schema_access:` (`pipelines.`, `pipelines.<group>.`, and `orchestration.` levels). Prefer the canonical spelling in new configs.
+
+> **BigQuery only.** Saga's orchestration provider (Cloud Run) writes the plan to BigQuery, so `orchestration.schema_access:` is a no-op on other destinations today. When orchestration support arrives for Databricks etc., the same field will dispatch through that destination.
 
 ---
 

@@ -272,6 +272,40 @@ Changing `table_format` is treated as a config change — historize detects it v
 
 ---
 
+## Per-layer access
+
+`historize_schema_access` is an overlay on top of `schema_access` that applies only to the historize schema. It exists for the case where the historize schema is distinct from the ingest schema — either because `placement: schema_suffix` is set or because a custom `naming_module` returns a different schema for `layer="historize"` — and you want different grants on each side.
+
+Resolution is union-with-dedup: the historize schema receives `schema_access ∪ historize_schema_access`. When the overlay is unset, the historize schema simply inherits the ingest list (the correct default under `placement: table_suffix`, where both layers share one schema). Reuses the existing `+key:` hierarchical merge in `saga_project.yml`:
+
+```yaml
+# saga_project.yml
+historize:
+  placement: schema_suffix
+  schema_suffix: "_historized"
+
+pipelines:
+  schema_access:
+    - "OWNER:serviceAccount:platform@<project>.iam.gserviceaccount.com"
+    - "WRITER:serviceAccount:dlt-run@<project>.iam.gserviceaccount.com"
+
+  filesystem:
+    +schema_access:
+      - "AUTHORIZED_DATASET:downstream-project.dlt_filesystem"
+    +historize_schema_access:
+      - "AUTHORIZED_DATASET:downstream-project.dlt_filesystem_historized"
+```
+
+The `+`-prefixed forms merge across hierarchy levels (project → group → pipeline). The bare key replaces. Pipeline-level overrides live at the top of a config YAML peer to the existing `historize:` block.
+
+Saga warns at runtime when `historize_schema_access` is declared but the resolved historize schema equals the ingest schema — the overlay would silently mix into the ingest grants. Either consolidate the entries into `schema_access`, or configure `placement: schema_suffix` / a custom `naming_module` to make the schemas distinct.
+
+> **Legacy alias.** The pre-0.4 key `dataset_access:` is still accepted as a silent read-time alias for `schema_access:` at every level. Mixing the legacy and canonical spelling across hierarchy is supported — normalisation runs before the `+key:` merge.
+
+See [Custom Naming](Custom-Naming) for the `layer="historize"` hook that pairs with this overlay.
+
+---
+
 ## Incremental vs full refresh
 
 **Incremental** (default): processes only snapshots not yet historized. Uses `LEAD` for within-batch sequencing and `MERGE` to close existing open records.
