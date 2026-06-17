@@ -194,12 +194,15 @@ class BigQueryBaseDestination(Destination):
                 f"location={self.config.location}"
             )
 
-        # Build kwargs with base parameters
-        # Use job_project_id for dlt's BigQuery client (job execution/billing),
-        # NOT project_id (which is the data project for table references)
+        # dlt's BigQuery destination has a single project_id that controls both
+        # the client's billing project AND the project used in dataset/table
+        # references (see dlt/destinations/impl/bigquery/sql_client.py:96-200).
+        # Pass the data project so dlt creates its datasets where data lives.
+        # billing_project still applies to saga-issued queries (which build
+        # their own clients), but dlt-internal jobs bill to the data project.
         kwargs: dict[str, Any] = {
             "destination_name": "bigquery",
-            "project_id": self.config.job_project_id,
+            "project_id": self.config.project_id,
             "location": self.config.location,
         }
 
