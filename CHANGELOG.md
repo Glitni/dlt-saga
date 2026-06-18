@@ -1,3 +1,9 @@
+## 0.4.1 — 2026-06-18
+
+### Fixed
+- Record actual task_count in _saga_executions row (#110)
+- Pass data project_id to dlt's BigQuery destination, not billing project (#108)
+
 ## 0.4.0 — 2026-06-17
 
 ### Added
