@@ -298,6 +298,57 @@ class TestTaskUnitInterleaving:
 # ---------------------------------------------------------------------------
 
 
+def _executions_task_count(sql_calls: list[str]) -> int:
+    """Recover the task_count literal from the _saga_executions INSERT."""
+    for sql in sql_calls:
+        if "_saga_executions" not in sql or "INSERT INTO" not in sql:
+            continue
+        values_idx = sql.upper().rfind("VALUES")
+        payload = sql[values_idx:]
+        open_paren = payload.find("(")
+        close_paren = payload.rfind(")")
+        parts = [p.strip() for p in payload[open_paren + 1 : close_paren].split(",")]
+        # Column order: execution_id, created_at, command, pipeline_count, task_count, ...
+        return int(parts[4])
+    raise AssertionError("_saga_executions INSERT not found in captured SQL")
+
+
+@pytest.mark.unit
+class TestExecutionsTaskCount:
+    """The executions row must record the actual task count, not n - 1."""
+
+    def test_single_task_records_count_one(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.create_execution_plan([_make_config("orders")])
+
+        assert _executions_task_count(dest.sql_calls) == 1
+
+    def test_multiple_singletons_record_full_count(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.create_execution_plan([_make_config(name) for name in ("a", "b", "c")])
+
+        assert _executions_task_count(dest.sql_calls) == 3
+
+    def test_task_group_collapses_to_one_task(self):
+        """Pipelines sharing a task_group count as a single task unit."""
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.create_execution_plan(
+            [
+                _make_config("a", task_group="g1"),
+                _make_config("b", task_group="g1"),
+                _make_config("c"),
+            ]
+        )
+
+        assert _executions_task_count(dest.sql_calls) == 2
+
+
 @pytest.mark.unit
 class TestForcePropagation:
     """`--force` must reach workers via SAGA_FORCE env var.

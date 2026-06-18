@@ -387,7 +387,7 @@ class ExecutionPlanManager:
                 {now},
                 {self._format_sql_value(meta.command)},
                 {self._format_sql_value(len(rows_to_insert))},
-                {self._format_sql_value(task_index)},
+                {self._format_sql_value(len(task_units))},
                 {self._format_sql_value(meta.select_criteria)},
                 {self._format_sql_value(meta.environment)},
                 {self._format_sql_value(meta.profile)},
