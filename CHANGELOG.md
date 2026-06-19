@@ -1,3 +1,8 @@
+## 0.4.2 — 2026-06-19
+
+### Fixed
+- Pre-create BigLake Iceberg tables with all NOT NULL columns, not just primary_key (#112)
+
 ## 0.4.1 — 2026-06-18
 
 ### Fixed
