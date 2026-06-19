@@ -340,26 +340,28 @@ class BigQueryDestination(BigQueryBaseDestination):
             if is_data_table:
                 hints = getattr(data, "_biglake_hints", {})
 
-                # Extract primary key columns from dlt resource schema.
-                # These must be included in CREATE TABLE since BigQuery Iceberg
-                # doesn't allow adding NOT NULL fields via schema evolution.
-                primary_key = None
+                # Extract NOT NULL columns from dlt resource schema.
+                # BigQuery Iceberg doesn't allow adding NOT NULL fields via
+                # schema evolution, so any column dlt will write as NOT NULL
+                # must exist at CREATE TABLE time. dlt marks primary_key and
+                # merge_key columns as nullable: false.
+                not_null_columns = None
                 columns = None
                 if hasattr(data, "compute_table_schema"):
                     schema_columns = data.compute_table_schema().get("columns", {})
-                    primary_key = [
+                    not_null_columns = [
                         name
                         for name, col in schema_columns.items()
-                        if col.get("primary_key")
+                        if col.get("nullable") is False
                     ]
-                    if primary_key:
+                    if not_null_columns:
                         columns = schema_columns
 
                 self._create_iceberg_table_if_not_exists(
                     table_name,
                     partition_column=hints.get("partition_column"),
                     cluster_columns=hints.get("cluster_columns"),
-                    primary_key=primary_key,
+                    not_null_columns=not_null_columns,
                     columns=columns,
                 )
 
@@ -1577,20 +1579,21 @@ class BigQueryDestination(BigQueryBaseDestination):
         table_name: str,
         partition_column: Optional[str] = None,
         cluster_columns: Optional[list] = None,
-        primary_key: Optional[list] = None,
+        not_null_columns: Optional[list] = None,
         columns: Optional[dict] = None,
     ) -> None:
         """Create BigLake Iceberg table if it doesn't exist.
 
-        Creates table with dlt system columns plus any primary key columns
+        Creates table with dlt system columns plus any NOT NULL columns
         (which must be included upfront since BigQuery Iceberg doesn't allow
-        adding required/NOT NULL fields via schema evolution).
+        adding required/NOT NULL fields via schema evolution). dlt marks
+        ``primary_key`` and ``merge_key`` columns as ``nullable: false``.
 
         Args:
             table_name: Table name
             partition_column: Optional partition column
             cluster_columns: Optional clustering columns
-            primary_key: Optional list of primary key column names
+            not_null_columns: Optional list of column names that must be NOT NULL
             columns: Optional column definitions dict from config
         """
         from google.cloud import bigquery
@@ -1620,26 +1623,28 @@ class BigQueryDestination(BigQueryBaseDestination):
                 "_dlt_id": {"data_type": "text"},
             }
 
-            # Include primary key columns upfront as NOT NULL.
+            # Include NOT NULL columns upfront.
             # BigQuery Iceberg doesn't allow adding required fields via schema evolution,
-            # so they must exist from table creation.
-            if primary_key:
+            # so any column dlt will write as NOT NULL must exist from table creation.
+            if not_null_columns:
                 if not columns:
                     raise ValueError(
-                        f"Iceberg table '{table_name}' has primary_key={primary_key} but no "
-                        f"'columns' configuration. Add all primary key columns to the 'columns' "
-                        f"config with data_type to avoid schema evolution errors."
+                        f"Iceberg table '{table_name}' has NOT NULL columns "
+                        f"{not_null_columns} but no 'columns' configuration. Add them to "
+                        f"the 'columns' config with data_type to avoid schema evolution "
+                        f"errors."
                     )
-                for pk_col in primary_key:
-                    if pk_col in columns:
-                        schema[pk_col] = {**columns[pk_col], "required": True}
+                for col_name in not_null_columns:
+                    if col_name in columns:
+                        schema[col_name] = {**columns[col_name], "required": True}
                     else:
                         raise ValueError(
-                            f"Iceberg table '{table_name}' has primary_key column '{pk_col}' "
-                            f"but it's not defined in 'columns'. Add it with a data_type "
-                            f'(e.g., columns:\n  {pk_col}:\n    data_type: "text") '
-                            f"to the config file. BigQuery Iceberg cannot add NOT NULL fields "
-                            f"to existing tables via schema evolution."
+                            f"Iceberg table '{table_name}' has NOT NULL column '{col_name}' "
+                            f"(from primary_key or merge_key) but it's not defined in "
+                            f"'columns'. Add it with a data_type "
+                            f'(e.g., columns:\n  {col_name}:\n    data_type: "text") '
+                            f"to the config file. BigQuery Iceberg cannot add NOT NULL "
+                            f"fields to existing tables via schema evolution."
                         )
 
             ddl = self._build_create_table_ddl(
@@ -1653,7 +1658,7 @@ class BigQueryDestination(BigQueryBaseDestination):
 
             logger.info(
                 f"Successfully created BigLake Iceberg table: {table_name}. "
-                f"Primary key columns included: {primary_key or 'none'}. "
+                f"NOT NULL columns included: {not_null_columns or 'none'}. "
                 f"Remaining columns will be added via schema evolution."
             )
 
