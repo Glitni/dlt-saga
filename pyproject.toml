@@ -42,7 +42,9 @@ dependencies = [
     "typer>=0.16.0",
     # Source dependencies (lightweight, commonly needed)
     "connectorx>=0.4.4",
-    "pandas>=2.3.1",
+    # Cap at the next major: 3.x is tested and accepted; <4 blocks a silent
+    # future jump to pandas 4.0. Direct use is the filesystem CSV reader only.
+    "pandas>=2.3.1,<4",
     "polars>=1.37.1",
     "pyarrow>=21.0.0",
 ]
