@@ -1,3 +1,9 @@
+## 0.4.3 — 2026-06-22
+
+### Fixed
+- Inject _dlt_ingested_at for replace so replace+historize works (#118)
+- Validate shared adapter config keys in saga_project.yml (#116)
+
 ## 0.4.2 — 2026-06-19
 
 ### Fixed
