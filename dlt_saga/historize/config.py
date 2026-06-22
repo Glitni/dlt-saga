@@ -30,7 +30,7 @@ class HistorizeConfig:
             "description": (
                 "Column that identifies each snapshot in the source table. "
                 "Rows sharing the same value are treated as one point-in-time view. "
-                "Defaults to '_dlt_ingested_at', which is injected automatically for append pipelines."
+                "Defaults to '_dlt_ingested_at', which is injected automatically for append and replace pipelines."
             )
         },
     )

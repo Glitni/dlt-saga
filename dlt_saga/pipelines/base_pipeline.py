@@ -386,10 +386,14 @@ class BasePipeline:
         return extraction_ts
 
     def _inject_ingested_at(self, resource: Any) -> Any:
-        """Inject _dlt_ingested_at column for append-mode pipelines.
+        """Inject _dlt_ingested_at column for append- and replace-mode pipelines.
 
-        For append pipelines, adds a timestamp column to enable historization
-        and efficient querying. Value resolution (priority order):
+        Adds a timestamp column to enable historization and efficient querying.
+        Injected for both ``append`` and ``replace`` (each ``replace`` run
+        overwrites the table with a single snapshot stamped at run time), but
+        not for ``merge``/``scd2`` — dlt manages its own columns there and an
+        injected timestamp would trigger false change detection. Value
+        resolution (priority order):
 
         1. Regex extraction from file path: When snapshot_date_regex +
            snapshot_date_format are configured, extracts date from
@@ -398,13 +402,14 @@ class BasePipeline:
            if available (filesystem sources with metadata injection).
         3. Extraction timestamp: datetime.now(UTC) as final fallback.
 
-        Also auto-clusters by _dlt_ingested_at when no explicit cluster_columns
-        are configured.
+        Auto-clusters by _dlt_ingested_at only for ``append`` when no explicit
+        cluster_columns are configured. A ``replace`` table holds one snapshot
+        with a single ~constant timestamp, so clustering by it is useless.
         """
         base_disposition = self.target_writer.config.write_disposition.replace(
             "+historize", ""
         )
-        if base_disposition != "append":
+        if base_disposition not in ("append", "replace"):
             return resource
 
         import re
@@ -440,9 +445,12 @@ class BasePipeline:
         resource.add_map(_add_ingested_at)
         result = resource
 
-        # Auto-cluster by _dlt_ingested_at if no explicit cluster_columns configured
+        # Auto-cluster by _dlt_ingested_at if no explicit cluster_columns
+        # configured. Append only: a replace table holds one snapshot with a
+        # single ~constant timestamp, so clustering by it is useless.
         if (
-            not self.target_writer.config.cluster_columns
+            base_disposition == "append"
+            and not self.target_writer.config.cluster_columns
             and self.destination.supports_clustering()
         ):
             self.target_writer.config.cluster_columns = ["_dlt_ingested_at"]
