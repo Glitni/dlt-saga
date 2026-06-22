@@ -171,6 +171,26 @@ class TestWithInheritAliases:
 
 
 @pytest.mark.unit
+class TestSharedPropsViaDefs:
+    def test_field_defined_once_and_referenced(self):
+        from dlt_saga.utility.generate_schemas import _shared_props_via_defs
+
+        field_defs, shared = _shared_props_via_defs({"foo": {"type": "string"}})
+
+        # The full schema lives once in $defs ...
+        assert field_defs == {"config_field_foo": {"type": "string"}}
+        # ... and both the plain and +merge forms are thin refs to it.
+        ref = {"$ref": "#/$defs/config_field_foo"}
+        assert shared["foo"] == ref
+        assert shared["+foo"] == ref
+
+    def test_none_input(self):
+        from dlt_saga.utility.generate_schemas import _shared_props_via_defs
+
+        assert _shared_props_via_defs(None) == ({}, {})
+
+
+@pytest.mark.unit
 class TestGenerateSchemasOutput:
     def test_creates_json_files(self, tmp_path):
         from dlt_saga.utility.generate_schemas import generate_schemas
@@ -253,6 +273,48 @@ class TestGenerateSchemasOutput:
             == "dlt_common.json#/$defs/schema_access_list"
         )
         assert "examples" in group_props["adapter"]
+
+    def test_shared_fields_are_deduplicated_via_defs(self, tmp_path):
+        """The config-field union is defined once under $defs and referenced,
+        not inlined six times (3 levels x plain/+merge). Guards against the
+        project schema ballooning as more adapters contribute fields."""
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        raw = (tmp_path / "saga_project_config.json").read_text(encoding="utf-8")
+        data = json.loads(raw)
+
+        defs = data.get("$defs", {})
+        assert defs, "expected a $defs block with field definitions"
+
+        group = data["properties"]["pipelines"]["additionalProperties"]
+        group_props = group["properties"]
+
+        # A union field resolves to a $ref into $defs, and both forms point
+        # to the same definition.
+        ref = group_props["partition_column"]["$ref"]
+        assert ref.startswith("#/$defs/")
+        assert group_props["+partition_column"]["$ref"] == ref
+        assert ref.split("/")[-1] in defs
+
+        # Dedup proof: a field's (non-trivial) description text appears exactly
+        # once in the whole file — in its definition, not at each ref site.
+        desc = defs[ref.split("/")[-1]].get("description")
+        assert desc and raw.count(desc) == 1
+
+    def test_project_schema_size_is_bounded(self, tmp_path):
+        """With $defs dedup the project schema stays modest even with every
+        built-in adapter's fields. A generous ceiling catches a regression that
+        re-inlines the union (which previously tripled the file)."""
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        size = (tmp_path / "saga_project_config.json").stat().st_size
+        assert size < 160_000, (
+            f"saga_project_config.json is {size} bytes — expected < 160KB. "
+            "A jump likely means the config-field union is being inlined "
+            "instead of referenced via $defs."
+        )
 
     def test_partition_expiration_days_in_profile_target(self, tmp_path):
         """Profile-level default surfaces under each target's properties."""

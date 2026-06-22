@@ -353,6 +353,34 @@ def _with_inherit_aliases(props: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+_FIELD_DEF_PREFIX = "config_field_"
+
+
+def _shared_props_via_defs(
+    config_field_props: Optional[Dict[str, Any]],
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Split the config-field union into ``$defs`` plus a thin ref map.
+
+    The union is injected at three levels of the project schema (project-wide,
+    group, pipeline) and each field carries a ``+merge`` alias — so inlining the
+    full field schemas would duplicate every field (with its description) six
+    times. Instead we define each field once under ``$defs`` and reference it,
+    keeping the generated schema small and flat regardless of how many adapters
+    contribute fields.
+
+    Returns:
+        (field_defs, shared_props) where *field_defs* maps a ``$defs`` key to
+        the field schema, and *shared_props* maps each field name (and its
+        ``+name`` alias) to a ``{"$ref": ...}`` pointing at that def.
+    """
+    union = config_field_props or {}
+    field_defs = {
+        f"{_FIELD_DEF_PREFIX}{name}": schema for name, schema in union.items()
+    }
+    ref_props = {name: {"$ref": f"#/$defs/{_FIELD_DEF_PREFIX}{name}"} for name in union}
+    return field_defs, _with_inherit_aliases(ref_props)
+
+
 def _build_project_schema(
     dataclass_type: type,
     title: str,
@@ -383,18 +411,21 @@ def _patch_pipelines_section(
     """Patch the pipelines property with rich nested structure.
 
     *config_field_props* is the union of all adapter config fields (see
-    ``_collect_config_field_union``). It is injected — with ``+name`` merge
-    aliases — at every level where a config key may be shared (project-wide,
-    pipeline group, and individual pipeline), so shared adapter keys validate
-    as typed properties rather than falling through to the nested-entry schema
-    and being reported as invalid. Explicit keys defined below always take
-    precedence over the union (e.g. the richer ``schema_access`` $ref).
+    ``_collect_config_field_union``). Each field is defined once under the
+    schema's ``$defs`` and referenced — with ``+name`` merge aliases — at every
+    level where a config key may be shared (project-wide, pipeline group, and
+    individual pipeline), so shared adapter keys validate as typed properties
+    rather than falling through to the nested-entry schema and being reported
+    as invalid. Explicit keys defined below always take precedence over the
+    union (e.g. the richer ``schema_access`` $ref).
     """
     pipelines_prop = schema.get("properties", {}).get("pipelines")
     if not pipelines_prop:
         return
 
-    shared_props = _with_inherit_aliases(config_field_props or {})
+    field_defs, shared_props = _shared_props_via_defs(config_field_props)
+    if field_defs:
+        schema.setdefault("$defs", {}).update(field_defs)
 
     adapter_prop: Dict[str, Any] = {
         "type": "string",
