@@ -310,6 +310,49 @@ def generate_schema_for_pipeline(
 # ---------------------------------------------------------------------------
 
 
+def _collect_config_field_union(
+    pipeline_schemas: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Merge the ``properties`` of all pipeline config schemas into one set.
+
+    The project-level schema (``saga_project.yml``) lets a group of pipelines
+    share config keys by declaring them once under the pipeline group. Those
+    keys are adapter-specific, so the project schema cannot know them up front.
+    This collects every field declared by every discovered adapter config (plus
+    the inherited base/target fields) so shared keys validate as typed
+    properties instead of being reported as invalid.
+
+    First occurrence of a field name wins. If the same name appears with a
+    differing schema across adapters, it is widened to an unconstrained schema
+    (``{}``, i.e. "any") rather than picking one adapter's definition.
+    """
+    union: Dict[str, Any] = {}
+    for schema in pipeline_schemas.values():
+        props = schema.get("properties")
+        if not isinstance(props, dict):
+            continue
+        for name, field_schema in props.items():
+            if name not in union:
+                union[name] = field_schema
+            elif union[name] != {} and union[name] != field_schema:
+                union[name] = {}
+    return union
+
+
+def _with_inherit_aliases(props: Dict[str, Any]) -> Dict[str, Any]:
+    """Return *props* plus a ``+name`` alias for every key.
+
+    Mirrors the runtime merge syntax: ``key:`` overrides the parent value while
+    ``+key:`` merges with it. Both forms are valid wherever a config key may be
+    shared (project/group/folder levels), so the schema must accept either.
+    """
+    out: Dict[str, Any] = {}
+    for name, schema in props.items():
+        out[name] = schema
+        out[f"+{name}"] = schema
+    return out
+
+
 def _build_project_schema(
     dataclass_type: type,
     title: str,
@@ -333,12 +376,25 @@ def _build_project_schema(
 
 
 def _patch_pipelines_section(
-    schema: Dict[str, Any], adapter_examples: List[str]
+    schema: Dict[str, Any],
+    adapter_examples: List[str],
+    config_field_props: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Patch the pipelines property with rich nested structure."""
+    """Patch the pipelines property with rich nested structure.
+
+    *config_field_props* is the union of all adapter config fields (see
+    ``_collect_config_field_union``). It is injected — with ``+name`` merge
+    aliases — at every level where a config key may be shared (project-wide,
+    pipeline group, and individual pipeline), so shared adapter keys validate
+    as typed properties rather than falling through to the nested-entry schema
+    and being reported as invalid. Explicit keys defined below always take
+    precedence over the union (e.g. the richer ``schema_access`` $ref).
+    """
     pipelines_prop = schema.get("properties", {}).get("pipelines")
     if not pipelines_prop:
         return
+
+    shared_props = _with_inherit_aliases(config_field_props or {})
 
     adapter_prop: Dict[str, Any] = {
         "type": "string",
@@ -353,6 +409,7 @@ def _patch_pipelines_section(
         {
             "type": "object",
             "properties": {
+                **shared_props,
                 "schema_access": {
                     "$ref": "dlt_common.json#/$defs/schema_access_list",
                     "description": (
@@ -390,6 +447,7 @@ def _patch_pipelines_section(
                     "(e.g., google_sheets, filesystem, api)"
                 ),
                 "properties": {
+                    **shared_props,
                     "schema_access": {
                         "$ref": "dlt_common.json#/$defs/schema_access_list",
                         "description": (
@@ -456,6 +514,7 @@ def _patch_pipelines_section(
                         "and other pipeline-specific fields."
                     ),
                     "properties": {
+                        **shared_props,
                         "adapter": adapter_prop,
                     },
                     "additionalProperties": True,
@@ -710,8 +769,15 @@ def _build_profiles_schema(
 
 def generate_project_level_schemas(
     adapter_examples: Optional[List[str]] = None,
+    config_field_props: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Generate JSON schemas for project-level config files.
+
+    Args:
+        adapter_examples: Discovered adapter values, surfaced as ``examples``.
+        config_field_props: Union of all adapter config fields, injected into
+            the ``pipelines`` section so shared keys validate (see
+            ``_collect_config_field_union``).
 
     Returns:
         Dict mapping schema filenames to schema dicts
@@ -743,7 +809,7 @@ def generate_project_level_schemas(
         ),
         additional_properties=False,
     )
-    _patch_pipelines_section(schema, adapter_examples or [])
+    _patch_pipelines_section(schema, adapter_examples or [], config_field_props)
     schemas["saga_project_config.json"] = schema
     print("  [OK] Generated saga_project_config.json (SagaProjectConfig)")
 
@@ -898,9 +964,15 @@ def generate_schemas(output_dir: Path) -> int:
 
     all_schemas, had_error = _discover_namespace_schemas(_NAMESPACE_REGISTRY)
 
+    # Teach the project-level schema about adapter-specific config keys so that
+    # keys shared across a pipeline group via saga_project.yml validate.
+    config_field_props = _collect_config_field_union(all_schemas)
+
     print("Generating project-level schemas...")
     try:
-        all_schemas.update(generate_project_level_schemas(adapter_examples))
+        all_schemas.update(
+            generate_project_level_schemas(adapter_examples, config_field_props)
+        )
     except Exception as e:
         print(f"  [ERROR] Project-level schemas: {e}")
         had_error = True

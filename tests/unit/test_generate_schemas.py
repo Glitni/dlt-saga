@@ -117,6 +117,60 @@ class TestDataclassToJsonSchema:
 
 
 @pytest.mark.unit
+class TestCollectConfigFieldUnion:
+    def test_merges_disjoint_fields(self):
+        from dlt_saga.utility.generate_schemas import _collect_config_field_union
+
+        schemas = {
+            "a": {"properties": {"foo": {"type": "string"}}},
+            "b": {"properties": {"bar": {"type": "integer"}}},
+        }
+        union = _collect_config_field_union(schemas)
+        assert union == {"foo": {"type": "string"}, "bar": {"type": "integer"}}
+
+    def test_identical_fields_kept(self):
+        from dlt_saga.utility.generate_schemas import _collect_config_field_union
+
+        schemas = {
+            "a": {"properties": {"foo": {"type": "string"}}},
+            "b": {"properties": {"foo": {"type": "string"}}},
+        }
+        union = _collect_config_field_union(schemas)
+        assert union["foo"] == {"type": "string"}
+
+    def test_conflicting_fields_widened_to_any(self):
+        from dlt_saga.utility.generate_schemas import _collect_config_field_union
+
+        schemas = {
+            "a": {"properties": {"foo": {"type": "string"}}},
+            "b": {"properties": {"foo": {"type": "integer"}}},
+        }
+        union = _collect_config_field_union(schemas)
+        assert union["foo"] == {}
+
+    def test_ignores_schemas_without_properties(self):
+        from dlt_saga.utility.generate_schemas import _collect_config_field_union
+
+        schemas = {"defs_only": {"$defs": {"x": {}}}}
+        assert _collect_config_field_union(schemas) == {}
+
+
+@pytest.mark.unit
+class TestWithInheritAliases:
+    def test_adds_plus_prefixed_alias(self):
+        from dlt_saga.utility.generate_schemas import _with_inherit_aliases
+
+        out = _with_inherit_aliases({"tags": {"type": "array"}})
+        assert out["tags"] == {"type": "array"}
+        assert out["+tags"] == {"type": "array"}
+
+    def test_empty_input(self):
+        from dlt_saga.utility.generate_schemas import _with_inherit_aliases
+
+        assert _with_inherit_aliases({}) == {}
+
+
+@pytest.mark.unit
 class TestGenerateSchemasOutput:
     def test_creates_json_files(self, tmp_path):
         from dlt_saga.utility.generate_schemas import generate_schemas
@@ -172,6 +226,33 @@ class TestGenerateSchemasOutput:
             assert field.get("type") == "integer"
             assert field.get("minimum") == 1
             assert "BigQuery" in field.get("description", "")
+
+    def test_shared_adapter_keys_valid_in_pipelines_section(self, tmp_path):
+        """Adapter config keys shared across a group via saga_project.yml must
+        validate as typed properties (both the plain and `+merge` forms),
+        rather than falling through to the nested-entry schema."""
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        data = json.loads(
+            (tmp_path / "saga_project_config.json").read_text(encoding="utf-8")
+        )
+        group = data["properties"]["pipelines"]["additionalProperties"]
+        group_props = group["properties"]
+        entry_props = group["additionalProperties"]["properties"]
+
+        # A TargetConfig field shared at group level
+        assert "partition_column" in group_props
+        assert "+partition_column" in group_props
+        # Available at the individual-pipeline level too
+        assert "write_disposition" in entry_props
+
+        # Explicit keys still win over the injected union
+        assert (
+            group_props["schema_access"]["$ref"]
+            == "dlt_common.json#/$defs/schema_access_list"
+        )
+        assert "examples" in group_props["adapter"]
 
     def test_partition_expiration_days_in_profile_target(self, tmp_path):
         """Profile-level default surfaces under each target's properties."""
