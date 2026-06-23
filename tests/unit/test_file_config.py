@@ -197,6 +197,39 @@ class TestResolveConfig:
 
 
 @pytest.mark.unit
+class TestConfigInterpolation:
+    """Env-var / Jinja interpolation is applied at YAML load time."""
+
+    def test_pipeline_config_renders_env_var_with_filter(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GCP_DATASET", "my-proj-dev")
+        configs = tmp_path / "configs" / "google_sheets"
+        configs.mkdir(parents=True)
+        cfg = configs / "data.yml"
+        cfg.write_text(
+            "write_disposition: append\n"
+            "dataset: \"{{ env_var('GCP_DATASET') | replace('-', '_') }}\"\n",
+            encoding="utf-8",
+        )
+
+        source = FilePipelineConfig(root_dir=str(tmp_path / "configs"))
+        result = source._load_config_file(str(cfg))
+
+        assert result.config_dict["dataset"] == "my_proj_dev"
+
+    def test_project_defaults_render_env_var(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TEAM_TAG", "platform")
+        (tmp_path / "saga_project.yml").write_text(
+            "pipelines:\n  +tags: [\"{{ env_var('TEAM_TAG') }}\"]\n",
+            encoding="utf-8",
+        )
+        configs = tmp_path / "configs" / "google_sheets"
+        configs.mkdir(parents=True)
+
+        source = FilePipelineConfig(root_dir=str(tmp_path / "configs"))
+        assert source.project_config["pipelines"]["+tags"] == ["platform"]
+
+
+@pytest.mark.unit
 class TestLoadProjectConfig:
     def test_nonexistent(self):
         with patch("pathlib.Path.exists", return_value=False):

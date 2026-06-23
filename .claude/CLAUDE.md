@@ -310,7 +310,7 @@ historize:
 - Config sources inherit from `ConfigSource` abstract class
 - Must implement `discover()` and `get_config()` methods
 - Return `PipelineConfig` dataclass instances
-- Support environment-aware field interpolation (e.g., `${ENV_VAR}`)
+- Jinja2 templating is applied to config values at load time (see `utility/templating.py`): `{{ env_var('VAR') }}`, `{{ env_var('VAR', 'default') }}`, plus filters/nested calls, e.g. `{{ env_var('GCP_DATASET') | replace('-', '_') }}`. Sandboxed, rendered before the hierarchical merge across all three surfaces (`profiles.yml`, `saga_project.yml`, pipeline configs). Missing var with no default → `""`. Use `{% raw %}…{% endraw %}` to keep a literal `{{`. Secret URIs (`googlesecretmanager::`, `azurekeyvault::`) are plain strings, untouched by rendering and resolved later at runtime.
 - `write_disposition` controls what commands run: `append+historize` enables both, `historize` enables historize-only
 - `PipelineConfig.ingest_enabled` — derived from `write_disposition` (True when base is append/merge/replace)
 - `PipelineConfig.historize_enabled` — derived from `write_disposition` (True when contains "historize")
@@ -363,7 +363,7 @@ historize:
 - Structure: `profile_name` → `target` → `outputs` → `target_name` → settings
 - Required fields per target: `project`, `location`, `environment`, `destination_type`
 - Optional fields: `dataset`, `run_as`
-- Use environment variable interpolation: `{{ env_var('VAR', 'default') }}`
+- Use environment variable interpolation: `{{ env_var('VAR', 'default') }}` (full Jinja2 — filters and nested calls supported, e.g. `{{ env_var('GCP_DATASET') | replace('-', '_') }}`)
 
 ### Project Config (`saga_project.yml`)
 - `config_source:` — where pipeline configs are discovered (type, path)

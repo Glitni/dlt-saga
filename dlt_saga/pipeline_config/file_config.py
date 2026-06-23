@@ -27,6 +27,7 @@ from dlt_saga.pipeline_config.naming import (
     load_naming_module,
 )
 from dlt_saga.utility.naming import get_dev_schema, get_environment
+from dlt_saga.utility.templating import render_templates
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,9 @@ class FilePipelineConfig(ConfigSource):
         try:
             with open(self.project_config_path, "r") as f:
                 config = yaml.safe_load(f) or {}
+                # Render {{ env_var(...) }} templates before the hierarchical
+                # merge so project-level defaults resolve to concrete values.
+                config = render_templates(config)
                 # Rewrite legacy config keys (e.g. dataset_access → schema_access)
                 # before the hierarchical merge runs so mixed-name trees compose
                 # correctly.
@@ -312,6 +316,11 @@ class FilePipelineConfig(ConfigSource):
         # Load raw YAML
         with open(config_path) as f:
             file_config = yaml.safe_load(f) or {}
+
+        # Render {{ env_var(...) }} templates (and Jinja filters) on the loaded
+        # values before the hierarchical merge so each layer resolves to
+        # concrete values independently.
+        file_config = render_templates(file_config)
 
         # Rewrite legacy config keys (e.g. dataset_access → schema_access)
         # before the hierarchical merge so mixed-name trees compose correctly.

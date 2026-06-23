@@ -450,6 +450,11 @@ def get_project_config() -> SagaProjectConfig:
         _project_config = SagaProjectConfig()
         return _project_config
 
+    # Render {{ env_var(...) }} templates (and Jinja filters) before parsing.
+    from dlt_saga.utility.templating import render_templates
+
+    data = render_templates(data)
+
     # Rewrite legacy config keys (e.g. dataset_access → schema_access) so
     # downstream consumers only see canonical names. The same normalisation
     # runs in FilePipelineConfig for per-pipeline configs; doing it here too

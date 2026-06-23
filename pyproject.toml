@@ -37,6 +37,7 @@ keywords = [
 dependencies = [
     # Core framework
     "dlt[duckdb,filesystem,parquet,sftp]>=1.18.0,<2.0.0",
+    "jinja2>=3.1.0",
     "pydantic>=2.11.7",
     "pyyaml>=6.0.2",
     "typer>=0.16.0",
