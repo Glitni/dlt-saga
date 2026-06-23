@@ -37,6 +37,17 @@ class TestGetProjectConfig:
         assert result.config_source.type == "file"
         assert result.config_source.path == "configs"
 
+    def test_renders_env_var_templates(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CONFIG_DIR", "my_configs")
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text(
+            "config_source:\n  type: file\n  path: \"{{ env_var('CONFIG_DIR') }}\"\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        result = get_project_config()
+        assert result.config_source.path == "my_configs"
+
     def test_returns_defaults_when_missing(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         result = get_project_config()

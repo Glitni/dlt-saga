@@ -6,8 +6,6 @@ credentials, projects, and settings.
 """
 
 import logging
-import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -15,33 +13,28 @@ from typing import Any, Dict, Optional
 import yaml
 
 from dlt_saga.utility.env import get_env
+from dlt_saga.utility.templating import render_template_str
 
 logger = logging.getLogger(__name__)
 
 
 def interpolate_env_vars(value: str) -> str:
-    """Interpolate environment variables in a string.
+    """Interpolate environment variables (and Jinja filters) in a string.
 
-    Supports dbt-style syntax: {{ env_var('VAR_NAME') }} or {{ env_var('VAR_NAME', 'default') }}
+    Supports dbt-style syntax: ``{{ env_var('VAR') }}``,
+    ``{{ env_var('VAR', 'default') }}``, plus Jinja filters and nested calls,
+    e.g. ``{{ env_var('GCP_DATASET') | replace('-', '_') }}``.
+
+    Backward-compatible thin wrapper over the shared template renderer; kept so
+    existing import sites continue to work.
 
     Args:
-        value: String that may contain env var references
+        value: String that may contain env var references.
 
     Returns:
-        String with environment variables interpolated
+        String with environment variables interpolated.
     """
-    if not isinstance(value, str):
-        return value
-
-    # Pattern: {{ env_var('VAR_NAME') }} or {{ env_var('VAR_NAME', 'default') }}
-    pattern = r"{{\s*env_var\s*\(\s*['\"]([^'\"]+)['\"]\s*(?:,\s*['\"]([^'\"]*)['\"]\s*)?\)\s*}}"
-
-    def replace_env_var(match):
-        var_name = match.group(1)
-        default_value = match.group(2) if match.group(2) is not None else ""
-        return os.getenv(var_name, default_value)
-
-    return re.sub(pattern, replace_env_var, value)
+    return render_template_str(value)
 
 
 # Fields that are core (destination-agnostic) on ProfileTarget.
