@@ -6,6 +6,7 @@ from dlt_saga.init_command import (
     _VALID_DESTINATION_TYPES,
     _check_initialized,
     _dlt_config_toml,
+    _gitignore,
     _packages_yml,
     _profiles_yml_bigquery,
     _profiles_yml_databricks,
@@ -108,6 +109,24 @@ class TestTemplates:
         assert len(non_comment_lines) > 0
         assert "write_disposition" in result
         assert "file_type" in result
+
+    def test_sample_pipeline_config_runnable_has_schema_modeline(self):
+        # First line links the sample to its adapter's schema for editor support.
+        first_line = _sample_pipeline_config_runnable().splitlines()[0]
+        assert first_line == (
+            "# yaml-language-server: $schema=../../schemas/filesystem_config.json"
+        )
+
+    def test_gitignore_does_not_ignore_schemas(self):
+        # schemas/ is committed — config modelines reference it, so it must be
+        # present for editor validation to resolve for the whole team.
+        rules = [
+            line.strip()
+            for line in _gitignore().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        assert "schemas/" not in rules
+        assert "schemas" not in rules
 
     def test_sample_csv_data_has_header_and_rows(self):
         result = _sample_csv_data()
