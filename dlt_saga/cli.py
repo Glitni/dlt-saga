@@ -2060,8 +2060,17 @@ def generate_schemas_cmd(
         "-o",
         help="Directory to write generated JSON schemas to.",
     ),
+    link: bool = typer.Option(
+        True,
+        "--link/--no-link",
+        help=(
+            "After generating, add/update a yaml-language-server modeline in each "
+            "config file pointing at its adapter's schema. Use --no-link to only "
+            "write schema files (e.g. in CI)."
+        ),
+    ),
 ):
-    """Generate JSON schemas for pipeline configs and project files.
+    """Generate JSON schemas for pipeline configs and project files, and link configs to them.
 
     Introspects config dataclasses from all registered pipeline namespaces
     (built-in dlt_saga pipelines + any external packages in packages.yml)
@@ -2069,8 +2078,14 @@ def generate_schemas_cmd(
 
     Also generates schemas for saga_project.yml, profiles.yml, and packages.yml.
 
+    By default, every discovered config file is then matched to its adapter's
+    schema via a ``# yaml-language-server: $schema=...`` modeline (idempotent,
+    editor-agnostic). Generating first guarantees brand-new pipelines have a
+    schema before any link is written.
+
     Examples:
-        saga generate-schemas                  # Write to schemas/ (default)
+        saga generate-schemas                  # Generate + link configs
+        saga generate-schemas --no-link        # Only write schema files
         saga generate-schemas -o my_schemas/   # Write to custom directory
     """
     from dlt_saga.utility.generate_schemas import generate_schemas
@@ -2081,7 +2096,35 @@ def generate_schemas_cmd(
         print(f"Done. Schemas written to {output_dir}/")
     else:
         print(f"Completed with errors. Schemas written to {output_dir}/")
+
+    if link:
+        _link_config_schemas(output_dir)
+
+    if exit_code != 0:
         raise typer.Exit(code=1)
+
+
+def _link_config_schemas(output_dir: Path) -> None:
+    """Match each config file to its adapter's schema; print a summary."""
+    from dlt_saga.utility.link_schemas import link_config_schemas
+
+    print("Linking config files to their schemas...")
+    try:
+        results = link_config_schemas(output_dir)
+    except Exception as e:
+        print(f"  [WARN] Could not link config schemas: {e}")
+        return
+
+    changed = [r for r in results if r.changed]
+    skipped = [r for r in results if r.schema_filename is None]
+    for r in changed:
+        print(f"  [LINK] {r.config_path} -> {r.schema_filename}")
+    for r in skipped:
+        print(f"  [SKIP] {r.config_path}: {r.skipped_reason}")
+    print(
+        f"Linked {len(changed)} config file(s) "
+        f"({len(results) - len(skipped)} matched, {len(skipped)} skipped)."
+    )
 
 
 # ---------------------------------------------------------------------------

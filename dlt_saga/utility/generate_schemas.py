@@ -896,16 +896,79 @@ def _process_config_module(modname: str, base_module: str) -> Dict[str, Dict[str
 
     for config_class in config_classes:
         config_class_name = config_class.__name__
-
-        schema_filename = config_class_name.replace("Config", "")
-        schema_filename = re.sub(r"(?<!^)(?=[A-Z])", "_", schema_filename).lower()
-        schema_filename = f"{schema_filename}_config.json"
+        schema_filename = schema_filename_for_config_class(config_class_name)
 
         schema = generate_schema_for_pipeline(human_name, config_class)
         schemas[schema_filename] = schema
         print(f"  [OK] Generated {schema_filename} ({config_class_name})")
 
     return schemas
+
+
+def schema_filename_for_config_class(config_class_name: str) -> str:
+    """Derive the generated schema filename for a config dataclass name.
+
+    e.g. ``NativeLoadConfig`` -> ``native_load_config.json``.
+    """
+    stem = config_class_name.replace("Config", "")
+    stem = re.sub(r"(?<!^)(?=[A-Z])", "_", stem).lower()
+    return f"{stem}_config.json"
+
+
+def _defined_config_class(module: Any, modname: str) -> Optional[type]:
+    """Return the ``*Config`` dataclass *defined* in *module* (not imported)."""
+    for attr_name in dir(module):
+        if not attr_name.endswith("Config"):
+            continue
+        obj = getattr(module, attr_name)
+        if isinstance(obj, type) and is_dataclass(obj) and obj.__module__ == modname:
+            return obj
+    return None
+
+
+def schema_filename_for_adapter(
+    adapter: Optional[str],
+    pipeline_group: str = "",
+    config_path: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve the generated schema filename a config file should reference.
+
+    Resolves the pipeline class (via the same registry logic used at runtime),
+    then walks its package ancestry for the nearest ``config.py`` that defines a
+    ``*Config`` dataclass — mirroring how schema generation discovers configs.
+    Returns the matching ``*_config.json`` filename, or ``None`` if no config
+    class can be resolved (e.g. an unresolvable adapter).
+    """
+    from dlt_saga.pipelines.registry import _NAMESPACE_REGISTRY, get_pipeline_class
+
+    try:
+        pipeline_cls = get_pipeline_class(pipeline_group, config_path, adapter)
+    except Exception:
+        return None
+
+    pkg = pipeline_cls.__module__.rsplit(".", 1)[0]
+    bases = tuple(_NAMESPACE_REGISTRY.values())
+    base = next((b for b in bases if pkg == b or pkg.startswith(f"{b}.")), None)
+
+    parts = pkg.split(".")
+    while parts:
+        candidate_pkg = ".".join(parts)
+        # Never walk above the namespace base (avoids matching unrelated configs).
+        if base and not (candidate_pkg == base or candidate_pkg.startswith(f"{base}.")):
+            break
+        modname = f"{candidate_pkg}.config"
+        try:
+            module = importlib.import_module(modname)
+        except ImportError:
+            module = None
+        if module is not None:
+            cls = _defined_config_class(module, modname)
+            if cls is not None:
+                return schema_filename_for_config_class(cls.__name__)
+        if base is None:
+            break  # unknown namespace: only try the leaf package
+        parts = parts[:-1]
+    return None
 
 
 # ---------------------------------------------------------------------------

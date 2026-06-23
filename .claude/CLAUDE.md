@@ -171,6 +171,15 @@ saga ai-setup                                       # Generate saga_ai_context.m
 
 Writes `saga_ai_context.md` to the project root with framework patterns and guidance for AI coding assistants. Content hash is embedded; `saga doctor` warns if outdated after a package upgrade.
 
+### Generate Schemas Command
+```bash
+saga generate-schemas                               # Generate schemas + link configs
+saga generate-schemas --no-link                     # Only write schema files (CI-safe)
+saga generate-schemas -o my_schemas/                # Custom output directory
+```
+
+Generates JSON schemas for all pipeline config classes (built-in + `packages.yml`) plus `saga_project.yml`, `profiles.yml`, `packages.yml`. By default it then **links** every discovered config file to its adapter's schema by writing/updating a `# yaml-language-server: $schema=...` modeline at the top of the file. Linking is per-file (resolves each config's effective `adapter`, including inheritance from `saga_project.yml`/folder defaults), editor-agnostic, and idempotent — safe to run repeatedly or as a pre-commit hook. Generating before linking guarantees brand-new pipelines have a schema before any link is written. Use `--no-link` for generate-only runs (e.g. CI verifying schemas, or `git diff --exit-code` to catch unlinked/stale configs). Adapter→schema resolution and the linker live in `utility/generate_schemas.py` (`schema_filename_for_adapter`) and `utility/link_schemas.py`.
+
 ### Configuration Files
 
 **profiles.yml** (repo root, with `.dlt/profiles.yml` as legacy fallback)

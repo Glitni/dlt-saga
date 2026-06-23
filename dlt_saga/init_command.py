@@ -208,8 +208,14 @@ def _dlt_config_toml() -> str:
 
 
 def _sample_pipeline_config_runnable() -> str:
-    """A working pipeline config that reads a local CSV file."""
+    """A working pipeline config that reads a local CSV file.
+
+    The modeline gives editors validation/autocomplete once schemas are
+    generated (`saga generate-schemas`); `saga generate-schemas` also keeps it
+    in sync for every config based on its adapter.
+    """
     return """\
+# yaml-language-server: $schema=../../schemas/filesystem_config.json
 tags: [daily]
 write_disposition: append
 
@@ -275,8 +281,9 @@ venv/
 # dlt — never commit secrets
 .dlt/secrets.toml
 
-# Generated files
-schemas/
+# Note: schemas/ is intentionally committed — config files reference the
+# generated JSON schemas via a yaml-language-server modeline, so the schemas
+# must be present for editor validation to resolve for everyone on the team.
 
 # Saga debug logs (one DEBUG-level transcript per local CLI run)
 logs/
@@ -587,6 +594,9 @@ def _print_next_steps(destination_type: str, config: dict) -> None:
         typer.echo("  1. Run `saga list` to see the sample pipeline.")
         typer.echo("  2. Run `saga ingest` to load the sample CSV into DuckDB.")
         typer.echo("  3. Add your own pipeline configs under configs/.")
+        typer.echo(
+            "  4. Run `saga generate-schemas` for editor validation/autocomplete."
+        )
     elif destination_type == "bigquery":
         typer.echo("  1. Authenticate: gcloud auth application-default login")
         typer.echo("  2. Edit profiles.yml with your GCP project details.")

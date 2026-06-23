@@ -191,6 +191,60 @@ class TestSharedPropsViaDefs:
 
 
 @pytest.mark.unit
+class TestSchemaFilenameForConfigClass:
+    def test_camel_case_to_snake(self):
+        from dlt_saga.utility.generate_schemas import schema_filename_for_config_class
+
+        assert (
+            schema_filename_for_config_class("NativeLoadConfig")
+            == "native_load_config.json"
+        )
+        assert schema_filename_for_config_class("ApiConfig") == "api_config.json"
+
+
+@pytest.mark.unit
+class TestSchemaFilenameForAdapter:
+    """Resolves a config file's adapter to its generated schema filename —
+    must match what generation actually writes for each built-in adapter."""
+
+    @pytest.mark.parametrize(
+        "adapter,expected",
+        [
+            ("dlt_saga.native_load", "native_load_config.json"),
+            ("dlt_saga.filesystem", "filesystem_config.json"),
+            ("dlt_saga.database", "database_config.json"),
+            ("dlt_saga.google_sheets", "g_sheets_config.json"),
+            ("dlt_saga.api", "api_config.json"),
+            ("dlt_saga.sharepoint", "share_point_config.json"),
+        ],
+    )
+    def test_builtin_adapters_resolve(self, adapter, expected):
+        from dlt_saga.utility.generate_schemas import schema_filename_for_adapter
+
+        assert schema_filename_for_adapter(adapter) == expected
+
+    def test_unresolvable_adapter_returns_none(self):
+        from dlt_saga.utility.generate_schemas import schema_filename_for_adapter
+
+        assert schema_filename_for_adapter("bogus.does_not_exist") is None
+
+    def test_resolved_filename_actually_generated(self, tmp_path):
+        """The filename the linker would reference must be a file generation
+        actually produces — guards against drift between the two code paths."""
+        from dlt_saga.utility.generate_schemas import (
+            generate_schemas,
+            schema_filename_for_adapter,
+        )
+
+        generate_schemas(tmp_path)
+        for adapter in ("dlt_saga.filesystem", "dlt_saga.native_load", "dlt_saga.api"):
+            filename = schema_filename_for_adapter(adapter)
+            assert filename and (tmp_path / filename).exists(), (
+                f"{adapter} -> {filename} was not generated"
+            )
+
+
+@pytest.mark.unit
 class TestGenerateSchemasOutput:
     def test_creates_json_files(self, tmp_path):
         from dlt_saga.utility.generate_schemas import generate_schemas
