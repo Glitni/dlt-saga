@@ -1,3 +1,13 @@
+## 0.5.0 — 2026-06-23
+
+### Added
+- Use sandboxed Jinja2 for config interpolation (profiles, saga_project, configs) (#126)
+- Auto-link pipeline config files to their schema by adapter (#124)
+
+
+### Changed
+- Dedup saga_project schema config fields via $defs (#122)
+
 ## 0.4.3 — 2026-06-22
 
 ### Fixed
