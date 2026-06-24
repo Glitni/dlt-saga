@@ -1,8 +1,15 @@
+import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from dlt_saga.pipelines.base_config import BaseConfig
 from dlt_saga.utility.secrets.secret_str import SecretStr, coerce_secret
+
+logger = logging.getLogger(__name__)
+
+# Deprecated config keys → their current names. Honoured at load time with a
+# warning; remove in a future major version.
+_DEPRECATED_KEY_ALIASES = {"auth_secret": "token_request_body"}
 
 
 @dataclass
@@ -23,12 +30,13 @@ class SharePointConfig(BaseConfig):
     # Authentication
     # -------------------------------------------------------------------------
 
-    auth_secret: Optional[SecretStr] = field(
+    token_request_body: Optional[SecretStr] = field(
         default=None,
         metadata={
             "description": (
-                "Secret URI for the OAuth2 form body, e.g. "
-                "'azurekeyvault::https://my-vault.vault.azure.net::MY-SECRET-NAME'. "
+                "The OAuth2 token-request form body, supplied as a plain value, "
+                "${ENV_VAR}, or secret URI (e.g. "
+                "'azurekeyvault::https://my-vault.vault.azure.net::MY-SECRET-NAME'). "
                 "The resolved value is POSTed directly to the SharePoint token endpoint."
             ),
             "required": True,
@@ -106,14 +114,14 @@ class SharePointConfig(BaseConfig):
     def __post_init__(self):
         super().__post_init__()
 
-        self.auth_secret = coerce_secret(self.auth_secret)
+        self.token_request_body = coerce_secret(self.token_request_body)
 
         required = ("tenant_id", "site_url", "file_path", "file_type")
         for name in required:
             if not getattr(self, name):
                 raise ValueError(f"{name} is required for SharePoint pipelines")
-        if not self.auth_secret:
-            raise ValueError("auth_secret is required for SharePoint pipelines")
+        if not self.token_request_body:
+            raise ValueError("token_request_body is required for SharePoint pipelines")
 
         valid_types = ("xlsx", "csv", "json", "jsonl")
         if self.file_type.lower() not in valid_types:
@@ -126,3 +134,22 @@ class SharePointConfig(BaseConfig):
             raise ValueError(
                 f"header_row must be a positive integer, got {self.header_row!r}"
             )
+
+
+def apply_deprecated_aliases(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Map deprecated SharePoint config keys to their current names.
+
+    Honours the old key with a warning so existing configs keep working; the
+    current key wins if both are present. Returns a new dict (input untouched).
+    """
+    out = dict(config)
+    for old, new in _DEPRECATED_KEY_ALIASES.items():
+        if old not in out:
+            continue
+        logger.warning(
+            "SharePoint config key '%s' is deprecated; rename it to '%s'.", old, new
+        )
+        if new not in out:
+            out[new] = out[old]
+        out.pop(old, None)
+    return out

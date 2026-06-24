@@ -185,7 +185,7 @@ class SharePointClient(BaseClient):
     # ------------------------------------------------------------------
 
     def _acquire_token(self) -> str:
-        oauth_body = resolve_secret(self.config.auth_secret)
+        oauth_body = resolve_secret(self.config.token_request_body)
         url = _TOKEN_ENDPOINT.format(tenant_id=self.config.tenant_id)
         response = requests.post(
             url,

@@ -306,7 +306,7 @@ Requires `pip install "dlt-saga[azure]"`. Set `adapter: dlt_saga.sharepoint` in 
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `auth_secret` | string | yes | Secret URI resolving to the OAuth2 form body (e.g. `azurekeyvault::https://vault.azure.net::MY-SECRET`) |
+| `token_request_body` | string | yes | OAuth2 token-request form body — plain value, `${ENV_VAR}`, or secret URI (e.g. `azurekeyvault::https://vault.azure.net::MY-SECRET`). Previously `auth_secret` (still accepted, deprecated). |
 | `tenant_id` | string | yes | Azure AD tenant ID (GUID) |
 | `site_url` | string | yes | SharePoint site base URL (e.g. `https://contoso.sharepoint.com/sites/MySite`) |
 | `file_path` | string | yes | Server-relative path to the file (e.g. `/sites/MySite/Shared Documents/report.xlsx`) |
