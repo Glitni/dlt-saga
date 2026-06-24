@@ -2052,6 +2052,123 @@ def init(
     run_init(no_input=no_input)
 
 
+new_app = typer.Typer(
+    help="Scaffold new project components (e.g. a custom pipeline adapter)."
+)
+app.add_typer(new_app, name="new")
+
+
+@new_app.command("adapter")
+def new_adapter(
+    name: Optional[str] = typer.Argument(
+        None, help="Adapter name in snake_case (e.g. my_service). Prompted if omitted."
+    ),
+    group: Optional[str] = typer.Option(
+        None,
+        "--group",
+        "-g",
+        help="Pipeline group / config subfolder (e.g. api, crm, ads). "
+        "Prompted if omitted (default: api).",
+    ),
+    kind: Optional[str] = typer.Option(
+        None,
+        "--kind",
+        "-k",
+        help="Template: 'generic' (BasePipeline) or 'api' (BaseApiPipeline). "
+        "Prompted if omitted (default: generic).",
+    ),
+    pkg_dir: str = typer.Option(
+        "pipelines",
+        "--path",
+        help="Local package directory that holds pipeline implementations.",
+    ),
+    namespace: str = typer.Option(
+        "local",
+        "--namespace",
+        help="Namespace registered in packages.yml for this package directory.",
+    ),
+    no_input: bool = typer.Option(
+        False,
+        "--no-input",
+        help="Skip prompts: require name as an argument, use defaults for kind/group.",
+    ),
+):
+    """Scaffold a custom pipeline adapter from a known-good template.
+
+    Generates a config.py + pipeline.py + starter pipeline config that already
+    follow the framework conventions (the real extract_data() contract,
+    idempotent incremental loading, secret-URI-aware credentials, reuse of the
+    inherited BaseConfig vocabulary), and registers the package in packages.yml.
+
+    Prompts for name, kind, and group when they aren't supplied (pass --no-input
+    to skip prompts in scripts/CI).
+
+    Examples:
+        saga new adapter                            # fully interactive (prompts)
+        saga new adapter my_service                 # generic source under configs/api/
+        saga new adapter orders --group database    # under configs/database/
+        saga new adapter weather --kind api         # REST API (BaseApiPipeline)
+    """
+    from dlt_saga.new_adapter_command import (
+        effective_namespace,
+        existing_adapter_files,
+        resolve_inputs,
+        run_new_adapter,
+    )
+
+    try:
+        name, group, kind = resolve_inputs(name, group, kind, no_input)
+    except ValueError as exc:
+        typer.secho(f"Error: {exc}", fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(code=1)
+
+    # The adapter may reuse a namespace already mapped to this directory.
+    ns = effective_namespace(Path.cwd(), namespace, pkg_dir)
+
+    # Collision guard — prominent and left-aligned, before the create summary.
+    existing = existing_adapter_files(Path.cwd(), pkg_dir, group, name)
+    if existing:
+        typer.secho(
+            f"Adapter '{ns}.{group}.{name}' already exists at {existing[0]}.",
+            fg=typer.colors.YELLOW,
+            bold=True,
+            err=True,
+        )
+        typer.secho(
+            "Choose a different name or --group, or edit the existing files.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if not no_input:
+        typer.echo("")
+        typer.echo("About to create:")
+        typer.echo(f"  adapter : {ns}.{group}.{name}   (kind: {kind})")
+        typer.echo(f"  package : {pkg_dir}/{group}/{name}/   (config.py, pipeline.py)")
+        typer.echo(f"  config  : configs/{group}/{name}.yml")
+        if ns != namespace:
+            typer.echo(
+                f"  note    : reusing namespace '{ns}' already registered "
+                f"for ./{pkg_dir} (not adding '{namespace}')"
+            )
+        if not typer.confirm("Proceed?", default=True):
+            typer.echo("Aborted.")
+            raise typer.Exit()
+
+    try:
+        run_new_adapter(
+            name=name,
+            group=group,
+            kind=kind,
+            pkg_dir=pkg_dir,
+            namespace=namespace,
+        )
+    except ValueError as exc:
+        typer.secho(f"Error: {exc}", fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(code=1)
+
+
 @app.command("generate-schemas")
 def generate_schemas_cmd(
     output_dir: Path = typer.Option(

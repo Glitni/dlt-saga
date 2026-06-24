@@ -22,16 +22,35 @@ Pipelines are registered via the `adapter` field in config YAML, resolved throug
 
 ## Implementing a custom pipeline
 
+> **Start with the scaffolder.** Run `saga new adapter <name>` (add `--group database`,
+> `--kind api`, etc.). It generates a config.py + pipeline.py + starter config that already
+> follow every convention below — the real `extract_data()` contract, idempotent
+> incremental loading, secret-URI-aware credentials — and registers the package in
+> `packages.yml`. Editing generated files is far less error-prone than starting from blank.
+
+**Reuse before reinventing.** Check whether a built-in adapter already fits, and prefer it
+(config-only) or *inherit* from it over hand-writing a new source:
+- REST APIs → `dlt_saga.api` (or scaffold `--kind api`, which inherits `BaseApiPipeline`)
+- SQL databases → `dlt_saga.database`
+- GCS / S3 / Azure / local / **SFTP** files → `dlt_saga.filesystem`
+
+To extend one, inherit its config and pipeline (e.g. `class MyConfig(FilesystemConfig)`,
+`class MyPipeline(FilesystemPipeline)`) and override only what differs. The generic
+`BasePipeline` template is for sources none of the built-ins cover. A generic source splits
+connection/I/O into a `client.py` (the house pattern — see `pipelines/database`,
+`pipelines/filesystem`), keeping the pipeline orchestration-only.
+
 ### File structure
 
 A custom pipeline source lives in its own directory with these files:
 
 ```
-my_pipelines/
+pipelines/
   api/
     my_service/
       __init__.py       # Empty or re-exports
       config.py         # Dataclass inheriting BaseConfig
+      client.py         # Connection + I/O + credential resolution (generic sources)
       pipeline.py       # Class inheriting BasePipeline (auto-discovered)
 ```
 
@@ -39,7 +58,7 @@ Register it in `packages.yml`:
 ```yaml
 packages:
   - namespace: local
-    path: ./my_pipelines
+    path: ./pipelines
 ```
 
 Then reference it in a pipeline config:
@@ -59,6 +78,7 @@ Inherit from `BaseConfig`. Use dataclass fields with type hints and metadata for
 from dataclasses import dataclass, field
 from typing import Optional
 from dlt_saga.pipelines.base_config import BaseConfig
+from dlt_saga.utility.secrets.secret_str import SecretStr, coerce_secret
 
 @dataclass
 class MyServiceConfig(BaseConfig):
@@ -68,31 +88,46 @@ class MyServiceConfig(BaseConfig):
         default="",
         metadata={"description": "API base URL", "required": True},
     )
-    api_key: Optional[str] = field(
+    # Name credential fields by what they HOLD, not by secrecy. Any string
+    # field accepts a plain value, ${ENV_VAR}, or a secret URI interchangeably,
+    # so a `*_secret` suffix is misleading — drop it.
+    api_token: Optional[SecretStr] = field(
         default=None,
-        metadata={"description": "API key (use ${ENV_VAR} for secrets)"},
+        metadata={"description": "Access token (plain value, ${ENV_VAR}, or secret URI)"},
     )
 
     def __post_init__(self):
         super().__post_init__()
+        self.api_token = coerce_secret(self.api_token)
         if not self.base_url:
             raise ValueError("base_url is required")
 ```
 
 Key rules:
-- Always call `super().__post_init__()` if you define `__post_init__`
-- Use `${ENV_VAR}` syntax for secrets, never hardcode credentials
-- Validate required fields and value bounds in `__post_init__`
-- Fields from `BaseConfig` (enabled, tags, task_group) are inherited automatically
+- Always call `super().__post_init__()` first if you define `__post_init__`
+- Credential fields: type as `SecretStr`, `coerce_secret()` them, and let the value be a
+  plain string, `${ENV_VAR}`, or a `googlesecretmanager::`/`azurekeyvault::` URI. Never
+  hardcode credentials, and never name a field `*_secret` — secrecy is a property of the
+  value, not the field.
+- Keep source-identifying fields (URLs, table names) with an empty default and validate them
+  in `__post_init__` so they must be set in the YAML — don't bury real values as class defaults.
+- For incremental loading, reuse the inherited `BaseConfig` fields `incremental` /
+  `incremental_column` / `initial_value`. Don't invent new names (e.g. `overlap_days`) for a
+  concept the standard vocabulary already covers.
+- Fields from `BaseConfig` (enabled, tags, task_group, incremental*) are inherited automatically
 
 ### Pipeline class (`pipeline.py`)
 
 Inherit from `BasePipeline`. The class is auto-discovered by the registry — any `BasePipeline` subclass in `pipeline.py` works, no naming convention enforced.
 
+The one required method is `extract_data()`, which returns a list of
+`(dlt.resource, description)` tuples. `BasePipeline.run()` iterates them, applies the write
+disposition and destination hints, and records load state in `_saga_load_info`.
+
 ```python
 import logging
 from dataclasses import fields as dataclass_fields
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import dlt
 
@@ -104,21 +139,39 @@ logger = logging.getLogger(__name__)
 
 class MyServicePipeline(BasePipeline):
     def __init__(self, config: Dict[str, Any], log_prefix: Optional[str] = None):
-        super().__init__(config, log_prefix)
-
-        # Parse source-specific config
+        # Parse source-specific config (includes inherited fields)
         field_names = {f.name for f in dataclass_fields(MyServiceConfig)}
         self.source_config = MyServiceConfig(
             **{k: v for k, v in config.items() if k in field_names}
         )
+        super().__init__(config, log_prefix)
 
-    def extract(self) -> Any:
-        """Extract data from source. Return a dlt resource or iterable."""
-        # Implement your extraction logic here.
-        # Use self.source_config for configuration values.
-        # Use self.logger for logging (includes pipeline prefix).
-        # Use self.target_writer to apply write disposition and hints.
-        raise NotImplementedError("Implement extract()")
+    def extract_data(self) -> List[Tuple[Any, str]]:
+        """Return a list of (dlt.resource, description) tuples."""
+        start = self._incremental_start()        # see below — idempotent cursor
+        rows = self._fetch_rows(start)            # your client call
+        resource = dlt.resource(rows, name=self.table_name, write_disposition="auto")
+        return [(resource, "MyService records")]
+
+    def _incremental_start(self) -> Optional[str]:
+        """Resume from the warehouse high-water mark; seed from initial_value on
+        the first run. This makes the pipeline self-healing — a missed or failed
+        run is caught up next time, with no gaps and no duplicates. Never
+        hardcode "yesterday"."""
+        if not self.source_config.incremental:
+            return None
+        table_id = f"{self.destination_database}.{self.pipeline.dataset_name}.{self.table_name}"
+        return (
+            self.destination.get_max_column_value(table_id, self.source_config.incremental_column)
+            or self.source_config.initial_value
+        )
+```
+
+To resolve a credential at request time (handles secret URIs and `${ENV_VAR}`):
+
+```python
+from dlt_saga.utility.secrets import resolve_secret
+token = resolve_secret(self.source_config.api_token)
 ```
 
 ### For API sources specifically
@@ -139,9 +192,13 @@ class MyApiPipeline(BaseApiPipeline):
     # Override _create_api_config if you need a custom config subclass:
     # def _create_api_config(self, config_dict):
     #     return MyApiConfig(**{k: v for k, v in config_dict.items() if k in field_names})
-
-    # Override extract() only if the base API behavior is insufficient.
 ```
+
+`BaseApiPipeline` already implements `extract_data()` (pagination + `dlt.resource` + description).
+The override hooks, lowest-impact first, are `fetch_data(self) -> list` (return the record dicts
+for a request), then `_make_request()` / `_extract_data_from_response()`. **Don't override
+`extract_data()` on an API pipeline** — you'd lose the built-in pagination. For most REST APIs you
+override nothing and configure auth + pagination + `response_path` in YAML.
 
 For simple REST APIs, you may not need a custom pipeline class at all — the built-in `dlt_saga.api` adapter handles most cases via YAML config alone:
 
@@ -159,6 +216,25 @@ pagination:
   type: offset
   limit: 100
 ```
+
+## Adapter authoring — anti-patterns to avoid
+
+First-time adapters tend to repeat the same mistakes. Each below is a DON'T → DO:
+
+| Anti-pattern (DON'T) | DO instead |
+|---|---|
+| Bury source-identifying values (URLs, table names) as class defaults, leaving the YAML empty | Empty default + validate in `__post_init__`; set real values in the pipeline config so the source is obvious |
+| Invent a new config name (`overlap_days`, `start_dt`) for a standard concept | Reuse the inherited vocabulary: `incremental`, `incremental_column`, `initial_value`, `primary_key`, `partition_column`, `cluster_columns`, `write_disposition` |
+| Name a field `*_secret` / `*_plaintext` | Name by content (`api_token`, `connection_string`); any field already accepts a plain value, `${ENV_VAR}`, or a secret URI |
+| Hardcode "always load yesterday" / `datetime.now() - 1d` | Look up the max loaded value with `destination.get_max_column_value(...)` and fall back to `initial_value` — idempotent and self-healing |
+| Re-fetch everything every run for an incremental source | Push the resolved cursor into the source query/filter so only new rows return |
+| Hardcode credentials, or read `os.environ` directly | Type credentials as `SecretStr`, `coerce_secret()` in config, `resolve_secret()` at use |
+| `print()` for output | `logger = logging.getLogger(__name__)` |
+| Catch-all `except Exception` that swallows config mistakes | Raise `ValueError` with an actionable message for config errors; let unexpected errors propagate |
+
+The standard config vocabulary lives on `BaseConfig` (execution + incremental) and the
+target/historize configs (write disposition, keys, partitioning). When in doubt, grep an
+existing adapter (`pipelines/database`, `pipelines/api`) before adding a new field name.
 
 ## Pipeline configuration reference
 
@@ -267,6 +343,7 @@ Filters compose AND and push down to SQL `WHERE` automatically. Pairs cleanly wi
 
 ```bash
 saga init                              # Scaffold a new project
+saga new adapter my_service            # Scaffold a custom pipeline adapter
 saga list                              # List all enabled pipelines
 saga list --resource-type ingest       # Ingest-enabled only
 saga ingest                            # Run all ingest-enabled pipelines

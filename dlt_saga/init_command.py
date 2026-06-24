@@ -301,10 +301,11 @@ def _packages_yml() -> str:
     return """\
 # Register local pipeline implementations here.
 # Each entry maps a namespace to a Python package directory.
+# Tip: `saga new adapter <name>` scaffolds an implementation and fills this in.
 # Example:
 # packages:
 #   - namespace: local
-#     path: ./my_pipelines   # directory containing pipeline.py modules
+#     path: ./pipelines   # directory containing pipeline.py modules
 packages: []
 """
 

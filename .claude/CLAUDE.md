@@ -70,7 +70,8 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
 - External pipeline implementations registered via `packages.yml` at repo root
 - Each package entry: `namespace`, `path` (Python package)
 - Local path packages: parent directory added to `sys.path`, directory name becomes importable module
-- Example: `adapter: local.api.my_source` → `my_pipelines/api/my_source/pipeline.py`
+- Example: `adapter: local.api.my_source` → `pipelines/api/my_source/pipeline.py`
+- Scaffold new adapters with `saga new adapter <name>` (`new_adapter_command.py`) — generates a convention-following config.py + pipeline.py + starter config and registers the package in `packages.yml` (default dir `./pipelines`, namespace `local`)
 
 **Granular Timing Tracking**
 - Tracks: initialization, extraction, load, finalization phases
@@ -206,7 +207,7 @@ default:
 ```yaml
 packages:
   - namespace: local
-    path: ./my_pipelines          # Python package with pipeline.py modules
+    path: ./pipelines             # Python package with pipeline.py modules
 ```
 
 **Pipeline config** (`configs/<pipeline_group>/<name>.yml`)
