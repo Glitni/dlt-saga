@@ -2371,6 +2371,68 @@ def info(
 
 
 # ---------------------------------------------------------------------------
+# lint command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def lint(
+    all_adapters: bool = typer.Option(
+        False,
+        "--all",
+        help="Also lint built-in and installed (third-party) adapters "
+        "(default: only your project's own adapters).",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+):
+    """Check adapters and configs for convention anti-patterns.
+
+    Flags secret-by-name config fields, field names that diverge from the
+    standard vocabulary, and non-idempotent "load yesterday" date math. Lints
+    only your project's own adapters (editable code inside the project) by
+    default, since built-in and installed third-party adapters aren't yours to
+    change; pass --all to lint everything.
+
+    Exits non-zero when any issue is found, so it can gate CI.
+    """
+    setup_logging(verbose)
+
+    from dlt_saga.lint import SEVERITY_ERROR, run_lint
+
+    findings = run_lint(include_all=all_adapters)
+
+    if not findings:
+        typer.secho("No issues found.", fg=typer.colors.GREEN)
+        return
+
+    by_adapter: Dict[str, list] = {}
+    for f in findings:
+        by_adapter.setdefault(f.adapter, []).append(f)
+
+    for adapter in sorted(by_adapter):
+        typer.echo("")
+        typer.secho(adapter, bold=True)
+        for f in by_adapter[adapter]:
+            colour = (
+                typer.colors.RED
+                if f.severity == SEVERITY_ERROR
+                else typer.colors.YELLOW
+            )
+            where = f" ({f.location})" if f.location else ""
+            typer.secho(f"  [{f.code}]{where}", fg=colour)
+            typer.echo(f"    {f.message}")
+            if f.suggestion:
+                typer.echo(f"    -> {f.suggestion}")
+
+    typer.echo("")
+    typer.secho(
+        f"Found {len(findings)} issue(s) across {len(by_adapter)} adapter(s).",
+        fg=typer.colors.YELLOW,
+    )
+    raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
 # doctor command
 # ---------------------------------------------------------------------------
 
