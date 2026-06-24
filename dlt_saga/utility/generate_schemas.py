@@ -926,18 +926,18 @@ def _defined_config_class(module: Any, modname: str) -> Optional[type]:
     return None
 
 
-def schema_filename_for_adapter(
+def config_class_for_adapter(
     adapter: Optional[str],
     pipeline_group: str = "",
     config_path: Optional[str] = None,
-) -> Optional[str]:
-    """Resolve the generated schema filename a config file should reference.
+) -> Optional[type]:
+    """Resolve the ``*Config`` dataclass an adapter's configs are validated against.
 
     Resolves the pipeline class (via the same registry logic used at runtime),
     then walks its package ancestry for the nearest ``config.py`` that defines a
     ``*Config`` dataclass — mirroring how schema generation discovers configs.
-    Returns the matching ``*_config.json`` filename, or ``None`` if no config
-    class can be resolved (e.g. an unresolvable adapter).
+    Returns the dataclass, or ``None`` if none can be resolved (e.g. an
+    unresolvable adapter).
     """
     from dlt_saga.pipelines.registry import _NAMESPACE_REGISTRY, get_pipeline_class
 
@@ -964,11 +964,25 @@ def schema_filename_for_adapter(
         if module is not None:
             cls = _defined_config_class(module, modname)
             if cls is not None:
-                return schema_filename_for_config_class(cls.__name__)
+                return cls
         if base is None:
             break  # unknown namespace: only try the leaf package
         parts = parts[:-1]
     return None
+
+
+def schema_filename_for_adapter(
+    adapter: Optional[str],
+    pipeline_group: str = "",
+    config_path: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve the generated schema filename a config file should reference.
+
+    Returns the matching ``*_config.json`` filename, or ``None`` if no config
+    class can be resolved (e.g. an unresolvable adapter).
+    """
+    cls = config_class_for_adapter(adapter, pipeline_group, config_path)
+    return schema_filename_for_config_class(cls.__name__) if cls is not None else None
 
 
 # ---------------------------------------------------------------------------

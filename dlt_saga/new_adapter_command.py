@@ -47,15 +47,19 @@ def _pascal_case(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _prompt_name(name: Optional[str], no_input: bool) -> str:
+def _prompt_name(
+    name: Optional[str],
+    no_input: bool,
+    label: str = "Adapter name (snake_case, e.g. my_service)",
+) -> str:
     if name is not None:
         return name
     if no_input:
         raise ValueError(
-            "Adapter name is required: pass it as an argument (e.g. "
-            "`saga new adapter my_service`) or drop --no-input to be prompted."
+            "A name is required: pass it as an argument or drop --no-input to be "
+            "prompted."
         )
-    return typer.prompt("Adapter name (snake_case, e.g. my_service)")
+    return typer.prompt(label)
 
 
 def _prompt_kind(kind: Optional[str], no_input: bool) -> str:
