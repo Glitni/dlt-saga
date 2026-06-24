@@ -1,3 +1,14 @@
+## 0.6.0 — 2026-06-24
+
+### Added
+- Add `saga lint` to flag adapter & config convention anti-patterns (#135)
+- Add `saga new config` to scaffold pipeline configs for existing adapters (#133)
+- Add `saga new adapter` scaffolder to guide adapter authoring (#129)
+
+
+### Fixed
+- Rename SharePoint auth_secret config field to token_request_body (#137)
+
 ## 0.5.0 — 2026-06-23
 
 ### Added
