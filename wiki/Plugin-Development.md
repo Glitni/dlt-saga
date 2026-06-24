@@ -12,6 +12,57 @@ The current plugin API version is **1** (`dlt_saga.PLUGIN_API_VERSION`).
 A pipeline plugin extracts data from a source and yields dlt resources.
 Every pipeline implementation extends `BasePipeline`.
 
+### Start here — scaffold, then read a built-in
+
+Don't start from a blank file. Two things give you a correct starting point:
+
+1. **Scaffold it:** `saga new adapter <name>` generates a convention-following
+   `config.py` + `client.py` + `pipeline.py` (plus a starter config and the
+   `packages.yml` entry). `--kind api` instead emits a `BaseApiPipeline` subclass.
+   Then `saga new config <name> --adapter <adapter>` scaffolds a pipeline config
+   pre-filled with the adapter's fields. Editing generated code is far less
+   error-prone than reconstructing the conventions by hand.
+2. **Read a built-in as a worked example** — these are the reference
+   implementations:
+   - `dlt_saga/pipelines/filesystem/` — the `config.py` / `client.py` /
+     `pipeline.py` split, end to end.
+   - `dlt_saga/pipelines/database/` — incremental loading from the warehouse
+     high-water mark (the idempotent pattern below).
+   - `dlt_saga/pipelines/api/` — the `BaseApiPipeline` path for REST sources.
+
+When you're done, run `saga lint` (see [below](#linting-your-adapter)) — it flags
+the common mistakes before review does.
+
+### Reuse before reinventing
+
+Before writing a custom adapter, check whether a built-in already fits — prefer
+using it (config only) or *inheriting* from it over hand-rolling a new source:
+
+| Source | Built-in adapter |
+|--------|------------------|
+| REST APIs | `dlt_saga.api` (or scaffold `--kind api`) |
+| SQL databases | `dlt_saga.database` |
+| GCS / S3 / Azure / local / **SFTP** files | `dlt_saga.filesystem` |
+| Large file batches (bulk load) | `dlt_saga.native_load` |
+
+To extend one, inherit its config and pipeline (e.g.
+`class MyConfig(FilesystemConfig)`, `class MyPipeline(FilesystemPipeline)`) and
+override only what differs. Reach for a from-scratch `BasePipeline` only for a
+source none of the built-ins cover.
+
+### Anatomy: `config.py` / `client.py` / `pipeline.py`
+
+A custom source lives in its own package directory with three files (the layout
+the scaffolder emits and every built-in follows):
+
+| File | Owns |
+|------|------|
+| `config.py` | A dataclass extending `BaseConfig`. Declares the source's fields, types, defaults, and validation (`__post_init__`). |
+| `client.py` | Connection + I/O + credential resolution. All the "talk to the source" logic, so it can be tested in isolation. |
+| `pipeline.py` | A `BasePipeline` subclass — orchestration only: resolve the incremental cursor, call the client, return resources. |
+
+REST API adapters can skip `client.py` — `BaseApiPipeline` owns the HTTP layer.
+
 ### Minimum Viable Pipeline
 
 ```python
@@ -101,13 +152,13 @@ from dlt_saga.pipelines.api.config import ApiConfig
 @dataclass
 class MyApiConfig(ApiConfig):
     """Configuration for my custom API."""
-    api_url: str = field(default="https://api.example.com")
+    api_url: str = field(default="", metadata={"description": "API base URL", "required": True})
     page_size: int = field(default=100)
 
     def __post_init__(self):
         super().__post_init__()
         if not self.api_url.startswith("https://"):
-            raise ValueError("api_url must use HTTPS")
+            raise ValueError("api_url must be set and use HTTPS")
 ```
 
 ### Pipeline YAML Config
@@ -120,6 +171,91 @@ api_url: "https://api.example.com/data"
 page_size: 50
 auth_type: bearer
 auth_token: "${API_TOKEN}"
+```
+
+### Idempotent incremental loading
+
+Resume from what's actually in the warehouse, not from the calendar. Look up the
+maximum value already loaded for the cursor column and fall back to
+`initial_value` only on the first run:
+
+```python
+def _incremental_start(self):
+    if not self.source_config.incremental:
+        return None
+    table_id = f"{self.destination_database}.{self.pipeline.dataset_name}.{self.table_name}"
+    return (
+        self.destination.get_max_column_value(table_id, self.source_config.incremental_column)
+        or self.source_config.initial_value
+    )
+```
+
+This makes the pipeline **self-healing**: a missed or failed run is caught up on
+the next run, with no gaps and no duplicates. Never hardcode "load yesterday"
+(`datetime.now() - timedelta(days=1)`) — that silently drops data whenever a run
+is skipped. See `dlt_saga/pipelines/database/` for the full pattern; `saga lint`
+flags the hardcoded-window anti-pattern.
+
+### Secrets and credentials
+
+Any string config field accepts a plain value, an environment variable
+(`${ENV_VAR}`), or a secret URI (`googlesecretmanager::…` / `azurekeyvault::…`)
+interchangeably — so **name credential fields by what they hold, never by
+secrecy**. `api_token` and `password` are good; `auth_secret` / `*_plaintext`
+are not (the name guarantees nothing, and `saga lint` flags it).
+
+Type credential fields as `SecretStr`, coerce them in `__post_init__`, and
+resolve them lazily at use:
+
+```python
+from dlt_saga.utility.secrets.secret_str import SecretStr, coerce_secret
+
+@dataclass
+class MyConfig(BaseConfig):
+    api_token: Optional[SecretStr] = field(default=None, metadata={"description": "..."})
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.api_token = coerce_secret(self.api_token)
+```
+
+```python
+# in client.py, at request time:
+from dlt_saga.utility.secrets import resolve_secret
+token = resolve_secret(self.config.api_token)   # handles plain / ${ENV_VAR} / secret URI
+```
+
+### Standard config vocabulary
+
+Reuse the inherited field names instead of inventing new ones — configs stay
+consistent across adapters, and `saga lint` flags near-misses (`primary_keys` →
+`primary_key`, `incremental_col` → `incremental_column`). The standard fields:
+
+| Field | Purpose |
+|-------|---------|
+| `incremental`, `incremental_column`, `initial_value` | Incremental loading (from `BaseConfig`) |
+| `tags`, `enabled`, `task_group` | Selection / scheduling / execution (from `BaseConfig`) |
+| `write_disposition` | `append` / `merge` / `replace` / `…+historize` |
+| `primary_key`, `merge_key`, `merge_strategy` | Merge / SCD2 behaviour |
+| `partition_column`, `cluster_columns` | Destination hints |
+| `historize` | SCD2 historization block |
+
+Add source-specific fields freely (`base_url`, `spreadsheet_id`, …) — just don't
+re-spell a standard concept under a new name.
+
+### Validate config in `__post_init__`
+
+Keep source-identifying values (URLs, table names) with an empty default and
+validate them in `__post_init__`, so they must be set in the YAML rather than
+buried as class defaults. Raise `ValueError` for configuration mistakes (the CLI
+renders these as clean, actionable errors — no traceback):
+
+```python
+def __post_init__(self):
+    super().__post_init__()              # always call super first
+    self.api_token = coerce_secret(self.api_token)
+    if not self.base_url:
+        raise ValueError("base_url is required")
 ```
 
 ### Registering via Entry Points
@@ -151,6 +287,60 @@ auto-discovers the `BasePipeline` subclass inside it.
 
 Use `saga info` to confirm the namespace is registered, and `saga doctor` to
 verify the base module is importable.
+
+### Registering a local package (`packages.yml`)
+
+For adapters that live in your own project (not a separately-installed package),
+register the directory in `packages.yml` at the project root:
+
+```yaml
+packages:
+  - namespace: local        # prefix used in adapter: values
+    path: ./pipelines        # directory holding <group>/<name>/pipeline.py modules
+```
+
+A config with `adapter: local.api.my_source` then resolves to
+`pipelines/api/my_source/pipeline.py`. `saga new adapter` creates this entry for
+you (and reuses an existing namespace if the directory is already registered).
+
+### Linting your adapter
+
+`saga lint` statically checks your adapters for the conventions on this page —
+secret-by-name fields, config names that diverge from the standard vocabulary,
+and non-idempotent "load yesterday" date math — and exits non-zero on any
+finding, so it can gate CI:
+
+```bash
+saga lint            # your project's own adapters
+saga lint --all      # also built-in and installed third-party adapters
+```
+
+By default it lints only adapters whose source lives inside your project (the
+ones you can actually change); built-ins and pip/entry-point installs are
+skipped unless you pass `--all`.
+
+### Anti-patterns to avoid
+
+| Don't | Do |
+|-------|----|
+| Bury source values (URLs, table names) as class defaults, leaving the YAML empty | Empty default + validate in `__post_init__`; set real values in the config |
+| Invent a name for a standard concept (`overlap_days`, `incremental_col`) | Reuse the standard vocabulary (`incremental_column`, `primary_key`, …) |
+| Name a field `*_secret` / `*_plaintext` | Name by content (`api_token`, `password`); any field accepts a secret URI |
+| Hardcode "load yesterday" / `datetime.now() - timedelta(...)` | Resume from `get_max_column_value(...) or initial_value` |
+| Read `os.environ` directly or hardcode credentials | `SecretStr` + `coerce_secret()` in config, `resolve_secret()` at use |
+| `print()` for output | `self.logger` / `logging.getLogger(__name__)` |
+| Swallow config errors in a broad `except` | Raise `ValueError` with an actionable message |
+
+### Contribution checklist
+
+Before opening a PR that adds an adapter:
+
+- [ ] Scaffolded with `saga new adapter` (or follows the same `config` / `client` / `pipeline` layout)
+- [ ] Reuses a built-in / inherits where one fits, rather than reimplementing it
+- [ ] Credentials are `SecretStr`, resolved via `resolve_secret`, named by content
+- [ ] Incremental loading resumes from the warehouse high-water mark (no hardcoded window)
+- [ ] Config fields reuse the standard vocabulary; required ones validated in `__post_init__`
+- [ ] `saga lint` passes; tests added (see [Testing Your Plugin](#testing-your-plugin))
 
 ---
 

@@ -27,6 +27,10 @@ Pipelines are registered via the `adapter` field in config YAML, resolved throug
 > follow every convention below — the real `extract_data()` contract, idempotent
 > incremental loading, secret-URI-aware credentials — and registers the package in
 > `packages.yml`. Editing generated files is far less error-prone than starting from blank.
+>
+> Full guide: the **Plugin Development** wiki page (anatomy, idempotent incremental,
+> secrets, standard vocabulary, anti-patterns, contribution checklist). Run `saga lint`
+> to check an adapter against these conventions.
 
 **Reuse before reinventing.** Check whether a built-in adapter already fits, and prefer it
 (config-only) or *inherit* from it over hand-writing a new source:
