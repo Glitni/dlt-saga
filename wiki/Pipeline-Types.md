@@ -202,7 +202,7 @@ Downloads a file from SharePoint using the app-only OAuth 2.0 flow.
 adapter: dlt_saga.sharepoint
 
 # Authentication (SharePoint app-only OAuth2 form body stored in a secrets provider)
-auth_secret: "azurekeyvault::https://my-vault.vault.azure.net::MY-SP-AUTH-SECRET"
+token_request_body: "azurekeyvault::https://my-vault.vault.azure.net::MY-SP-TOKEN-BODY"
 tenant_id: "<azure-ad-tenant-id>"
 
 # File location
@@ -218,11 +218,14 @@ write_disposition: "replace"
 tags: ["daily"]
 ```
 
-The `auth_secret` must resolve to a URL-encoded OAuth2 form body:
+The `token_request_body` must resolve to a URL-encoded OAuth2 form body:
 
 ```
 grant_type=client_credentials&client_id=<app-id>@<tenant-id>&client_secret=<secret>&resource=00000003-0000-0ff1ce00-000000000000/<host>@<tenant-id>
 ```
+
+> The key was previously named `auth_secret`. That name still works but is
+> deprecated (it logs a warning) — rename it to `token_request_body`.
 
 ---
 

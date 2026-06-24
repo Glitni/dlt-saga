@@ -8,7 +8,7 @@ from dlt_saga.utility.cli.context import get_execution_context
 from dlt_saga.utility.cli.logging import YELLOW, colorize
 
 from .client import SharePointClient
-from .config import SharePointConfig
+from .config import SharePointConfig, apply_deprecated_aliases
 
 
 class SharePointPipeline(BasePipeline):
@@ -18,10 +18,11 @@ class SharePointPipeline(BasePipeline):
 
     Authentication uses the SharePoint app-only OAuth 2.0 flow: the OAuth2
     form body is stored in a secrets provider (e.g. Azure Key Vault) and
-    fetched at runtime via the ``auth_secret`` URI.
+    fetched at runtime via the ``token_request_body`` URI.
     """
 
     def __init__(self, config: Dict[str, Any], log_prefix: str = None):
+        config = apply_deprecated_aliases(config)
         config_field_names = {f.name for f in fields(SharePointConfig)}
         self.source_config = SharePointConfig(
             **{k: v for k, v in config.items() if k in config_field_names}
