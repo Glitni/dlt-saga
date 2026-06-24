@@ -344,6 +344,7 @@ Filters compose AND and push down to SQL `WHERE` automatically. Pairs cleanly wi
 ```bash
 saga init                              # Scaffold a new project
 saga new adapter my_service            # Scaffold a custom pipeline adapter
+saga new config orders -a dlt_saga.api # Scaffold a config for an existing adapter
 saga list                              # List all enabled pipelines
 saga list --resource-type ingest       # Ingest-enabled only
 saga ingest                            # Run all ingest-enabled pipelines

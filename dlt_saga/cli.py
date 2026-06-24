@@ -2169,6 +2169,69 @@ def new_adapter(
         raise typer.Exit(code=1)
 
 
+@new_app.command("config")
+def new_config(
+    name: Optional[str] = typer.Argument(
+        None, help="Config name in snake_case (e.g. orders). Prompted if omitted."
+    ),
+    adapter: Optional[str] = typer.Option(
+        None,
+        "--adapter",
+        "-a",
+        help="Adapter the config targets (e.g. dlt_saga.api). Prompted if omitted.",
+    ),
+    group: Optional[str] = typer.Option(
+        None,
+        "--group",
+        "-g",
+        help="Pipeline group / config subfolder. Prompted if omitted (default: api).",
+    ),
+    schema_dir: str = typer.Option(
+        "schemas",
+        "--schema-dir",
+        help="Directory the generated JSON schemas live in (for the modeline).",
+    ),
+    no_input: bool = typer.Option(
+        False,
+        "--no-input",
+        help="Skip prompts: require name + --adapter, use defaults for group.",
+    ),
+):
+    """Scaffold a pipeline config YAML for an existing adapter.
+
+    Introspects the adapter's config dataclass (the same metadata that powers
+    `saga generate-schemas`) and writes configs/<group>/<name>.yml pre-populated
+    with the available fields — required ones active, optional ones commented
+    with their descriptions — plus a schema modeline when the schema exists.
+
+    Examples:
+        saga new config orders --adapter dlt_saga.database --group database
+        saga new config sales --adapter dlt_saga.api
+    """
+    from dlt_saga.new_config_command import resolve_config_inputs, run_new_config
+
+    try:
+        name, group, adapter = resolve_config_inputs(name, group, adapter, no_input)
+    except ValueError as exc:
+        typer.secho(f"Error: {exc}", fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(code=1)
+
+    if not no_input:
+        typer.echo("")
+        typer.echo("About to create:")
+        typer.echo(f"  config  : configs/{group}/{name}.yml")
+        typer.echo(f"  adapter : {adapter}")
+        if not typer.confirm("Proceed?", default=True):
+            typer.echo("Aborted.")
+            raise typer.Exit()
+
+    try:
+        run_new_config(name=name, adapter=adapter, group=group, schema_dir=schema_dir)
+    except ValueError as exc:
+        typer.secho(f"Error: {exc}", fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(code=1)
+
+
 @app.command("generate-schemas")
 def generate_schemas_cmd(
     output_dir: Path = typer.Option(
