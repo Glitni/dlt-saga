@@ -710,6 +710,16 @@ def _build_profiles_schema(
         "type": "string",
         "description": "Named Unity Catalog storage credential used in COPY INTO (optional)",
     }
+    yaml_target_props["storage_root"] = {
+        "type": "string",
+        "description": (
+            "Base cloud storage location for external Delta/Iceberg tables "
+            "(e.g., 'abfss://container@account.dfs.core.windows.net/raw/'). "
+            "When set, native_load creates external tables at "
+            "'<storage_root>/<pipeline_group>/<table_name>/' unless overridden "
+            "per pipeline. Databricks-specific."
+        ),
+    }
 
     # Patch historize sub-section with explicit key schemas (overrides the Dict[str, Any] default)
     yaml_target_props["historize"] = {
