@@ -1,5 +1,6 @@
 """Unit tests for the config-file schema linker (modeline injection)."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -122,8 +123,16 @@ class TestLinkConfigSchemas:
                 "filesystem_config.json"
             ),
         )
+        # No project-level files under the temp root, and no external profiles.
+        monkeypatch.setattr(
+            "dlt_saga.utility.cli.profiles._find_profiles_file", lambda: None
+        )
 
-        results = link_config_schemas(tmp_path / "schemas", config_source=fake_source)
+        results = link_config_schemas(
+            tmp_path / "schemas",
+            config_source=fake_source,
+            project_root=tmp_path,
+        )
 
         assert len(results) == 1
         assert results[0].schema_filename == "filesystem_config.json"
@@ -148,8 +157,15 @@ class TestLinkConfigSchemas:
             "dlt_saga.utility.link_schemas.schema_filename_for_adapter",
             lambda adapter, pipeline_group="", config_path=None: None,
         )
+        monkeypatch.setattr(
+            "dlt_saga.utility.cli.profiles._find_profiles_file", lambda: None
+        )
 
-        results = link_config_schemas(tmp_path / "schemas", config_source=fake_source)
+        results = link_config_schemas(
+            tmp_path / "schemas",
+            config_source=fake_source,
+            project_root=tmp_path,
+        )
 
         assert len(results) == 1
         assert results[0].schema_filename is None
@@ -157,3 +173,91 @@ class TestLinkConfigSchemas:
         assert results[0].skipped_reason
         # Unresolvable config is left untouched.
         assert "yaml-language-server" not in cfg.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+class TestLinkRootFiles:
+    def _empty_source(self):
+        return SimpleNamespace(discover=lambda: ({}, {}))
+
+    def test_links_project_root_files(self, tmp_path, monkeypatch):
+        (tmp_path / "saga_project.yml").write_text("pipelines: {}\n", encoding="utf-8")
+        (tmp_path / "packages.yml").write_text("packages: []\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "dlt_saga.utility.cli.profiles._find_profiles_file", lambda: None
+        )
+
+        results = link_config_schemas(
+            tmp_path / "schemas",
+            config_source=self._empty_source(),
+            project_root=tmp_path,
+        )
+
+        by_name = {Path(r.config_path).name: r for r in results}
+        assert by_name["saga_project.yml"].schema_filename == "saga_project_config.json"
+        assert by_name["packages.yml"].schema_filename == "packages_config.json"
+        for name, schema in (
+            ("saga_project.yml", "saga_project_config.json"),
+            ("packages.yml", "packages_config.json"),
+        ):
+            first = (tmp_path / name).read_text(encoding="utf-8").splitlines()[0]
+            assert first == f"{MODELINE_PREFIX}schemas/{schema}"
+
+    def test_skips_absent_root_files(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "dlt_saga.utility.cli.profiles._find_profiles_file", lambda: None
+        )
+
+        results = link_config_schemas(
+            tmp_path / "schemas",
+            config_source=self._empty_source(),
+            project_root=tmp_path,
+        )
+
+        assert results == []
+
+    def test_links_profiles_inside_project(self, tmp_path, monkeypatch):
+        profiles = tmp_path / "profiles.yml"
+        profiles.write_text("default:\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "dlt_saga.utility.cli.profiles._find_profiles_file", lambda: profiles
+        )
+
+        results = link_config_schemas(
+            tmp_path / "schemas",
+            config_source=self._empty_source(),
+            project_root=tmp_path,
+        )
+
+        assert len(results) == 1
+        assert results[0].schema_filename == "profiles_config.json"
+        assert results[0].changed is True
+        first = profiles.read_text(encoding="utf-8").splitlines()[0]
+        assert first == f"{MODELINE_PREFIX}schemas/profiles_config.json"
+
+    def test_suggests_for_external_profiles(self, tmp_path, monkeypatch):
+        external = tmp_path / "outside"
+        external.mkdir()
+        profiles = external / "profiles.yml"
+        profiles.write_text("default:\n", encoding="utf-8")
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.setattr(
+            "dlt_saga.utility.cli.profiles._find_profiles_file", lambda: profiles
+        )
+
+        results = link_config_schemas(
+            project / "schemas",
+            config_source=self._empty_source(),
+            project_root=project,
+        )
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.changed is False
+        assert r.suggestion is not None
+        # An absolute schema path is suggested, not a brittle relative one.
+        schema_abs = str((project / "schemas" / "profiles_config.json").resolve())
+        assert schema_abs.replace("\\", "/") in r.suggestion
+        # The external file is never modified.
+        assert "yaml-language-server" not in profiles.read_text(encoding="utf-8")
