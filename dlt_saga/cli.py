@@ -2260,8 +2260,11 @@ def generate_schemas_cmd(
 
     By default, every discovered config file is then matched to its adapter's
     schema via a ``# yaml-language-server: $schema=...`` modeline (idempotent,
-    editor-agnostic). Generating first guarantees brand-new pipelines have a
-    schema before any link is written.
+    editor-agnostic). The project-level files (saga_project.yml, packages.yml,
+    and an in-project profiles.yml) are linked the same way; an external
+    profiles.yml is left untouched, with a suggested modeline printed instead.
+    Generating first guarantees brand-new pipelines have a schema before any
+    link is written.
 
     Examples:
         saga generate-schemas                  # Generate + link configs
@@ -2297,10 +2300,13 @@ def _link_config_schemas(output_dir: Path) -> None:
 
     changed = [r for r in results if r.changed]
     skipped = [r for r in results if r.schema_filename is None]
+    suggested = [r for r in results if r.suggestion]
     for r in changed:
         print(f"  [LINK] {r.config_path} -> {r.schema_filename}")
     for r in skipped:
         print(f"  [SKIP] {r.config_path}: {r.skipped_reason}")
+    for r in suggested:
+        print(f"  [NOTE] {r.suggestion}")
     print(
         f"Linked {len(changed)} config file(s) "
         f"({len(results) - len(skipped)} matched, {len(skipped)} skipped)."
