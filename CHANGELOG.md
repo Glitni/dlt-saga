@@ -1,3 +1,12 @@
+## 0.6.1 — 2026-06-25
+
+### Added
+- Auto-link project-level files in generate-schemas (#140)
+
+
+### Fixed
+- Add missing storage_root field to profile schema (#141)
+
 ## 0.6.0 — 2026-06-24
 
 ### Added
