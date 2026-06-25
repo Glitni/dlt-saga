@@ -386,3 +386,19 @@ class TestGenerateSchemasOutput:
         assert field["type"] == "integer"
         assert field["minimum"] == 1
         assert "BigQuery" in field["description"]
+
+    def test_storage_root_in_profile_target(self, tmp_path):
+        """Databricks storage_root surfaces under each target's properties."""
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        data = json.loads(
+            (tmp_path / "profiles_config.json").read_text(encoding="utf-8")
+        )
+        target_props = data["additionalProperties"]["properties"]["outputs"][
+            "additionalProperties"
+        ]["properties"]
+        assert "storage_root" in target_props
+        field = target_props["storage_root"]
+        assert field["type"] == "string"
+        assert "Databricks" in field["description"]
