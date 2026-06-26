@@ -80,13 +80,105 @@ tracked watermark for the run):
 saga ingest --select "api__myservice__events" --start-value-override "2024-03-01"
 ```
 
-> The `{incremental_value}` placeholder mechanism applies **only to the default
-> fetch path**. For windowed APIs that need a start **and** end parameter, an
-> overlap margin, or non-trivial cursor formatting, subclass `BaseApiPipeline`
-> and build the range in an overridden `fetch_data()` (or `extract_data()`). A
-> subclass that overrides `fetch_data` owns request construction and manages
-> incremental itself — the base placeholder filter is skipped for it, so it does
-> not need (and is not required to provide) a `{incremental_value}` placeholder.
+> The `{incremental_value}` placeholder is for a single cursor on one filter
+> param. If your API takes a **date range** (`from`/`to`, `startDate`/`endDate`),
+> use the date-window adapter below instead — it handles the range, overlap and
+> backfill for you.
+
+### Date-window incremental (`dlt_saga.api.date_window`)
+
+Most incremental APIs are queried by a date range: "give me everything between
+`from` and `to`." The `dlt_saga.api.date_window` adapter does the bookkeeping —
+resume from the warehouse high-water mark, re-fetch a small `overlap` to catch
+late-arriving or corrected rows, and load a `[start, end]` window — so you never
+hardcode "yesterday" (which can't recover from a missed run). For the common case
+it needs **no Python**:
+
+```yaml
+# configs/api/myservice/events.yml
+adapter: dlt_saga.api.date_window
+tags: [daily]
+write_disposition: "merge"          # delete-insert on the date column → idempotent re-runs
+merge_key: "event_date"
+
+base_url: "https://api.example.com"
+endpoint: "/events"
+response_path: "data"
+
+incremental_column: "event_date"    # the warehouse column whose MAX seeds the cursor
+initial_value: "2024-01-01"         # first-run start (or set on_first_run)
+overlap: 2                          # days to re-fetch: 1 = just the watermark day
+                                    # (inclusive, default), 2 = it + the day before, 0 = none
+
+start_param: "from"                 # query params that receive the window bounds
+end_param: "to"
+date_format: "%Y-%m-%d"
+# window_end: today | yesterday      (default: today)
+# per_period_requests: true          (one request per day, for single-date APIs)
+# pagination: { ... }                (paginates the window when set)
+```
+
+Backfill a specific range with the standard override (wins over the watermark):
+
+```bash
+saga ingest --select "api__myservice__events" --start-value-override 2024-03-01 --end-value-override 2024-03-31
+```
+
+When the API doesn't take the window as plain query params — a report body, a
+custom cursor, per-row enrichment — subclass `DateWindowApiPipeline` and override
+**`_fetch_window(start, end)`**. You keep the window resolution, `overlap`,
+backfill and watermark logic; you only describe how to fetch one window:
+
+```python
+from dlt_saga.pipelines.api.date_window import DateWindowApiPipeline
+
+class MyReportPipeline(DateWindowApiPipeline):
+    def _fetch_window(self, start, end):
+        report = self.client.run_report(start, end)   # your request shape
+        return self._rows_from(report)
+```
+
+Other override points for less common needs: `resolve_window()` (e.g. ISO-week
+periods instead of days), `iter_days()`, `_render_date()`.
+
+#### Custom-client pipelines (no REST request layer)
+
+The window logic is transport-agnostic. A pipeline that talks to its source
+through its own SDK/HTTP/DB client (a plain `BasePipeline`, not `BaseApiPipeline`)
+gets the same idempotent windowing by mixing in `DateWindowResolver` and calling
+`resolve_window()` / `iter_days()` from `extract_data`. Use the same
+`DateWindowConfig` fields (`overlap`, `timezone`, `window_end`, `on_first_run`,
+`incremental_column`, `initial_value`) on your config, and expose a
+`window_config` property pointing at it:
+
+```python
+from dlt_saga.pipelines.base_pipeline import BasePipeline
+from dlt_saga.pipelines.date_window import DateWindowConfig, DateWindowResolver
+
+class MySourceConfig(DateWindowConfig, MyBaseConfig): ...
+
+class MySourcePipeline(DateWindowResolver, BasePipeline):
+    @property
+    def window_config(self):
+        return self.source_config            # carries the DateWindowConfig fields
+
+    def extract_data(self):
+        start, end = self.resolve_window()
+        rows = [r for day in self.iter_days(start, end)
+                for r in self.client.fetch(day)]   # your client
+        return [(dlt.resource(rows, name=self.table_name), "…")]
+```
+
+`resolve_window()` reads the watermark via `self.destination.get_max_column_value`,
+so the host just needs the standard `BasePipeline` attributes (`destination`,
+`pipeline`, `table_name`).
+
+#### `overlap` semantics
+
+`overlap` is the number of already-loaded days to **re-fetch** to catch
+late-arriving/corrected data: `0` = none (resume the day after the watermark),
+`1` = re-fetch the watermark day itself (inclusive — the default), `N` = the
+watermark day plus the `N-1` days before it.
 
 ---
 

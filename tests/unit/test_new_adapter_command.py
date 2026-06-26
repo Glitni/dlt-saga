@@ -236,3 +236,25 @@ class TestGeneratedCodeConventions:
         ).read_text()
         assert "BaseApiPipeline" in pipeline
         assert "_create_api_config" in pipeline
+
+    def test_date_window_kind_inherits_date_window_pipeline(self, tmp_path):
+        run_new_adapter("metrics", kind="api-date-window", target=tmp_path)
+        adapter_dir = tmp_path / "pipelines" / "api" / "metrics"
+        pipeline = (adapter_dir / "pipeline.py").read_text()
+        config = (adapter_dir / "config.py").read_text()
+        # Inherits the reusable date-window base (an API adapter), not BasePipeline.
+        assert "DateWindowApiPipeline" in pipeline
+        assert "_fetch_window" in pipeline
+        assert "DateWindowApiConfig" in config
+        # API adapter → no client.py (the base owns the HTTP layer).
+        assert not (adapter_dir / "client.py").exists()
+        # Starter config wires the window into the request.
+        starter = (tmp_path / "configs" / "api" / "metrics.yml").read_text()
+        assert "incremental_column" in starter
+        assert "start_param" in starter
+
+    def test_date_window_kind_is_valid(self):
+        # api-date-window is an accepted kind alongside generic/api.
+        from dlt_saga.new_adapter_command import _VALID_KINDS
+
+        assert "api-date-window" in _VALID_KINDS
