@@ -572,6 +572,125 @@ class TestIncrementalFilter:
             )
 
 
+# ---------------------------------------------------------------------------
+# extract_data() incremental gating
+#
+# These drive the real extract_data() path (filter + fetch + resource build),
+# not just _apply_incremental_filter() in isolation — that gap is what let a
+# regression slip past: the base extract_data() unconditionally applied the
+# placeholder filter and raised for fetch_data-overriding subclasses that
+# manage incremental themselves.
+# ---------------------------------------------------------------------------
+
+
+class _FetchOverridingPipeline(BaseApiPipeline):
+    """Subclass that overrides fetch_data and manages incremental itself.
+
+    Models the real date-window subclasses (google_ad_manager,
+    omnystudio date-range) that set ``incremental: true`` but build their own
+    request rather than using the ``{incremental_value}`` placeholder.
+    """
+
+    def __init__(self, config_dict):
+        self.api_config = self._create_api_config(config_dict)
+        self.logger = logging.getLogger("test")
+        self.table_name = "events"
+
+    def fetch_data(self):
+        return [{"id": 1}, {"id": 2}]
+
+
+class _DefaultPathPipeline(BaseApiPipeline):
+    """Generic pipeline that uses the base fetch path (no fetch_data override)."""
+
+    def __init__(self, config_dict, responses, max_value=None):
+        self.api_config = self._create_api_config(config_dict)
+        self.logger = logging.getLogger("test")
+        self.table_name = "events"
+        self.destination_database = "proj"
+        self.destination = _FakeDestination(max_value)
+
+        class _Pipeline:
+            dataset_name = "dlt_api"
+
+        self.pipeline = _Pipeline()
+        self._responses = list(responses)
+        self._call_count = 0
+
+    def _make_request(self, url=None, query_params=None):
+        resp = self._responses[self._call_count]
+        self._call_count += 1
+        return resp
+
+
+@pytest.mark.unit
+class TestExtractDataIncrementalGating:
+    def test_uses_default_fetch_path_detection(self):
+        # Generic pipeline (no fetch_data override) → default path
+        assert _DefaultPathPipeline(
+            {"base_url": "https://api.example.com", "endpoint": "/events"},
+            responses=[[]],
+        )._uses_default_fetch_path()
+        # Subclass overriding fetch_data → not the default path
+        assert not _FetchOverridingPipeline(
+            {"base_url": "https://api.example.com", "endpoint": "/events"}
+        )._uses_default_fetch_path()
+
+    def test_fetch_data_override_skips_base_filter(self):
+        # Regression: incremental enabled, no {incremental_value} placeholder.
+        # A fetch_data-overriding subclass must NOT raise — it manages its own
+        # incremental loading. (Before the fix, base extract_data() raised here.)
+        pipeline = _FetchOverridingPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/events",
+                "incremental": True,
+                "incremental_column": "created_at",
+            }
+        )
+        resources = pipeline.extract_data()
+        assert len(resources) == 1
+        resource, _description = resources[0]
+        assert [r["id"] for r in resource] == [1, 2]
+
+    def test_default_path_substitutes_cursor_through_extract_data(self):
+        # End-to-end default path: filter resolves the watermark and substitutes
+        # it into query_params before the request, then data flows through.
+        pipeline = _DefaultPathPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/events",
+                "incremental": True,
+                "incremental_column": "created_at",
+                "initial_value": "2024-01-01",
+                "query_params": {"updated_since": "{incremental_value}"},
+            },
+            responses=[[{"id": 1}]],
+            max_value="2024-06-15",
+        )
+        resources = pipeline.extract_data()
+        assert pipeline.api_config.query_params["updated_since"] == "2024-06-15"
+        resource, _description = resources[0]
+        assert [r["id"] for r in resource] == [1]
+
+    def test_default_path_still_raises_without_placeholder(self):
+        # The helpful hard error is preserved for direct config users on the
+        # default fetch path.
+        pipeline = _DefaultPathPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/events",
+                "incremental": True,
+                "incremental_column": "created_at",
+                "initial_value": "2024-01-01",
+                "query_params": {"status": "active"},
+            },
+            responses=[[{"id": 1}]],
+        )
+        with pytest.raises(ValueError, match="incremental is enabled but no query"):
+            pipeline.extract_data()
+
+
 @pytest.mark.unit
 class TestMaxPagesSafety:
     def test_max_pages_limits_iteration(self):

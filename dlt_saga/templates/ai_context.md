@@ -204,6 +204,13 @@ for a request), then `_make_request()` / `_extract_data_from_response()`. **Don'
 `extract_data()` on an API pipeline** — you'd lose the built-in pagination. For most REST APIs you
 override nothing and configure auth + pagination + `response_path` in YAML.
 
+Incremental: on the default fetch path, set `incremental: true` + `incremental_column` and put a
+`{incremental_value}` placeholder in a `query_params` value — the base substitutes the resolved
+cursor (watermark or `initial_value`) before the request. If you override `fetch_data` to build a
+date window or custom request, you own incremental loading yourself (resolve the watermark with
+`destination.get_max_column_value(...)` — see the `_incremental_start` example above); the base
+placeholder filter is skipped for you, so you don't need a `{incremental_value}` placeholder.
+
 For simple REST APIs, you may not need a custom pipeline class at all — the built-in `dlt_saga.api` adapter handles most cases via YAML config alone:
 
 ```yaml
