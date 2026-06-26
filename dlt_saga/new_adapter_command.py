@@ -16,7 +16,7 @@ from typing import List, Optional, Tuple
 import typer
 import yaml
 
-_VALID_KINDS = ("generic", "api")
+_VALID_KINDS = ("generic", "api", "api-date-window")
 
 
 # ---------------------------------------------------------------------------
@@ -69,12 +69,19 @@ def _prompt_kind(kind: Optional[str], no_input: bool) -> str:
         return "generic"
     typer.echo(
         "Adapter kind:\n"
-        "  generic - any source; you implement extract_data() (BasePipeline)\n"
-        "  api     - REST API; inherits requests/auth/pagination (BaseApiPipeline)"
+        "  generic         - any source; you implement extract_data() (BasePipeline)\n"
+        "  api             - REST API; inherits requests/auth/pagination (BaseApiPipeline)\n"
+        "  api-date-window - an `api` variant for REST APIs queried by a date range:\n"
+        "                    idempotent incremental loading with overlap + backfill\n"
+        "                    (DateWindowApiPipeline, a BaseApiPipeline subclass)"
     )
     choice = ""
     while choice not in _VALID_KINDS:
-        choice = typer.prompt("Kind [generic/api]", default="generic").strip().lower()
+        choice = (
+            typer.prompt("Kind [generic/api/api-date-window]", default="generic")
+            .strip()
+            .lower()
+        )
         if choice not in _VALID_KINDS:
             typer.echo(f"  Invalid choice. Enter one of: {', '.join(_VALID_KINDS)}")
     return choice
@@ -388,6 +395,118 @@ class {class_name}Pipeline(BaseApiPipeline):
 '''
 
 
+def _config_py_date_window(name: str, class_name: str) -> str:
+    return f'''\
+"""Configuration for the {name} date-window API source."""
+
+from dataclasses import dataclass
+
+from dlt_saga.pipelines.api.date_window.config import DateWindowApiConfig
+
+
+@dataclass
+class {class_name}Config(DateWindowApiConfig):
+    """Configuration for the {name} API (date-window incremental).
+
+    Inherits the date-window vocabulary from DateWindowApiConfig — ``overlap``,
+    ``timezone``, ``window_end``, ``on_first_run``, ``start_param`` / ``end_param``
+    / ``date_format``, ``per_period_requests`` — plus every REST field from
+    ApiConfig and ``incremental_column`` / ``initial_value`` from BaseConfig.
+
+    Add source-specific fields here only when the inherited config can't express
+    them, and validate them in ``__post_init__`` (calling ``super().__post_init__()``
+    first). If you add nothing, you may not need a custom config or pipeline at all
+    — the built-in ``dlt_saga.api.date_window`` adapter works from YAML alone.
+    """
+'''
+
+
+def _pipeline_py_date_window(name: str, class_name: str, adapter: str) -> str:
+    return f'''\
+"""Pipeline for the {name} date-window API source."""
+
+import logging
+from dataclasses import fields as dataclass_fields
+from datetime import date
+from typing import Any, Dict, List
+
+from dlt_saga.pipelines.api.date_window import DateWindowApiPipeline
+
+from .config import {class_name}Config
+
+logger = logging.getLogger(__name__)
+
+
+class {class_name}Pipeline(DateWindowApiPipeline):
+    """Extract {name} over a resolved ``[start, end]`` date window.
+
+    Inherits idempotent, self-healing incremental loading: resume from the
+    warehouse high-water mark, re-fetch ``overlap`` recent days to catch late or
+    corrected rows, and backfill with ``--start-value-override``. Bound via
+    ``adapter: {adapter}``.
+
+    For the common case — the window goes into query params — you need NO Python
+    here: set ``incremental_column`` + ``start_param`` / ``end_param`` in the YAML.
+    You could even delete this package and point the config straight at
+    ``adapter: dlt_saga.api.date_window``. Keep this subclass when the request
+    needs a custom shape.
+    """
+
+    def _create_api_config(self, config_dict: Dict[str, Any]) -> {class_name}Config:
+        """Build this pipeline's config object (overrides the base factory)."""
+        field_names = {{f.name for f in dataclass_fields({class_name}Config)}}
+        return {class_name}Config(
+            **{{k: v for k, v in config_dict.items() if k in field_names}}
+        )
+
+    # Override _fetch_window ONLY when the window can't go in plain query params
+    # (e.g. a report body, a custom cursor, or per-row enrichment). You still get
+    # window resolution, overlap, backfill and the watermark lookup for free —
+    # you only describe how to fetch one [start, end] window. ``iter_days`` is
+    # available if the API only accepts a single date per request.
+    #
+    # def _fetch_window(self, start: date, end: date) -> List[Any]:
+    #     records: List[Any] = []
+    #     for day in self.iter_days(start, end):
+    #         records.extend(self._fetch_one_day(day))
+    #     return records
+'''
+
+
+def _starter_config_yml_date_window(name: str, adapter: str) -> str:
+    return f"""\
+adapter: {adapter}
+tags: [daily]
+
+# delete-insert on the date column makes re-running a day (via overlap) idempotent.
+write_disposition: "merge"
+merge_key: "event_date"
+
+base_url: "https://api.example.com"
+endpoint: "/v1/events"
+response_path: "data"
+
+# Auth: any field accepts a plain value, ${{ENV_VAR}} or a secret URI.
+auth_type: bearer
+auth_token: "${{MY_API_TOKEN}}"
+# auth_token: "googlesecretmanager::my-project::{name}-token"
+
+# Date-window incremental: resume from the warehouse watermark, re-fetch `overlap`
+# recent days, and seed the first run from initial_value.
+incremental_column: "event_date"   # warehouse column whose MAX seeds the cursor
+initial_value: "2024-01-01"
+overlap: 1                         # already-loaded days to re-fetch (0 = none)
+
+# Where the resolved window bounds go in the request:
+start_param: "from"
+end_param: "to"
+date_format: "%Y-%m-%d"
+# window_end: today                # or "yesterday" to load only complete days
+# per_period_requests: true        # one request per day (single-date APIs)
+# pagination: {{ type: offset, limit: 100 }}   # paginates within the window
+"""
+
+
 def _starter_config_yml_generic(name: str, adapter: str) -> str:
     return f"""\
 adapter: {adapter}
@@ -601,7 +720,15 @@ def _scaffold(
     _ensure_package_init(group_dir, created, skipped)
     _ensure_package_init(adapter_dir, created, skipped)
 
-    if kind == "api":
+    if kind == "api-date-window":
+        # An API adapter (DateWindowApiPipeline -> BaseApiPipeline), so like `api`
+        # it needs no client.py — the base owns the HTTP layer.
+        files = {
+            "config.py": _config_py_date_window(name, class_name),
+            "pipeline.py": _pipeline_py_date_window(name, class_name, adapter),
+        }
+        starter_yml = _starter_config_yml_date_window(name, adapter)
+    elif kind == "api":
         # API sources need no client.py — BaseApiPipeline owns the HTTP layer.
         files = {
             "config.py": _config_py_api(name, class_name),
@@ -633,7 +760,13 @@ def _print_next_steps(name: str, group: str, adapter: str, kind: str) -> None:
     class_name = _pascal_case(name)
     typer.echo("")
     typer.echo("Done! Next steps:")
-    if kind == "api":
+    if kind == "api-date-window":
+        typer.echo(
+            f"  1. Set incremental_column + start_param/end_param (and auth) in "
+            f"configs/{group}/{name}.yml — or override _fetch_window() in pipeline.py "
+            "for a custom request shape."
+        )
+    elif kind == "api":
         typer.echo(
             f"  1. Configure auth + pagination + response_path in "
             f"configs/{group}/{name}.yml (or override fetch_data() in pipeline.py)."
