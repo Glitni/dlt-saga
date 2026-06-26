@@ -210,7 +210,7 @@ Ignored on BigQuery and DuckDB destinations (a warning is logged).
 
 ```yaml
 incremental: true
-incremental_key: "updated_at"        # Column to track
+incremental_column: "updated_at"     # Column to track
 initial_value: "2025-01-01"          # Starting value
 ```
 

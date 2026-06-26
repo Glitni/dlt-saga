@@ -477,17 +477,124 @@ class BaseApiPipeline(BasePipeline):
         self.logger.debug(f"Successfully fetched {len(data)} records from API")
         return data
 
+    # ------------------------------------------------------------------
+    # Incremental loading
+    # ------------------------------------------------------------------
+
+    _INCREMENTAL_VALUE_PLACEHOLDER = "{incremental_value}"
+    _INCREMENTAL_COLUMN_PLACEHOLDER = "{incremental_column}"
+
+    def _resolve_incremental_value(self) -> Optional[Any]:
+        """Resolve the incremental cursor for this run.
+
+        Resolution order (highest priority first):
+
+        1. ``start_value_override`` — a backfill override from the CLI
+           (``--start-value-override``) or config; forces a re-read from a
+           chosen point regardless of what's already loaded.
+        2. The maximum already-loaded value of ``incremental_column`` in the
+           destination table (the tracked high-water mark).
+        3. ``initial_value`` — the seed for the first run (empty/absent table).
+
+        Returns ``None`` when none of these is available. This mirrors the
+        ``database`` source: the warehouse is the source of truth for the
+        high-water mark, so a missed or failed run is caught up on the next
+        run with no gaps and no duplicates.
+        """
+        if self.api_config.start_value_override:
+            return self.api_config.start_value_override
+
+        column = self.api_config.incremental_column
+        table_id = (
+            f"{self.destination_database}.{self.pipeline.dataset_name}."
+            f"{self.table_name}"
+        )
+        watermark = self.destination.get_max_column_value(table_id, column)
+        if watermark is None:
+            watermark = self.api_config.initial_value
+        return watermark
+
+    def _apply_incremental_filter(self) -> None:
+        """Substitute the incremental cursor into ``query_params``.
+
+        When ``incremental`` is enabled, resolves the watermark (max loaded
+        value of ``incremental_column``, or ``initial_value`` on the first run)
+        and substitutes it into ``query_params`` wherever the
+        ``{incremental_value}`` / ``{incremental_column}`` placeholders appear.
+        This is how the resolved cursor is pushed into the request so the API
+        only returns new rows (e.g. an ``updated_since`` filter param).
+
+        Raises:
+            ValueError: If incremental is enabled but no ``query_params`` value
+                references ``{incremental_value}`` — without a placeholder the
+                cursor cannot be applied and the source would silently re-fetch
+                everything.
+        """
+        if not self.api_config.incremental:
+            return
+
+        column = self.api_config.incremental_column  # required by BaseConfig
+        params = self.api_config.query_params or {}
+
+        def _has_value_placeholder(value: Any) -> bool:
+            return (
+                isinstance(value, str) and self._INCREMENTAL_VALUE_PLACEHOLDER in value
+            )
+
+        if not any(_has_value_placeholder(v) for v in params.values()):
+            raise ValueError(
+                "incremental is enabled but no query parameter references "
+                f"'{self._INCREMENTAL_VALUE_PLACEHOLDER}'. Add a placeholder so "
+                "the resolved cursor can filter the request, e.g.:\n"
+                "  query_params:\n"
+                f'    updated_since: "{self._INCREMENTAL_VALUE_PLACEHOLDER}"\n'
+                "(incremental_column names the column whose max value seeds the "
+                "cursor from the destination.)"
+            )
+
+        value = self._resolve_incremental_value()
+
+        if value is None:
+            # First run with no initial_value and no prior data: drop the
+            # placeholder params so the request loads the full response rather
+            # than sending a literal '{incremental_value}' to the API.
+            self.api_config.query_params = {
+                k: v for k, v in params.items() if not _has_value_placeholder(v)
+            }
+            self.logger.info(
+                "Incremental enabled but no watermark yet (no prior data and no "
+                "initial_value) — loading the full response this run."
+            )
+            return
+
+        def _substitute(v: Any) -> Any:
+            if isinstance(v, str) and (
+                self._INCREMENTAL_VALUE_PLACEHOLDER in v
+                or self._INCREMENTAL_COLUMN_PLACEHOLDER in v
+            ):
+                return v.format(incremental_value=value, incremental_column=column)
+            return v
+
+        self.api_config.query_params = {k: _substitute(v) for k, v in params.items()}
+        self.logger.info(
+            f"Incremental loading: {column} cursor = {value} "
+            f"(substituted into query params)"
+        )
+
     def extract_data(self) -> List[Tuple[Any, str]]:
         """Extract data from API.
 
         This is the main method called by BasePipeline.run().
         When pagination is configured, yields records lazily across pages
         so dlt can process them incrementally without loading all pages
-        into memory.
+        into memory. When ``incremental`` is configured, the resolved cursor
+        is substituted into ``query_params`` before any request is made.
 
         Returns:
             List of tuples containing (dlt.resource, description)
         """
+        self._apply_incremental_filter()
+
         data: Iterable[Any]
         if self.api_config.pagination:
             data = self._fetch_all_pages()

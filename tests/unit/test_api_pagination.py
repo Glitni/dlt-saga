@@ -392,6 +392,186 @@ class TestNextUrlPagination:
         assert len(records) == 1
 
 
+# ---------------------------------------------------------------------------
+# Incremental loading
+# ---------------------------------------------------------------------------
+
+
+class _FakeDestination:
+    """Destination double returning a canned high-water mark."""
+
+    def __init__(self, max_value):
+        self._max_value = max_value
+        self.calls = []
+
+    def get_max_column_value(self, table_id, column):
+        self.calls.append((table_id, column))
+        return self._max_value
+
+
+class IncrementalApiPipeline(BaseApiPipeline):
+    """Test double exposing the incremental machinery without HTTP/BasePipeline."""
+
+    def __init__(self, config_dict, max_value=None):
+        self.api_config = self._create_api_config(config_dict)
+        self.logger = logging.getLogger("test")
+        self.table_name = "events"
+        self.destination_database = "proj"
+        self.destination = _FakeDestination(max_value)
+
+        class _Pipeline:
+            dataset_name = "dlt_api"
+
+        self.pipeline = _Pipeline()
+
+
+@pytest.mark.unit
+class TestIncrementalFilter:
+    def test_no_op_when_incremental_disabled(self):
+        pipeline = IncrementalApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/events",
+                "query_params": {"updated_since": "{incremental_value}"},
+            }
+        )
+        pipeline._apply_incremental_filter()
+        # Placeholder left untouched — incremental off
+        assert (
+            pipeline.api_config.query_params["updated_since"] == "{incremental_value}"
+        )
+        assert pipeline.destination.calls == []
+
+    def test_substitutes_watermark_from_destination(self):
+        pipeline = IncrementalApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/events",
+                "incremental": True,
+                "incremental_column": "created_at",
+                "initial_value": "2024-01-01",
+                "query_params": {"updated_since": "{incremental_value}"},
+            },
+            max_value="2024-06-15",
+        )
+        pipeline._apply_incremental_filter()
+        assert pipeline.api_config.query_params["updated_since"] == "2024-06-15"
+        assert pipeline.destination.calls == [("proj.dlt_api.events", "created_at")]
+
+    def test_start_value_override_wins_over_watermark(self):
+        pipeline = IncrementalApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/events",
+                "incremental": True,
+                "incremental_column": "created_at",
+                "initial_value": "2024-01-01",
+                "start_value_override": "2023-03-01",  # backfill
+                "query_params": {"updated_since": "{incremental_value}"},
+            },
+            max_value="2024-06-15",
+        )
+        pipeline._apply_incremental_filter()
+        # Override takes precedence over both the watermark and initial_value
+        assert pipeline.api_config.query_params["updated_since"] == "2023-03-01"
+        assert pipeline.destination.calls == []
+
+    def test_falls_back_to_initial_value_on_first_run(self):
+        pipeline = IncrementalApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/events",
+                "incremental": True,
+                "incremental_column": "created_at",
+                "initial_value": "2024-01-01",
+                "query_params": {"updated_since": "{incremental_value}"},
+            },
+            max_value=None,
+        )
+        pipeline._apply_incremental_filter()
+        assert pipeline.api_config.query_params["updated_since"] == "2024-01-01"
+
+    def test_drops_placeholder_when_no_watermark(self):
+        pipeline = IncrementalApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/events",
+                "incremental": True,
+                "incremental_column": "created_at",
+                # no initial_value, empty destination -> full load
+                "query_params": {
+                    "updated_since": "{incremental_value}",
+                    "status": "active",
+                },
+            },
+            max_value=None,
+        )
+        pipeline._apply_incremental_filter()
+        assert "updated_since" not in pipeline.api_config.query_params
+        # Unrelated params preserved
+        assert pipeline.api_config.query_params["status"] == "active"
+
+    def test_preserves_other_params_and_column_placeholder(self):
+        pipeline = IncrementalApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/events",
+                "incremental": True,
+                "incremental_column": "created_at",
+                "initial_value": "2024-01-01",
+                "query_params": {
+                    "filter_field": "{incremental_column}",
+                    "filter_since": "{incremental_value}",
+                    "status": "active",
+                },
+            },
+            max_value="2024-06-15",
+        )
+        pipeline._apply_incremental_filter()
+        params = pipeline.api_config.query_params
+        assert params["filter_field"] == "created_at"
+        assert params["filter_since"] == "2024-06-15"
+        assert params["status"] == "active"
+
+    def test_raises_when_no_placeholder(self):
+        pipeline = IncrementalApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/events",
+                "incremental": True,
+                "incremental_column": "created_at",
+                "initial_value": "2024-01-01",
+                "query_params": {"status": "active"},
+            },
+            max_value="2024-06-15",
+        )
+        with pytest.raises(ValueError, match="incremental is enabled but no query"):
+            pipeline._apply_incremental_filter()
+
+    def test_raises_when_query_params_missing_entirely(self):
+        pipeline = IncrementalApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/events",
+                "incremental": True,
+                "incremental_column": "created_at",
+                "initial_value": "2024-01-01",
+            },
+            max_value="2024-06-15",
+        )
+        with pytest.raises(ValueError, match="incremental is enabled but no query"):
+            pipeline._apply_incremental_filter()
+
+    def test_incremental_requires_column_at_config_time(self):
+        # Guard rail lives in BaseConfig.__post_init__
+        with pytest.raises(ValueError, match="incremental_column is required"):
+            ApiConfig(
+                base_url="https://api.example.com",
+                endpoint="/events",
+                incremental=True,
+            )
+
+
 @pytest.mark.unit
 class TestMaxPagesSafety:
     def test_max_pages_limits_iteration(self):
