@@ -216,6 +216,13 @@ params (report body, custom cursor, per-row enrichment), subclass it and overrid
 `_fetch_window(start, end)`; you keep the window/overlap/backfill/watermark logic. Don't hand-roll
 date-window math in `fetch_data` — that's exactly what this base exists to remove.
 
+The window logic is transport-agnostic: a custom-client pipeline (a plain `BasePipeline` with its
+own SDK/HTTP/DB client, not `BaseApiPipeline`) gets the same behaviour by mixing in
+`DateWindowResolver` (from `dlt_saga.pipelines.date_window`), inheriting `DateWindowConfig` on its
+config, exposing a `window_config` property, and calling `resolve_window()` / `iter_days()` from
+`extract_data`. `overlap` = days to re-fetch: 1 is inclusive of the watermark day (default), 0
+resumes after it.
+
 For simple REST APIs, you may not need a custom pipeline class at all — the built-in `dlt_saga.api` adapter handles most cases via YAML config alone:
 
 ```yaml

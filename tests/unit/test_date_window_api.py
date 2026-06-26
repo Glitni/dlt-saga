@@ -5,8 +5,10 @@ from datetime import date, datetime
 
 import pytest
 
+from dlt_saga.pipelines.api.base import BaseApiPipeline
 from dlt_saga.pipelines.api.date_window.config import DateWindowApiConfig
 from dlt_saga.pipelines.api.date_window.pipeline import DateWindowApiPipeline
+from dlt_saga.pipelines.date_window import DateWindowResolver
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -123,7 +125,14 @@ class TestResolveWindow:
         start, _end = p.resolve_window()
         assert start == date(2024, 6, 8)
 
-    def test_overlap_zero_resumes_after_watermark(self):
+    def test_overlap_one_reloads_watermark_day(self):
+        # overlap=1 (default) is inclusive of the watermark day.
+        p = FakeDateWindowPipeline(_base_cfg(overlap=1), max_value="2024-06-10")
+        start, _end = p.resolve_window()
+        assert start == date(2024, 6, 10)
+
+    def test_overlap_zero_resumes_day_after_watermark(self):
+        # overlap=0 re-fetches nothing: resume strictly after the watermark.
         p = FakeDateWindowPipeline(_base_cfg(overlap=0), max_value="2024-06-10")
         start, _end = p.resolve_window()
         assert start == date(2024, 6, 11)
@@ -301,6 +310,55 @@ class TestFetchWindow:
         assert p._calls == []
         resource, _desc = resources[0]
         assert list(resource) == []
+
+
+# ---------------------------------------------------------------------------
+# DateWindowResolver mixin used standalone (transport-agnostic)
+# ---------------------------------------------------------------------------
+
+
+class _CustomClientPipeline(DateWindowResolver):
+    """A non-API host: the resolver mixed into a plain object (no BaseApiPipeline)."""
+
+    def __init__(self, cfg, max_value=None):
+        self._cfg = cfg
+        self.logger = logging.getLogger("test")
+        self.table_name = "events"
+        self.destination_database = "proj"
+        self.destination = _FakeDestination(max_value)
+        self.pipeline = _Pipeline()
+
+    @property
+    def window_config(self):
+        return self._cfg
+
+
+@pytest.mark.unit
+class TestResolverMixinStandalone:
+    def test_resolves_window_without_base_api_pipeline(self):
+        # The mixin must not require BaseApiPipeline in the MRO.
+        assert BaseApiPipeline not in _CustomClientPipeline.__mro__
+        cfg = DateWindowApiConfig(
+            base_url="https://api.example.com",
+            endpoint="/events",
+            incremental_column="created_at",
+            overlap=2,
+            window_end="yesterday",
+        )
+        p = _CustomClientPipeline(cfg, max_value=date(2024, 6, 10))
+        start, _end = p.resolve_window()
+        assert start == date(2024, 6, 9)  # overlap=2 -> watermark - 1
+        assert p.destination.calls == [("proj.dlt_api.events", "created_at")]
+
+    def test_iter_days_standalone(self):
+        cfg = DateWindowApiConfig(
+            base_url="https://api.example.com",
+            endpoint="/events",
+            incremental_column="created_at",
+        )
+        p = _CustomClientPipeline(cfg)
+        days = list(p.iter_days(date(2024, 3, 1), date(2024, 3, 3)))
+        assert days == [date(2024, 3, 1), date(2024, 3, 2), date(2024, 3, 3)]
 
 
 # ---------------------------------------------------------------------------

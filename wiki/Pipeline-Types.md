@@ -107,7 +107,8 @@ response_path: "data"
 
 incremental_column: "event_date"    # the warehouse column whose MAX seeds the cursor
 initial_value: "2024-01-01"         # first-run start (or set on_first_run)
-overlap: 2                          # re-fetch the last 2 loaded days each run
+overlap: 2                          # days to re-fetch: 1 = just the watermark day
+                                    # (inclusive, default), 2 = it + the day before, 0 = none
 
 start_param: "from"                 # query params that receive the window bounds
 end_param: "to"
@@ -139,6 +140,45 @@ class MyReportPipeline(DateWindowApiPipeline):
 
 Other override points for less common needs: `resolve_window()` (e.g. ISO-week
 periods instead of days), `iter_days()`, `_render_date()`.
+
+#### Custom-client pipelines (no REST request layer)
+
+The window logic is transport-agnostic. A pipeline that talks to its source
+through its own SDK/HTTP/DB client (a plain `BasePipeline`, not `BaseApiPipeline`)
+gets the same idempotent windowing by mixing in `DateWindowResolver` and calling
+`resolve_window()` / `iter_days()` from `extract_data`. Use the same
+`DateWindowConfig` fields (`overlap`, `timezone`, `window_end`, `on_first_run`,
+`incremental_column`, `initial_value`) on your config, and expose a
+`window_config` property pointing at it:
+
+```python
+from dlt_saga.pipelines.base_pipeline import BasePipeline
+from dlt_saga.pipelines.date_window import DateWindowConfig, DateWindowResolver
+
+class MySourceConfig(DateWindowConfig, MyBaseConfig): ...
+
+class MySourcePipeline(DateWindowResolver, BasePipeline):
+    @property
+    def window_config(self):
+        return self.source_config            # carries the DateWindowConfig fields
+
+    def extract_data(self):
+        start, end = self.resolve_window()
+        rows = [r for day in self.iter_days(start, end)
+                for r in self.client.fetch(day)]   # your client
+        return [(dlt.resource(rows, name=self.table_name), "…")]
+```
+
+`resolve_window()` reads the watermark via `self.destination.get_max_column_value`,
+so the host just needs the standard `BasePipeline` attributes (`destination`,
+`pipeline`, `table_name`).
+
+#### `overlap` semantics
+
+`overlap` is the number of already-loaded days to **re-fetch** to catch
+late-arriving/corrected data: `0` = none (resume the day after the watermark),
+`1` = re-fetch the watermark day itself (inclusive — the default), `N` = the
+watermark day plus the `N-1` days before it.
 
 ---
 
