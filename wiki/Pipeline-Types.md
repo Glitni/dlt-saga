@@ -53,11 +53,37 @@ tags: ["daily"]
 
 ### Incremental loading
 
+Enable `incremental` and name the column whose high-water mark seeds the cursor.
+The resolved cursor is the max already-loaded value of `incremental_column`
+(falling back to `initial_value` on the first run), substituted into
+`query_params` wherever the `{incremental_value}` placeholder appears — so the
+API only returns new rows. This is idempotent and self-healing: a missed run is
+caught up on the next run.
+
 ```yaml
 incremental: true
-incremental_key: "created_at"
-initial_value: "2024-01-01"
+incremental_column: "created_at"   # column read from the destination for the watermark
+initial_value: "2024-01-01"        # cursor for the first run
+
+query_params:
+  updated_since: "{incremental_value}"   # cursor is substituted here before the request
 ```
+
+`{incremental_value}` is required somewhere in `query_params` when `incremental`
+is enabled — without it the cursor cannot filter the request. `{incremental_column}`
+is also available if the API expects the column name as a parameter.
+
+Backfill from a chosen point with `--start-value-override` (this wins over the
+tracked watermark for the run):
+
+```bash
+saga ingest --select "api__myservice__events" --start-value-override "2024-03-01"
+```
+
+> For windowed APIs that need a start **and** end parameter, an overlap margin,
+> or non-trivial cursor formatting, subclass `BaseApiPipeline` and build the
+> range in `extract_data()` / `fetch_data()`. The `{incremental_value}`
+> mechanism covers the common single-cursor filter case.
 
 ---
 
@@ -96,7 +122,7 @@ source_table: "customers"
 
 # Incremental loading (optional)
 incremental: true
-incremental_key: "updated_at"
+incremental_column: "updated_at"
 initial_value: "2025-01-01"
 
 write_disposition: "merge"

@@ -170,7 +170,7 @@ password: "${DB_PASSWORD}"
 
 write_disposition: append
 incremental: true
-incremental_key: updated_at
+incremental_column: updated_at
 initial_value: "2024-01-01"
 ```
 
