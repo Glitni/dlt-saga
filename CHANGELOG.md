@@ -1,3 +1,8 @@
+## 0.6.2 — 2026-06-26
+
+### Fixed
+- Implement incremental loading for the api source (#144)
+
 ## 0.6.1 — 2026-06-25
 
 ### Added
