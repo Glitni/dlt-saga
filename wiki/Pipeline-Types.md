@@ -80,10 +80,13 @@ tracked watermark for the run):
 saga ingest --select "api__myservice__events" --start-value-override "2024-03-01"
 ```
 
-> For windowed APIs that need a start **and** end parameter, an overlap margin,
-> or non-trivial cursor formatting, subclass `BaseApiPipeline` and build the
-> range in `extract_data()` / `fetch_data()`. The `{incremental_value}`
-> mechanism covers the common single-cursor filter case.
+> The `{incremental_value}` placeholder mechanism applies **only to the default
+> fetch path**. For windowed APIs that need a start **and** end parameter, an
+> overlap margin, or non-trivial cursor formatting, subclass `BaseApiPipeline`
+> and build the range in an overridden `fetch_data()` (or `extract_data()`). A
+> subclass that overrides `fetch_data` owns request construction and manages
+> incremental itself — the base placeholder filter is skipped for it, so it does
+> not need (and is not required to provide) a `{incremental_value}` placeholder.
 
 ---
 

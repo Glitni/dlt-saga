@@ -581,19 +581,36 @@ class BaseApiPipeline(BasePipeline):
             f"(substituted into query params)"
         )
 
+    def _uses_default_fetch_path(self) -> bool:
+        """Whether this pipeline relies on the base request-building path.
+
+        The ``{incremental_value}`` placeholder filter only makes sense for the
+        default fetch path (base ``fetch_data`` / pagination). A subclass that
+        overrides ``fetch_data`` builds its own request and manages incremental
+        loading itself (e.g. date-window APIs that compute start/end periods
+        from the destination watermark), so the base filter must not be imposed
+        on it — doing so would raise on a perfectly valid subclass that simply
+        doesn't use the placeholder mechanism.
+        """
+        return type(self).fetch_data is BaseApiPipeline.fetch_data
+
     def extract_data(self) -> List[Tuple[Any, str]]:
         """Extract data from API.
 
         This is the main method called by BasePipeline.run().
         When pagination is configured, yields records lazily across pages
         so dlt can process them incrementally without loading all pages
-        into memory. When ``incremental`` is configured, the resolved cursor
-        is substituted into ``query_params`` before any request is made.
+        into memory. When ``incremental`` is configured and this pipeline uses
+        the default fetch path, the resolved cursor is substituted into
+        ``query_params`` before any request is made. Subclasses that override
+        ``fetch_data`` manage incremental loading themselves and are left
+        untouched.
 
         Returns:
             List of tuples containing (dlt.resource, description)
         """
-        self._apply_incremental_filter()
+        if self._uses_default_fetch_path():
+            self._apply_incremental_filter()
 
         data: Iterable[Any]
         if self.api_config.pagination:
