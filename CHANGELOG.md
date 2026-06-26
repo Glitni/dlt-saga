@@ -1,3 +1,8 @@
+## 0.7.0 — 2026-06-26
+
+### Added
+- Add date-window incremental pipeline for REST API sources (#149)
+
 ## 0.6.3 — 2026-06-26
 
 ### Fixed
