@@ -1,3 +1,8 @@
+## 0.6.3 — 2026-06-26
+
+### Fixed
+- Skip api incremental filter for fetch_data-overriding subclasses (#146)
+
 ## 0.6.2 — 2026-06-26
 
 ### Fixed
