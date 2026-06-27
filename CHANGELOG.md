@@ -1,3 +1,8 @@
+## 0.7.1 — 2026-06-27
+
+### Fixed
+- Stream date-window records and warn on lossy overlap config (#151)
+
 ## 0.7.0 — 2026-06-26
 
 ### Added
