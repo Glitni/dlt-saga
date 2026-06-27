@@ -1,3 +1,8 @@
+## 0.7.2 — 2026-06-27
+
+### Added
+- Add dev: config override block with dynamic templating (#154)
+
 ## 0.7.1 — 2026-06-27
 
 ### Fixed
