@@ -29,7 +29,7 @@ class by mixing :class:`DateWindowResolver` into a plain ``BasePipeline``.
 import time
 from dataclasses import fields
 from datetime import date, timedelta
-from typing import Any, List, Tuple
+from typing import Any, Iterable, Iterator, List, Tuple
 
 import dlt
 
@@ -65,6 +65,12 @@ class DateWindowApiPipeline(DateWindowResolver, BaseApiPipeline):
         Overrides the base ``extract_data`` (rather than ``fetch_data``) so the
         window is always resolved first — including when ``pagination`` is
         configured, which the base would otherwise dispatch before any hook runs.
+
+        Records stream lazily: the resource is handed an iterator that dlt pulls
+        as it loads, so a wide window (or a long ``per_period_requests`` backfill)
+        is never fully materialized in memory. Window resolution and request
+        validation still happen eagerly here, so a misconfigured pipeline fails
+        before the resource is built rather than mid-load.
         """
         start, end = self.resolve_window()
 
@@ -72,12 +78,13 @@ class DateWindowApiPipeline(DateWindowResolver, BaseApiPipeline):
             self.logger.info(
                 f"Window start {start} is after end {end} — nothing to load this run."
             )
-            data: List[Any] = []
+            records: Iterable[Any] = []
         else:
-            data = self._fetch_window(start, end)
+            # Eager (validation, request shape); the returned iterator is lazy.
+            records = self._fetch_window(start, end)
 
         resource = dlt.resource(
-            data,
+            iter(records),
             name=self.table_name,
             max_table_nesting=self.window_config.max_table_nesting,
         )
@@ -87,7 +94,7 @@ class DateWindowApiPipeline(DateWindowResolver, BaseApiPipeline):
         )
         return [(resource, description)]
 
-    def _fetch_window(self, start: date, end: date) -> List[Any]:
+    def _fetch_window(self, start: date, end: date) -> Iterable[Any]:
         """Fetch all records in the ``[start, end]`` window. The main override point.
 
         Default behaviour places the window into ``query_params`` via
@@ -95,9 +102,12 @@ class DateWindowApiPipeline(DateWindowResolver, BaseApiPipeline):
         ``per_period_requests`` is set, otherwise the whole window in a single
         request (paginated if ``pagination`` is configured).
 
-        Override this for APIs that take the window somewhere other than query
-        params (e.g. a JSON report body). ``resolve_window``, ``iter_days`` and
-        ``_get_watermark`` remain available to the override.
+        Returns a lazy iterator so records stream through to dlt without being
+        collected first; request validation runs eagerly (before iteration) so a
+        missing ``start_param`` / ``end_param`` fails fast. Override this for APIs
+        that take the window somewhere other than query params (e.g. a JSON report
+        body) — return any iterable (a list is fine). ``resolve_window``,
+        ``iter_days`` and ``_get_watermark`` remain available to the override.
         """
         cfg = self.window_config
         if not cfg.start_param and not cfg.end_param:
@@ -108,28 +118,31 @@ class DateWindowApiPipeline(DateWindowResolver, BaseApiPipeline):
                 "  start_param: from\n"
                 "  end_param: to"
             )
+        return self._iter_default_window(start, end)
 
+    def _iter_default_window(self, start: date, end: date) -> Iterator[Any]:
+        """Stream records for the default (query-param) fetch path, lazily."""
+        cfg = self.window_config
         if cfg.per_period_requests:
-            records: List[Any] = []
             for day in self.iter_days(start, end):
                 self._inject_window_params(day, day)
-                records.extend(self._fetch_once())
+                yield from self._fetch_once()
                 if cfg.page_delay:
                     time.sleep(cfg.page_delay)
-            return records
+        else:
+            self._inject_window_params(start, end)
+            yield from self._fetch_once()
 
-        self._inject_window_params(start, end)
-        return self._fetch_once()
-
-    def _fetch_once(self) -> List[Any]:
-        """Fetch the request currently described by ``query_params``.
+    def _fetch_once(self) -> Iterator[Any]:
+        """Yield records for the request currently described by ``query_params``.
 
         Uses the base pagination loop when ``pagination`` is configured, otherwise
-        a single request.
+        a single request. Streams in both cases — pages are not collected first.
         """
         if self.window_config.pagination:
-            return list(self._fetch_all_pages())
-        return self.fetch_data()
+            yield from self._fetch_all_pages()
+        else:
+            yield from self.fetch_data()
 
     def _inject_window_params(self, start: date, end: date) -> None:
         """Place the window bounds into ``query_params`` (preserving other params)."""

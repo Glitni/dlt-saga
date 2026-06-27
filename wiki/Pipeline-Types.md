@@ -118,6 +118,13 @@ date_format: "%Y-%m-%d"
 # pagination: { ... }                (paginates the window when set)
 ```
 
+> **Pair it with `merge`, `scd2`, or `+historize`.** `overlap` deliberately
+> re-fetches already-loaded days to catch late/corrected rows, so every run
+> re-emits those rows. With `merge` (delete-insert on the date column), `scd2`,
+> or `+historize` the re-fetched rows reconcile against what's there; with plain
+> `append` the overlap days **duplicate on every run**. The example above uses
+> `merge` for exactly this reason.
+
 Backfill a specific range with the standard override (wins over the watermark):
 
 ```bash
@@ -179,6 +186,13 @@ so the host just needs the standard `BasePipeline` attributes (`destination`,
 late-arriving/corrected data: `0` = none (resume the day after the watermark),
 `1` = re-fetch the watermark day itself (inclusive — the default), `N` = the
 watermark day plus the `N-1` days before it.
+
+> **`overlap: 0` is only safe with `window_end: yesterday`.** With the default
+> `window_end: today` the watermark day is loaded only up to run time (a partial
+> day), so resuming the day *after* it silently drops rows that arrive later the
+> same day. The framework warns on the `overlap: 0` + `window_end: today`
+> combination. Use `overlap >= 1` to re-fetch the watermark day, or
+> `window_end: yesterday` to only ever load complete days.
 
 ---
 

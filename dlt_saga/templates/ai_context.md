@@ -221,7 +221,10 @@ own SDK/HTTP/DB client, not `BaseApiPipeline`) gets the same behaviour by mixing
 `DateWindowResolver` (from `dlt_saga.pipelines.date_window`), inheriting `DateWindowConfig` on its
 config, exposing a `window_config` property, and calling `resolve_window()` / `iter_days()` from
 `extract_data`. `overlap` = days to re-fetch: 1 is inclusive of the watermark day (default), 0
-resumes after it.
+resumes after it (only safe with `window_end: yesterday` — `overlap: 0` + `window_end: today` drops
+same-day late rows and is warned about). Because `overlap` re-fetches already-loaded days, pair the
+date-window adapter with `merge`/`scd2`/`+historize` so re-fetched rows reconcile; plain `append`
+duplicates the overlap days every run.
 
 For simple REST APIs, you may not need a custom pipeline class at all — the built-in `dlt_saga.api` adapter handles most cases via YAML config alone:
 
