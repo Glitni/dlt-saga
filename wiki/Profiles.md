@@ -50,7 +50,7 @@ saga ingest --target local                        # Local DuckDB
 | `schema` | No | auto | Dataset/schema name (supports `{{ env_var('VAR') }}`) |
 | `run_as` | No | — | Identity to impersonate (service account email for GCP) |
 | `auth_provider` | No | auto | Auth backend: `gcp`, `azure`, `databricks` (inferred from `type` if omitted) |
-| `dev_row_limit` | No | — | Limit rows extracted per resource (dev only) |
+| `dev_row_limit` | No | — | Consumer-side row cap (dev only). Only shortens extraction for lazily-streamed resources; for windowed/incremental sources use a config `dev:` block instead — see [Configuration → Dev Overrides](Configuration#dev-overrides) |
 | `table_format` | No | `native` | Table format: `native` or `iceberg` |
 | `storage_path` | No | — | Base storage URI for external table formats (e.g. `gs://bucket/path/` for BigQuery Iceberg) |
 
