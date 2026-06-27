@@ -301,6 +301,36 @@ class TestGenerateSchemasOutput:
             assert field.get("minimum") == 1
             assert "BigQuery" in field.get("description", "")
 
+    def test_dev_override_block_in_pipeline_schemas(self, tmp_path):
+        """Every per-pipeline schema allows a `dev:` override block that mirrors
+        the config keys, requires nothing, and rejects typos."""
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        project_level = {
+            "dlt_common.json",
+            "profiles_config.json",
+            "saga_project_config.json",
+            "packages_config.json",
+        }
+        checked = 0
+        for schema_path in tmp_path.glob("*_config.json"):
+            if schema_path.name in project_level:
+                continue
+            data = json.loads(schema_path.read_text(encoding="utf-8"))
+            props = data.get("properties", {})
+            assert "dev" in props, f"{schema_path.name} missing dev override block"
+            dev = props["dev"]
+            assert dev["type"] == "object"
+            # Mirrors config keys (so values validate/autocomplete)...
+            assert "initial_value" in dev["properties"]
+            # ...but does not nest, requires nothing, and still catches typos.
+            assert "dev" not in dev["properties"]
+            assert "required" not in dev
+            assert dev["additionalProperties"] is False
+            checked += 1
+        assert checked > 0
+
     def test_shared_adapter_keys_valid_in_pipelines_section(self, tmp_path):
         """Adapter config keys shared across a group via saga_project.yml must
         validate as typed properties (both the plain and `+merge` forms),

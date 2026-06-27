@@ -6,6 +6,13 @@ config values. Uses a sandboxed environment and is applied at config-load time,
 before any hierarchical merge, so every layer resolves to concrete strings
 independently.
 
+The standard-library ``datetime``, ``timedelta`` and ``timezone`` are also in
+scope, so values can be computed relative to run time without any bespoke
+helpers — the expression stays self-evident at the call site, e.g. a rolling
+seed for a dev override::
+
+    {{ (datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%d') }}
+
 Public API:
     render_template_str(value) -> str
     render_templates(obj) -> obj   # recursive over dict/list/str
@@ -13,6 +20,7 @@ Public API:
 
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from jinja2 import TemplateError
@@ -42,6 +50,14 @@ def _get_env() -> SandboxedEnvironment:
     if _env is None:
         env = SandboxedEnvironment(autoescape=False)
         env.globals["env_var"] = _env_var
+        # Standard-library date/time, so configs can compute rolling values
+        # relative to run time (e.g. a dev seed) with plain, visible Python
+        # rather than bespoke helpers. The sandbox still blocks imports and
+        # dunder/underscore attribute access, so exposing these classes adds no
+        # escape surface.
+        env.globals["datetime"] = datetime
+        env.globals["timedelta"] = timedelta
+        env.globals["timezone"] = timezone
         _env = env
     return _env
 

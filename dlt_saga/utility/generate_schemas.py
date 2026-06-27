@@ -298,11 +298,35 @@ def generate_schema_for_pipeline(
     target_fields = get_target_fields_from_dataclass()
     all_properties.update(target_fields)
 
+    # `dev:` is a load-time override block, not a dataclass field. Mirror every
+    # config key so values inside it validate and autocomplete, but require
+    # nothing — a dev block overrides only a subset.
+    all_properties["dev"] = _dev_override_property(all_properties)
+
     schema["properties"] = all_properties
     if all_required:
         schema["required"] = sorted(list(set(all_required)))
 
     return schema
+
+
+def _dev_override_property(properties: Dict[str, Any]) -> Dict[str, Any]:
+    """Schema for the ``dev:`` override block: the config's keys, none required.
+
+    Applied only in the ``dev`` environment (and stripped elsewhere), the block
+    may override any config key — so it mirrors the surrounding property set with
+    no ``required`` constraint. ``dev`` itself is excluded to avoid nesting.
+    """
+    return {
+        "type": "object",
+        "description": (
+            "Overrides applied only when the active environment is 'dev' "
+            "(stripped in all environments). Any config key may be overridden; "
+            "values support Jinja templating (e.g. a rolling initial_value)."
+        ),
+        "properties": {k: v for k, v in properties.items() if k != "dev"},
+        "additionalProperties": False,
+    }
 
 
 # ---------------------------------------------------------------------------

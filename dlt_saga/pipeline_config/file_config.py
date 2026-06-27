@@ -31,6 +31,12 @@ from dlt_saga.utility.templating import render_templates
 
 logger = logging.getLogger(__name__)
 
+# Lowercase-keyed dicts in the `pipelines:` hierarchy are normally folder
+# segments. These keys are config blocks instead, so the folder heuristic must
+# not mistake them for pipeline-group folders — letting them be set as
+# project-wide or folder-level defaults.
+_RESERVED_BLOCK_KEYS = {"dev"}
+
 
 class FilePipelineConfig(ConfigSource):
     """Configuration source that reads YAML files from a directory structure.
@@ -329,6 +335,11 @@ class FilePipelineConfig(ConfigSource):
         # Apply hierarchical resolution (dlt_project.yml defaults)
         resolved_config = self._resolve_config(config_path, file_config)
 
+        # Fold the `dev:` override block into the config (dev only). Applied
+        # after the hierarchical resolve so a project-level `dev:` inherits down
+        # like any other key.
+        resolved_config = self._apply_dev_overrides(resolved_config)
+
         # Determine pipeline group from path
         pipeline_group = self._get_pipeline_group_from_path(config_path)
 
@@ -374,6 +385,27 @@ class FilePipelineConfig(ConfigSource):
             source_type="file",
         )
 
+    def _apply_dev_overrides(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Fold a top-level ``dev:`` override block into the config.
+
+        A ``dev:`` block lets a config (or a project/folder default) carry
+        dev-only values — most usefully a smaller ``initial_value`` so dev runs
+        load a recent slice instead of full history. Its values are ordinary
+        config keys and are already Jinja-rendered at load time, so
+        ``dev: {initial_value: "{{ (datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%d') }}"}``
+        resolves to a concrete, rolling date.
+
+        The block is **always stripped** so it never reaches the pipeline, and it
+        only takes effect when the active environment is ``dev``. Override is
+        shallow: each key in ``dev:`` replaces the corresponding top-level key.
+        """
+        dev_overrides = config.pop("dev", None)
+        if (get_environment() or "").lower() == "dev" and isinstance(
+            dev_overrides, dict
+        ):
+            config.update(dev_overrides)
+        return config
+
     # =========================================================================
     # Hierarchical Configuration Resolution
     # =========================================================================
@@ -398,11 +430,14 @@ class FilePipelineConfig(ConfigSource):
         if not project_defaults:
             return
         for key, value in project_defaults.items():
-            # Skip keys that are path segments (nested folders)
-            if self._is_path_segment_dict(value):
+            clean_key = key.lstrip("+")
+            # Skip keys that are path segments (nested folders), but not reserved
+            # config blocks (e.g. `dev:`) that merely look like one.
+            if clean_key not in _RESERVED_BLOCK_KEYS and self._is_path_segment_dict(
+                value
+            ):
                 continue
             # Remove + prefix if present (all project level uses inherit by default)
-            clean_key = key.lstrip("+")
             resolved[clean_key] = value
 
     def _extract_level_config(
@@ -411,8 +446,13 @@ class FilePipelineConfig(ConfigSource):
         """Extract config at current hierarchy level, excluding path segments."""
         level_config = {}
         for key, value in current_dict.items():
-            # Skip nested path segments (but not if we're at the last segment)
-            if not is_last_segment and self._is_path_segment_dict(value):
+            # Skip nested path segments (but not if we're at the last segment),
+            # except reserved config blocks (e.g. `dev:`) that look like folders.
+            if (
+                not is_last_segment
+                and key.lstrip("+") not in _RESERVED_BLOCK_KEYS
+                and self._is_path_segment_dict(value)
+            ):
                 continue
             level_config[key] = value
         return level_config

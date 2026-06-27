@@ -230,6 +230,116 @@ class TestConfigInterpolation:
 
 
 @pytest.mark.unit
+class TestDevOverrides:
+    """The `dev:` block overrides config keys in dev, is stripped everywhere."""
+
+    def _config(self, project_config=None):
+        c = FilePipelineConfig()
+        c.project_config = project_config or {}
+        return c
+
+    def test_applied_in_dev_and_stripped(self):
+        c = self._config()
+        with patch(
+            "dlt_saga.pipeline_config.file_config.get_environment", return_value="dev"
+        ):
+            resolved = c._apply_dev_overrides(
+                {"initial_value": "2020-01-01", "dev": {"initial_value": "2026-06-20"}}
+            )
+        assert resolved["initial_value"] == "2026-06-20"
+        assert "dev" not in resolved
+
+    def test_ignored_in_prod_and_stripped(self):
+        c = self._config()
+        with patch(
+            "dlt_saga.pipeline_config.file_config.get_environment", return_value="prod"
+        ):
+            resolved = c._apply_dev_overrides(
+                {"initial_value": "2020-01-01", "dev": {"initial_value": "2026-06-20"}}
+            )
+        assert resolved["initial_value"] == "2020-01-01"
+        assert "dev" not in resolved
+
+    def test_no_dev_block_is_noop(self):
+        c = self._config()
+        with patch(
+            "dlt_saga.pipeline_config.file_config.get_environment", return_value="dev"
+        ):
+            resolved = c._apply_dev_overrides({"initial_value": "2020-01-01"})
+        assert resolved == {"initial_value": "2020-01-01"}
+
+    def test_folder_group_dev_default_inherits_and_is_scoped(self):
+        # The natural placement: a folder (pipeline-group) default. Must reach
+        # the group at any depth, and not leak to other groups.
+        c = self._config(
+            {"pipelines": {"api": {"+dev": {"initial_value": "API_GROUP"}}}}
+        )
+        with patch(
+            "dlt_saga.pipeline_config.file_config.get_environment", return_value="dev"
+        ):
+            shallow = c._apply_dev_overrides(c._resolve_config("configs/api/x.yml", {}))
+            nested = c._apply_dev_overrides(
+                c._resolve_config("configs/api/myservice/x.yml", {})
+            )
+            other = c._apply_dev_overrides(
+                c._resolve_config("configs/google_sheets/x.yml", {})
+            )
+        assert shallow["initial_value"] == "API_GROUP"
+        assert nested["initial_value"] == "API_GROUP"  # dev under non-last segment
+        assert "initial_value" not in other  # scoped to the api group
+
+    def test_project_wide_dev_default_inherits(self):
+        # A top-level `pipelines: +dev:` default must reach pipelines despite the
+        # folder-segment heuristic (dev is a reserved config block, not a folder).
+        c = self._config({"pipelines": {"+dev": {"initial_value": "PROJECT"}}})
+        with patch(
+            "dlt_saga.pipeline_config.file_config.get_environment", return_value="dev"
+        ):
+            resolved = c._apply_dev_overrides(
+                c._resolve_config("configs/api/x.yml", {})
+            )
+        assert resolved["initial_value"] == "PROJECT"
+        assert "dev" not in resolved
+
+    def test_file_dev_overrides_project_default(self):
+        c = self._config({"pipelines": {"+dev": {"initial_value": "PROJECT"}}})
+        with patch(
+            "dlt_saga.pipeline_config.file_config.get_environment", return_value="dev"
+        ):
+            resolved = c._apply_dev_overrides(
+                c._resolve_config(
+                    "configs/api/x.yml", {"dev": {"initial_value": "FILE"}}
+                )
+            )
+        assert resolved["initial_value"] == "FILE"
+
+    def test_dynamic_rolling_date_via_jinja(self, tmp_path):
+        # End-to-end: a Jinja datetime expression in the dev block resolves to a
+        # concrete rolling date at load time.
+        from datetime import datetime, timedelta, timezone
+
+        configs = tmp_path / "configs" / "api"
+        configs.mkdir(parents=True)
+        (configs / "events.yml").write_text(
+            "write_disposition: append\n"
+            "incremental_column: event_date\n"
+            "initial_value: 2020-01-01\n"
+            "dev:\n"
+            '  initial_value: "{{ (datetime.now(timezone.utc) - timedelta(days=7))'
+            ".strftime('%Y-%m-%d') }}\"\n",
+            encoding="utf-8",
+        )
+        expected = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+
+        source = FilePipelineConfig(root_dir=str(tmp_path / "configs"))
+        with patch(
+            "dlt_saga.pipeline_config.file_config.get_environment", return_value="dev"
+        ):
+            result = source._load_config_file(str(configs / "events.yml"))
+        assert result.config_dict["initial_value"] == expected
+
+
+@pytest.mark.unit
 class TestLoadProjectConfig:
     def test_nonexistent(self):
         with patch("pathlib.Path.exists", return_value=False):

@@ -67,6 +67,38 @@ class TestRenderTemplateStr:
 
 
 @pytest.mark.unit
+class TestDateTimeGlobals:
+    """Stdlib datetime/timedelta/timezone exposed for rolling, dynamic values."""
+
+    def test_relative_date_expression(self):
+        from datetime import datetime, timedelta, timezone
+
+        expected = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+        result = render_template_str(
+            "{{ (datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%d') }}"
+        )
+        assert result == expected
+
+    def test_today_iso(self):
+        from datetime import datetime, timezone
+
+        expected = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert (
+            render_template_str("{{ datetime.now(timezone.utc).strftime('%Y-%m-%d') }}")
+            == expected
+        )
+
+    def test_custom_format(self):
+        from datetime import datetime, timezone
+
+        expected = datetime.now(timezone.utc).strftime("%Y%m%d")
+        assert (
+            render_template_str("{{ datetime.now(timezone.utc).strftime('%Y%m%d') }}")
+            == expected
+        )
+
+
+@pytest.mark.unit
 class TestRenderTemplates:
     def test_recurses_dicts_and_lists(self, monkeypatch):
         monkeypatch.setenv("DS", "data")

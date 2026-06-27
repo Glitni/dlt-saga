@@ -63,7 +63,8 @@ spreadsheet_id: "123ABC"
 | `dataset_name` | string | — | Override default dataset |
 | `access` | list | — | BigQuery IAM access (`"group:email"`, `"user:email"`) |
 | `columns` | dict | — | Explicit column type hints — see [Column Hints](#column-hints) |
-| `dev_row_limit` | int | — | Limit rows in dev (uses `dlt.resource.add_limit()`) |
+| `dev_row_limit` | int | — | Consumer-side row cap (set on the profile target). Only shortens extraction for resources that stream lazily; for windowed/incremental sources use `dev:` instead — see [Dev Overrides](#dev-overrides) |
+| `dev` | dict | — | Override block applied only in the `dev` environment (and stripped elsewhere) — see [Dev Overrides](#dev-overrides) |
 | `task_group` | string | — | Group pipelines to run together in orchestration mode |
 | `adapter` | string | — | Explicit pipeline implementation binding (e.g., `dlt_saga.api.myservice`) |
 | `filters` | list | — | Row-level filters applied during ingest — see [Row Filters](#row-filters) |
@@ -218,6 +219,30 @@ Override at runtime for backfills:
 ```bash
 saga ingest --select "my_pipeline" --start-value-override "2025-06-01"
 ```
+
+### Dev Overrides
+
+A `dev:` block carries values that apply **only when the active environment is `dev`**. Its keys override the corresponding top-level keys; the block is always stripped, so it never reaches production or the pipeline itself. The most common use is a smaller `initial_value` so dev runs load a recent slice instead of full history (the cost of a windowed/incremental source is its time range — shrinking the range is what makes dev fast, which `dev_row_limit` cannot do for these sources):
+
+```yaml
+initial_value: "2020-01-01"          # prod seed, untouched
+dev:
+  initial_value: "{{ (datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%d') }}"
+```
+
+The block follows the normal config hierarchy. The natural place for a shared `initial_value` is a **folder (pipeline-group) default** in `saga_project.yml`, since pipelines in a group usually share a cursor type (all dates, or all numeric IDs) — a single project-wide value rarely fits every group at once:
+
+```yaml
+# saga_project.yml
+pipelines:
+  api:                                  # applies to all configs/api/** pipelines
+    +dev:
+      initial_value: "{{ (datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%d') }}"
+```
+
+A project-wide `pipelines: +dev:` default and a per-pipeline `dev:` block in the config file are also supported; more specific levels win (file > folder > project), so use the project-wide form only for overrides that are genuinely uniform across all groups.
+
+**Dynamic values via templating.** Config values are rendered with Jinja at load time, and the standard-library `datetime`, `timedelta` and `timezone` are in scope alongside `env_var(...)`. This keeps the expression self-evident at the call site — the subtraction, the timezone and the output format are all visible — and because it's evaluated each run the seed is a **rolling** date that never goes stale. It's plain Python, so it composes for any cursor shape (a numeric-ID source just won't use date math).
 
 ### Scheduling tags
 

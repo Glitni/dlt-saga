@@ -103,7 +103,15 @@ class ProfileTarget:
     dev_row_limit: Optional[int] = field(
         default=None,
         metadata={
-            "description": "Row limit for dev testing (limits rows extracted per resource)",
+            "description": (
+                "Consumer-side row cap for dev testing. Stops dlt pulling from a "
+                "resource after N rows, so it only shortens extraction for "
+                "resources that stream lazily; for adapters that fetch everything "
+                "up front it just caps what's written, not what's fetched. For "
+                "date-windowed / incremental sources, prefer a `dev:` override "
+                "block (e.g. a smaller `initial_value`) to shrink the source "
+                "range itself."
+            ),
         },
     )
     table_format: str = field(
