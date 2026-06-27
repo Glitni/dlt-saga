@@ -25,6 +25,7 @@ import requests
 
 from dlt_saga.pipelines.api.config import ApiConfig
 from dlt_saga.pipelines.base_pipeline import BasePipeline
+from dlt_saga.pipelines.watermark import read_destination_watermark
 
 logger = logging.getLogger(__name__)
 
@@ -504,12 +505,13 @@ class BaseApiPipeline(BasePipeline):
         if self.api_config.start_value_override:
             return self.api_config.start_value_override
 
-        column = self.api_config.incremental_column
-        table_id = (
-            f"{self.destination_database}.{self.pipeline.dataset_name}."
-            f"{self.table_name}"
+        watermark = read_destination_watermark(
+            self.destination,
+            self.destination_database,
+            self.pipeline.dataset_name,
+            self.table_name,
+            self.api_config.incremental_column,
         )
-        watermark = self.destination.get_max_column_value(table_id, column)
         if watermark is None:
             watermark = self.api_config.initial_value
         return watermark

@@ -92,6 +92,20 @@ class TestDateWindowConfig:
         with pytest.raises(ValueError, match="on_first_run must be one of"):
             DateWindowApiConfig(**_base_cfg(on_first_run="whenever"))
 
+    def test_overlap_zero_with_window_end_today_warns(self, caplog):
+        # Silent-data-loss footgun: warn, don't fail.
+        with caplog.at_level(logging.WARNING):
+            DateWindowApiConfig(**_base_cfg(overlap=0, window_end="today"))
+        assert any(
+            "overlap=0 with window_end='today'" in r.message for r in caplog.records
+        )
+
+    def test_overlap_zero_with_window_end_yesterday_is_silent(self, caplog):
+        # overlap=0 only loads complete days here — safe, no warning.
+        with caplog.at_level(logging.WARNING):
+            DateWindowApiConfig(**_base_cfg(overlap=0, window_end="yesterday"))
+        assert not any("overlap=0" in r.message for r in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # Window resolution
@@ -219,12 +233,14 @@ class TestFetchWindow:
             ),
             responses=[[{"id": 1}, {"id": 2}]],
         )
-        resources = p.extract_data()
+        resource, _desc = p.extract_data()[0]
+        # Records stream lazily — the request fires only when the resource is read.
+        assert p._calls == []
+        rows = list(resource)
         # One request for the whole window
         assert len(p._calls) == 1
         assert p._calls[0] == {"from": "2024-03-01", "to": "2024-03-03"}
-        resource, _desc = resources[0]
-        assert [r["id"] for r in resource] == [1, 2]
+        assert [r["id"] for r in rows] == [1, 2]
 
     def test_end_param_exclusive_adds_a_day(self):
         p = FakeDateWindowPipeline(
@@ -237,7 +253,7 @@ class TestFetchWindow:
             ),
             responses=[[]],
         )
-        p.extract_data()
+        list(p.extract_data()[0][0])
         assert p._calls[0]["to"] == "2024-03-04"
 
     def test_per_period_requests_one_per_day(self):
@@ -250,14 +266,33 @@ class TestFetchWindow:
             ),
             responses=[[{"id": 1}], [{"id": 2}], [{"id": 3}]],
         )
-        resources = p.extract_data()
+        resource, _desc = p.extract_data()[0]
+        rows = list(resource)
         assert [c["date"] for c in p._calls] == [
             "2024-03-01",
             "2024-03-02",
             "2024-03-03",
         ]
-        resource, _desc = resources[0]
-        assert [r["id"] for r in resource] == [1, 2, 3]
+        assert [r["id"] for r in rows] == [1, 2, 3]
+
+    def test_per_period_streams_lazily(self):
+        # Pull one record and assert only the first day's request has fired —
+        # proof the whole window isn't materialized up front.
+        p = FakeDateWindowPipeline(
+            _base_cfg(
+                start_value_override="2024-03-01",
+                end_value_override="2024-03-03",
+                start_param="date",
+                per_period_requests=True,
+            ),
+            responses=[[{"id": 1}], [{"id": 2}], [{"id": 3}]],
+        )
+        resource, _desc = p.extract_data()[0]
+        gen = iter(resource)
+        assert next(gen)["id"] == 1
+        assert len(p._calls) == 1  # only day one fetched so far
+        assert next(gen)["id"] == 2
+        assert len(p._calls) == 2
 
     def test_preserves_other_query_params(self):
         p = FakeDateWindowPipeline(
@@ -270,7 +305,7 @@ class TestFetchWindow:
             ),
             responses=[[]],
         )
-        p.extract_data()
+        list(p.extract_data()[0][0])
         assert p._calls[0]["status"] == "active"
 
     def test_custom_date_format(self):
@@ -283,7 +318,7 @@ class TestFetchWindow:
             ),
             responses=[[]],
         )
-        p.extract_data()
+        list(p.extract_data()[0][0])
         assert p._calls[0]["from"] == "20240301"
 
     def test_missing_params_raises(self):

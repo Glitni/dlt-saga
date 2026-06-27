@@ -13,12 +13,16 @@ over ``BaseApiPipeline``) and can be mixed into custom-client pipelines (a plain
 ``BasePipeline`` with its own SDK/HTTP/DB client).
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Iterator, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from dlt_saga.pipelines.base_config import BaseConfig
+from dlt_saga.pipelines.watermark import read_destination_watermark
+
+logger = logging.getLogger(__name__)
 
 _WINDOW_END_VALUES = ("today", "yesterday")
 _ON_FIRST_RUN_VALUES = ("error", "today", "yesterday")
@@ -34,6 +38,12 @@ class DateWindowConfig(BaseConfig):
     directly for a custom-client pipeline. ``incremental_column`` / ``initial_value``
     / ``start_value_override`` / ``end_value_override`` are inherited from
     ``BaseConfig``; ``incremental`` defaults to ``True`` since that is the point.
+
+    Note on write disposition: ``overlap`` deliberately re-fetches already-loaded
+    days to catch late/corrected rows, so each run re-emits those rows. Pair the
+    date-window adapter with ``merge`` (delete-insert on the date column),
+    ``scd2``, or ``+historize`` so the re-fetched rows reconcile instead of
+    accumulating. With plain ``append`` the overlap days duplicate on every run.
     """
 
     incremental: bool = field(
@@ -97,6 +107,19 @@ class DateWindowConfig(BaseConfig):
                 f"on_first_run must be one of {_ON_FIRST_RUN_VALUES}, got '{self.on_first_run}'"
             )
 
+        # overlap=0 resumes the day *after* the watermark. With window_end=today
+        # the watermark day was only partially loaded (up to the previous run),
+        # so rows arriving later that same day are never picked up — silent data
+        # loss. overlap=0 is only safe with window_end=yesterday (complete days).
+        if self.incremental and self.overlap == 0 and self.window_end == "today":
+            logger.warning(
+                "overlap=0 with window_end='today' can silently drop rows: the "
+                "watermark day is only partially loaded, and resuming the day "
+                "after it skips rows that arrive later the same day. Use overlap "
+                ">= 1 to re-fetch the watermark day, or window_end='yesterday' to "
+                "only load complete days."
+            )
+
 
 class DateWindowResolver:
     """Mixin: resolve an idempotent ``[start, end]`` date window from the warehouse.
@@ -139,17 +162,16 @@ class DateWindowResolver:
         run. The destination is the source of truth for the high-water mark, so a
         missed or failed run is caught up on the next run with no gaps.
         """
-        column = self.window_config.incremental_column
-        if not column:
-            return None
-        table_id = (
-            f"{self.destination_database}.{self.pipeline.dataset_name}."
-            f"{self.table_name}"
-        )
         try:
-            return self.destination.get_max_column_value(table_id, column)
+            return read_destination_watermark(
+                self.destination,
+                self.destination_database,
+                self.pipeline.dataset_name,
+                self.table_name,
+                self.window_config.incremental_column,
+            )
         except Exception as e:  # pragma: no cover - destination already guards
-            self.logger.debug(f"No watermark for {table_id} (likely first run): {e}")
+            self.logger.debug(f"No watermark (likely first run): {e}")
             return None
 
     def _watermark_date(self) -> Optional[date]:
