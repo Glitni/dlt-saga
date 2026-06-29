@@ -128,6 +128,8 @@ class ExecutionPlanManager:
         - started_at: When execution started
         - completed_at: When execution completed
         - error_message: Error details if failed
+        - is_orchestrated: True for orchestrator/worker runs, False for local
+          runs recorded directly. NULL on legacy rows is read as orchestrated.
         """
         d = self.destination
         d.ensure_schema_exists(self.schema)
@@ -145,7 +147,8 @@ class ExecutionPlanManager:
                 status {self._t("string")} NOT NULL,
                 started_at {self._t("timestamp")},
                 completed_at {self._t("timestamp")},
-                error_message {self._t("string")}
+                error_message {self._t("string")},
+                is_orchestrated {self._t("bool")}
             )
             {d.partition_ddl("log_timestamp")}
             {d.cluster_ddl(["execution_id", "task_index"])}
@@ -163,13 +166,42 @@ class ExecutionPlanManager:
                 select_criteria {self._t("string")},
                 environment {self._t("string")},
                 profile {self._t("string")},
-                target {self._t("string")}
+                target {self._t("string")},
+                is_orchestrated {self._t("bool")}
             )
         """
         d.execute_sql(exec_ddl, self.schema)
 
+        # Backfill the is_orchestrated column on tables created before it
+        # existed (CREATE IF NOT EXISTS won't alter them). Best-effort.
+        from dlt_saga.project_config import (
+            get_execution_plans_table_name,
+            get_executions_table_name,
+        )
+
+        self._ensure_column(get_execution_plans_table_name(), "is_orchestrated", "bool")
+        self._ensure_column(get_executions_table_name(), "is_orchestrated", "bool")
+
         # View for latest status per pipeline per execution
         self._ensure_view_exists()
+
+    def _ensure_column(self, table_name: str, column: str, logical_type: str) -> None:
+        """Add a column to an existing table if it's missing (best-effort).
+
+        Fresh tables already have the column from CREATE; this only matters for
+        tables that predate the column. Swallows errors (e.g. a destination
+        without column introspection) so it never breaks a run.
+        """
+        d = self.destination
+        try:
+            existing = {
+                c[0].lower() for c in d.list_table_columns(self.schema, table_name)
+            }
+            if column.lower() not in existing:
+                d.add_column(self.schema, table_name, column, self._t(logical_type))
+                logger.debug(f"Added column {column} to {self.schema}.{table_name}")
+        except Exception as e:
+            logger.debug(f"Could not ensure column {column} on {table_name}: {e}")
 
     def _ensure_view_exists(self):
         """Create or replace the current-status view.
@@ -364,14 +396,14 @@ class ExecutionPlanManager:
                 f"{self._format_sql_value(row['table_name'])}, "
                 f"{parse_json}, "
                 f"{self._format_sql_value(row['status'])}, "
-                f"NULL, NULL, NULL)"
+                f"NULL, NULL, NULL, TRUE)"
             )
 
         insert_sql = f"""
             INSERT INTO {self.plans_table_id}
             (log_timestamp, execution_id, task_index, pipeline_type,
              pipeline_identifier, table_name, config_json, status,
-             started_at, completed_at, error_message)
+             started_at, completed_at, error_message, is_orchestrated)
             VALUES
             {",".join(value_clauses)}
         """
@@ -381,7 +413,7 @@ class ExecutionPlanManager:
         meta_sql = f"""
             INSERT INTO {self.executions_table_id}
             (execution_id, created_at, command, pipeline_count, task_count,
-             select_criteria, environment, profile, target)
+             select_criteria, environment, profile, target, is_orchestrated)
             VALUES (
                 {self._format_sql_value(execution_id)},
                 {now},
@@ -391,7 +423,8 @@ class ExecutionPlanManager:
                 {self._format_sql_value(meta.select_criteria)},
                 {self._format_sql_value(meta.environment)},
                 {self._format_sql_value(meta.profile)},
-                {self._format_sql_value(meta.target)}
+                {self._format_sql_value(meta.target)},
+                TRUE
             )
         """
         d.execute_sql(meta_sql, self.schema)
@@ -403,6 +436,113 @@ class ExecutionPlanManager:
         self._log_task_mapping(rows_to_insert)
 
         return execution_id
+
+    def record_local_run(
+        self,
+        results: List[Dict[str, Any]],
+        metadata: Optional[ExecutionMetadata] = None,
+        execution_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Record a local (non-orchestrated) run's per-pipeline outcomes.
+
+        Unlike ``create_execution_plan`` (which plans pending tasks for remote
+        workers), this writes terminal-state rows directly — one
+        ``_saga_execution_plans`` row per pipeline plus one ``_saga_executions``
+        row — all flagged ``is_orchestrated = FALSE``. ``pending``/``running``
+        states are skipped; local runs are synchronous, so only the final
+        ``completed``/``failed`` outcome is recorded.
+
+        Best-effort: any failure here is logged and swallowed so it can never
+        break the run it's reporting on.
+
+        Args:
+            results: One dict per pipeline with keys ``pipeline_type``,
+                ``pipeline_identifier``, ``table_name``, ``status``
+                (``completed``/``failed``), and optional ``error_message``.
+            metadata: Execution-level metadata (command, selection, context).
+            execution_id: Optional explicit ID; a UUID is generated otherwise.
+
+        Returns:
+            The execution_id, or None if there was nothing to record.
+        """
+        if not results:
+            return None
+
+        execution_id = execution_id or str(uuid.uuid4())
+        meta = metadata or ExecutionMetadata()
+        d = self.destination
+        now = d.current_timestamp_expression()
+        empty_json = d.parse_json_expression(self._format_sql_value("{}"))
+
+        value_clauses = []
+        for task_index, row in enumerate(results):
+            value_clauses.append(
+                f"({now}, "
+                f"{self._format_sql_value(execution_id)}, "
+                f"{self._format_sql_value(task_index)}, "
+                f"{self._format_sql_value(row['pipeline_type'])}, "
+                f"{self._format_sql_value(row['pipeline_identifier'])}, "
+                f"{self._format_sql_value(row['table_name'])}, "
+                f"{empty_json}, "
+                f"{self._format_sql_value(row['status'])}, "
+                f"{now}, {now}, "
+                f"{self._format_sql_value(row.get('error_message') or '')}, "
+                f"FALSE)"
+            )
+
+        plans_sql = f"""
+            INSERT INTO {self.plans_table_id}
+            (log_timestamp, execution_id, task_index, pipeline_type,
+             pipeline_identifier, table_name, config_json, status,
+             started_at, completed_at, error_message, is_orchestrated)
+            VALUES
+            {",".join(value_clauses)}
+        """
+        meta_sql = f"""
+            INSERT INTO {self.executions_table_id}
+            (execution_id, created_at, command, pipeline_count, task_count,
+             select_criteria, environment, profile, target, is_orchestrated)
+            VALUES (
+                {self._format_sql_value(execution_id)},
+                {now},
+                {self._format_sql_value(meta.command)},
+                {self._format_sql_value(len(results))},
+                {self._format_sql_value(len(results))},
+                {self._format_sql_value(meta.select_criteria)},
+                {self._format_sql_value(meta.environment)},
+                {self._format_sql_value(meta.profile)},
+                {self._format_sql_value(meta.target)},
+                FALSE
+            )
+        """
+
+        def _insert() -> None:
+            d.execute_sql(plans_sql, self.schema)
+            d.execute_sql(meta_sql, self.schema)
+
+        # Optimistic: skip the per-run ensure_table_exists() overhead (CREATE
+        # IF NOT EXISTS + column checks + view replace = several BigQuery jobs).
+        # Only fall back to creating/migrating the tables if the inserts fail
+        # because they don't exist yet — the common steady-state cost is just
+        # the two inserts.
+        try:
+            _insert()
+            logger.debug(
+                f"Recorded local run {execution_id} with {len(results)} pipeline(s)"
+            )
+            return execution_id
+        except Exception:
+            try:
+                self.ensure_table_exists()
+                _insert()
+                logger.debug(
+                    f"Recorded local run {execution_id} with {len(results)} "
+                    "pipeline(s) (after table init)"
+                )
+                return execution_id
+            except Exception as e:
+                logger.debug(f"Could not record local run {execution_id}: {e}")
+                return None
 
     def get_task_assignment(
         self, execution_id: str, task_index: int
@@ -552,7 +692,7 @@ class ExecutionPlanManager:
                     INSERT INTO {self.plans_table_id}
                     (log_timestamp, execution_id, task_index, pipeline_type,
                      pipeline_identifier, table_name, config_json, status,
-                     started_at, completed_at, error_message)
+                     started_at, completed_at, error_message, is_orchestrated)
                     VALUES (
                         {now},
                         '{safe_eid}',
@@ -564,7 +704,8 @@ class ExecutionPlanManager:
                         {self._format_sql_value(status)},
                         {started_at_sql},
                         {completed_at_sql},
-                        {self._format_sql_value(error_message or "")}
+                        {self._format_sql_value(error_message or "")},
+                        TRUE
                     )
                 """
                 d.execute_sql(insert_sql, self.schema)

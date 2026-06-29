@@ -456,3 +456,86 @@ class TestForcePropagation:
         env = request.overrides.container_overrides[0].env
         names = {e["name"] for e in env}
         assert "SAGA_WORKER_CONCURRENCY" not in names
+
+
+@pytest.mark.unit
+class TestRecordLocalRun:
+    """record_local_run captures local (non-orchestrated) run outcomes."""
+
+    def _records(self):
+        return [
+            {
+                "pipeline_type": "api",
+                "pipeline_identifier": "api/orders",
+                "table_name": "orders",
+                "status": "completed",
+                "error_message": None,
+            },
+            {
+                "pipeline_type": "database",
+                "pipeline_identifier": "database/geozone",
+                "table_name": "geozone",
+                "status": "failed",
+                "error_message": "NotFound: 404 table missing",
+            },
+        ]
+
+    def test_writes_terminal_rows_flagged_local(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        eid = manager.record_local_run(
+            self._records(),
+            metadata=ExecutionMetadata(command="run", environment="dev"),
+            execution_id="local-001",
+        )
+
+        assert eid == "local-001"
+        all_sql = " ".join(dest.sql_calls)
+        # Both the plans insert and the executions insert flag the run local.
+        assert "is_orchestrated" in all_sql
+        assert "FALSE" in all_sql
+        assert "TRUE" not in all_sql  # nothing orchestrated was written
+        # Terminal statuses and the real error are recorded.
+        assert "'completed'" in all_sql
+        assert "'failed'" in all_sql
+        assert "NotFound: 404 table missing" in all_sql
+
+    def test_empty_results_writes_nothing(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        assert manager.record_local_run([]) is None
+        assert dest.sql_calls == []
+
+    def test_auto_generates_execution_id(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        eid = manager.record_local_run(self._records())
+        assert eid is not None and len(eid) == 36
+
+
+@pytest.mark.unit
+class TestIsOrchestratedFlag:
+    """Orchestrated writes flag is_orchestrated TRUE; the column is in the schema."""
+
+    def test_orchestrated_plan_marked_true(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.create_execution_plan([_make_config("orders")])
+
+        all_sql = " ".join(dest.sql_calls)
+        assert "is_orchestrated" in all_sql
+        assert "TRUE" in all_sql
+
+    def test_schema_includes_is_orchestrated_column(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.ensure_table_exists()
+
+        create_sql = " ".join(s for s in dest.sql_calls if "CREATE TABLE" in s.upper())
+        # Present in both the plans and the executions table DDL.
+        assert create_sql.count("is_orchestrated") >= 2

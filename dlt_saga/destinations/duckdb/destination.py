@@ -375,3 +375,13 @@ class DuckDBDestination(Destination):
             AND table_name = '{safe_table}'
             ORDER BY ordinal_position
         """
+
+    def list_table_columns(self, dataset: str, table: str) -> list:
+        rows = self.execute_sql(self.columns_query("", dataset, table))
+        return [(r.column_name, r.data_type) for r in rows]
+
+    def add_column(self, dataset: str, table: str, column: str, type_name: str) -> None:
+        table_id = self.get_full_table_id(dataset, table)
+        self.execute_sql(
+            f"ALTER TABLE {table_id} ADD COLUMN {self.quote_identifier(column)} {type_name}"
+        )
