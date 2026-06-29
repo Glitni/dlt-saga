@@ -65,6 +65,18 @@
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
+  // Expandable error cell: short messages render inline; long ones collapse
+  // into a <details> the reader can expand to see the full text.
+  const ERR_PREVIEW = 80;
+  function errorCell(msg) {
+    if (!msg) return '-';
+    if (msg.length <= ERR_PREVIEW) {
+      return '<span class="err-inline">' + escHtml(msg) + '</span>';
+    }
+    return '<details class="err-detail"><summary>' + escHtml(msg.substring(0, ERR_PREVIEW)) +
+      '</summary><div class="err-full">' + escHtml(msg) + '</div></details>';
+  }
+
   function tagsFor(name) {
     const p = pipelineMap[name];
     return p ? p.tags : [];
@@ -301,6 +313,44 @@
     return chart;
   }
 
+  // Single-series bar chart (e.g. rows loaded per day).
+  // fmtVal formats the tooltip value; labelEvery controls x-axis label density.
+  function buildBarChart(label, days, values, color, fmtVal, labelEvery) {
+    const every = labelEvery || 2;
+    const max = Math.max(...values, 1);
+    const chart = h('div', { className: 'mini-chart' });
+    chart.appendChild(h('h3', null, label));
+    const bars = h('div', { className: 'bar-chart' });
+    const labels = h('div', { className: 'bar-labels' });
+    values.forEach((v, i) => {
+      const pct = (v / max) * 100;
+      const bar = h('div', { className: 'bar' });
+      bar.style.height = Math.max(pct, 2) + '%';
+      bar.style.background = color;
+      bar.appendChild(h('div', { className: 'bar-tooltip' },
+        fmtDateShort(days[i].toISOString()) + ': ' + (fmtVal ? fmtVal(v) : v)));
+      bars.appendChild(bar);
+      labels.appendChild(h('span', null, i % every === 0 ? fmtDateShort(days[i].toISOString()) : ''));
+    });
+    chart.appendChild(bars);
+    chart.appendChild(labels);
+    return chart;
+  }
+
+  // Sum a numeric field per day bucket.
+  function sumByDay(runs, days, field, tsField) {
+    const ts = tsField || 'started_at';
+    const sums = new Array(days.length).fill(0);
+    runs.forEach(r => {
+      if (!r[ts]) return;
+      const rd = new Date(r[ts]);
+      rd.setHours(0, 0, 0, 0);
+      const idx = days.findIndex(d => d.getTime() === rd.getTime());
+      if (idx >= 0) sums[idx] += (r[field] || 0);
+    });
+    return sums;
+  }
+
   // ---- Donut chart helper ----
   function buildDonutChart(label, segments, centerValue, centerSub) {
     // segments: [{ value, color, label }]
@@ -376,6 +426,53 @@
       ' <span class="sort-arrow">' + arrow + '</span>';
   }
 
+  // ---- Column chooser (hide/show table columns, persisted per table) ----
+  function loadHiddenCols(storeKey) {
+    try { return new Set(JSON.parse(localStorage.getItem(storeKey) || '[]')); }
+    catch (e) { return new Set(); }
+  }
+  function columnMenu(storeKey, cols, hidden, redraw) {
+    const wrap = h('div', { className: 'col-menu' });
+    const btn = h('button', { className: 'col-menu-btn', type: 'button' }, 'Columns');
+    const panel = h('div', { className: 'col-menu-panel' });
+    cols.forEach(c => {
+      if (c.fixed) return; // fixed columns (e.g. pipeline name) can't be hidden
+      const cb = h('input', { type: 'checkbox' });
+      cb.checked = !hidden.has(c.key);
+      cb.addEventListener('change', () => {
+        if (cb.checked) hidden.delete(c.key); else hidden.add(c.key);
+        try { localStorage.setItem(storeKey, JSON.stringify([...hidden])); } catch (e) {}
+        redraw();
+      });
+      panel.appendChild(h('label', null, cb, document.createTextNode(' ' + c.label)));
+    });
+    btn.addEventListener('click', e => { e.stopPropagation(); wrap.classList.toggle('open'); });
+    panel.addEventListener('click', e => e.stopPropagation());
+    wrap.appendChild(btn);
+    wrap.appendChild(panel);
+    return wrap;
+  }
+
+  // Build a table from column defs honoring hidden columns. Each col has
+  // { key, label, render(row), nosort?, fixed? }; non-nosort cols are sortable.
+  function buildTable(cols, hidden, rows, sortCol, sortAsc, emptyHtml) {
+    const vis = cols.filter(c => !hidden.has(c.key));
+    let html = '<table><tr>';
+    vis.forEach(c => {
+      if (c.nosort) html += '<th>' + c.label + '</th>';
+      else html += '<th class="' + sortIndicator(c.key, sortCol, sortAsc) + c.label + '</th>';
+    });
+    html += '</tr>';
+    if (!rows.length) {
+      html += '<tr><td colspan="' + vis.length + '">' + emptyHtml + '</td></tr>';
+    }
+    rows.forEach(r => {
+      html += '<tr>' + vis.map(c => '<td>' + c.render(r) + '</td>').join('') + '</tr>';
+    });
+    html += '</table>';
+    return html;
+  }
+
   function genericSort(arr, sortCol, sortAsc, getVal) {
     arr.sort((a, b) => {
       let va = getVal(a, sortCol), vb = getVal(b, sortCol);
@@ -409,6 +506,189 @@
   function matchesDisposition(pipelineName, dispFilter) {
     if (!dispFilter) return true;
     return dispositionFor(pipelineName) === dispFilter;
+  }
+
+  // ---- Tree filter pane (folder → pipeline navigator, shared across table tabs) ----
+  // Replaces the per-tab group + free-text search inputs. Collapsible; collapse
+  // state persists. onChange(selection) fires whenever the selection changes.
+  //
+  // The pipeline name encodes the config path with '__' separators
+  // (e.g. api__genesyscloud__conversation_aggregate), so splitting it
+  // reconstructs the real config folder hierarchy at any depth.
+  function buildPipelineTree(pipelines) {
+    const root = { name: '', path: '', children: {}, leaves: [] };
+    pipelines.forEach(p => {
+      const segs = p.pipeline_name.split('__');
+      let node = root;
+      for (let i = 0; i < segs.length - 1; i++) {
+        const key = segs[i];
+        if (!node.children[key]) {
+          node.children[key] = {
+            name: key, path: node.path ? node.path + '__' + key : key,
+            children: {}, leaves: [],
+          };
+        }
+        node = node.children[key];
+      }
+      node.leaves.push({ label: segs[segs.length - 1], full: p.pipeline_name });
+    });
+    return root;
+  }
+  function countLeaves(node) {
+    let n = node.leaves.length;
+    Object.values(node.children).forEach(c => { n += countLeaves(c); });
+    return n;
+  }
+  function nodeMatchesQuery(node, q) {
+    if (!q) return true;
+    if (node.name && node.name.toLowerCase().includes(q)) return true;
+    if (node.leaves.some(l => l.full.toLowerCase().includes(q))) return true;
+    return Object.values(node.children).some(c => nodeMatchesQuery(c, q));
+  }
+  const pipelineTree = buildPipelineTree(D.pipelines);
+
+  function createTreeFilter(onChange) {
+    const collapsedKey = 'saga-tree-collapsed';
+    const widthKey = 'saga-tree-width';
+    let selection = { type: 'all', value: null };
+    const expanded = new Set();
+
+    const pane = h('div', { className: 'tree-pane' });
+    const storedW = parseInt(localStorage.getItem(widthKey) || '', 10);
+    const startCollapsed = localStorage.getItem(collapsedKey) === '1';
+    if (startCollapsed) pane.classList.add('collapsed');
+    else if (storedW) pane.style.flexBasis = storedW + 'px';
+
+    const head = h('div', { className: 'tree-head' });
+    head.appendChild(h('h3', null, 'Pipelines'));
+    const collapseBtn = h('button', { className: 'tree-collapse-btn', type: 'button' });
+    const syncBtn = () => { collapseBtn.textContent = pane.classList.contains('collapsed') ? '»' : '«'; };
+    collapseBtn.addEventListener('click', () => {
+      const willCollapse = !pane.classList.contains('collapsed');
+      pane.classList.toggle('collapsed');
+      if (willCollapse) {
+        pane.style.flexBasis = ''; // let .collapsed control the width
+      } else {
+        const w = parseInt(localStorage.getItem(widthKey) || '', 10);
+        if (w) pane.style.flexBasis = w + 'px';
+      }
+      try { localStorage.setItem(collapsedKey, willCollapse ? '1' : '0'); } catch (e) {}
+      syncBtn();
+    });
+    head.appendChild(collapseBtn);
+    pane.appendChild(head);
+
+    const searchWrap = h('div', { className: 'tree-search' });
+    const search = h('input', { className: 'filter-input', type: 'text', placeholder: 'Search pipelines…' });
+    searchWrap.appendChild(search);
+    pane.appendChild(searchWrap);
+
+    const body = h('div', { className: 'tree-body' });
+    pane.appendChild(body);
+
+    // Drag-to-resize handle on the right edge.
+    const resizer = h('div', { className: 'tree-resize', title: 'Drag to resize' });
+    resizer.addEventListener('mousedown', e => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = pane.getBoundingClientRect().width;
+      document.body.style.userSelect = 'none';
+      function move(ev) {
+        const w = Math.max(160, Math.min(560, startW + (ev.clientX - startX)));
+        pane.style.flexBasis = w + 'px';
+      }
+      function up() {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        document.body.style.userSelect = '';
+        try { localStorage.setItem(widthKey, String(Math.round(pane.getBoundingClientRect().width))); } catch (e) {}
+      }
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+    pane.appendChild(resizer);
+
+    const indentPad = depth => (8 + depth * 15) + 'px';
+
+    function renderLeaf(leaf, depth) {
+      const item = h('div', { className: 'tree-item tree-leaf' +
+        (selection.type === 'pipeline' && selection.value === leaf.full ? ' selected' : '') },
+        h('span', { className: 'tree-caret' }), document.createTextNode(leaf.label));
+      item.style.paddingLeft = indentPad(depth);
+      item.title = leaf.full;
+      item.addEventListener('click', () => { selection = { type: 'pipeline', value: leaf.full }; render(); onChange(selection); });
+      body.appendChild(item);
+    }
+
+    function renderFolder(node, depth, q) {
+      if (q && !nodeMatchesQuery(node, q)) return;
+      const isExp = expanded.has(node.path) || !!q;
+      const selected = selection.type === 'folder' && selection.value === node.path;
+      const fItem = h('div', { className: 'tree-item tree-group' + (isExp ? '' : ' collapsed') + (selected ? ' selected' : '') });
+      fItem.style.paddingLeft = indentPad(depth);
+      const caret = h('span', { className: 'tree-caret' }, '▾');
+      caret.addEventListener('click', e => {
+        e.stopPropagation();
+        if (expanded.has(node.path)) expanded.delete(node.path); else expanded.add(node.path);
+        render();
+      });
+      fItem.appendChild(caret);
+      fItem.appendChild(document.createTextNode(node.name));
+      fItem.appendChild(h('span', { className: 'tree-count' }, String(countLeaves(node))));
+      fItem.addEventListener('click', () => {
+        if (selection.type === 'folder' && selection.value === node.path) {
+          // Already selected → clicking the row toggles expand (large hit target).
+          if (expanded.has(node.path)) expanded.delete(node.path); else expanded.add(node.path);
+          render();
+        } else {
+          expanded.add(node.path);
+          selection = { type: 'folder', value: node.path };
+          render(); onChange(selection);
+        }
+      });
+      body.appendChild(fItem);
+      if (isExp) renderChildren(node, depth + 1, q);
+    }
+
+    function renderChildren(node, depth, q) {
+      Object.keys(node.children).sort().forEach(key => renderFolder(node.children[key], depth, q));
+      node.leaves.slice()
+        .sort((a, b) => a.label < b.label ? -1 : a.label > b.label ? 1 : 0)
+        .forEach(leaf => {
+          if (q && !leaf.full.toLowerCase().includes(q)) return;
+          renderLeaf(leaf, depth);
+        });
+    }
+
+    function render() {
+      const q = search.value.toLowerCase();
+      body.innerHTML = '';
+
+      const allItem = h('div', { className: 'tree-item' + (selection.type === 'all' ? ' selected' : '') },
+        h('span', { className: 'tree-caret' }), document.createTextNode('All pipelines'));
+      allItem.style.paddingLeft = indentPad(0);
+      allItem.addEventListener('click', () => { selection = { type: 'all', value: null }; render(); onChange(selection); });
+      body.appendChild(allItem);
+
+      renderChildren(pipelineTree, 0, q);
+    }
+
+    search.addEventListener('input', render);
+    syncBtn();
+    render();
+
+    return {
+      pane,
+      reset() { selection = { type: 'all', value: null }; search.value = ''; render(); },
+      matches(pipelineName) {
+        if (selection.type === 'all') return true;
+        if (selection.type === 'pipeline') return pipelineName === selection.value;
+        if (selection.type === 'folder') {
+          return pipelineName === selection.value || pipelineName.startsWith(selection.value + '__');
+        }
+        return true;
+      },
+    };
   }
 
   // ---- Pagination helpers ----
@@ -497,8 +777,38 @@
     const pipelinesWithRuns = new Set(allIngestRuns.map(r => r.pipeline_name)).size;
     const pipelinesNoRuns = totalPipelines - pipelinesWithRuns;
 
+    // Currently failed pipelines (last run was a failure)
+    const currentIngestFails = getCurrentlyFailed(allIngestRuns);
+    const currentHistFails = getCurrentlyFailed(D.historize_runs);
+    const failingNames = [...new Set([
+      ...currentIngestFails.map(r => r.pipeline_name),
+      ...currentHistFails.map(r => r.pipeline_name),
+    ])];
+    const currentlyFailedCount = failingNames.length;
+    const healthyCount = totalPipelines - currentlyFailedCount;
+
     panel.innerHTML = '';
     panel.appendChild(h('h2', { className: 'page-title' }, 'Dashboard'));
+
+    // Persistent health strip — same slot whether healthy or failing, so the
+    // layout never shifts; the headline status is always visible without scrolling.
+    if (currentlyFailedCount === 0) {
+      const strip = h('div', { className: 'health-strip healthy' },
+        h('span', { className: 'health-dot' }),
+        h('span', null, h('strong', null, 'All ' + totalPipelines + ' pipelines healthy')));
+      panel.appendChild(strip);
+    } else {
+      const shown = failingNames.slice(0, 4).join(', ') + (failingNames.length > 4 ? ', …' : '');
+      const strip = h('div', { className: 'health-strip failing',
+        onClick: () => { const t = $('#failures-anchor'); if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' }); } });
+      strip.appendChild(h('span', { className: 'health-dot' }));
+      strip.appendChild(h('span', null,
+        h('strong', null, currentlyFailedCount + (currentlyFailedCount === 1 ? ' pipeline failing' : ' pipelines failing')),
+        document.createTextNode('  '),
+        h('span', { className: 'health-names' }, shown)));
+      strip.appendChild(h('span', { className: 'health-cta' }, 'View failures ▾'));
+      panel.appendChild(strip);
+    }
 
     // Report context banner
     const banner = h('div', { className: 'report-banner' });
@@ -509,7 +819,11 @@
       '<span>Generated: <strong>' + fmtDate(D.generated_at) + '</strong></span>';
     panel.appendChild(banner);
 
-    // Consolidated KPI row
+    // Which activity types actually have data — used to hide empty cards/charts.
+    const hasIngest = allIngestRuns.length > 0;
+    const hasHist = totalHist > 0;
+
+    // Consolidated KPI row — only include cards that have data behind them.
     const kpiGrid = h('div', { className: 'kpi-grid' });
     const kpis = [
       { label: 'Pipelines', value: totalPipelines,
@@ -517,20 +831,26 @@
     ];
     if (totalExecs > 0) {
       kpis.push(
-        { label: 'Successful Orchestrations', value: cleanExecs + ' / ' + totalExecs,
+        { label: 'Successful orchestrations', value: cleanExecs + ' / ' + totalExecs,
           sub: failedExecs > 0 ? failedExecs + ' with failures' : 'all clean',
           subColor: failedExecs > 0 ? 'var(--danger)' : null }
       );
     }
-    kpis.push(
-      { label: 'Successful Ingest Runs', value: ingestSuccess + ' / ' + totalIngest,
-        sub: (ingestFailed > 0 ? ingestFailed + ' failed' : 'all succeeded') + (ingestSkipped > 0 ? ', ' + ingestSkipped + ' skipped' : ''),
-        subColor: ingestFailed > 0 ? 'var(--danger)' : null },
-      { label: 'Rows Loaded', value: fmtNum(totalRows), sub: 'across all ingest runs' },
-      { label: 'Successful Historize Runs', value: histSuccess + ' / ' + totalHist,
-        sub: histFailed > 0 ? histFailed + ' failed' : 'all succeeded',
-        subColor: histFailed > 0 ? 'var(--danger)' : null }
-    );
+    if (hasIngest) {
+      kpis.push(
+        { label: 'Successful ingest runs', value: ingestSuccess + ' / ' + totalIngest,
+          sub: (ingestFailed > 0 ? ingestFailed + ' failed' : 'all succeeded') + (ingestSkipped > 0 ? ', ' + ingestSkipped + ' skipped' : ''),
+          subColor: ingestFailed > 0 ? 'var(--danger)' : null },
+        { label: 'Rows loaded', value: fmtNum(totalRows), sub: 'across all ingest runs' }
+      );
+    }
+    if (hasHist) {
+      kpis.push(
+        { label: 'Successful historize runs', value: histSuccess + ' / ' + totalHist,
+          sub: histFailed > 0 ? histFailed + ' failed' : 'all succeeded',
+          subColor: histFailed > 0 ? 'var(--danger)' : null }
+      );
+    }
     kpis.forEach(k => {
       const subEl = h('div', { className: 'kpi-sub' }, k.sub);
       if (k.subColor) subEl.style.color = k.subColor;
@@ -543,23 +863,16 @@
     });
     panel.appendChild(kpiGrid);
 
-    // Currently failed pipelines (last run was a failure)
-    const currentIngestFails = getCurrentlyFailed(allIngestRuns);
-    const currentHistFails = getCurrentlyFailed(D.historize_runs);
-    const currentlyFailedCount = new Set([
-      ...currentIngestFails.map(r => r.pipeline_name),
-      ...currentHistFails.map(r => r.pipeline_name),
-    ]).size;
-    const healthyCount = totalPipelines - currentlyFailedCount;
-
     // Stacked activity charts with pipeline state donut
+    const numDays = D.days || 14;
+    const dayBuckets = buildDayBuckets(numDays);
+    const labelEvery = numDays > 20 ? 5 : numDays > 10 ? 2 : 1;
     const chartSection = h('div', { className: 'section' });
-    chartSection.appendChild(h('div', { className: 'section-header' }, 'Activity (Last 14 Days)'));
+    chartSection.appendChild(h('div', { className: 'section-header' }, 'Activity — last ' + numDays + ' days'));
     const chartContainer = h('div', { className: 'chart-container' });
-    const days14 = buildDayBuckets(14);
 
     // Pipeline state donut chart
-    chartContainer.appendChild(buildDonutChart('Pipeline State', [
+    chartContainer.appendChild(buildDonutChart('Pipeline state', [
       { value: healthyCount, color: 'var(--success)', label: 'passing' },
       { value: currentlyFailedCount, color: 'var(--danger)', label: 'failing' },
     ], currentlyFailedCount > 0 ? currentlyFailedCount : totalPipelines,
@@ -567,19 +880,19 @@
 
     // Orchestration: clean vs failed executions per day
     if (totalExecs > 0) {
-      const orchCleanByDay = new Array(14).fill(0);
-      const orchFailByDay = new Array(14).fill(0);
+      const orchCleanByDay = new Array(numDays).fill(0);
+      const orchFailByDay = new Array(numDays).fill(0);
       execList.forEach(e => {
         if (!e.timestamp) return;
         const rd = new Date(e.timestamp);
         rd.setHours(0, 0, 0, 0);
-        const idx = days14.findIndex(d => d.getTime() === rd.getTime());
+        const idx = dayBuckets.findIndex(d => d.getTime() === rd.getTime());
         if (idx >= 0) {
           if (e.failed > 0) orchFailByDay[idx]++;
           else orchCleanByDay[idx]++;
         }
       });
-      chartContainer.appendChild(buildStackedBarChart('Orchestration Runs', days14,
+      chartContainer.appendChild(buildStackedBarChart('Orchestration runs', dayBuckets,
         orchCleanByDay, orchFailByDay, 'var(--success)', 'var(--danger)', date => {
           pendingOrchDateFilter = date;
           showTab('orchestration');
@@ -587,33 +900,39 @@
         }));
     }
 
-    // Ingest: success vs failed
-    const ingestSuccessRuns = allIngestRuns.filter(r => r.status === 'success');
-    const ingestFailedRuns = allIngestRuns.filter(r => r.status === 'failed');
-    chartContainer.appendChild(buildStackedBarChart('Ingest Runs', days14,
-      bucketByDay(ingestSuccessRuns, days14), bucketByDay(ingestFailedRuns, days14),
-      'var(--success)', 'var(--danger)', date => {
-        pendingIngestDateFilter = date;
-        showTab('ingest-runs');
-        renderIngestRuns();
-      }));
+    // Ingest: success vs failed (+ rows per day) — only when there are ingest runs
+    if (hasIngest) {
+      const ingestSuccessRuns = allIngestRuns.filter(r => r.status === 'success');
+      const ingestFailedRuns = allIngestRuns.filter(r => r.status === 'failed');
+      chartContainer.appendChild(buildStackedBarChart('Ingest runs', dayBuckets,
+        bucketByDay(ingestSuccessRuns, dayBuckets), bucketByDay(ingestFailedRuns, dayBuckets),
+        'var(--success)', 'var(--danger)', date => {
+          pendingIngestDateFilter = date;
+          showTab('ingest-runs');
+          renderIngestRuns();
+        }));
+      chartContainer.appendChild(buildBarChart('Rows loaded per day', dayBuckets,
+        sumByDay(ingestSuccessRuns, dayBuckets, 'row_count'), 'var(--accent)', fmtNum, labelEvery));
+    }
 
-    // Historize: completed vs failed
-    chartContainer.appendChild(buildStackedBarChart('Historize Runs', days14,
-      bucketByDay(D.historize_runs.filter(r => r.status === 'completed'), days14),
-      bucketByDay(D.historize_runs.filter(r => r.status === 'failed'), days14),
-      'var(--success)', 'var(--danger)', date => {
-        pendingHistorizeDateFilter = date;
-        showTab('historize-runs');
-        renderHistorizeRuns();
-      }));
+    // Historize: completed vs failed — only when there are historize runs
+    if (hasHist) {
+      chartContainer.appendChild(buildStackedBarChart('Historize runs', dayBuckets,
+        bucketByDay(D.historize_runs.filter(r => r.status === 'completed'), dayBuckets),
+        bucketByDay(D.historize_runs.filter(r => r.status === 'failed'), dayBuckets),
+        'var(--success)', 'var(--danger)', date => {
+          pendingHistorizeDateFilter = date;
+          showTab('historize-runs');
+          renderHistorizeRuns();
+        }));
+    }
 
     chartSection.appendChild(chartContainer);
     panel.appendChild(chartSection);
 
     // Pipeline groups breakdown
     const groupSection = h('div', { className: 'section' });
-    groupSection.appendChild(h('div', { className: 'section-header' }, 'Pipeline Groups'));
+    groupSection.appendChild(h('div', { className: 'section-header' }, 'Pipeline groups'));
     const groupTable = h('div', { className: 'table-wrap' });
     let gtHTML = '<table><tr><th>Group</th><th>Pipelines</th><th>Ingest</th><th>Historize</th><th>Tags</th></tr>';
     groups.sort().forEach(g => {
@@ -628,17 +947,17 @@
     groupSection.appendChild(groupTable);
     panel.appendChild(groupSection);
 
-    // Currently failing pipelines (last run was a failure)
+    // Currently failing pipelines (last run was a failure).
+    // The first failing section carries the scroll anchor for the health strip.
     if (currentIngestFails.length) {
-      const failSection = h('div', { className: 'section' });
-      failSection.appendChild(h('div', { className: 'section-header' }, 'Currently Failing — Ingest'));
+      const failSection = h('div', { className: 'section', id: 'failures-anchor' });
+      failSection.appendChild(h('div', { className: 'section-header' }, 'Currently failing — ingest'));
       const failTable = h('div', { className: 'table-wrap' });
-      let ftHTML = '<table><tr><th>Pipeline</th><th>Table</th><th>Last Run</th><th>Error</th><th>Status</th></tr>';
+      let ftHTML = '<table><tr><th>Pipeline</th><th>Table</th><th>Last run</th><th>Error</th><th>Status</th></tr>';
       currentIngestFails.forEach(r => {
-        const errMsg = r.error_message ? escHtml(r.error_message.substring(0, 120)) : '-';
         ftHTML += '<tr><td><span class="pipeline-link" data-pipeline="' + escHtml(r.pipeline_name) + '">' +
           escHtml(r.pipeline_name) + '</span></td><td>' + escHtml(r.table_name) +
-          '</td><td>' + fmtDate(r.started_at) + '</td><td>' + errMsg +
+          '</td><td>' + fmtDate(r.started_at) + '</td><td>' + errorCell(r.error_message) +
           '</td><td>' + statusBadge(r.status) + '</td></tr>';
       });
       ftHTML += '</table>';
@@ -648,10 +967,10 @@
     }
 
     if (currentHistFails.length) {
-      const failSection = h('div', { className: 'section' });
-      failSection.appendChild(h('div', { className: 'section-header' }, 'Currently Failing — Historize'));
+      const failSection = h('div', { className: 'section', id: currentIngestFails.length ? null : 'failures-anchor' });
+      failSection.appendChild(h('div', { className: 'section-header' }, 'Currently failing — historize'));
       const failTable = h('div', { className: 'table-wrap' });
-      let ftHTML = '<table><tr><th>Pipeline</th><th>Target</th><th>Snapshot</th><th>Last Run</th><th>Status</th></tr>';
+      let ftHTML = '<table><tr><th>Pipeline</th><th>Target</th><th>Snapshot</th><th>Last run</th><th>Status</th></tr>';
       currentHistFails.forEach(r => {
         ftHTML += '<tr><td><span class="pipeline-link" data-pipeline="' + escHtml(r.pipeline_name) + '">' +
           escHtml(r.pipeline_name) + '</span></td><td>' + escHtml(r.target_table) +
@@ -684,7 +1003,7 @@
       const infoGrid = h('div', { className: 'kpi-grid' });
       [
         { label: 'Group', value: p.pipeline_group },
-        { label: 'Write Disposition', value: p.write_disposition },
+        { label: 'Write disposition', value: p.write_disposition },
         { label: 'Table', value: (p.schema_name ? p.schema_name + '.' : '') + (p.table_name || '') },
         { label: 'Implementation', value: p.adapter || 'default' },
       ].forEach(k => {
@@ -713,10 +1032,10 @@
     const pFailed = pRuns.filter(r => r.status === 'failed').length;
     const histFailCount = pHistRuns.filter(r => r.status === 'failed').length;
     [
-      { label: 'Successful Ingest Runs', value: pSuccess.length + ' / ' + (pSuccess.length + pFailed) },
-      { label: 'Total Rows Loaded', value: fmtNum(totalIngestRows) },
-      { label: 'Avg Duration', value: fmtDuration(avgDuration) },
-      { label: 'Historize Runs', value: pHistRuns.length + (histFailCount > 0 ? ' (' + histFailCount + ' failed)' : '') },
+      { label: 'Successful ingest runs', value: pSuccess.length + ' / ' + (pSuccess.length + pFailed) },
+      { label: 'Total rows loaded', value: fmtNum(totalIngestRows) },
+      { label: 'Avg duration', value: fmtDuration(avgDuration) },
+      { label: 'Historize runs', value: pHistRuns.length + (histFailCount > 0 ? ' (' + histFailCount + ' failed)' : '') },
     ].forEach(k => {
       statGrid.appendChild(h('div', { className: 'kpi-card' },
         h('div', { className: 'kpi-label' }, k.label),
@@ -728,7 +1047,7 @@
     // Row count chart over time
     if (pSuccess.length > 1) {
       const chartSection = h('div', { className: 'section' });
-      chartSection.appendChild(h('div', { className: 'section-header' }, 'Rows Per Run (Ingest)'));
+      chartSection.appendChild(h('div', { className: 'section-header' }, 'Rows per run (ingest)'));
       const chartContainer = h('div', { className: 'chart-container' });
 
       const recent = pSuccess.slice().sort((a,b) => (a.started_at||'') > (b.started_at||'') ? 1 : -1).slice(-30);
@@ -778,7 +1097,7 @@
     // Recent ingest runs table
     if (pRuns.length) {
       const runSection = h('div', { className: 'section' });
-      runSection.appendChild(h('div', { className: 'section-header' }, 'Ingest Run History'));
+      runSection.appendChild(h('div', { className: 'section-header' }, 'Ingest run history'));
       const tw = h('div', { className: 'table-wrap' });
       let html = '<table><tr><th>Schema</th><th>Table</th><th>Rows</th><th>Started</th><th>Duration</th><th>Status</th></tr>';
       pRuns.slice(0, 100).forEach(r => {
@@ -795,7 +1114,7 @@
     // Historize runs table
     if (pHistRuns.length) {
       const histSection = h('div', { className: 'section' });
-      histSection.appendChild(h('div', { className: 'section-header' }, 'Historize Run History'));
+      histSection.appendChild(h('div', { className: 'section-header' }, 'Historize run history'));
       const tw = h('div', { className: 'table-wrap' });
       let html = '<table><tr><th>Target</th><th>Snapshot</th><th>Changed</th><th>Deleted</th><th>Started</th><th>Duration</th><th>Status</th></tr>';
       pHistRuns.slice(0, 100).forEach(r => {
@@ -822,6 +1141,8 @@
 
   // Global click handler for pipeline links and execution links
   document.addEventListener('click', e => {
+    // Close any open column-chooser menus when clicking elsewhere
+    $$('.col-menu.open').forEach(m => { if (!m.contains(e.target)) m.classList.remove('open'); });
     const link = e.target.closest('.pipeline-link');
     if (link) { e.preventDefault(); showPipelineDetail(link.dataset.pipeline); return; }
     const execLink = e.target.closest('.exec-link');
@@ -839,34 +1160,56 @@
     panel.innerHTML = '';
     panel.appendChild(h('h2', { className: 'page-title' }, 'Pipeline Catalog'));
 
+    const tree = createTreeFilter(() => { pipelinesPage = 0; draw(); });
+    const treeWrap = h('div', { className: 'tab-with-tree' });
+    const treeMain = h('div', { className: 'tree-main' });
+    treeWrap.appendChild(tree.pane);
+    treeWrap.appendChild(treeMain);
+    panel.appendChild(treeWrap);
+
     const section = h('div', { className: 'section' });
     const filters = h('div', { className: 'filters' });
-    const searchInput = h('input', { className: 'filter-input', type: 'text', placeholder: 'Search pipelines...' });
-    const groupSelect = h('select', { className: 'filter-input' });
-    groupSelect.appendChild(h('option', { value: '' }, 'All groups'));
-    [...new Set(D.pipelines.map(p => p.pipeline_group))].sort().forEach(g => {
-      groupSelect.appendChild(h('option', { value: g }, g));
-    });
     const tagSelect = addTagFilter(filters);
     const dispSelect = addDispositionFilter(filters);
-    filters.insertBefore(groupSelect, tagSelect);
-    filters.insertBefore(searchInput, groupSelect);
     section.appendChild(filters);
 
-    const filterInputs = [searchInput, groupSelect, tagSelect, dispSelect];
-    const clearBtn = addClearFiltersButton(filters, filterInputs, () => { pipelinesPage = 0; draw(); });
+    const filterInputs = [tagSelect, dispSelect];
+    const clearBtn = addClearFiltersButton(filters, filterInputs, () => { pipelinesPage = 0; tree.reset(); draw(); });
 
     const tableWrap = h('div', { className: 'table-wrap' });
     const paginationWrap = h('div');
     section.appendChild(tableWrap);
     section.appendChild(paginationWrap);
-    panel.appendChild(section);
+    treeMain.appendChild(section);
 
     const lastRun = {};
     allIngestRuns.forEach(r => {
       if (!lastRun[r.pipeline_name] || r.started_at > lastRun[r.pipeline_name].started_at)
         lastRun[r.pipeline_name] = r;
     });
+
+    const cols = [
+      { key: 'pipeline_name', label: 'Pipeline', fixed: true,
+        render: p => '<span class="pipeline-link" data-pipeline="' + escHtml(p.pipeline_name) + '">' + escHtml(p.pipeline_name) + '</span>' },
+      { key: 'pipeline_group', label: 'Group', render: p => escHtml(p.pipeline_group) },
+      { key: 'write_disposition', label: 'Disposition', render: p => {
+        const caps = [];
+        if (p.ingest_enabled) caps.push('<span class="badge badge-info">ingest</span>');
+        if (p.historize_enabled) caps.push('<span class="badge badge-success">historize</span>');
+        return escHtml(p.write_disposition) + ' ' + caps.join(' ');
+      } },
+      { key: 'tags', label: 'Tags', nosort: true, render: p => tagBadges(p.tags) },
+      { key: 'last_run', label: 'Last run', render: p => {
+        const lr = lastRun[p.pipeline_name];
+        return lr ? fmtDate(lr.started_at) : '<span class="badge badge-neutral">no runs</span>';
+      } },
+      { key: 'last_rows', label: 'Last rows', render: p => {
+        const lr = lastRun[p.pipeline_name];
+        return lr ? fmtNum(lr.row_count) : '-';
+      } },
+    ];
+    const hidden = loadHiddenCols('saga-cols-pipelines');
+    filters.appendChild(columnMenu('saga-cols-pipelines', cols, hidden, () => draw()));
 
     let sortCol = 'pipeline_name', sortAsc = true;
     let pipelinesPage = 0;
@@ -877,15 +1220,11 @@
         else { sortCol = clickedCol; sortAsc = true; }
         pipelinesPage = 0;
       }
-      const query = searchInput.value.toLowerCase();
-      const groupFilter = groupSelect.value;
       const tagFilter = tagSelect.value;
       const dispFilter = dispSelect.value;
 
       let filtered = D.pipelines.filter(p => {
-        if (query && !p.pipeline_name.toLowerCase().includes(query) &&
-            !p.tags.some(t => t.toLowerCase().includes(query))) return false;
-        if (groupFilter && p.pipeline_group !== groupFilter) return false;
+        if (!tree.matches(p.pipeline_name)) return false;
         if (tagFilter && !p.tags.includes(tagFilter)) return false;
         if (dispFilter && p.write_disposition !== dispFilter) return false;
         return true;
@@ -897,43 +1236,8 @@
         return item[col] || '';
       });
 
-      const cols = [
-        { key: 'pipeline_name', label: 'Pipeline' },
-        { key: 'pipeline_group', label: 'Group' },
-        { key: 'write_disposition', label: 'Disposition' },
-        { key: 'tags', label: 'Tags', nosort: true },
-        { key: 'last_run', label: 'Last Run' },
-        { key: 'last_rows', label: 'Last Rows' },
-      ];
-
-      let html = '<table><tr>';
-      cols.forEach(c => {
-        if (c.nosort) { html += '<th>' + c.label + '</th>'; return; }
-        html += '<th class="' + sortIndicator(c.key, sortCol, sortAsc) + c.label + '</th>';
-      });
-      html += '</tr>';
-
-      if (!filtered.length) {
-        html += '<tr><td colspan="' + cols.length + '"><div class="empty-state"><h3>No pipelines match</h3></div></td></tr>';
-      }
-
-      paginateRows(filtered, pipelinesPage).forEach(p => {
-        const lr = lastRun[p.pipeline_name];
-        const caps = [];
-        if (p.ingest_enabled) caps.push('<span class="badge badge-info">ingest</span>');
-        if (p.historize_enabled) caps.push('<span class="badge badge-success">historize</span>');
-
-        html += '<tr>';
-        html += '<td><span class="pipeline-link" data-pipeline="' + escHtml(p.pipeline_name) + '">' + escHtml(p.pipeline_name) + '</span></td>';
-        html += '<td>' + p.pipeline_group + '</td>';
-        html += '<td>' + p.write_disposition + ' ' + caps.join(' ') + '</td>';
-        html += '<td>' + tagBadges(p.tags) + '</td>';
-        html += '<td>' + (lr ? fmtDate(lr.started_at) : '<span class="badge badge-neutral">no runs</span>') + '</td>';
-        html += '<td>' + (lr ? fmtNum(lr.row_count) : '-') + '</td>';
-        html += '</tr>';
-      });
-      html += '</table>';
-      tableWrap.innerHTML = html;
+      tableWrap.innerHTML = buildTable(cols, hidden, paginateRows(filtered, pipelinesPage),
+        sortCol, sortAsc, '<div class="empty-state"><h3>No pipelines match</h3></div>');
       attachSortHandlers(tableWrap, draw);
       renderPagination(paginationWrap, pipelinesPage, filtered.length, p => { pipelinesPage = p; draw(); });
       updateClearButton(clearBtn, filterInputs);
@@ -951,9 +1255,15 @@
     panel.innerHTML = '';
     panel.appendChild(h('h2', { className: 'page-title' }, 'Ingest Runs'));
 
+    const tree = createTreeFilter(() => { ingestPage = 0; draw(); });
+    const treeWrap = h('div', { className: 'tab-with-tree' });
+    const treeMain = h('div', { className: 'tree-main' });
+    treeWrap.appendChild(tree.pane);
+    treeWrap.appendChild(treeMain);
+    panel.appendChild(treeWrap);
+
     const section = h('div', { className: 'section' });
     const filters = h('div', { className: 'filters' });
-    const searchInput = h('input', { className: 'filter-input', type: 'text', placeholder: 'Filter by pipeline...' });
     const datasetSelect = h('select', { className: 'filter-input' });
     datasetSelect.appendChild(h('option', { value: '' }, 'All schemas'));
     [...new Set(allIngestRuns.map(r => r.dataset_name).filter(Boolean))].sort().forEach(d => {
@@ -969,16 +1279,15 @@
     });
     const tagSelect = addTagFilter(filters);
     const dispSelect = addDispositionFilter(filters);
-    // Order: search, status, tag, schema, disposition, execution
+    // Order: status, tag, schema, disposition, execution
     filters.insertBefore(datasetSelect, dispSelect);
     filters.insertBefore(tagSelect, datasetSelect);
     filters.insertBefore(statusSelect, tagSelect);
-    filters.insertBefore(searchInput, statusSelect);
     filters.appendChild(execSelect);
     const ingestDateInput = addDateFilter(filters);
     filters.insertBefore(ingestDateInput, filters.firstChild);
-    const ingestFilterInputs = [searchInput, datasetSelect, statusSelect, execSelect, tagSelect, dispSelect, ingestDateInput];
-    const ingestClearBtn = addClearFiltersButton(filters, ingestFilterInputs, () => { ingestPage = 0; draw(); });
+    const ingestFilterInputs = [datasetSelect, statusSelect, execSelect, tagSelect, dispSelect, ingestDateInput];
+    const ingestClearBtn = addClearFiltersButton(filters, ingestFilterInputs, () => { ingestPage = 0; tree.reset(); draw(); });
     section.appendChild(filters);
 
     // Apply pending filters from cross-tab navigation
@@ -995,7 +1304,21 @@
     const paginationWrap = h('div');
     section.appendChild(tableWrap);
     section.appendChild(paginationWrap);
-    panel.appendChild(section);
+    treeMain.appendChild(section);
+
+    const cols = [
+      { key: 'pipeline_name', label: 'Pipeline', fixed: true,
+        render: r => '<span class="pipeline-link" data-pipeline="' + escHtml(r.pipeline_name) + '">' + escHtml(r.pipeline_name) + '</span>' },
+      { key: 'dataset_name', label: 'Schema', render: r => escHtml(r.dataset_name || '') },
+      { key: 'table_name', label: 'Table', render: r => escHtml(r.table_name) },
+      { key: 'row_count', label: 'Rows', render: r => fmtNum(r.row_count) },
+      { key: 'started_at', label: 'Started', render: r => fmtDate(r.started_at) },
+      { key: 'duration_seconds', label: 'Duration', render: r => fmtDuration(r.duration_seconds) },
+      { key: 'status', label: 'Status', render: r => statusBadge(r.status) },
+      { key: 'error_message', label: 'Error', render: r => errorCell(r.error_message) },
+    ];
+    const hidden = loadHiddenCols('saga-cols-ingest');
+    filters.appendChild(columnMenu('saga-cols-ingest', cols, hidden, () => draw()));
 
     let sortCol = 'started_at', sortAsc = false;
     let ingestPage = 0;
@@ -1006,7 +1329,6 @@
         else { sortCol = clickedCol; sortAsc = true; }
         ingestPage = 0;
       }
-      const query = searchInput.value.toLowerCase();
       const dsFilter = datasetSelect.value;
       const statusFilter = statusSelect.value;
       const execFilter = execSelect.value;
@@ -1015,8 +1337,7 @@
       const dateFilter = ingestDateInput.value;
 
       let filtered = allIngestRuns.filter(r => {
-        if (query && !r.pipeline_name.toLowerCase().includes(query) &&
-            !r.table_name.toLowerCase().includes(query)) return false;
+        if (!tree.matches(r.pipeline_name)) return false;
         if (dsFilter && r.dataset_name !== dsFilter) return false;
         if (statusFilter && r.status !== statusFilter) return false;
         if (execFilter && r.execution_id !== execFilter) return false;
@@ -1028,40 +1349,9 @@
 
       genericSort(filtered, sortCol, sortAsc, (item, col) => item[col]);
 
-      const cols = [
-        { key: 'pipeline_name', label: 'Pipeline' },
-        { key: 'dataset_name', label: 'Schema' },
-        { key: 'table_name', label: 'Table' },
-        { key: 'row_count', label: 'Rows' },
-        { key: 'started_at', label: 'Started' },
-        { key: 'duration_seconds', label: 'Duration' },
-        { key: 'status', label: 'Status' },
-        { key: 'error_message', label: 'Error' },
-      ];
-
-      let html = '<table><tr>';
-      cols.forEach(c => { html += '<th class="' + sortIndicator(c.key, sortCol, sortAsc) + c.label + '</th>'; });
-      html += '</tr>';
-
-      if (!filtered.length) {
-        html += '<tr><td colspan="' + cols.length + '"><div class="empty-state"><h3>No ingest runs found</h3><p>Run pipelines with <code>saga ingest</code> to generate data.</p></div></td></tr>';
-      }
-
-      paginateRows(filtered, ingestPage).forEach(r => {
-        const errMsg = r.error_message ? escHtml(r.error_message.substring(0, 100)) : '-';
-        html += '<tr>';
-        html += '<td><span class="pipeline-link" data-pipeline="' + escHtml(r.pipeline_name) + '">' + escHtml(r.pipeline_name) + '</span></td>';
-        html += '<td>' + escHtml(r.dataset_name || '') + '</td>';
-        html += '<td>' + escHtml(r.table_name) + '</td>';
-        html += '<td>' + fmtNum(r.row_count) + '</td>';
-        html += '<td>' + fmtDate(r.started_at) + '</td>';
-        html += '<td>' + fmtDuration(r.duration_seconds) + '</td>';
-        html += '<td>' + statusBadge(r.status) + '</td>';
-        html += '<td>' + errMsg + '</td>';
-        html += '</tr>';
-      });
-      html += '</table>';
-      tableWrap.innerHTML = html;
+      tableWrap.innerHTML = buildTable(cols, hidden, paginateRows(filtered, ingestPage),
+        sortCol, sortAsc,
+        '<div class="empty-state"><h3>No ingest runs found</h3><p>Run pipelines with <code>saga ingest</code> to generate data.</p></div>');
       attachSortHandlers(tableWrap, draw);
       renderPagination(paginationWrap, ingestPage, filtered.length, p => { ingestPage = p; draw(); });
       updateClearButton(ingestClearBtn, ingestFilterInputs);
@@ -1079,19 +1369,24 @@
     panel.innerHTML = '';
     panel.appendChild(h('h2', { className: 'page-title' }, 'Historize Runs'));
 
+    const tree = createTreeFilter(() => { histPage = 0; draw(); });
+    const treeWrap = h('div', { className: 'tab-with-tree' });
+    const treeMain = h('div', { className: 'tree-main' });
+    treeWrap.appendChild(tree.pane);
+    treeWrap.appendChild(treeMain);
+    panel.appendChild(treeWrap);
+
     const section = h('div', { className: 'section' });
     const filters = h('div', { className: 'filters' });
-    const searchInput = h('input', { className: 'filter-input', type: 'text', placeholder: 'Filter by pipeline...' });
     const statusSelect = h('select', { className: 'filter-input' });
     statusSelect.appendChild(h('option', { value: '' }, 'All statuses'));
     ['completed', 'failed'].forEach(s => statusSelect.appendChild(h('option', { value: s }, s)));
     const tagSelect = addTagFilter(filters);
     filters.insertBefore(statusSelect, tagSelect);
-    filters.insertBefore(searchInput, statusSelect);
     const histDateInput = addDateFilter(filters);
     filters.insertBefore(histDateInput, filters.firstChild);
-    const histFilterInputs = [searchInput, statusSelect, tagSelect, histDateInput];
-    const histClearBtn = addClearFiltersButton(filters, histFilterInputs, () => { histPage = 0; draw(); });
+    const histFilterInputs = [statusSelect, tagSelect, histDateInput];
+    const histClearBtn = addClearFiltersButton(filters, histFilterInputs, () => { histPage = 0; tree.reset(); draw(); });
     section.appendChild(filters);
 
     // Apply pending date filter from cross-tab navigation
@@ -1104,7 +1399,22 @@
     const paginationWrap = h('div');
     section.appendChild(tableWrap);
     section.appendChild(paginationWrap);
-    panel.appendChild(section);
+    treeMain.appendChild(section);
+
+    const cols = [
+      { key: 'pipeline_name', label: 'Pipeline', fixed: true,
+        render: r => '<span class="pipeline-link" data-pipeline="' + escHtml(r.pipeline_name) + '">' + escHtml(r.pipeline_name) + '</span>' },
+      { key: 'source_table', label: 'Source', render: r => escHtml(r.source_table) },
+      { key: 'target_table', label: 'Target', render: r => escHtml(r.target_table) },
+      { key: 'snapshot_value', label: 'Snapshot', render: r => escHtml(r.snapshot_value) },
+      { key: 'new_or_changed_rows', label: 'Changed', render: r => fmtNum(r.new_or_changed_rows) },
+      { key: 'deleted_rows', label: 'Deleted', render: r => fmtNum(r.deleted_rows) },
+      { key: 'started_at', label: 'Started', render: r => fmtDate(r.started_at) },
+      { key: 'duration_seconds', label: 'Duration', render: r => fmtDuration(r.duration_seconds) },
+      { key: 'status', label: 'Status', render: r => statusBadge(r.status) },
+    ];
+    const hidden = loadHiddenCols('saga-cols-historize');
+    filters.appendChild(columnMenu('saga-cols-historize', cols, hidden, () => draw()));
 
     let sortCol = 'started_at', sortAsc = false;
     let histPage = 0;
@@ -1115,13 +1425,12 @@
         else { sortCol = clickedCol; sortAsc = true; }
         histPage = 0;
       }
-      const query = searchInput.value.toLowerCase();
       const statusFilter = statusSelect.value;
       const tagFilter = tagSelect.value;
       const dateFilter = histDateInput.value;
 
       let filtered = D.historize_runs.filter(r => {
-        if (query && !r.pipeline_name.toLowerCase().includes(query)) return false;
+        if (!tree.matches(r.pipeline_name)) return false;
         if (statusFilter && r.status !== statusFilter) return false;
         if (!matchesTag(r.pipeline_name, tagFilter)) return false;
         if (!matchesDate(r.started_at, dateFilter)) return false;
@@ -1130,41 +1439,9 @@
 
       genericSort(filtered, sortCol, sortAsc, (item, col) => item[col]);
 
-      const cols = [
-        { key: 'pipeline_name', label: 'Pipeline' },
-        { key: 'source_table', label: 'Source' },
-        { key: 'target_table', label: 'Target' },
-        { key: 'snapshot_value', label: 'Snapshot' },
-        { key: 'new_or_changed_rows', label: 'Changed' },
-        { key: 'deleted_rows', label: 'Deleted' },
-        { key: 'started_at', label: 'Started' },
-        { key: 'duration_seconds', label: 'Duration' },
-        { key: 'status', label: 'Status' },
-      ];
-
-      let html = '<table><tr>';
-      cols.forEach(c => { html += '<th class="' + sortIndicator(c.key, sortCol, sortAsc) + c.label + '</th>'; });
-      html += '</tr>';
-
-      if (!filtered.length) {
-        html += '<tr><td colspan="' + cols.length + '"><div class="empty-state"><h3>No historize runs found</h3><p>Run pipelines with <code>saga historize</code> to generate data.</p></div></td></tr>';
-      }
-
-      paginateRows(filtered, histPage).forEach(r => {
-        html += '<tr>';
-        html += '<td><span class="pipeline-link" data-pipeline="' + escHtml(r.pipeline_name) + '">' + escHtml(r.pipeline_name) + '</span></td>';
-        html += '<td>' + escHtml(r.source_table) + '</td>';
-        html += '<td>' + escHtml(r.target_table) + '</td>';
-        html += '<td>' + escHtml(r.snapshot_value) + '</td>';
-        html += '<td>' + fmtNum(r.new_or_changed_rows) + '</td>';
-        html += '<td>' + fmtNum(r.deleted_rows) + '</td>';
-        html += '<td>' + fmtDate(r.started_at) + '</td>';
-        html += '<td>' + fmtDuration(r.duration_seconds) + '</td>';
-        html += '<td>' + statusBadge(r.status) + '</td>';
-        html += '</tr>';
-      });
-      html += '</table>';
-      tableWrap.innerHTML = html;
+      tableWrap.innerHTML = buildTable(cols, hidden, paginateRows(filtered, histPage),
+        sortCol, sortAsc,
+        '<div class="empty-state"><h3>No historize runs found</h3><p>Run pipelines with <code>saga historize</code> to generate data.</p></div>');
       attachSortHandlers(tableWrap, draw);
       renderPagination(paginationWrap, histPage, filtered.length, p => { histPage = p; draw(); });
       updateClearButton(histClearBtn, histFilterInputs);
@@ -1202,7 +1479,7 @@
 
     // Execution summary section
     const summarySection = h('div', { className: 'section' });
-    summarySection.appendChild(h('div', { className: 'section-header' }, 'Execution Summary'));
+    summarySection.appendChild(h('div', { className: 'section-header' }, 'Execution summary'));
     const filters = h('div', { className: 'filters' });
     const statusSelect = h('select', { className: 'filter-input' });
     statusSelect.appendChild(h('option', { value: '' }, 'All executions'));

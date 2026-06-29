@@ -178,14 +178,20 @@ def _build_html(json_data: str, css: str, js: str, favicon_svg: str) -> str:
 <div id="app">
   <nav class="sidebar">
     <div class="sidebar-header">
-      <h1>Saga</h1>
-      <span class="subtitle">Pipeline Report</span>
+      <span class="brand-logo">{favicon_svg}</span>
+      <div class="brand-text">
+        <h1>Saga</h1>
+        <span class="subtitle">Pipeline report</span>
+      </div>
     </div>
     <ul class="nav-links">
+      <li class="nav-group-label">Overview</li>
       <li><a href="#" class="nav-link active" data-tab="dashboard">Dashboard</a></li>
+      <li class="nav-group-label">Runs</li>
       <li><a href="#" class="nav-link" data-tab="orchestration">Orchestration</a></li>
-      <li><a href="#" class="nav-link" data-tab="ingest-runs">Ingest Runs</a></li>
-      <li><a href="#" class="nav-link" data-tab="historize-runs">Historize Runs</a></li>
+      <li><a href="#" class="nav-link" data-tab="ingest-runs">Ingest runs</a></li>
+      <li><a href="#" class="nav-link" data-tab="historize-runs">Historize runs</a></li>
+      <li class="nav-group-label">Catalog</li>
       <li><a href="#" class="nav-link" data-tab="pipelines">Pipelines</a></li>
     </ul>
     <div class="sidebar-footer">
