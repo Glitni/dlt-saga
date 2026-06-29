@@ -216,11 +216,32 @@ def _create_orchestration_destination():
     )
 
 
+# Cap stored error messages so a pathological traceback-in-message can't bloat
+# the execution-plan row; the report shows the full stored text (expandable).
+_MAX_ERROR_MESSAGE_LEN = 2000
+
+
+def _format_run_error(exc: Exception) -> str:
+    """Build a concise, informative error string for storage and reporting.
+
+    Includes the exception type so the cause is identifiable (e.g.
+    ``NotFound: 404 Not found: Table ...``) rather than a bare message.
+    """
+    message = f"{type(exc).__name__}: {exc}".strip()
+    if len(message) > _MAX_ERROR_MESSAGE_LEN:
+        message = message[: _MAX_ERROR_MESSAGE_LEN - 1] + "…"
+    return message
+
+
 def _run_pipeline_safe(
     pipeline_config: PipelineConfig,
     log_prefix: str,
-) -> bool:
-    """Thread-safe wrapper for running a pipeline."""
+) -> Optional[str]:
+    """Thread-safe wrapper for running a pipeline.
+
+    Returns ``None`` on success, or the error message on failure (so callers
+    can surface the real cause instead of a generic "failed").
+    """
     from dlt_saga.pipelines.executor import execute_pipeline
 
     try:
@@ -235,10 +256,10 @@ def _run_pipeline_safe(
                 logger.info("%s %s", log_prefix, message)
             else:
                 logger.info("%s %s", log_prefix, summarize_load_info(result))
-        return True
+        return None
     except Exception as e:
         logger.error("%s %s", log_prefix, e)
-        return False
+        return _format_run_error(e)
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +503,7 @@ def _execute_worker_parallel(
     configs: List[PipelineConfig],
     task_index: int,
     label: str,
-    run_fn: Callable[[PipelineConfig, str], bool],
+    run_fn: Callable[[PipelineConfig, str], Optional[str]],
     max_workers: int = _DEFAULT_WORKER_CONCURRENCY,
 ) -> List[tuple[str, str]]:
     """Execute pipelines in parallel within a worker task.
@@ -491,7 +512,8 @@ def _execute_worker_parallel(
         configs: Pre-filtered pipeline configs to run.
         task_index: Worker task index for log prefixes.
         label: Phase label for logging (e.g. "ingest", "historize").
-        run_fn: Callable(config, log_prefix) -> bool (True=success).
+        run_fn: Callable(config, log_prefix) -> Optional[str], returning ``None``
+            on success or the error message on failure.
         max_workers: Cap on concurrent threads inside this worker. Capped
             again at ``len(configs)`` since there's no point spawning more
             threads than pipelines. Defaults to ``_DEFAULT_WORKER_CONCURRENCY``
@@ -499,7 +521,8 @@ def _execute_worker_parallel(
             spawning one thread per pipeline.
 
     Returns:
-        List of (table_name, error_message) tuples for failed pipelines.
+        List of (table_name, error_message) tuples for failed pipelines, carrying
+        the real error so the report shows the cause rather than a generic "failed".
     """
     if not configs:
         return []
@@ -526,15 +549,16 @@ def _execute_worker_parallel(
         for future in as_completed(future_to_config):
             config = future_to_config[future]
             try:
-                if not future.result():
-                    failed_pipelines.append(
-                        (config.table_name, f"{label.capitalize()} failed")
-                    )
+                error = future.result()
+                if error:
+                    failed_pipelines.append((config.table_name, error))
             except Exception as e:
+                # Safety net: run_fn handles its own exceptions, but if one
+                # escapes, still record the real cause rather than dropping it.
                 logger.error(
                     "%s %s failed: %s", label.capitalize(), config.table_name, e
                 )
-                failed_pipelines.append((config.table_name, str(e)))
+                failed_pipelines.append((config.table_name, _format_run_error(e)))
 
     return failed_pipelines
 
@@ -560,7 +584,7 @@ def _execute_worker_historize(
     """Execute historize for assigned pipelines."""
     configs = [c for c in pipeline_configs if c.historize_enabled]
 
-    def _run(config: PipelineConfig, log_prefix: str) -> bool:
+    def _run(config: PipelineConfig, log_prefix: str) -> Optional[str]:
         return _run_historize_safe(config, full_refresh, log_prefix)
 
     return _execute_worker_parallel(
@@ -871,8 +895,11 @@ def _run_historize_safe(
     pipeline_config: PipelineConfig,
     full_refresh: bool,
     log_prefix: str,
-) -> bool:
-    """Thread-safe wrapper for historizing a single pipeline."""
+) -> Optional[str]:
+    """Thread-safe wrapper for historizing a single pipeline.
+
+    Returns ``None`` on success, or the error message on failure.
+    """
     try:
         runner = _build_historize_runner(pipeline_config, full_refresh)
         result = runner.run()
@@ -895,11 +922,11 @@ def _run_historize_safe(
             stats_str = f", {', '.join(stats_parts)}" if stats_parts else ""
             msg = f"{pipeline_config.pipeline_name}: {mode} ({detail}{stats_str}, {duration:.1f}s [{timing_parts}])"
             logger.info("%s %s", log_prefix, msg)
-            return True
+            return None
         else:
-            error = result.get("error", "Unknown error")
+            error = str(result.get("error", "Unknown error"))
             logger.error("%s %s: %s", log_prefix, pipeline_config.pipeline_name, error)
-            return False
+            return error
 
     except Exception as e:
         logger.error(
@@ -909,7 +936,7 @@ def _run_historize_safe(
             e,
             exc_info=True,
         )
-        return False
+        return _format_run_error(e)
 
 
 # ===========================================================================
