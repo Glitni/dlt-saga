@@ -652,7 +652,7 @@ class TestExecuteWorkerParallel:
             gate.wait(timeout=0.5)
             with active_lock:
                 active_count["current"] -= 1
-            return True
+            return None
 
         # Release the gate slightly later so threads pile up first.
         timer = threading.Timer(0.05, gate.set)
@@ -677,7 +677,7 @@ class TestExecuteWorkerParallel:
 
         def run_fn(config, log_prefix):
             ran.append(config.table_name)
-            return True
+            return None
 
         failed = _execute_worker_parallel(
             configs, task_index=0, label="ingest", run_fn=run_fn, max_workers=10
@@ -692,7 +692,7 @@ class TestExecuteWorkerParallel:
 
         def run_fn(config, log_prefix):
             called.append(config)
-            return True
+            return None
 
         failed = _execute_worker_parallel(
             configs=[],
@@ -703,3 +703,37 @@ class TestExecuteWorkerParallel:
         )
         assert failed == []
         assert called == []
+
+    def test_failure_records_real_error_message(self):
+        """A failing run_fn surfaces its real message per-pipeline (issue #156)."""
+        from dlt_saga.cli import _execute_worker_parallel
+
+        configs = [_make_config("ok"), _make_config("bad")]
+
+        def run_fn(config, log_prefix):
+            if config.table_name == "ok":
+                return None
+            return "NotFound: 404 Not found: Table missing"
+
+        failed = _execute_worker_parallel(
+            configs, task_index=0, label="ingest", run_fn=run_fn, max_workers=4
+        )
+
+        # Only the failing pipeline is recorded, carrying its actual error text
+        # rather than a generic "Ingest failed".
+        assert failed == [("bad", "NotFound: 404 Not found: Table missing")]
+
+
+@pytest.mark.unit
+class TestFormatRunError:
+    def test_includes_exception_type(self):
+        from dlt_saga.cli import _format_run_error
+
+        assert _format_run_error(ValueError("boom")) == "ValueError: boom"
+
+    def test_truncates_pathological_messages(self):
+        from dlt_saga.cli import _MAX_ERROR_MESSAGE_LEN, _format_run_error
+
+        msg = _format_run_error(ValueError("x" * 5000))
+        assert len(msg) <= _MAX_ERROR_MESSAGE_LEN
+        assert msg.startswith("ValueError: ")
