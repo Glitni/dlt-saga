@@ -148,9 +148,34 @@
     return { ...r, execution_id: matchedExecId };
   });
 
-  // Synthesize failed ingest runs from failed orchestration tasks
-  const failedOrchIngest = orchRuns
-    .filter(r => r.status === 'failed')
+  // ---- Attribute an orchestration task to the ingest vs historize phase ----
+  // A plan row carries one combined task status, not per-phase (see #161). We
+  // infer the failing phase so the failure lands in the right place and we
+  // don't emit a contradictory failed-ingest row when ingest actually
+  // succeeded (the historize phase is what failed).
+  const ingestSuccessKeys = new Set();
+  taggedLoadRuns.forEach(r => {
+    if (r.execution_id && r.status === 'success') {
+      ingestSuccessKeys.add(r.execution_id + '|' + r.table_name);
+    }
+  });
+  function pipelineCaps(name) {
+    const p = pipelineMap[name];
+    return { ingest: p ? p.ingest_enabled : true, historize: p ? p.historize_enabled : false };
+  }
+  function failurePhase(r) {
+    const caps = pipelineCaps(r.pipeline_name);
+    if (caps.historize && !caps.ingest) return 'historize';
+    if (caps.ingest && !caps.historize) return 'ingest';
+    // Both phases ran: a successful load_run means ingest succeeded → historize failed.
+    return ingestSuccessKeys.has(r.execution_id + '|' + r.table_name) ? 'historize' : 'ingest';
+  }
+
+  const failedOrch = orchRuns.filter(r => r.status === 'failed');
+
+  // Failed tasks whose failing phase is ingest → synthesized failed ingest runs.
+  const failedOrchIngest = failedOrch
+    .filter(r => failurePhase(r) === 'ingest')
     .map(r => ({
       pipeline_name: r.pipeline_name,
       table_name: r.table_name,
@@ -167,13 +192,37 @@
       error_message: r.error_message,
     }));
 
-  // Identify completed orchestration tasks with no matching load_run (skipped — no new rows)
+  // Failed tasks whose failing phase is historize → synthesized failed historize runs.
+  // (_saga_historize_log only records completed runs, so these are the sole
+  // source of historize failures in the report.)
+  const failedOrchHistorize = failedOrch
+    .filter(r => failurePhase(r) === 'historize')
+    .map(r => ({
+      pipeline_name: r.pipeline_name,
+      source_table: r.table_name,
+      target_table: r.table_name,
+      snapshot_value: '',
+      new_or_changed_rows: 0,
+      deleted_rows: 0,
+      is_full_reprocess: false,
+      started_at: r.started_at || r.log_timestamp,
+      finished_at: r.completed_at,
+      status: 'failed',
+      duration_seconds: r.duration_seconds,
+      error_message: r.error_message,
+    }));
+
+  // Completed tasks with no matching load_run = ingest "skipped" (no new rows),
+  // but only for ingest-capable pipelines. A completed historize-only task has
+  // no load_run by nature and lives in the historize log, not here.
   const matchedOrchKeys = new Set();
   taggedLoadRuns.forEach(r => {
     if (r.execution_id) matchedOrchKeys.add(r.execution_id + '|' + r.table_name);
   });
   const skippedOrchIngest = orchRuns
-    .filter(r => r.status === 'completed' && !matchedOrchKeys.has(r.execution_id + '|' + r.table_name))
+    .filter(r => r.status === 'completed'
+      && pipelineCaps(r.pipeline_name).ingest
+      && !matchedOrchKeys.has(r.execution_id + '|' + r.table_name))
     .map(r => ({
       pipeline_name: r.pipeline_name,
       table_name: r.table_name,
@@ -192,6 +241,10 @@
 
   // Merged list: load_runs + failed orch tasks + skipped orch tasks
   const allIngestRuns = [...taggedLoadRuns, ...failedOrchIngest, ...skippedOrchIngest]
+    .sort((a, b) => (b.started_at || '') > (a.started_at || '') ? 1 : -1);
+
+  // Merged historize: completed runs from the log + synthesized failed-historize tasks.
+  const allHistorizeRuns = [...D.historize_runs, ...failedOrchHistorize]
     .sort((a, b) => (b.started_at || '') > (a.started_at || '') ? 1 : -1);
 
   // All unique execution_ids across merged ingest runs
@@ -764,8 +817,8 @@
     const totalRows = allIngestRuns.reduce((s, r) => s + (r.row_count || 0), 0);
 
     // Historize stats
-    const totalHist = D.historize_runs.length;
-    const histFailed = D.historize_runs.filter(r => r.status === 'failed').length;
+    const totalHist = allHistorizeRuns.length;
+    const histFailed = allHistorizeRuns.filter(r => r.status === 'failed').length;
     const histSuccess = totalHist - histFailed;
 
     // Orchestration stats (execution-level)
@@ -779,7 +832,7 @@
 
     // Currently failed pipelines (last run was a failure)
     const currentIngestFails = getCurrentlyFailed(allIngestRuns);
-    const currentHistFails = getCurrentlyFailed(D.historize_runs);
+    const currentHistFails = getCurrentlyFailed(allHistorizeRuns);
     const failingNames = [...new Set([
       ...currentIngestFails.map(r => r.pipeline_name),
       ...currentHistFails.map(r => r.pipeline_name),
@@ -918,8 +971,8 @@
     // Historize: completed vs failed — only when there are historize runs
     if (hasHist) {
       chartContainer.appendChild(buildStackedBarChart('Historize runs', dayBuckets,
-        bucketByDay(D.historize_runs.filter(r => r.status === 'completed'), dayBuckets),
-        bucketByDay(D.historize_runs.filter(r => r.status === 'failed'), dayBuckets),
+        bucketByDay(allHistorizeRuns.filter(r => r.status === 'completed'), dayBuckets),
+        bucketByDay(allHistorizeRuns.filter(r => r.status === 'failed'), dayBuckets),
         'var(--success)', 'var(--danger)', date => {
           pendingHistorizeDateFilter = date;
           showTab('historize-runs');
@@ -970,12 +1023,12 @@
       const failSection = h('div', { className: 'section', id: currentIngestFails.length ? null : 'failures-anchor' });
       failSection.appendChild(h('div', { className: 'section-header' }, 'Currently failing — historize'));
       const failTable = h('div', { className: 'table-wrap' });
-      let ftHTML = '<table><tr><th>Pipeline</th><th>Target</th><th>Snapshot</th><th>Last run</th><th>Status</th></tr>';
+      let ftHTML = '<table><tr><th>Pipeline</th><th>Target</th><th>Last run</th><th>Error</th><th>Status</th></tr>';
       currentHistFails.forEach(r => {
         ftHTML += '<tr><td><span class="pipeline-link" data-pipeline="' + escHtml(r.pipeline_name) + '">' +
           escHtml(r.pipeline_name) + '</span></td><td>' + escHtml(r.target_table) +
-          '</td><td>' + escHtml(r.snapshot_value) +
-          '</td><td>' + fmtDate(r.started_at) + '</td><td>' + statusBadge(r.status) + '</td></tr>';
+          '</td><td>' + fmtDate(r.started_at) + '</td><td>' + errorCell(r.error_message) +
+          '</td><td>' + statusBadge(r.status) + '</td></tr>';
       });
       ftHTML += '</table>';
       failTable.innerHTML = ftHTML;
@@ -1022,7 +1075,7 @@
     }
 
     const pRuns = allIngestRuns.filter(r => r.pipeline_name === pipelineName);
-    const pHistRuns = D.historize_runs.filter(r => r.pipeline_name === pipelineName);
+    const pHistRuns = allHistorizeRuns.filter(r => r.pipeline_name === pipelineName);
 
     // Stats
     const statGrid = h('div', { className: 'kpi-grid' });
@@ -1412,6 +1465,7 @@
       { key: 'started_at', label: 'Started', render: r => fmtDate(r.started_at) },
       { key: 'duration_seconds', label: 'Duration', render: r => fmtDuration(r.duration_seconds) },
       { key: 'status', label: 'Status', render: r => statusBadge(r.status) },
+      { key: 'error_message', label: 'Error', render: r => errorCell(r.error_message) },
     ];
     const hidden = loadHiddenCols('saga-cols-historize');
     filters.appendChild(columnMenu('saga-cols-historize', cols, hidden, () => draw()));
@@ -1429,7 +1483,7 @@
       const tagFilter = tagSelect.value;
       const dateFilter = histDateInput.value;
 
-      let filtered = D.historize_runs.filter(r => {
+      let filtered = allHistorizeRuns.filter(r => {
         if (!tree.matches(r.pipeline_name)) return false;
         if (statusFilter && r.status !== statusFilter) return false;
         if (!matchesTag(r.pipeline_name, tagFilter)) return false;
