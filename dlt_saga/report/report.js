@@ -831,7 +831,7 @@
     ];
     if (totalExecs > 0) {
       kpis.push(
-        { label: 'Successful orchestrations', value: cleanExecs + ' / ' + totalExecs,
+        { label: 'Clean executions', value: cleanExecs + ' / ' + totalExecs,
           sub: failedExecs > 0 ? failedExecs + ' with failures' : 'all clean',
           subColor: failedExecs > 0 ? 'var(--danger)' : null }
       );
@@ -892,7 +892,7 @@
           else orchCleanByDay[idx]++;
         }
       });
-      chartContainer.appendChild(buildStackedBarChart('Orchestration runs', dayBuckets,
+      chartContainer.appendChild(buildStackedBarChart('Executions', dayBuckets,
         orchCleanByDay, orchFailByDay, 'var(--success)', 'var(--danger)', date => {
           pendingOrchDateFilter = date;
           showTab('orchestration');
@@ -1457,13 +1457,13 @@
   function renderOrchestration() {
     const panel = $('#tab-orchestration');
     panel.innerHTML = '';
-    panel.appendChild(h('h2', { className: 'page-title' }, 'Orchestration Runs'));
+    panel.appendChild(h('h2', { className: 'page-title' }, 'Executions'));
 
     if (!orchRuns.length) {
       panel.appendChild(h('div', { className: 'section' },
         h('div', { className: 'empty-state' },
-          h('h3', null, 'No orchestration data'),
-          h('p', null, 'No orchestration runs found. Orchestration data is recorded when using saga ingest --orchestrate.')
+          h('h3', null, 'No executions recorded'),
+          h('p', null, 'No execution runs found yet. Runs are recorded automatically — both local runs and orchestrated runs (saga ingest --orchestrate).')
         )
       ));
       return;
@@ -1496,10 +1496,24 @@
     criteriaSelect.appendChild(h('option', { value: '' }, 'All selectors'));
     allCriteria.forEach(c => criteriaSelect.appendChild(h('option', { value: c }, c)));
     filters.appendChild(criteriaSelect);
+
+    const typeSelect = h('select', { className: 'filter-input' });
+    typeSelect.appendChild(h('option', { value: '' }, 'All types'));
+    typeSelect.appendChild(h('option', { value: 'orchestrated' }, 'Orchestrated'));
+    typeSelect.appendChild(h('option', { value: 'local' }, 'Local'));
+    filters.appendChild(typeSelect);
+
     const orchDateInput = addDateFilter(filters);
     filters.insertBefore(orchDateInput, filters.firstChild);
-    const orchFilterInputs = [statusSelect, commandSelect, criteriaSelect, orchDateInput];
+    const orchFilterInputs = [statusSelect, commandSelect, criteriaSelect, typeSelect, orchDateInput];
     const orchClearBtn = addClearFiltersButton(filters, orchFilterInputs, () => { orchPage = 0; drawSummary(); });
+
+    // An execution is "local" when its metadata says so, or (no metadata) any
+    // of its tasks is flagged local.
+    function execIsLocal(e) {
+      return (e.meta && e.meta.is_orchestrated === false) ||
+        (!e.meta && e.tasks.some(t => t.is_orchestrated === false));
+    }
 
     summarySection.appendChild(filters);
 
@@ -1521,10 +1535,13 @@
       const filter = statusSelect.value;
       const commandFilter = commandSelect.value;
       const criteriaFilter = criteriaSelect.value;
+      const typeFilter = typeSelect.value;
       const dateFilter = orchDateInput.value;
       let filtered = execList;
       if (filter === 'failed') filtered = filtered.filter(e => e.failed > 0);
       if (filter === 'clean') filtered = filtered.filter(e => e.failed === 0);
+      if (typeFilter === 'local') filtered = filtered.filter(e => execIsLocal(e));
+      if (typeFilter === 'orchestrated') filtered = filtered.filter(e => !execIsLocal(e));
       if (commandFilter) {
         filtered = filtered.filter(e =>
           e.meta && e.meta.command === commandFilter
@@ -1542,8 +1559,7 @@
         });
       }
 
-      const hasMeta = filtered.some(e => e.meta);
-      const cols = ['Execution ID', 'Time', 'Command', 'Select', 'Tasks', 'Completed', 'Failed', 'Duration', 'Status'];
+      const cols = ['Execution ID', 'Type', 'Time', 'Command', 'Select', 'Tasks', 'Completed', 'Failed', 'Duration', 'Status'];
       let html = '<table><tr>';
       cols.forEach(c => { html += '<th>' + c + '</th>'; });
       html += '</tr>';
@@ -1554,8 +1570,10 @@
         const shortId = e.execution_id.substring(0, 8);
         const status = e.failed > 0 ? 'failed' : e.running > 0 ? 'running' : e.pending > 0 ? 'pending' : 'completed';
         const m = e.meta;
+        const isLocal = execIsLocal(e);
         html += '<tr>';
         html += '<td><span class="exec-link" data-exec-id="' + escHtml(e.execution_id) + '" style="color:var(--accent-light);cursor:pointer;font-weight:600"><code>' + escHtml(shortId) + '</code></span></td>';
+        html += '<td><span class="badge ' + (isLocal ? 'badge-neutral' : 'badge-info') + '">' + (isLocal ? 'local' : 'orchestrated') + '</span></td>';
         html += '<td>' + fmtDate(m ? m.created_at : e.timestamp) + '</td>';
         html += '<td>' + (m ? escHtml(m.command) : '-') + '</td>';
         html += '<td>' + (m && m.select_criteria ? '<code>' + escHtml(m.select_criteria) + '</code>' : '<span style="color:var(--text-muted)">all</span>') + '</td>';

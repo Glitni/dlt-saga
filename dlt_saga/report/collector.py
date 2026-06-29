@@ -77,6 +77,7 @@ class OrchestrationRun:
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     error_message: Optional[str]
+    is_orchestrated: bool = True
 
     @property
     def duration_seconds(self) -> Optional[float]:
@@ -98,6 +99,7 @@ class ExecutionInfo:
     environment: Optional[str]
     profile: Optional[str]
     target: Optional[str]
+    is_orchestrated: bool = True
 
 
 @dataclass
@@ -260,18 +262,10 @@ def _query_orchestration_runs(
     from dlt_saga.project_config import get_execution_plans_table_name
 
     table_id = destination.get_full_table_id(schema, get_execution_plans_table_name())
+    # SELECT * (not an explicit column list) so the query still works against
+    # tables predating the is_orchestrated column; absent → read as orchestrated.
     sql = f"""
-        SELECT
-            execution_id,
-            task_index,
-            pipeline_type,
-            pipeline_identifier,
-            table_name,
-            status,
-            log_timestamp,
-            started_at,
-            completed_at,
-            error_message
+        SELECT *
         FROM {table_id}
         WHERE log_timestamp >= {destination.timestamp_n_days_ago(days)}
         QUALIFY ROW_NUMBER() OVER (
@@ -286,6 +280,7 @@ def _query_orchestration_runs(
         for row in rows:
             # Derive pipeline_name from group + table to match load_run naming
             pipeline_name = f"{row.pipeline_type}__{row.table_name}"
+            is_orch = getattr(row, "is_orchestrated", None)
             runs.append(
                 OrchestrationRun(
                     execution_id=row.execution_id,
@@ -298,6 +293,7 @@ def _query_orchestration_runs(
                     started_at=row.started_at,
                     completed_at=row.completed_at,
                     error_message=getattr(row, "error_message", None) or None,
+                    is_orchestrated=True if is_orch is None else bool(is_orch),
                 )
             )
         logger.debug(
@@ -314,37 +310,33 @@ def _query_executions(destination: Any, schema: str, days: int) -> List[Executio
     from dlt_saga.project_config import get_executions_table_name
 
     table_id = destination.get_full_table_id(schema, get_executions_table_name())
+    # SELECT * so the query tolerates tables predating the is_orchestrated column.
     sql = f"""
-        SELECT
-            execution_id,
-            created_at,
-            command,
-            pipeline_count,
-            task_count,
-            select_criteria,
-            environment,
-            profile,
-            target
+        SELECT *
         FROM {table_id}
         WHERE created_at >= {destination.timestamp_n_days_ago(days)}
         ORDER BY created_at DESC
     """
     try:
         rows = list(destination.execute_sql(sql, schema))
-        return [
-            ExecutionInfo(
-                execution_id=row.execution_id,
-                created_at=row.created_at,
-                command=getattr(row, "command", "ingest"),
-                pipeline_count=getattr(row, "pipeline_count", 0),
-                task_count=getattr(row, "task_count", 0),
-                select_criteria=getattr(row, "select_criteria", None),
-                environment=getattr(row, "environment", None),
-                profile=getattr(row, "profile", None),
-                target=getattr(row, "target", None),
+        result = []
+        for row in rows:
+            is_orch = getattr(row, "is_orchestrated", None)
+            result.append(
+                ExecutionInfo(
+                    execution_id=row.execution_id,
+                    created_at=row.created_at,
+                    command=getattr(row, "command", "ingest"),
+                    pipeline_count=getattr(row, "pipeline_count", 0),
+                    task_count=getattr(row, "task_count", 0),
+                    select_criteria=getattr(row, "select_criteria", None),
+                    environment=getattr(row, "environment", None),
+                    profile=getattr(row, "profile", None),
+                    target=getattr(row, "target", None),
+                    is_orchestrated=True if is_orch is None else bool(is_orch),
+                )
             )
-            for row in rows
-        ]
+        return result
     except Exception as e:
         logger.debug(f"No executions table in {schema} (skipping): {e}")
         return []

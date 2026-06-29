@@ -52,6 +52,7 @@ class PipelineResult:
     success: bool
     error: Optional[str] = None
     load_info: Optional[Any] = None
+    config: Optional[PipelineConfig] = None
 
 
 @dataclass
@@ -210,7 +211,13 @@ class Session:
             start_value_override=start_value_override,
             end_value_override=end_value_override,
         ):
-            return self._execute_with_auth(lambda: self._run_ingest(select, workers))
+
+            def _ingest_and_record() -> SessionResult:
+                result = self._run_ingest(select, workers)
+                self._record_run("ingest", select, result)
+                return result
+
+            return self._execute_with_auth(_ingest_and_record)
 
     def historize(
         self,
@@ -237,11 +244,15 @@ class Session:
             self._profile_target,
             full_refresh=full_refresh,
         ):
-            return self._execute_with_auth(
-                lambda: self._run_historize(
+
+            def _historize_and_record() -> SessionResult:
+                result = self._run_historize(
                     select, workers, full_refresh, partial_refresh, historize_from
                 )
-            )
+                self._record_run("historize", select, result)
+                return result
+
+            return self._execute_with_auth(_historize_and_record)
 
     def run(
         self,
@@ -280,11 +291,15 @@ class Session:
             start_value_override=start_value_override,
             end_value_override=end_value_override,
         ):
-            return self._execute_with_auth(
-                lambda: self._run_both(
+
+            def _run_and_record() -> SessionResult:
+                result = self._run_both(
                     select, workers, full_refresh, partial_refresh, historize_from
                 )
-            )
+                self._record_run("run", select, result)
+                return result
+
+            return self._execute_with_auth(_run_and_record)
 
     def update_access(
         self,
@@ -514,6 +529,73 @@ class Session:
                 return callback()
         return callback()
 
+    def _record_run(
+        self,
+        command: str,
+        select: Optional[List[str]],
+        result: SessionResult,
+    ) -> None:
+        """Record this local run's per-pipeline outcomes for `saga report`.
+
+        Local (non-orchestrated) runs would otherwise leave no trace of
+        failures — `_saga_load_info` only logs successes. This writes terminal
+        outcomes into the same `_saga_execution_plans` / `_saga_executions`
+        tables the orchestrated path uses (flagged ``is_orchestrated = False``),
+        so failed local runs show up in the report. Best-effort: never raises.
+
+        For a combined ``run`` (ingest + historize) a pipeline can produce two
+        results; they're merged into one row per pipeline, failing if either
+        phase failed.
+        """
+        if not result.pipeline_results:
+            return
+        try:
+            from dlt_saga.destinations.factory import DestinationFactory
+            from dlt_saga.utility.cli.context import get_execution_context
+            from dlt_saga.utility.naming import get_execution_plan_schema
+            from dlt_saga.utility.orchestration.execution_plan import (
+                ExecutionMetadata,
+                ExecutionPlanManager,
+            )
+
+            # Merge per pipeline: failed if any phase failed.
+            by_pipeline: Dict[str, Dict[str, Any]] = {}
+            for r in result.pipeline_results:
+                if r.config is None:
+                    continue
+                entry = by_pipeline.get(r.pipeline_name)
+                if entry is None:
+                    by_pipeline[r.pipeline_name] = {
+                        "pipeline_type": r.config.pipeline_group,
+                        "pipeline_identifier": r.config.identifier,
+                        "table_name": r.config.table_name,
+                        "status": "completed" if r.success else "failed",
+                        "error_message": r.error,
+                    }
+                elif not r.success:
+                    entry["status"] = "failed"
+                    entry["error_message"] = entry["error_message"] or r.error
+
+            records = list(by_pipeline.values())
+            if not records:
+                return
+
+            context = get_execution_context()
+            destination = DestinationFactory.create_from_context(
+                context.get_destination_type(), context, {"schema_name": ""}
+            )
+            metadata = ExecutionMetadata(
+                select_criteria=" ".join(select) if select else None,
+                command=command,
+                environment=context.get_environment(),
+                target=self._profile_target.name if self._profile_target else None,
+            )
+            ExecutionPlanManager(
+                destination=destination, schema=get_execution_plan_schema()
+            ).record_local_run(records, metadata=metadata)
+        except Exception as e:  # pragma: no cover - best-effort telemetry
+            logger.debug("Could not record local run outcomes: %s", e)
+
     # -------------------------------------------------------------------
     # Internal: ingest execution
     # -------------------------------------------------------------------
@@ -672,6 +754,7 @@ class Session:
                 pipeline_name=config.pipeline_name,
                 success=True,
                 load_info=load_info,
+                config=config,
             )
         except Exception as e:
             logger.error("%sPipeline %s failed: %s", prefix, config.pipeline_name, e)
@@ -688,6 +771,7 @@ class Session:
                 pipeline_name=config.pipeline_name,
                 success=False,
                 error=str(e),
+                config=config,
             )
 
     # -------------------------------------------------------------------
@@ -825,6 +909,7 @@ class Session:
                     pipeline_name=config.pipeline_name,
                     success=True,
                     load_info=run_result,
+                    config=config,
                 )
             else:
                 error = run_result.get("error", "Unknown error")
@@ -842,6 +927,7 @@ class Session:
                     pipeline_name=config.pipeline_name,
                     success=False,
                     error=error,
+                    config=config,
                 )
 
         except Exception as e:
@@ -865,6 +951,7 @@ class Session:
                 pipeline_name=config.pipeline_name,
                 success=False,
                 error=str(e),
+                config=config,
             )
 
     # -------------------------------------------------------------------

@@ -99,6 +99,7 @@ def _serialize_report_data(data: ReportData) -> str:
                 "completed_at": _dt(o.completed_at),
                 "error_message": o.error_message,
                 "duration_seconds": o.duration_seconds,
+                "is_orchestrated": o.is_orchestrated,
             }
         )
 
@@ -115,6 +116,7 @@ def _serialize_report_data(data: ReportData) -> str:
                 "environment": e.environment,
                 "profile": e.profile,
                 "target": e.target,
+                "is_orchestrated": e.is_orchestrated,
             }
         )
 
@@ -188,7 +190,7 @@ def _build_html(json_data: str, css: str, js: str, favicon_svg: str) -> str:
       <li class="nav-group-label">Overview</li>
       <li><a href="#" class="nav-link active" data-tab="dashboard">Dashboard</a></li>
       <li class="nav-group-label">Runs</li>
-      <li><a href="#" class="nav-link" data-tab="orchestration">Orchestration</a></li>
+      <li><a href="#" class="nav-link" data-tab="orchestration">Executions</a></li>
       <li><a href="#" class="nav-link" data-tab="ingest-runs">Ingest runs</a></li>
       <li><a href="#" class="nav-link" data-tab="historize-runs">Historize runs</a></li>
       <li class="nav-group-label">Catalog</li>
