@@ -24,6 +24,13 @@ class DestinationConfig:
     destination_type: str = "bigquery"
     location: Optional[str] = None
 
+    # Per-destination aliases for generic profile keys, surfaced only on this
+    # destination's target in the profile schema (e.g. BigQuery accepts
+    # ``project_id`` for the generic ``database`` key, Databricks ``catalog``).
+    # Maps canonical key -> tuple of alias key names. Not a dataclass field
+    # (no annotation), so it doesn't affect construction.
+    PROFILE_KEY_ALIASES = {}  # type: ignore[var-annotated]
+
     @property
     def database(self) -> str:
         """The top-level database/project/catalog identifier for this destination.

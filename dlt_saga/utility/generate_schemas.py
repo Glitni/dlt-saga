@@ -239,6 +239,102 @@ def dataclass_to_json_schema(
     return result
 
 
+def _destination_profile_props(config_class: type) -> Dict[str, Any]:
+    """Build profile-schema props for one destination's specific YAML keys.
+
+    Introspects the destination config dataclass: fields flagged with
+    ``metadata["profile_field"]`` become profile keys. The YAML key defaults to
+    the field name unless ``metadata["profile_key"]`` overrides it (e.g.
+    ``billing_project_id`` → ``billing_project``). Type comes from the
+    annotation; ``description``/``enum``/``minimum`` come from the field
+    metadata. The config dataclass is thus the single source of truth — adding a
+    field there surfaces it in the profile schema with no hand-list to drift.
+    """
+    import typing
+
+    props: Dict[str, Any] = {}
+    if not is_dataclass(config_class):
+        return props
+
+    # Resolve annotations to real types. The config modules use
+    # ``from __future__ import annotations``, so ``field.type`` is a string
+    # (e.g. "Optional[int]") that wouldn't type-map correctly.
+    try:
+        hints = typing.get_type_hints(config_class)
+    except Exception:
+        hints = {}
+    type_map = {str: "string", int: "integer", float: "number", bool: "boolean"}
+
+    for f in fields(config_class):
+        if not (f.metadata and f.metadata.get("profile_field")):
+            continue
+        key = f.metadata.get("profile_key", f.name)
+        annotation = hints.get(f.name, str)
+        if typing.get_origin(annotation) is typing.Union:
+            non_none = [a for a in typing.get_args(annotation) if a is not type(None)]
+            annotation = non_none[0] if non_none else str
+        prop: Dict[str, Any] = {"type": type_map.get(annotation, "string")}
+        for meta_key in (
+            "description",
+            "enum",
+            "minimum",
+            "maximum",
+            "pattern",
+            "format",
+        ):
+            if meta_key in f.metadata:
+                prop[meta_key] = f.metadata[meta_key]
+        props[key] = prop
+
+    # Destination-idiomatic aliases for generic keys (e.g. BigQuery's project_id
+    # for `database`), surfaced only on this destination's target.
+    for canonical, alias_names in getattr(
+        config_class, "PROFILE_KEY_ALIASES", {}
+    ).items():
+        for alias in alias_names:
+            props[alias] = {
+                "type": "string",
+                "description": f"Alias for '{canonical}' on this destination.",
+            }
+    return props
+
+
+def _build_destination_conditionals(
+    generic_props: Dict[str, Any],
+) -> "tuple[Dict[str, Any], List[Dict[str, Any]]]":
+    """Introspect registered destinations into profile-schema pieces.
+
+    Returns ``(union_props, conditional_blocks)`` where ``union_props`` is every
+    destination's specific keys merged (for the base ``properties``, so editors
+    autocomplete them all) and ``conditional_blocks`` is one ``if/then`` per
+    destination type: when ``type`` is that destination, only the generic keys
+    plus that destination's keys are allowed (``additionalProperties: false``),
+    so a sibling destination's key on the wrong target is flagged.
+    """
+    from dlt_saga.destinations.factory import DestinationFactory
+
+    per_type_props = {
+        dtype: _destination_profile_props(config_class)
+        for dtype, config_class in DestinationFactory._config_registry.items()
+    }
+
+    union_props: Dict[str, Any] = {}
+    for type_props in per_type_props.values():
+        union_props.update(type_props)
+
+    conditional_blocks = [
+        {
+            "if": {"properties": {"type": {"const": dtype}}, "required": ["type"]},
+            "then": {
+                "properties": {**generic_props, **type_props},
+                "additionalProperties": False,
+            },
+        }
+        for dtype, type_props in per_type_props.items()
+    ]
+    return union_props, conditional_blocks
+
+
 def get_target_fields_from_dataclass() -> Dict[str, Dict[str, Any]]:
     """Extract target configuration fields from TargetConfig dataclass.
 
@@ -618,6 +714,13 @@ def _build_profiles_schema(
             "Accepted aliases: catalog, project_id, project."
         ),
     }
+    # `destination_type` is a cross-destination synonym for `type` (the field
+    # name), so it's generic. Destination-idiomatic aliases (catalog, project_id,
+    # dataset, …) are declared per-destination via PROFILE_KEY_ALIASES instead.
+    yaml_target_props["destination_type"] = {
+        "type": "string",
+        "description": "Alias for 'type'.",
+    }
     yaml_target_props["schema"] = {
         "type": "string",
         "description": (
@@ -641,108 +744,6 @@ def _build_profiles_schema(
     yaml_target_props["run_as"] = {
         "type": "string",
         "description": "Identity to impersonate (e.g., service account email for GCP)",
-    }
-    yaml_target_props["billing_project"] = {
-        "type": "string",
-        "description": (
-            "GCP project used for job execution / billing on saga-issued queries "
-            "(load-info inserts, historize SQL, native-load SQL, IAM sync). "
-            "Does NOT apply to dlt-internal jobs (extract/normalize/load), which "
-            "always bill to 'database'. BigQuery-specific, defaults to 'database'."
-        ),
-    }
-    yaml_target_props["database_path"] = {
-        "type": "string",
-        "description": "Path to local DuckDB file (DuckDB-specific, use ':memory:' for in-memory)",
-    }
-    yaml_target_props["storage_path"] = {
-        "type": "string",
-        "description": "Cloud storage path for Iceberg tables (e.g., 'gs://bucket/path')",
-    }
-    yaml_target_props["partition_expiration_days"] = {
-        "type": "integer",
-        "minimum": 1,
-        "description": (
-            "BigQuery only. Default partition expiration (in days) for partitioned "
-            "tables created by pipelines targeting this profile. Pipeline-level "
-            "value overrides this. Honored on CREATE TABLE and reconciled (ALTER) "
-            "on every subsequent run. No effect on Iceberg or non-BigQuery targets."
-        ),
-    }
-
-    # ---- Databricks-specific fields ----
-    yaml_target_props["catalog"] = {
-        "type": "string",
-        "description": "Unity Catalog name (Databricks alias for 'database')",
-    }
-    yaml_target_props["server_hostname"] = {
-        "type": "string",
-        "description": (
-            "Databricks workspace hostname "
-            "(e.g., adb-1234567890.12.azuredatabricks.net). "
-            "Find it in Settings → Developer → SQL Warehouse → Connection Details."
-        ),
-    }
-    yaml_target_props["http_path"] = {
-        "type": "string",
-        "description": (
-            "Databricks SQL Warehouse HTTP path "
-            "(e.g., /sql/1.0/warehouses/abc123). "
-            "Find it in the warehouse's Connection Details tab."
-        ),
-    }
-    yaml_target_props["auth_mode"] = {
-        "type": "string",
-        "enum": ["u2m", "m2m", "pat"],
-        "description": (
-            "Databricks authentication mode. "
-            "'u2m': browser OAuth (default). "
-            "'m2m': service principal OAuth. "
-            "'pat': personal access token."
-        ),
-    }
-    yaml_target_props["access_token"] = {
-        "type": "string",
-        "description": (
-            "Databricks personal access token (auth_mode: pat). "
-            "Prefer a secret URI: "
-            "'azurekeyvault::https://my-vault.vault.azure.net::secret-name'"
-        ),
-    }
-    yaml_target_props["client_id"] = {
-        "type": "string",
-        "description": "Databricks service principal client ID (auth_mode: m2m)",
-    }
-    yaml_target_props["client_secret"] = {
-        "type": "string",
-        "description": (
-            "Databricks service principal client secret (auth_mode: m2m). "
-            "Prefer a secret URI: "
-            "'azurekeyvault::https://my-vault.vault.azure.net::secret-name'"
-        ),
-    }
-    yaml_target_props["staging_volume_name"] = {
-        "type": "string",
-        "description": (
-            "Fully-qualified Unity Catalog volume used to stage Parquet files "
-            "before COPY INTO (e.g., 'my_catalog.my_schema.ingest_volume'). "
-            "Recommended: point to a shared team volume. "
-            "When omitted, dlt auto-creates '_dlt_staging_load_volume' in the target schema."
-        ),
-    }
-    yaml_target_props["staging_credentials_name"] = {
-        "type": "string",
-        "description": "Named Unity Catalog storage credential used in COPY INTO (optional)",
-    }
-    yaml_target_props["storage_root"] = {
-        "type": "string",
-        "description": (
-            "Base cloud storage location for external Delta/Iceberg tables "
-            "(e.g., 'abfss://container@account.dfs.core.windows.net/raw/'). "
-            "When set, native_load creates external tables at "
-            "'<storage_root>/<pipeline_group>/<table_name>/' unless overridden "
-            "per pipeline. Databricks-specific."
-        ),
     }
 
     # Patch historize sub-section with explicit key schemas (overrides the Dict[str, Any] default)
@@ -774,6 +775,16 @@ def _build_profiles_schema(
         "additionalProperties": False,
     }
 
+    # Everything accumulated so far is destination-agnostic (generic). Fold in
+    # the introspected per-destination keys and build the conditional blocks.
+    union_props, conditional_blocks = _build_destination_conditionals(
+        dict(yaml_target_props)
+    )
+    # Base properties = generic + the union of every destination's keys, so
+    # editors autocomplete all keys and the schema knows each key's type.
+    for key, prop in union_props.items():
+        yaml_target_props.setdefault(key, prop)
+
     target_obj = {
         "type": "object",
         "description": (
@@ -781,6 +792,7 @@ def _build_profiles_schema(
             "for a specific environment"
         ),
         "properties": yaml_target_props,
+        "allOf": conditional_blocks,
         "additionalProperties": {
             "description": "Additional destination-specific configuration fields",
         },
