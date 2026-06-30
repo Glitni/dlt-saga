@@ -1,3 +1,15 @@
+## 0.8.0 — 2026-06-30
+
+### Added
+- Introspect destination configs for the profile schema with per-type validation (#164)
+- Record local run outcomes so failures appear in saga report (#162)
+- Improve saga report design, usability, and navigation (#158)
+
+
+### Fixed
+- Attribute failed runs to the correct phase in saga report (#163)
+- Store the real pipeline error so saga report shows the cause, not "failed" (#160)
+
 ## 0.7.2 — 2026-06-27
 
 ### Added
