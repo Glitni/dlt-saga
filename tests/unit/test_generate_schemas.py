@@ -432,3 +432,87 @@ class TestGenerateSchemasOutput:
         field = target_props["storage_root"]
         assert field["type"] == "string"
         assert "Databricks" in field["description"]
+
+    def _profile_target(self, tmp_path):
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        data = json.loads(
+            (tmp_path / "profiles_config.json").read_text(encoding="utf-8")
+        )
+        return data["additionalProperties"]["properties"]["outputs"][
+            "additionalProperties"
+        ]
+
+    def test_destination_keys_use_yaml_names_not_dataclass_fields(self, tmp_path):
+        """Introspection maps field aliases to YAML keys (billing_project_id → billing_project)."""
+        props = self._profile_target(tmp_path)["properties"]
+        assert "billing_project" in props
+        # Raw dataclass field names must not leak into the profile schema.
+        assert "billing_project_id" not in props
+        assert "dataset_name" not in props
+
+    def test_generic_keys_allowed_on_every_destination(self, tmp_path):
+        """Canonical keys + the cross-destination `destination_type` synonym apply
+        on every destination, so they validate on any target."""
+        generic = ("database", "schema", "type", "destination_type")
+        target = self._profile_target(tmp_path)
+        by_type = {
+            b["if"]["properties"]["type"]["const"]: b["then"]["properties"]
+            for b in target["allOf"]
+        }
+        for dtype, then_props in by_type.items():
+            for alias in generic:
+                assert alias in then_props, f"{alias} not allowed on {dtype} target"
+
+    def test_idiomatic_aliases_are_per_destination(self, tmp_path):
+        """Destination-idiomatic aliases are scoped to their destination and
+        flagged on the wrong target: project_id/project/dataset on BigQuery,
+        catalog on Databricks."""
+        by_type = {
+            b["if"]["properties"]["type"]["const"]: b["then"]["properties"]
+            for b in self._profile_target(tmp_path)["allOf"]
+        }
+        # BigQuery: database aliases + dataset (BigQuery's word for schema).
+        assert {"project_id", "project", "dataset"}.issubset(by_type["bigquery"])
+        assert "catalog" not in by_type["bigquery"]
+        # Databricks: catalog only; not BigQuery's aliases.
+        assert "catalog" in by_type["databricks"]
+        assert "project_id" not in by_type["databricks"]
+        assert "dataset" not in by_type["databricks"]
+        # DuckDB: only the canonical keys.
+        assert "database" in by_type["duckdb"]
+        assert "dataset" not in by_type["duckdb"]
+        assert "catalog" not in by_type["duckdb"]
+
+    def test_profile_target_has_conditional_blocks(self, tmp_path):
+        """Each registered destination gets an if/then block with closed props."""
+        target = self._profile_target(tmp_path)
+        blocks = target["allOf"]
+        types = {b["if"]["properties"]["type"]["const"] for b in blocks}
+        assert {"bigquery", "databricks", "duckdb"}.issubset(types)
+        for b in blocks:
+            assert b["then"]["additionalProperties"] is False
+
+    def test_conditional_blocks_partition_keys_by_destination(self, tmp_path):
+        """A destination's keys appear only in its own block, plus generic keys."""
+        target = self._profile_target(tmp_path)
+        by_type = {
+            b["if"]["properties"]["type"]["const"]: b["then"]["properties"]
+            for b in target["allOf"]
+        }
+        # BigQuery has its own key, not Databricks'.
+        assert "billing_project" in by_type["bigquery"]
+        assert "staging_volume_name" not in by_type["bigquery"]
+        # Databricks has its own key, not BigQuery's.
+        assert "staging_volume_name" in by_type["databricks"]
+        assert "billing_project" not in by_type["databricks"]
+        assert "partition_expiration_days" not in by_type["databricks"]
+        # DuckDB only its own.
+        assert "database_path" in by_type["duckdb"]
+        assert "billing_project" not in by_type["duckdb"]
+        # Generic keys are allowed in every block (so they aren't rejected).
+        for props in by_type.values():
+            assert "database" in props
+            assert "schema" in props
+            assert "historize" in props

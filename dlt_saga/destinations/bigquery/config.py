@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from dlt_saga.destinations.config import DestinationConfig
@@ -19,21 +19,58 @@ class BigQueryDestinationConfig(DestinationConfig):
     Table format is controlled by the table_format field.
     """
 
-    project_id: str = ""  # Project where datasets/tables live
-    billing_project_id: Optional[str] = (
-        None  # Project for job execution (defaults to project_id)
+    # BigQuery's idiomatic aliases for generic profile keys: `project_id`/
+    # `project` for `database`, and `dataset` (BigQuery's term) for `schema`.
+    PROFILE_KEY_ALIASES = {
+        "database": ("project_id", "project"),
+        "schema": ("dataset",),
+    }
+
+    project_id: str = ""  # Project where datasets/tables live (profile key: database)
+    # Project for job execution (defaults to project_id). profile_key maps the
+    # runtime field name to the profile YAML key, which differs here.
+    billing_project_id: Optional[str] = field(
+        default=None,
+        metadata={
+            "profile_field": True,
+            "profile_key": "billing_project",
+            "description": (
+                "GCP project used for job execution / billing on saga-issued queries "
+                "(load-info inserts, historize SQL, native-load SQL, IAM sync). "
+                "Does NOT apply to dlt-internal jobs (extract/normalize/load), which "
+                "always bill to 'database'. BigQuery-specific, defaults to 'database'."
+            ),
+        },
     )
     destination_type: str = "bigquery"
     location: str = "EU"
-    dataset_name: Optional[str] = None
-    schema_access: Optional[List[str]] = None  # Schema-level access control entries
-    table_format: str = "native"  # "native" or "iceberg"
-    storage_path: Optional[str] = None  # Required for Iceberg tables (gs://bucket/path)
+    dataset_name: Optional[str] = None  # profile key: schema
+    schema_access: Optional[List[str]] = None  # pipeline-level, not a profile key
+    table_format: str = "native"  # "native" or "iceberg" (generic profile key)
+    storage_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "profile_field": True,
+            "description": "Cloud storage path for Iceberg tables (e.g., 'gs://bucket/path')",
+        },
+    )
     # Partition expiration in days. Maps to time_partitioning.expiration_ms on
     # native BigQuery tables. Resolution: pipeline config > profile
     # destination_config > None (no expiration). Has no effect on Iceberg
     # tables, which don't expose a time_partitioning option.
-    partition_expiration_days: Optional[int] = None
+    partition_expiration_days: Optional[int] = field(
+        default=None,
+        metadata={
+            "profile_field": True,
+            "minimum": 1,
+            "description": (
+                "BigQuery only. Default partition expiration (in days) for partitioned "
+                "tables created by pipelines targeting this profile. Pipeline-level "
+                "value overrides this. Honored on CREATE TABLE and reconciled (ALTER) "
+                "on every subsequent run. No effect on Iceberg or non-BigQuery targets."
+            ),
+        },
+    )
 
     @property
     def database(self) -> str:

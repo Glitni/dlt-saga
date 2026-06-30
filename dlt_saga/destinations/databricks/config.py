@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from dlt_saga.destinations.config import DestinationConfig
@@ -20,30 +20,117 @@ class DatabricksDestinationConfig(DestinationConfig):
     target schema within that catalog.
     """
 
-    server_hostname: str = ""
-    http_path: str = ""
+    # Databricks' idiomatic alias for the generic `database` profile key.
+    PROFILE_KEY_ALIASES = {"database": ("catalog",)}
+
+    server_hostname: str = field(
+        default="",
+        metadata={
+            "profile_field": True,
+            "description": (
+                "Databricks workspace hostname "
+                "(e.g., adb-1234567890.12.azuredatabricks.net). "
+                "Find it in Settings → Developer → SQL Warehouse → Connection Details."
+            ),
+        },
+    )
+    http_path: str = field(
+        default="",
+        metadata={
+            "profile_field": True,
+            "description": (
+                "Databricks SQL Warehouse HTTP path "
+                "(e.g., /sql/1.0/warehouses/abc123). "
+                "Find it in the warehouse's Connection Details tab."
+            ),
+        },
+    )
+    # Unity Catalog name. Exposed in the profile schema as a generic alias of
+    # 'database' (works on any target), so it's not flagged as Databricks-only.
     catalog: str = ""
-    schema_name: Optional[str] = None
-    schema_access: Optional[List[str]] = None
-    auth_mode: Optional[str] = None  # "pat", "m2m", "u2m", or None (SDK auto-detect)
-    access_token: Optional[str] = None  # PAT only; resolved via SecretResolver
-    client_id: Optional[str] = None  # M2M only
-    client_secret: Optional[str] = None  # M2M only; resolved via SecretResolver
+    schema_name: Optional[str] = None  # profile key: schema
+    schema_access: Optional[List[str]] = None  # pipeline-level, not a profile key
+    auth_mode: Optional[str] = field(  # "pat", "m2m", "u2m", or None (SDK auto-detect)
+        default=None,
+        metadata={
+            "profile_field": True,
+            "enum": ["u2m", "m2m", "pat"],
+            "description": (
+                "Databricks authentication mode. "
+                "'u2m': browser OAuth (default). "
+                "'m2m': service principal OAuth. "
+                "'pat': personal access token."
+            ),
+        },
+    )
+    access_token: Optional[str] = field(  # PAT only; resolved via SecretResolver
+        default=None,
+        metadata={
+            "profile_field": True,
+            "description": (
+                "Databricks personal access token (auth_mode: pat). "
+                "Prefer a secret URI: "
+                "'azurekeyvault::https://my-vault.vault.azure.net::secret-name'"
+            ),
+        },
+    )
+    client_id: Optional[str] = field(  # M2M only
+        default=None,
+        metadata={
+            "profile_field": True,
+            "description": "Databricks service principal client ID (auth_mode: m2m)",
+        },
+    )
+    client_secret: Optional[str] = field(  # M2M only; resolved via SecretResolver
+        default=None,
+        metadata={
+            "profile_field": True,
+            "description": (
+                "Databricks service principal client secret (auth_mode: m2m). "
+                "Prefer a secret URI: "
+                "'azurekeyvault::https://my-vault.vault.azure.net::secret-name'"
+            ),
+        },
+    )
     destination_type: str = "databricks"
 
     # Unity Catalog volume staging.
     # dlt defaults to creating '_dlt_staging_load_volume' in the target schema;
     # set this to use an existing shared volume instead.
-    # Fully qualified: "<catalog>.<schema>.<volume_name>"
-    # e.g. "kumulus_dev_raw.ingest.ingest_volume"
-    staging_volume_name: Optional[str] = None
-    # Named Unity Catalog storage credential to use in COPY INTO (optional).
-    staging_credentials_name: Optional[str] = None
-    # Base ADLS location for external Delta/Iceberg tables.
-    # When set, native_load creates external tables at
-    # <storage_root>/<pipeline_group>/<table_name>/ unless overridden per pipeline.
-    # Example: abfss://lake@account.dfs.core.windows.net/raw/
-    storage_root: Optional[str] = None
+    staging_volume_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "profile_field": True,
+            "description": (
+                "Fully-qualified Unity Catalog volume used to stage Parquet files "
+                "before COPY INTO (e.g., 'my_catalog.my_schema.ingest_volume'). "
+                "Recommended: point to a shared team volume. "
+                "When omitted, dlt auto-creates '_dlt_staging_load_volume' in the target schema."
+            ),
+        },
+    )
+    staging_credentials_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "profile_field": True,
+            "description": (
+                "Named Unity Catalog storage credential used in COPY INTO (optional)"
+            ),
+        },
+    )
+    storage_root: Optional[str] = field(
+        default=None,
+        metadata={
+            "profile_field": True,
+            "description": (
+                "Base cloud storage location for external Delta/Iceberg tables "
+                "(e.g., 'abfss://container@account.dfs.core.windows.net/raw/'). "
+                "When set, native_load creates external tables at "
+                "'<storage_root>/<pipeline_group>/<table_name>/' unless overridden "
+                "per pipeline. Databricks-specific."
+            ),
+        },
+    )
 
     @property
     def database(self) -> str:

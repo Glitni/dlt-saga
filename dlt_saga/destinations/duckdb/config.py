@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from dlt_saga.destinations.config import DestinationConfig
@@ -20,9 +20,18 @@ class DuckDBDestinationConfig(DestinationConfig):
     """
 
     destination_type: str = "duckdb"
-    database_path: str = ":memory:"
-    schema_name: Optional[str] = None
-    project_id: str = "local"  # Used for table ID construction
+    database_path: str = field(
+        default=":memory:",
+        metadata={
+            "profile_field": True,
+            "description": (
+                "Path to local DuckDB file (DuckDB-specific, use ':memory:' "
+                "for in-memory)"
+            ),
+        },
+    )
+    schema_name: Optional[str] = None  # profile key: schema
+    project_id: str = "local"  # internal table-ID construction, not a profile key
 
     @property
     def database(self) -> str:
