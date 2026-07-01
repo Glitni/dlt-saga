@@ -27,13 +27,38 @@ def _base_kwargs(**overrides):
     return kwargs
 
 
+_CERT = "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----"
+
+
+def _cert_kwargs(**overrides):
+    kwargs = {
+        "tenant_id": "tenant-guid",
+        "site_url": "https://contoso.sharepoint.com/sites/X",
+        "file_path": "/sites/X/Shared Documents/r.xlsx",
+        "file_type": "xlsx",
+        "client_id": "client-guid",
+        "certificate": _CERT,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
 class TestSharePointConfig:
     def test_builds_with_token_request_body(self):
         cfg = SharePointConfig(**_base_kwargs())
         assert cfg.token_request_body is not None
 
-    def test_missing_token_request_body_raises(self):
-        with pytest.raises(ValueError, match="token_request_body is required"):
+    def test_builds_with_certificate(self):
+        cfg = SharePointConfig(**_cert_kwargs())
+        assert cfg.certificate is not None
+        assert cfg.client_id == "client-guid"
+
+    def test_certificate_without_client_id_raises(self):
+        with pytest.raises(ValueError, match="client_id is required"):
+            SharePointConfig(**_cert_kwargs(client_id=""))
+
+    def test_no_auth_configured_raises(self):
+        with pytest.raises(ValueError, match="authentication is not configured"):
             SharePointConfig(**_base_kwargs(token_request_body=None))
 
     def test_no_secret_named_field(self):

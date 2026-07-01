@@ -329,9 +329,14 @@ Selector reference:
 
 Requires `pip install "dlt-saga[azure]"`. Set `adapter: dlt_saga.sharepoint` in the config.
 
+Authenticate with **either** Entra ID certificate auth (`client_id` + `certificate`, recommended) **or** the deprecated legacy Azure ACS flow (`token_request_body`). Azure ACS for SharePoint Online was retired by Microsoft on 2 April 2026 — use the certificate method.
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `token_request_body` | string | yes | OAuth2 token-request form body — plain value, `${ENV_VAR}`, or secret URI (e.g. `azurekeyvault::https://vault.azure.net::MY-SECRET`). Previously `auth_secret` (still accepted, deprecated). |
+| `client_id` | string | cert auth | Entra ID application (client) ID. Required with `certificate`. |
+| `certificate` | string | cert auth | PEM (certificate + private key) — plain value, `${ENV_VAR}`, or secret URI (e.g. `azurekeyvault::https://vault.azure.net::MY-CERT`). Enables Entra ID app-only auth. |
+| `certificate_password` | string | no | Password for the private key, if encrypted. |
+| `token_request_body` | string | ACS auth | **Deprecated** (Azure ACS, retired 2 April 2026). OAuth2 token-request form body — plain value, `${ENV_VAR}`, or secret URI. Previously `auth_secret` (still accepted, deprecated). |
 | `tenant_id` | string | yes | Azure AD tenant ID (GUID) |
 | `site_url` | string | yes | SharePoint site base URL (e.g. `https://contoso.sharepoint.com/sites/MySite`) |
 | `file_path` | string | yes | Server-relative path to the file (e.g. `/sites/MySite/Shared Documents/report.xlsx`) |
