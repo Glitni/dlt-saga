@@ -6,7 +6,7 @@ using a URI-style notation: provider::project_or_scope::secret_name
 Supported formats:
 - googlesecretmanager::project_id::secret_name - Google Cloud Secret Manager
 - azurekeyvault::https://vault.azure.net::secret_name - Azure Key Vault
-- env::SECRET_NAME - Environment variables (for local dev / CI)
+- env_secret::SECRET_NAME - Secret read from an environment variable (local dev / CI)
 - Direct values (no prefix) - Plain text values for dev/testing
 
 The double-colon separator avoids ambiguity with URLs (which contain single colons).
@@ -47,7 +47,7 @@ def _ensure_providers() -> None:
     )
 
     _provider_registry.setdefault("googlesecretmanager", GcpSecretsProvider())
-    _provider_registry.setdefault("env", EnvVarSecretsProvider())
+    _provider_registry.setdefault("env_secret", EnvVarSecretsProvider())
 
     # Azure Key Vault — lazy import so the package is optional
     try:
@@ -65,7 +65,8 @@ class SecretResolver:
 
     Providers are registered by URI prefix. Built-in providers:
     - ``googlesecretmanager`` — Google Cloud Secret Manager
-    - ``env`` — Environment variables
+    - ``azurekeyvault`` — Azure Key Vault
+    - ``env_secret`` — Secret read from an environment variable
 
     Custom providers can be registered via ``register_provider()``.
     """
@@ -241,7 +242,7 @@ def resolve_secret(value: Any) -> Any:
     Example:
         >>> username = resolve_secret("googlesecretmanager::my-project::username")
         >>> password = resolve_secret("plain_password")  # Returns as-is
-        >>> token = resolve_secret("env::MY_API_TOKEN")  # From environment
+        >>> token = resolve_secret("env_secret::MY_API_TOKEN")  # From environment
     """
     return SecretResolver.resolve(value)
 

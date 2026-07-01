@@ -183,7 +183,7 @@ def _add_metadata_fields(schema, metadata):
 _SECRET_SUPPORT_NOTE = (
     "Accepts a secret URI resolved at runtime: "
     "'azurekeyvault::<vault-url>::<name>', "
-    "'googlesecretmanager::<project>::<name>', or 'env::<VAR>'."
+    "'googlesecretmanager::<project>::<name>', or 'env_secret::<VAR>'."
 )
 
 

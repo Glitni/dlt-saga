@@ -122,7 +122,7 @@ class TestResolverProviderDispatch:
 
     def test_env_uri_dispatches_to_env_provider(self, monkeypatch):
         monkeypatch.setenv("MY_TOKEN", "token-value")
-        result = resolve_secret("env::MY_TOKEN")
+        result = resolve_secret("env_secret::MY_TOKEN")
         assert result == "token-value"
 
     def test_googlesecretmanager_uri_dispatches_to_gcp(self):
@@ -170,7 +170,7 @@ class TestResolverRegistration:
         )
 
     def test_get_provider_returns_registered(self):
-        provider = SecretResolver.get_provider("env")
+        provider = SecretResolver.get_provider("env_secret")
         assert isinstance(provider, EnvVarSecretsProvider)
 
     def test_get_provider_returns_none_for_unknown(self):
@@ -180,8 +180,8 @@ class TestResolverRegistration:
         mock_provider = MagicMock(spec=SecretsProvider)
         mock_provider.get_secret.return_value = "overridden"
 
-        SecretResolver.register_provider("env", mock_provider)
-        result = resolve_secret("env::MY_KEY")
+        SecretResolver.register_provider("env_secret", mock_provider)
+        result = resolve_secret("env_secret::MY_KEY")
 
         assert result == "overridden"
 
@@ -192,10 +192,10 @@ class TestTwoPartUri:
 
     def test_env_two_part_uri(self, monkeypatch):
         monkeypatch.setenv("API_KEY", "key123")
-        assert resolve_secret("env::API_KEY") == "key123"
+        assert resolve_secret("env_secret::API_KEY") == "key123"
 
     def test_is_secret_uri_recognizes_env(self):
-        assert SecretResolver.is_secret_uri("env::MY_KEY") is True
+        assert SecretResolver.is_secret_uri("env_secret::MY_KEY") is True
 
     def test_is_secret_uri_recognizes_gcp(self):
         assert SecretResolver.is_secret_uri("googlesecretmanager::proj::name") is True
@@ -212,11 +212,11 @@ class TestCachingWithProviders:
         monkeypatch.setenv("CACHED_KEY", "val")
 
         # First call resolves
-        assert resolve_secret("env::CACHED_KEY") == "val"
+        assert resolve_secret("env_secret::CACHED_KEY") == "val"
 
         # Remove env var — second call should still return cached value
         monkeypatch.delenv("CACHED_KEY")
-        assert resolve_secret("env::CACHED_KEY") == "val"
+        assert resolve_secret("env_secret::CACHED_KEY") == "val"
 
     def test_gcp_cached_after_first_call(self):
         with patch(
@@ -236,7 +236,7 @@ class TestSecretStrIntegration:
         from dlt_saga.utility.secrets.secret_str import SecretStr
 
         monkeypatch.setenv("WRAPPED", "unwrapped-val")
-        result = resolve_secret(SecretStr("env::WRAPPED"))
+        result = resolve_secret(SecretStr("env_secret::WRAPPED"))
         assert result == "unwrapped-val"
 
     def test_secret_str_plain_passthrough(self):

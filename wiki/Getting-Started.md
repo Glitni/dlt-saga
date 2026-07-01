@@ -165,8 +165,8 @@ host: db.example.com
 port: 5432
 source_database: mydb
 source_table: orders
-username: "${DB_USER}"
-password: "${DB_PASSWORD}"
+username: "env_secret::DB_USER"
+password: "env_secret::DB_PASSWORD"
 
 write_disposition: append
 incremental: true

@@ -1,6 +1,7 @@
 """Unit tests for dlt_saga.new_adapter_command."""
 
 import py_compile
+import re
 
 import pytest
 import yaml
@@ -205,7 +206,9 @@ class TestGeneratedCodeConventions:
         assert "coerce_secret" in config
         # Named by content (the credential field), never by secrecy.
         assert "credential" in config
-        assert "_secret:" not in config
+        # No field *declared* with a secrecy suffix (e.g. `api_secret: ...`).
+        # Matches field declarations at line start, not `env_secret::` in prose.
+        assert not re.search(r"^\s*\w+_(secret|plaintext)\s*:", config, re.MULTILINE)
 
     def test_generic_creates_client_with_fetch(self, tmp_path):
         run_new_adapter("my_service", target=tmp_path)
