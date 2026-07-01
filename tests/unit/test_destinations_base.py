@@ -164,6 +164,41 @@ class TestBuildHistorizeCreateTableSqlDefault:
         assert sql.startswith("CREATE OR REPLACE TABLE proj.ds.tgt")
 
 
+class _PartitionClusterDestination(_ConcreteDestination):
+    """Concrete destination whose dialect supports both partition and cluster."""
+
+    def partition_ddl(self, column, col_type=None):
+        return f"PARTITION BY {column}"
+
+    def cluster_ddl(self, columns):
+        return f"CLUSTER BY {', '.join(columns)}"
+
+
+@pytest.mark.unit
+class TestPartitionClusterDdlDefault:
+    def test_returns_empty_when_dialect_unsupported(self):
+        # Base partition_ddl / cluster_ddl return "".
+        assert _ConcreteDestination().partition_cluster_ddl("dt", ["id"]) == ""
+
+    def test_combines_both_when_supported(self):
+        result = _PartitionClusterDestination().partition_cluster_ddl(
+            "dt", ["id", "ts"]
+        )
+        assert result == "PARTITION BY dt\nCLUSTER BY id, ts"
+
+    def test_partition_only(self):
+        assert (
+            _PartitionClusterDestination().partition_cluster_ddl("dt", None)
+            == "PARTITION BY dt"
+        )
+
+    def test_cluster_only(self):
+        assert (
+            _PartitionClusterDestination().partition_cluster_ddl(None, ["id"])
+            == "CLUSTER BY id"
+        )
+
+
 @pytest.mark.unit
 class TestLifecycleMethods:
     def test_connect_is_noop(self):

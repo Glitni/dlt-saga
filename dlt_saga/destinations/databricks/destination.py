@@ -536,6 +536,27 @@ class DatabricksDestination(Destination):
     def cluster_ddl(self, columns: list) -> str:
         return f"CLUSTER BY ({', '.join(columns)})"
 
+    def partition_cluster_ddl(
+        self,
+        partition_column: Optional[str],
+        cluster_columns: Optional[list],
+    ) -> str:
+        # Databricks rejects PARTITIONED BY and CLUSTER BY on the same table
+        # (SPECIFY_CLUSTER_BY_WITH_PARTITIONED_BY_IS_NOT_ALLOWED); prefer Liquid
+        # Clustering when both are requested.
+        if partition_column and cluster_columns:
+            logger.debug(
+                "Partition and cluster columns both requested; Databricks does not "
+                "support both on one table — using CLUSTER BY (Liquid Clustering) only."
+            )
+            partition_column = None
+        parts = []
+        if partition_column:
+            parts.append(self.partition_ddl(partition_column))
+        if cluster_columns:
+            parts.append(self.cluster_ddl(cluster_columns))
+        return "\n".join(parts)
+
     def type_name(self, logical_type: str) -> str:
         type_map = {
             "string": "STRING",

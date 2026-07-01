@@ -156,6 +156,18 @@ class TestDatabricksDialect:
     def test_cluster_ddl(self, columns, expected):
         assert self.dest.cluster_ddl(columns) == expected
 
+    def test_partition_cluster_ddl_prefers_clustering_when_both_set(self):
+        # Databricks rejects PARTITIONED BY + CLUSTER BY on one table.
+        result = self.dest.partition_cluster_ddl("dt", ["id", "ts"])
+        assert result == "CLUSTER BY (id, ts)"
+        assert "PARTITIONED BY" not in result
+
+    def test_partition_cluster_ddl_partition_only(self):
+        assert self.dest.partition_cluster_ddl("dt", None) == "PARTITIONED BY (dt)"
+
+    def test_partition_cluster_ddl_cluster_only(self):
+        assert self.dest.partition_cluster_ddl(None, ["id"]) == "CLUSTER BY (id)"
+
     @pytest.mark.parametrize(
         "logical, sql",
         [

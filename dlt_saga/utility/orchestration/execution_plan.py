@@ -150,8 +150,7 @@ class ExecutionPlanManager:
                 error_message {self._t("string")},
                 is_orchestrated {self._t("bool")}
             )
-            {d.partition_ddl("log_timestamp")}
-            {d.cluster_ddl(["execution_id", "task_index"])}
+            {d.partition_cluster_ddl("log_timestamp", ["execution_id", "task_index"])}
         """
         d.execute_sql(plans_ddl, self.schema)
 
