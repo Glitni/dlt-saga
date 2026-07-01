@@ -18,9 +18,9 @@ body = """
 ## Unreleased
 {% endif %}\
 {% for group, commits in commits | group_by(attribute="group") %}
-### {{ group }}
+### {{ group | striptags | trim }}
 {% for commit in commits %}\
-- {{ commit.message | split(pat="\n") | first | replace_regex(from="^(?i)(feat(ure)?|fix|sec(urity)?|perf(ormance)?|refactor)[:\\s]\\s*", to="") | trim | upper_first }}
+- {{ commit.message | split(pat="\n") | first | replace_regex(from="^(?i)(feat(ure)?|fix|sec(urity)?|perf(ormance)?|refactor)(\\(.+\\))?!?[:\\s]\\s*", to="") | trim | upper_first }}
 {% endfor %}
 {% endfor %}
 """
@@ -31,12 +31,17 @@ footer = ""
 conventional_commits = false
 filter_unconventional = false
 split_commits = false
+# Breaking changes (conventional `type!:` marker) are matched FIRST, so any
+# breaking commit lands under one prominent section regardless of its type.
+# Group names carry an HTML-comment sort prefix (stripped in the template) so
+# the sections render in a deliberate order rather than alphabetically.
 commit_parsers = [
-  { message = "^(?i)feat(ure)?[:\\s]",     group = "Added" },
-  { message = "^(?i)fix[:\\s]",            group = "Fixed" },
-  { message = "^(?i)sec(urity)?[:\\s]",    group = "Security" },
-  { message = "^(?i)perf(ormance)?[:\\s]", group = "Performance" },
-  { message = "^(?i)refactor[:\\s]",       group = "Changed" },
+  { message = "^(?i)\\w+(\\(.+\\))?!:",    group = "<!-- 0 -->Breaking Changes" },
+  { message = "^(?i)feat(ure)?[:\\s]",     group = "<!-- 1 -->Added" },
+  { message = "^(?i)refactor[:\\s]",       group = "<!-- 2 -->Changed" },
+  { message = "^(?i)fix[:\\s]",            group = "<!-- 3 -->Fixed" },
+  { message = "^(?i)perf(ormance)?[:\\s]", group = "<!-- 4 -->Performance" },
+  { message = "^(?i)sec(urity)?[:\\s]",    group = "<!-- 5 -->Security" },
   { message = "^(?i)(docs?|ci|chore|config|bump|test|debug)[:\\s]", skip = true },
   { message = ".*", skip = true },
 ]
