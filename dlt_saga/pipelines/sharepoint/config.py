@@ -36,29 +36,24 @@ class SharePointConfig(BaseConfig):
         metadata={
             "description": (
                 "Entra ID application (client) ID for app-only authentication. "
-                "Required together with 'certificate'. Plain value, ${ENV_VAR}, "
-                "or secret URI (resolved at runtime)."
+                "Required together with 'certificate'."
             ),
+            "secret": True,
         },
     )
     certificate: Optional[SecretStr] = field(
         default=None,
         metadata={
             "description": (
-                "PEM-encoded certificate including the private key, supplied as a "
-                "plain value, ${ENV_VAR}, or secret URI (e.g. "
-                "'azurekeyvault::https://my-vault.vault.azure.net::MY-CERT'). "
-                "Enables Entra ID app-only authentication."
+                "PEM-encoded certificate including the private key. Enables "
+                "Entra ID app-only authentication."
             ),
         },
     )
     certificate_password: Optional[SecretStr] = field(
         default=None,
         metadata={
-            "description": (
-                "Password for the certificate's private key, if encrypted. "
-                "Plain value, ${ENV_VAR}, or secret URI."
-            ),
+            "description": "Password for the certificate's private key, if encrypted.",
         },
     )
 
@@ -73,21 +68,17 @@ class SharePointConfig(BaseConfig):
                 "DEPRECATED — legacy Azure ACS app-only flow. Azure ACS for "
                 "SharePoint Online was retired by Microsoft and stopped working on "
                 "2 April 2026; use 'client_id' + 'certificate' instead. The OAuth2 "
-                "token-request form body, supplied as a plain value, ${ENV_VAR}, or "
-                "secret URI (e.g. "
-                "'azurekeyvault::https://my-vault.vault.azure.net::MY-SECRET-NAME'). "
-                "The resolved value is POSTed directly to the Azure ACS token endpoint."
+                "token-request form body; the resolved value is POSTed directly to "
+                "the Azure ACS token endpoint."
             ),
         },
     )
     tenant_id: str = field(
         default="",
         metadata={
-            "description": (
-                "Azure AD tenant ID (GUID). Plain value, ${ENV_VAR}, or secret URI "
-                "(resolved at runtime)."
-            ),
+            "description": "Azure AD tenant ID (GUID).",
             "required": True,
+            "secret": True,
         },
     )
 

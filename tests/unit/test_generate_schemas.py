@@ -516,3 +516,81 @@ class TestGenerateSchemasOutput:
             assert "database" in props
             assert "schema" in props
             assert "historize" in props
+
+
+@pytest.mark.unit
+class TestSecretSupportNote:
+    """Fields that resolve secret references are documented uniformly."""
+
+    def _schema(self):
+        from dlt_saga.utility.generate_schemas import dataclass_to_json_schema
+        from dlt_saga.utility.secrets.secret_str import SecretStr
+
+        @dataclass
+        class WithSecrets:
+            token: Optional[SecretStr] = field(
+                default=None, metadata={"description": "API token"}
+            )
+            client_id: str = field(
+                default="",
+                metadata={"description": "Client ID", "secret": True},
+            )
+            region: str = field(default="", metadata={"description": "Region"})
+
+        return dataclass_to_json_schema(WithSecrets)
+
+    def test_secretstr_field_gets_note(self):
+        desc = self._schema()["properties"]["token"]["description"]
+        assert desc.startswith("API token")
+        assert "secret URI" in desc
+        assert "azurekeyvault::" in desc
+
+    def test_note_separated_from_description_by_period(self):
+        # A description without terminal punctuation gets a period before the note.
+        desc = self._schema()["properties"]["token"]["description"]
+        assert "API token. Accepts a secret URI" in desc
+
+    def test_existing_terminal_punctuation_not_doubled(self):
+        from dlt_saga.utility.generate_schemas import dataclass_to_json_schema
+        from dlt_saga.utility.secrets.secret_str import SecretStr
+
+        @dataclass
+        class Ends:
+            token: Optional[SecretStr] = field(
+                default=None, metadata={"description": "Token value."}
+            )
+
+        desc = dataclass_to_json_schema(Ends)["properties"]["token"]["description"]
+        assert "Token value. Accepts" in desc
+        assert "value.. Accepts" not in desc
+
+    def test_marked_plain_field_gets_note(self):
+        desc = self._schema()["properties"]["client_id"]["description"]
+        assert desc.startswith("Client ID")
+        assert "secret URI" in desc
+
+    def test_note_omits_env_var_templating(self):
+        # {{ env_var() }} is universal Jinja, not a per-field capability.
+        desc = self._schema()["properties"]["token"]["description"]
+        assert "${ENV_VAR}" not in desc
+        assert "env_var" not in desc
+
+    def test_non_secret_field_has_no_note(self):
+        desc = self._schema()["properties"]["region"]["description"]
+        assert desc == "Region"
+
+    def test_secret_marker_not_emitted_as_schema_key(self):
+        # The marker drives the note; it must not leak into the JSON schema.
+        assert "secret" not in self._schema()["properties"]["client_id"]
+
+    def test_sharepoint_config_documents_resolvable_identifiers(self):
+        from dlt_saga.pipelines.sharepoint.config import SharePointConfig
+        from dlt_saga.utility.generate_schemas import dataclass_to_json_schema
+
+        props = dataclass_to_json_schema(SharePointConfig)["properties"]
+        # Plain-str identifier that is resolved at runtime.
+        assert "secret URI" in props["client_id"]["description"]
+        # SecretStr credential.
+        assert "secret URI" in props["certificate"]["description"]
+        # Non-secret field untouched.
+        assert "secret URI" not in props["file_type"]["description"]

@@ -14,7 +14,7 @@ import shutil
 from dataclasses import MISSING, Field, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, get_args, get_origin
+from typing import Any, Dict, List, Mapping, Optional, Union, get_args, get_origin
 
 # ---------------------------------------------------------------------------
 # Static schema location
@@ -175,6 +175,45 @@ def _add_metadata_fields(schema, metadata):
     return schema
 
 
+# Standard note appended to the description of any field that accepts a secret
+# reference. Keeps secret-capability documentation uniform and in one place
+# rather than hand-written (and drifting) across each field's description.
+# Only the secret-URI form is per-field; ``{{ env_var('VAR') }}`` templating
+# works in every field (Jinja, applied at load time) so it is not mentioned here.
+_SECRET_SUPPORT_NOTE = (
+    "Accepts a secret URI resolved at runtime: "
+    "'azurekeyvault::<vault-url>::<name>', "
+    "'googlesecretmanager::<project>::<name>', or 'env::<VAR>'."
+)
+
+
+def _accepts_secret(field: Field, metadata: Mapping[str, Any]) -> bool:
+    """True if the field resolves secret references at runtime.
+
+    Detected from an explicit ``metadata={"secret": True}`` marker (for fields
+    resolved but not typed as ``SecretStr``, e.g. identifiers) or from a
+    ``SecretStr`` type annotation. Name-based type detection keeps this robust
+    to ``from __future__ import annotations`` (string annotations).
+    """
+    if metadata.get("secret"):
+        return True
+    field_type, _ = _unwrap_optional(field.type)
+    if isinstance(field_type, str):
+        return "SecretStr" in field_type
+    return getattr(field_type, "__name__", "") == "SecretStr"
+
+
+def _append_secret_note(schema: Dict[str, Any]) -> None:
+    """Append the standard secret-support note to a schema's description."""
+    existing = schema.get("description", "").strip()
+    if not existing:
+        schema["description"] = _SECRET_SUPPORT_NOTE
+        return
+    if existing[-1] not in ".!?":
+        existing += "."
+    schema["description"] = f"{existing} {_SECRET_SUPPORT_NOTE}"
+
+
 def python_type_to_json_schema(
     field: Field, field_metadata: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
@@ -200,7 +239,14 @@ def python_type_to_json_schema(
         schema = _handle_primitive_or_dataclass(field_type, metadata)
 
     _add_default_value(schema, field)
-    return _add_metadata_fields(schema, metadata)
+    schema = _add_metadata_fields(schema, metadata)
+    if (
+        isinstance(schema, dict)
+        and "$ref" not in schema
+        and _accepts_secret(field, metadata)
+    ):
+        _append_secret_note(schema)
+    return schema
 
 
 def dataclass_to_json_schema(

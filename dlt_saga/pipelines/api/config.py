@@ -59,9 +59,7 @@ class ApiConfig(BaseConfig):
     )
     auth_token: Optional[SecretStr] = field(
         default=None,
-        metadata={
-            "description": "API token or bearer token (plain value, ${ENV_VAR}, or secret URI: googlesecretmanager::project::secret)"
-        },
+        metadata={"description": "API token or bearer token"},
     )
     auth_header_name: Optional[str] = field(
         default=None,
