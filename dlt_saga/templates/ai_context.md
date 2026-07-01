@@ -93,11 +93,11 @@ class MyServiceConfig(BaseConfig):
         metadata={"description": "API base URL", "required": True},
     )
     # Name credential fields by what they HOLD, not by secrecy. Any string
-    # field accepts a plain value, ${ENV_VAR}, or a secret URI interchangeably,
+    # field accepts a plain value or a secret URI (e.g. env_secret::VAR) interchangeably,
     # so a `*_secret` suffix is misleading — drop it.
     api_token: Optional[SecretStr] = field(
         default=None,
-        metadata={"description": "Access token (plain value, ${ENV_VAR}, or secret URI)"},
+        metadata={"description": "Access token (plain value or secret URI)"},
     )
 
     def __post_init__(self):
@@ -110,7 +110,7 @@ class MyServiceConfig(BaseConfig):
 Key rules:
 - Always call `super().__post_init__()` first if you define `__post_init__`
 - Credential fields: type as `SecretStr`, `coerce_secret()` them, and let the value be a
-  plain string, `${ENV_VAR}`, or a `googlesecretmanager::`/`azurekeyvault::` URI. Never
+  plain string or a secret URI (`googlesecretmanager::`/`azurekeyvault::`/`env_secret::VAR`). Never
   hardcode credentials, and never name a field `*_secret` — secrecy is a property of the
   value, not the field.
 - Keep source-identifying fields (URLs, table names) with an empty default and validate them
@@ -171,7 +171,7 @@ class MyServicePipeline(BasePipeline):
         )
 ```
 
-To resolve a credential at request time (handles secret URIs and `${ENV_VAR}`):
+To resolve a credential at request time (handles plain values and secret URIs):
 
 ```python
 from dlt_saga.utility.secrets import resolve_secret
@@ -236,7 +236,7 @@ write_disposition: append
 base_url: "https://api.example.com"
 endpoint: "/v1/data"
 auth_type: bearer
-auth_token: "${MY_API_TOKEN}"
+auth_token: "env_secret::MY_API_TOKEN"
 response_path: "data.items"
 pagination:
   type: offset
@@ -251,7 +251,7 @@ First-time adapters tend to repeat the same mistakes. Each below is a DON'T → 
 |---|---|
 | Bury source-identifying values (URLs, table names) as class defaults, leaving the YAML empty | Empty default + validate in `__post_init__`; set real values in the pipeline config so the source is obvious |
 | Invent a new config name (`overlap_days`, `start_dt`) for a standard concept | Reuse the inherited vocabulary: `incremental`, `incremental_column`, `initial_value`, `primary_key`, `partition_column`, `cluster_columns`, `write_disposition` |
-| Name a field `*_secret` / `*_plaintext` | Name by content (`api_token`, `connection_string`); any field already accepts a plain value, `${ENV_VAR}`, or a secret URI |
+| Name a field `*_secret` / `*_plaintext` | Name by content (`api_token`, `connection_string`); any field already accepts a plain value or a secret URI (`env_secret::VAR`, `googlesecretmanager::…`) |
 | Hardcode "always load yesterday" / `datetime.now() - 1d` | Look up the max loaded value with `destination.get_max_column_value(...)` and fall back to `initial_value` — idempotent and self-healing |
 | Re-fetch everything every run for an incremental source | Push the resolved cursor into the source query/filter so only new rows return |
 | Hardcode credentials, or read `os.environ` directly | Type credentials as `SecretStr`, `coerce_secret()` in config, `resolve_secret()` at use |
@@ -422,7 +422,7 @@ Switch targets with `--target prod`. Environment affects naming:
 ## Key conventions
 
 - Use `logger = logging.getLogger(__name__)` — never `print()`
-- Use `${ENV_VAR}` or secret URIs for credentials — never hardcode
+- Use secret URIs (`env_secret::VAR`, `googlesecretmanager::…`) for credentials — never hardcode
 - Config errors should raise `ValueError` with actionable messages
 - Keep functions small; prefer composition over long methods
 - Add type hints to public functions

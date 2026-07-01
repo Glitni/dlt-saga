@@ -170,7 +170,7 @@ write_disposition: append
 api_url: "https://api.example.com/data"
 page_size: 50
 auth_type: bearer
-auth_token: "${API_TOKEN}"
+auth_token: "env_secret::API_TOKEN"
 ```
 
 ### Idempotent incremental loading
@@ -198,9 +198,10 @@ flags the hardcoded-window anti-pattern.
 
 ### Secrets and credentials
 
-Any string config field accepts a plain value, an environment variable
-(`${ENV_VAR}`), or a secret URI (`googlesecretmanager::…` / `azurekeyvault::…`)
-interchangeably — so **name credential fields by what they hold, never by
+Any string config field accepts a plain value or a secret URI
+(`googlesecretmanager::…` / `azurekeyvault::…` / `env_secret::VAR`) interchangeably;
+non-secret environment variables can also be injected in any field with `{{ env_var('VAR') }}`
+templating. So **name credential fields by what they hold, never by
 secrecy**. `api_token` and `password` are good; `auth_secret` / `*_plaintext`
 are not (the name guarantees nothing, and `saga lint` flags it).
 
@@ -222,7 +223,7 @@ class MyConfig(BaseConfig):
 ```python
 # in client.py, at request time:
 from dlt_saga.utility.secrets import resolve_secret
-token = resolve_secret(self.config.api_token)   # handles plain / ${ENV_VAR} / secret URI
+token = resolve_secret(self.config.api_token)   # handles plain values and secret URIs
 ```
 
 ### Standard config vocabulary
@@ -439,7 +440,7 @@ All string config fields support secret reference prefixes — the same config w
 |--------|----------|
 | `googlesecretmanager::project::secret-name` | GCP Secret Manager |
 | `azurekeyvault::https://vault-name.vault.azure.net::secret-name` | Azure Key Vault |
-| `${ENV_VAR}` | Environment variable |
+| `env_secret::VAR` | Secret from an environment variable (resolved at runtime) |
 
 ---
 

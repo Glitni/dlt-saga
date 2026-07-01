@@ -98,8 +98,8 @@ def check_secret_field_names(target: AdapterTarget) -> Iterable[Finding]:
                 code="secret-naming",
                 message=(
                     f"Config field '{name}' is named by secrecy. Any field accepts a "
-                    "secret URI (googlesecretmanager::…/azurekeyvault::…) or ${ENV_VAR} "
-                    "just as well as a plain value, so the name carries no guarantee — "
+                    "secret URI (googlesecretmanager::…/azurekeyvault::…/env_secret::…) just "
+                    "as well as a plain value, so the name carries no guarantee — "
                     "name it by what it holds and type it as SecretStr."
                 ),
                 location=name,

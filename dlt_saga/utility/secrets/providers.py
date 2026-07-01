@@ -78,7 +78,7 @@ class EnvVarSecretsProvider(SecretsProvider):
     Useful for local development and CI where cloud secret managers are
     not available. The ``project_or_scope`` parameter is ignored.
 
-    URI format: ``env::VAR_NAME``
+    URI format: ``env_secret::VAR_NAME``
     """
 
     def get_secret(

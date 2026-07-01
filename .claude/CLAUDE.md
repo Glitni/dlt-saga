@@ -407,7 +407,7 @@ historize:
 
 ## Security
 - Never include secrets in code or examples.
-- Use environment variables or placeholders like `${API_KEY}` or `<API_KEY>`
+- Use placeholders like `<API_KEY>` in examples; in configs reference secrets via a secret URI (`env_secret::API_KEY`, `googlesecretmanager::…`, `azurekeyvault::…`) — not `{{ env_var() }}`, which renders at load time and would bake the value into the execution plan
 - Identity impersonation: Always use the `AuthProvider.impersonate()` context manager
 - Credentials: Load from environment, profiles, or cloud metadata service — never hardcode
 

@@ -13,8 +13,8 @@ class ApiConfig(BaseConfig):
 
     Authentication credentials can be:
     - Plain values: auth_token: "my_api_key"
-    - Environment variables: auth_token: "${API_KEY}"
     - Secret URIs: auth_token: "googlesecretmanager::project::secret-name"
+    - From an environment variable: auth_token: "env_secret::API_KEY"
     """
 
     # API endpoint details (required, validated in __post_init__)

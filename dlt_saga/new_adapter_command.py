@@ -135,8 +135,8 @@ from dlt_saga.utility.secrets.secret_str import SecretStr, coerce_secret
 class {class_name}Config(BaseConfig):
     """Configuration for the {name} source.
 
-    Credentials accept a plain value, an environment variable (``${{ENV_VAR}}``)
-    or a secret URI (``googlesecretmanager::project::secret``) interchangeably.
+    Credentials accept a plain value or a secret URI
+    (``googlesecretmanager::project::secret``, ``env_secret::VAR``) interchangeably.
     Name fields by *what they hold* (``credential``, ``password``), never by
     whether the value is secret — avoid ``*_secret`` names, since secrecy is a
     property of the value, not the field.
@@ -156,11 +156,11 @@ class {class_name}Config(BaseConfig):
 
     # --- Credentials -----------------------------------------------------
     # Type secrets as SecretStr and coerce them in __post_init__. The value may be
-    # plain, ${{ENV_VAR}}, or a secret URI — resolve it lazily in client.py.
+    # plain or a secret URI (e.g. ``env_secret::VAR``) — resolve it lazily in client.py.
     credential: Optional[SecretStr] = field(
         default=None,
         metadata={{
-            "description": "Access credential (plain value, ${{ENV_VAR}}, or secret URI)"
+            "description": "Access credential (plain value or secret URI)"
         }},
     )
 
@@ -216,8 +216,8 @@ class {class_name}Client:
 
     Keep all I/O and credential resolution here so the pipeline stays
     orchestration-only — this mirrors the built-in adapters (database, filesystem,
-    sftp). Resolve secrets lazily at call time so secret URIs and ${{ENV_VAR}}
-    both work::
+    sftp). Resolve secrets lazily at call time so secret URIs (including
+    ``env_secret::VAR``) work::
 
         from dlt_saga.utility.secrets import resolve_secret
         secret = resolve_secret(self.config.credential)
@@ -486,9 +486,9 @@ base_url: "https://api.example.com"
 endpoint: "/v1/events"
 response_path: "data"
 
-# Auth: any field accepts a plain value, ${{ENV_VAR}} or a secret URI.
+# Auth: any field accepts a plain value or a secret URI (env_secret::VAR or a manager).
 auth_type: bearer
-auth_token: "${{MY_API_TOKEN}}"
+auth_token: "env_secret::MY_API_TOKEN"
 # auth_token: "googlesecretmanager::my-project::{name}-token"
 
 # Date-window incremental: resume from the warehouse watermark, re-fetch `overlap`
@@ -523,7 +523,7 @@ source_uri: "https://example.com/or/host/or/path"
 # hostname, source_table). Credentials: never commit a plain secret — point at a
 # secret manager or env var; any field accepts a secret URI:
 # credential: "googlesecretmanager::my-project::{name}-credential"
-# credential: "${{MY_CREDENTIAL}}"
+# credential: "env_secret::MY_CREDENTIAL"
 
 # Incremental loading (optional). The pipeline resumes from the warehouse
 # high-water mark and seeds from initial_value on the first run — so it catches
@@ -544,9 +544,9 @@ base_url: "https://api.example.com"
 endpoint: "/v1/records"
 response_path: "data"
 
-# Auth: any field accepts a plain value, ${{ENV_VAR}} or a secret URI.
+# Auth: any field accepts a plain value or a secret URI (env_secret::VAR or a manager).
 auth_type: bearer
-auth_token: "${{MY_API_TOKEN}}"
+auth_token: "env_secret::MY_API_TOKEN"
 # auth_token: "googlesecretmanager::my-project::{name}-token"
 
 # Pagination (optional) — omit for single-request endpoints.

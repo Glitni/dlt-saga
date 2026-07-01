@@ -2,7 +2,8 @@
 
 Provides a unified interface for resolving secrets from:
 - Google Cloud Secret Manager (googlesecretmanager::project::secret_name)
-- Environment variables (env::VAR_NAME)
+- Azure Key Vault (azurekeyvault::vault-url::secret_name)
+- Environment variables (env_secret::VAR_NAME)
 - Custom providers via SecretsProvider ABC
 
 Secrets are referenced using URI-style syntax in pipeline configs.

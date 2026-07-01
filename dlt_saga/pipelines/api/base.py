@@ -1,7 +1,6 @@
 """Base pipeline for REST API sources."""
 
 import logging
-import os
 import time
 from dataclasses import fields
 from typing import (
@@ -94,35 +93,21 @@ class BaseApiPipeline(BasePipeline):
         return headers
 
     def _resolve_token(self, token: Union[str, "SecretStr", None]) -> str:
-        """Resolve token value (supports env vars and secret URIs).
+        """Resolve a token value.
 
         Args:
-            token: Token value, ${ENV_VAR} reference, secret URI, or SecretStr
+            token: A secret URI (e.g. ``googlesecretmanager::project::secret``,
+                ``env_secret::VAR``), a plain value, or a ``SecretStr``.
 
         Returns:
-            Resolved token value
+            Resolved token value.
         """
         from dlt_saga.utility.secrets import resolve_secret
-        from dlt_saga.utility.secrets.secret_str import SecretStr
 
         if not token:
             raise ValueError("Token value is required")
 
-        # Unwrap SecretStr for env var check below
-        raw = token.get_secret_value() if isinstance(token, SecretStr) else token
-
-        # Support ${ENV_VAR} syntax
-        if raw.startswith("${") and raw.endswith("}"):
-            env_var = raw[2:-1]
-            value = os.getenv(env_var)
-            if not value:
-                raise ValueError(
-                    f"Environment variable '{env_var}' is not set for API authentication"
-                )
-            return value
-
-        # Support secret URI format (googlesecretmanager::project::secret)
-        # Also handles plain values (returns as-is)
+        # resolve_secret handles secret URIs, SecretStr, and plain values.
         return resolve_secret(token)
 
     def _extract_data_from_response(self, response_data: Any) -> list:
