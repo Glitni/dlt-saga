@@ -20,7 +20,7 @@ class DatabaseConfig(BaseConfig):
     connection_string: Optional[SecretStr] = field(
         default=None,
         metadata={
-            "description": "Database connection string (supports env vars and secret URIs). "
+            "description": "Database connection string. "
             "Example: 'postgresql://user:pass@host:5432/db'"
         },
     )
@@ -60,15 +60,11 @@ class DatabaseConfig(BaseConfig):
     )
     username: Optional[SecretStr] = field(
         default=None,
-        metadata={
-            "description": "Database username (supports env vars and secret URIs)"
-        },
+        metadata={"description": "Database username"},
     )
     password: Optional[SecretStr] = field(
         default=None,
-        metadata={
-            "description": "Database password (supports env vars and secret URIs)"
-        },
+        metadata={"description": "Database password"},
     )
     source_schema: Optional[str] = field(
         default=None,

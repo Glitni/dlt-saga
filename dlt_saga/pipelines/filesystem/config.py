@@ -79,37 +79,27 @@ class FilesystemConfig(BaseConfig):
     )
 
     # SFTP Credentials
-    # Supports both plain values and secret URIs:
-    # - Plain: username: "myuser"
-    # - Secret: username: "googlesecretmanager::project-id::secret-name"
     username: Optional[SecretStr] = field(
         default=None,
-        metadata={
-            "description": "SFTP username (plain value or secret URI: googlesecretmanager::project::secret)"
-        },
+        metadata={"description": "SFTP username"},
     )
     password: Optional[SecretStr] = field(
         default=None,
-        metadata={
-            "description": "SFTP password (plain value or secret URI: googlesecretmanager::project::secret)"
-        },
+        metadata={"description": "SFTP password"},
     )
     key_filename: Optional[SecretStr] = field(
         default=None,
-        metadata={
-            "description": "SSH private key (file path, key content, or secret URI: googlesecretmanager::project::secret)"
-        },
+        metadata={"description": "SSH private key (file path or key content)"},
     )
     key_passphrase: Optional[SecretStr] = field(
         default=None,
-        metadata={
-            "description": "Passphrase for encrypted SSH key (plain value or secret URI)"
-        },
+        metadata={"description": "Passphrase for encrypted SSH key"},
     )
     known_hosts: Optional[str] = field(
         default=None,
         metadata={
-            "description": "Known hosts (file path, content, or secret URI: googlesecretmanager::project::secret)"
+            "description": "Known hosts (file path or content)",
+            "secret": True,
         },
     )
     end_date: Optional[str] = field(
