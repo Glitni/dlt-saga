@@ -1,3 +1,12 @@
+## 0.10.0 — 2026-07-01
+
+### Breaking Changes
+- Consolidate env-var secret handling (remove ${VAR}, rename env:: → env_secret::) (#175)
+
+
+### Fixed
+- Recognize conventional "!" breaking-change marker in changelog generation (#174)
+
 ## 0.9.0 — 2026-07-01
 
 ### Added
