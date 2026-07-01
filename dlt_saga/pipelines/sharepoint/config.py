@@ -16,36 +16,77 @@ _DEPRECATED_KEY_ALIASES = {"auth_secret": "token_request_body"}
 class SharePointConfig(BaseConfig):
     """SharePoint file source configuration.
 
-    Authenticates via an OAuth2 client-credentials body stored in a secrets
-    provider (e.g. Azure Key Vault).  The secret value must be a URL-encoded
-    form body suitable for POSTing directly to the SharePoint token endpoint:
+    Two authentication methods are supported:
 
-        grant_type=client_credentials
-        &client_id=<app-id>@<tenant-id>
-        &client_secret=<secret>
-        &resource=00000003-0000-0ff1ce00-000000000000/<host>@<tenant-id>
+    * **Entra ID app-only with a certificate (recommended).** Set ``client_id``
+      and ``certificate`` (a PEM containing the private key). This is
+      Microsoft's replacement for the retired Azure ACS flow.
+    * **Legacy Azure ACS app-only (deprecated).** Set ``token_request_body`` to
+      a URL-encoded client-credentials form body. Azure ACS for SharePoint
+      Online was retired by Microsoft and stopped working on 2 April 2026, so
+      this path may fail; it remains only as a migration bridge.
     """
 
     # -------------------------------------------------------------------------
-    # Authentication
+    # Authentication — Entra ID app-only with a certificate (recommended)
+    # -------------------------------------------------------------------------
+
+    client_id: str = field(
+        default="",
+        metadata={
+            "description": (
+                "Entra ID application (client) ID for app-only authentication. "
+                "Required together with 'certificate'. Plain value, ${ENV_VAR}, "
+                "or secret URI (resolved at runtime)."
+            ),
+        },
+    )
+    certificate: Optional[SecretStr] = field(
+        default=None,
+        metadata={
+            "description": (
+                "PEM-encoded certificate including the private key, supplied as a "
+                "plain value, ${ENV_VAR}, or secret URI (e.g. "
+                "'azurekeyvault::https://my-vault.vault.azure.net::MY-CERT'). "
+                "Enables Entra ID app-only authentication."
+            ),
+        },
+    )
+    certificate_password: Optional[SecretStr] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Password for the certificate's private key, if encrypted. "
+                "Plain value, ${ENV_VAR}, or secret URI."
+            ),
+        },
+    )
+
+    # -------------------------------------------------------------------------
+    # Authentication — legacy Azure ACS app-only (DEPRECATED)
     # -------------------------------------------------------------------------
 
     token_request_body: Optional[SecretStr] = field(
         default=None,
         metadata={
             "description": (
-                "The OAuth2 token-request form body, supplied as a plain value, "
-                "${ENV_VAR}, or secret URI (e.g. "
+                "DEPRECATED — legacy Azure ACS app-only flow. Azure ACS for "
+                "SharePoint Online was retired by Microsoft and stopped working on "
+                "2 April 2026; use 'client_id' + 'certificate' instead. The OAuth2 "
+                "token-request form body, supplied as a plain value, ${ENV_VAR}, or "
+                "secret URI (e.g. "
                 "'azurekeyvault::https://my-vault.vault.azure.net::MY-SECRET-NAME'). "
-                "The resolved value is POSTed directly to the SharePoint token endpoint."
+                "The resolved value is POSTed directly to the Azure ACS token endpoint."
             ),
-            "required": True,
         },
     )
     tenant_id: str = field(
         default="",
         metadata={
-            "description": "Azure AD tenant ID (GUID) — used to build the token endpoint URL",
+            "description": (
+                "Azure AD tenant ID (GUID). Plain value, ${ENV_VAR}, or secret URI "
+                "(resolved at runtime)."
+            ),
             "required": True,
         },
     )
@@ -114,14 +155,16 @@ class SharePointConfig(BaseConfig):
     def __post_init__(self):
         super().__post_init__()
 
+        self.certificate = coerce_secret(self.certificate)
+        self.certificate_password = coerce_secret(self.certificate_password)
         self.token_request_body = coerce_secret(self.token_request_body)
 
         required = ("tenant_id", "site_url", "file_path", "file_type")
         for name in required:
             if not getattr(self, name):
                 raise ValueError(f"{name} is required for SharePoint pipelines")
-        if not self.token_request_body:
-            raise ValueError("token_request_body is required for SharePoint pipelines")
+
+        self._validate_auth()
 
         valid_types = ("xlsx", "csv", "json", "jsonl")
         if self.file_type.lower() not in valid_types:
@@ -134,6 +177,25 @@ class SharePointConfig(BaseConfig):
             raise ValueError(
                 f"header_row must be a positive integer, got {self.header_row!r}"
             )
+
+    def _validate_auth(self) -> None:
+        """Ensure a supported authentication method is configured."""
+        if self.certificate:
+            if not self.client_id:
+                raise ValueError(
+                    "client_id is required when using certificate authentication "
+                    "for SharePoint pipelines"
+                )
+            return
+        if self.token_request_body:
+            # Legacy Azure ACS path; a deprecation warning is emitted at connect time.
+            return
+        raise ValueError(
+            "SharePoint authentication is not configured. Provide 'client_id' and "
+            "'certificate' for Entra ID app-only authentication (recommended), or "
+            "the legacy 'token_request_body' for Azure ACS (deprecated, retired "
+            "2 April 2026)."
+        )
 
 
 def apply_deprecated_aliases(config: Dict[str, Any]) -> Dict[str, Any]:

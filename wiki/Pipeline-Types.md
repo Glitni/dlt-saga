@@ -328,7 +328,8 @@ tags: ["daily"]
 
 ## SharePoint
 
-Downloads a file from SharePoint using the app-only OAuth 2.0 flow.
+Downloads a file from SharePoint via the SharePoint REST API, authenticating
+with Entra ID app-only (certificate) authentication.
 
 **Requires:** `pip install "dlt-saga[azure]"`
 
@@ -336,8 +337,10 @@ Downloads a file from SharePoint using the app-only OAuth 2.0 flow.
 # configs/sharepoint/my_report.yml
 adapter: dlt_saga.sharepoint
 
-# Authentication (SharePoint app-only OAuth2 form body stored in a secrets provider)
-token_request_body: "azurekeyvault::https://my-vault.vault.azure.net::MY-SP-TOKEN-BODY"
+# Authentication — Entra ID app-only with a certificate (recommended)
+client_id: "<entra-application-client-id>"
+certificate: "azurekeyvault::https://my-vault.vault.azure.net::MY-SP-CERT"
+# certificate_password: "..."   # only if the private key is encrypted
 tenant_id: "<azure-ad-tenant-id>"
 
 # File location
@@ -353,7 +356,26 @@ write_disposition: "replace"
 tags: ["daily"]
 ```
 
-The `token_request_body` must resolve to a URL-encoded OAuth2 form body:
+`certificate` must resolve to a PEM containing the certificate **and** its
+private key. Register an Entra ID application, upload the certificate's public
+key, and grant it the `Sites.Selected` (preferred) or `Sites.Read.All`
+application permission on the target site(s). The `client_id` is that
+application's ID.
+
+### Legacy Azure ACS authentication (deprecated)
+
+> **Deprecated.** Microsoft retired Azure ACS for SharePoint Online; it stopped
+> working on **2 April 2026**. Use the certificate method above. This path
+> remains only as a migration bridge and may no longer acquire tokens.
+
+Instead of `client_id`/`certificate`, set a URL-encoded OAuth2 form body:
+
+```yaml
+token_request_body: "azurekeyvault::https://my-vault.vault.azure.net::MY-SP-TOKEN-BODY"
+tenant_id: "<azure-ad-tenant-id>"
+```
+
+The `token_request_body` must resolve to:
 
 ```
 grant_type=client_credentials&client_id=<app-id>@<tenant-id>&client_secret=<secret>&resource=00000003-0000-0ff1ce00-000000000000/<host>@<tenant-id>

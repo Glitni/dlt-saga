@@ -1,22 +1,27 @@
 """SharePoint REST API client.
 
-Downloads files from SharePoint using the legacy SharePoint app-only
-OAuth 2.0 flow (same as ADF LS_REST_SP_AZURE / LS_HTTP_AZURE_BINARY).
+Downloads files from SharePoint using the SharePoint REST API. Two
+authentication methods are supported for obtaining the Bearer token:
 
-Authentication flow
--------------------
-1. Fetch the OAuth2 form body from the configured secrets provider.
-2. POST the body to the SharePoint token endpoint to obtain a Bearer token.
-3. GET the file via the SharePoint REST API using the token.
+* **Entra ID app-only with a certificate (recommended).** A certificate-signed
+  client assertion is exchanged for a token via the Microsoft identity
+  platform. This is Microsoft's replacement for the retired Azure ACS flow.
+* **Legacy Azure ACS app-only (deprecated).** A client-credentials form body is
+  POSTed to the Azure ACS token endpoint. Azure ACS for SharePoint Online was
+  retired by Microsoft and stopped working on 2 April 2026.
+
+In both cases the file is then fetched via the SharePoint REST API using the
+resulting Bearer token — the REST calls are identical regardless of auth method.
 """
 
+import base64
 import csv
 import io
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -185,8 +190,73 @@ class SharePointClient(BaseClient):
     # ------------------------------------------------------------------
 
     def _acquire_token(self) -> str:
+        """Acquire a SharePoint Bearer token via the configured auth method."""
+        if self.config.certificate:
+            return self._acquire_token_entra_id()
+        if self.config.token_request_body:
+            logger.warning(
+                "SharePoint is authenticating via the legacy Azure ACS app-only "
+                "flow ('token_request_body'). Azure ACS for SharePoint Online was "
+                "retired by Microsoft and stopped working on 2 April 2026, so this "
+                "path may fail. Migrate to Entra ID certificate authentication by "
+                "setting 'client_id' and 'certificate'."
+            )
+            return self._acquire_token_acs()
+        # Guarded by SharePointConfig._validate_auth(); defensive fallback.
+        raise ValueError(
+            "SharePoint authentication is not configured. Provide 'client_id' and "
+            "'certificate', or the legacy 'token_request_body'."
+        )
+
+    def _acquire_token_entra_id(self) -> str:
+        """Acquire a token via Entra ID app-only certificate authentication."""
+        require_optional("azure.identity", "SharePoint certificate authentication")
+        from azure.identity import CertificateCredential
+
+        password = (
+            resolve_secret(self.config.certificate_password).encode("utf-8")
+            if self.config.certificate_password
+            else None
+        )
+        credential = CertificateCredential(
+            tenant_id=resolve_secret(self.config.tenant_id),
+            client_id=resolve_secret(self.config.client_id),
+            certificate_data=self._certificate_bytes(),
+            password=password,
+        )
+        scope = f"{self._sharepoint_resource()}/.default"
+        token = credential.get_token(scope)
+        logger.debug(
+            "SharePoint Entra ID token acquired (expires_on=%s)", token.expires_on
+        )
+        return token.token
+
+    def _certificate_bytes(self) -> bytes:
+        """Resolve the certificate secret to raw bytes for ``CertificateCredential``.
+
+        Accepts either a PEM string (private key + certificate) or a
+        base64-encoded PKCS#12 (PFX) blob. Azure Key Vault returns a
+        certificate's backing secret as base64-encoded PKCS#12 when the
+        certificate uses the default ``application/x-pkcs12`` content type, and
+        as PEM text when it uses ``application/x-pem-file``.
+        """
+        raw = resolve_secret(self.config.certificate)
+        if "-----BEGIN" in raw:
+            return raw.encode("utf-8")
+        try:
+            # binascii.Error (raised on invalid base64) subclasses ValueError.
+            return base64.b64decode(raw, validate=True)
+        except ValueError as exc:
+            raise ValueError(
+                "SharePoint 'certificate' is neither PEM (missing '-----BEGIN') nor "
+                "valid base64-encoded PKCS#12. Ensure the secret holds the "
+                "certificate including its private key."
+            ) from exc
+
+    def _acquire_token_acs(self) -> str:
+        """Acquire a token via the legacy Azure ACS app-only flow (deprecated)."""
         oauth_body = resolve_secret(self.config.token_request_body)
-        url = _TOKEN_ENDPOINT.format(tenant_id=self.config.tenant_id)
+        url = _TOKEN_ENDPOINT.format(tenant_id=resolve_secret(self.config.tenant_id))
         response = requests.post(
             url,
             data=oauth_body,
@@ -205,3 +275,16 @@ class SharePointClient(BaseClient):
             "SharePoint Bearer token acquired (expires_in=%s)", data.get("expires_in")
         )
         return token
+
+    def _sharepoint_resource(self) -> str:
+        """Return the SharePoint resource root used to build the token scope.
+
+        Derived from ``site_url`` — e.g. ``https://contoso.sharepoint.com/sites/X``
+        yields ``https://contoso.sharepoint.com``.
+        """
+        parsed = urlparse(self.config.site_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError(
+                f"site_url must be an absolute URL, got '{self.config.site_url}'"
+            )
+        return f"{parsed.scheme}://{parsed.netloc}"

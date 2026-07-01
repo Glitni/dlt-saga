@@ -16,9 +16,10 @@ class SharePointPipeline(BasePipeline):
 
     Supported file types: xlsx, csv, json, jsonl.
 
-    Authentication uses the SharePoint app-only OAuth 2.0 flow: the OAuth2
-    form body is stored in a secrets provider (e.g. Azure Key Vault) and
-    fetched at runtime via the ``token_request_body`` URI.
+    Authentication uses Entra ID app-only certificate auth (``client_id`` +
+    ``certificate``) or the deprecated legacy Azure ACS flow
+    (``token_request_body``); credentials are stored in a secrets provider
+    (e.g. Azure Key Vault) and resolved at runtime.
     """
 
     def __init__(self, config: Dict[str, Any], log_prefix: str = None):
