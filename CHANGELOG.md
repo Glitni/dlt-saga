@@ -1,3 +1,12 @@
+## 0.9.0 — 2026-07-01
+
+### Added
+- Add Entra ID certificate authentication for SharePoint (Azure ACS retired) (#169)
+
+
+### Fixed
+- Reconcile partition/cluster DDL so Databricks records local runs (#170)
+
 ## 0.8.0 — 2026-06-30
 
 ### Added
