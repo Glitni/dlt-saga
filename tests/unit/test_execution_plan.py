@@ -32,6 +32,14 @@ class _RecordingDestination:
     def cluster_ddl(self, columns) -> str:
         return ""
 
+    def partition_cluster_ddl(self, partition_column, cluster_columns) -> str:
+        parts = []
+        if partition_column:
+            parts.append(self.partition_ddl(partition_column))
+        if cluster_columns:
+            parts.append(self.cluster_ddl(cluster_columns))
+        return "\n".join(p for p in parts if p)
+
     def ensure_schema_exists(self, schema: str) -> None:
         pass
 
@@ -81,6 +89,30 @@ def _extract_stored_configs(sql_calls: list[str]) -> list[dict]:
             except json.JSONDecodeError:
                 continue
     return found
+
+
+@pytest.mark.unit
+class TestPlansTableDdl:
+    """The `_saga_execution_plans` DDL must reconcile partition/cluster per
+    destination, not emit both raw (Databricks rejects the combination)."""
+
+    def test_ddl_routes_through_partition_cluster_reconciler(self):
+        dest = _RecordingDestination()
+        dest.partition_ddl = lambda *a, **k: pytest.fail(
+            "partition_ddl called directly — must go through partition_cluster_ddl"
+        )
+        dest.cluster_ddl = lambda *a, **k: pytest.fail(
+            "cluster_ddl called directly — must go through partition_cluster_ddl"
+        )
+        dest.partition_cluster_ddl = lambda partition, cluster: "<<RECONCILED>>"
+
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+        manager.ensure_table_exists()
+
+        plans_ddl = next(
+            sql for sql in dest.sql_calls if "CREATE TABLE IF NOT EXISTS" in sql
+        )
+        assert "<<RECONCILED>>" in plans_ddl
 
 
 @pytest.mark.unit

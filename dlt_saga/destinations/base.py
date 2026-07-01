@@ -455,6 +455,27 @@ class Destination(ABC):
         """Return DDL clause for table clustering, or empty string if unsupported."""
         return ""
 
+    def partition_cluster_ddl(
+        self,
+        partition_column: Optional[str],
+        cluster_columns: Optional[list[str]],
+    ) -> str:
+        """Return combined partition + cluster DDL clauses for a CREATE TABLE.
+
+        Emits whichever clauses the destination supports. Destinations that
+        cannot combine partitioning and clustering on the same table override
+        this to reconcile (e.g. Databricks keeps clustering only). Callers that
+        want both concepts applied should use this rather than calling
+        ``partition_ddl`` and ``cluster_ddl`` separately, so per-destination
+        rules are respected.
+        """
+        parts = []
+        if partition_column:
+            parts.append(self.partition_ddl(partition_column))
+        if cluster_columns:
+            parts.append(self.cluster_ddl(cluster_columns))
+        return "\n".join(part for part in parts if part)
+
     def type_name(self, logical_type: str) -> str:
         """Map a logical type name to the destination's SQL type.
 
