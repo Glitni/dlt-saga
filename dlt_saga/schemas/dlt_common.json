@@ -169,6 +169,15 @@
             {"type": "boolean"},
             {"type": "null"}
           ]
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable column description written to the destination column. Honored when persist_docs.columns is true."
+        },
+        "classification": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]+$"},
+          "description": "Lightweight data-classification labels for the column (e.g. ['pii']). Encoded into the column description as a [saga:classification=...] block. Honored when persist_docs.columns is true. Data governance, distinct from the top-level 'tags' used for pipeline selection."
         }
       }
     },

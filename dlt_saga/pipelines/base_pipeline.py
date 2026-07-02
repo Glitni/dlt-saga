@@ -103,6 +103,10 @@ class BasePipeline:
             cluster_columns=config.get("cluster_columns"),
             # Column hints
             columns=config.get("columns"),
+            # Documentation
+            description=config.get("description"),
+            classification=config.get("classification"),
+            persist_docs=config.get("persist_docs"),
         )
 
         self.target_writer = TargetWriter(target_config)
@@ -264,7 +268,16 @@ class BasePipeline:
 
     def _build_destination_hints(self, description: str) -> Dict[str, Any]:
         """Build destination-specific hint arguments."""
-        hints: Dict[str, Any] = {"table_description": description}
+        hints: Dict[str, Any] = {}
+
+        # Config description overrides the pipeline-generated one and table-level
+        # classification is encoded in; the whole thing is gated by
+        # persist_docs.table (returns None when off / nothing to write).
+        table_description = self.target_writer.config.resolve_table_description(
+            description
+        )
+        if table_description:
+            hints["table_description"] = table_description
 
         if (
             self.target_writer.config.partition_column
