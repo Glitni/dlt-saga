@@ -10,10 +10,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import yaml
-
 from dlt_saga.utility.env import get_env
 from dlt_saga.utility.templating import render_template_str
+from dlt_saga.utility.yaml_io import load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -399,8 +398,7 @@ class ProfilesConfig:
             )
 
         try:
-            with open(self.profiles_path, "r") as f:
-                profiles_data = yaml.safe_load(f) or {}
+            profiles_data = load_yaml(self.profiles_path)
         except Exception as e:
             raise ValueError(f"Failed to parse profiles.yml: {e}") from e
 

@@ -12,8 +12,6 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import yaml
-
 from dlt_saga.pipeline_config.base_config import (
     ConfigSource,
     PipelineConfig,
@@ -28,6 +26,7 @@ from dlt_saga.pipeline_config.naming import (
 )
 from dlt_saga.utility.naming import get_dev_schema, get_environment
 from dlt_saga.utility.templating import render_templates
+from dlt_saga.utility.yaml_io import load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -89,17 +88,16 @@ class FilePipelineConfig(ConfigSource):
             return {}
 
         try:
-            with open(self.project_config_path, "r") as f:
-                config = yaml.safe_load(f) or {}
-                # Render {{ env_var(...) }} templates before the hierarchical
-                # merge so project-level defaults resolve to concrete values.
-                config = render_templates(config)
-                # Rewrite legacy config keys (e.g. dataset_access → schema_access)
-                # before the hierarchical merge runs so mixed-name trees compose
-                # correctly.
-                normalize_config_aliases(config)
-                logger.debug(f"Loaded project config from {self.project_config_path}")
-                return config
+            config = load_yaml(self.project_config_path)
+            # Render {{ env_var(...) }} templates before the hierarchical
+            # merge so project-level defaults resolve to concrete values.
+            config = render_templates(config)
+            # Rewrite legacy config keys (e.g. dataset_access → schema_access)
+            # before the hierarchical merge runs so mixed-name trees compose
+            # correctly.
+            normalize_config_aliases(config)
+            logger.debug(f"Loaded project config from {self.project_config_path}")
+            return config
         except Exception as e:
             logger.warning(
                 f"Failed to load project config from {self.project_config_path}: {e}"
@@ -320,8 +318,7 @@ class FilePipelineConfig(ConfigSource):
             Exception: If config is invalid or cannot be loaded
         """
         # Load raw YAML
-        with open(config_path) as f:
-            file_config = yaml.safe_load(f) or {}
+        file_config = load_yaml(config_path)
 
         # Render {{ env_var(...) }} templates (and Jinja filters) on the loaded
         # values before the hierarchical merge so each layer resolves to

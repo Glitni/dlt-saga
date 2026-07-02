@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import yaml
+from dlt_saga.utility.yaml_io import load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -443,8 +443,7 @@ def get_project_config() -> SagaProjectConfig:
         return _project_config
 
     try:
-        with open(project_path) as f:
-            data = yaml.safe_load(f) or {}
+        data = load_yaml(project_path)
     except Exception as e:
         logger.warning(f"Failed to read saga_project.yml: {e}")
         _project_config = SagaProjectConfig()
