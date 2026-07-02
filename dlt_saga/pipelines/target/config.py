@@ -4,6 +4,60 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
 from dlt_saga.historize.config import HistorizeConfig
+from dlt_saga.utility.column_docs import compose_description
+
+
+@dataclass
+class PersistDocs:
+    """Controls whether declared docs are written to the destination.
+
+    Mirrors dbt's ``persist_docs``, with two differences: the sub-key is
+    ``table`` rather than dbt's ``relation`` (saga has no table/view
+    polymorphism — every output is a table), and both keys default to **on**
+    (warehouse visibility is the premise of saga's docs support, so persistence
+    is the default; opt out for the exceptions).
+    """
+
+    table: bool = field(
+        default=True,
+        metadata={
+            "description": "Persist the table-level description to the destination."
+        },
+    )
+    columns: bool = field(
+        default=True,
+        metadata={
+            "description": (
+                "Persist column descriptions (including encoded classification "
+                "tags) to the destination."
+            )
+        },
+    )
+
+    @classmethod
+    def from_value(cls, value: Any) -> "PersistDocs":
+        """Normalize a config value (None / bool / dict / instance) to PersistDocs."""
+        if value is None:
+            return cls()
+        if isinstance(value, PersistDocs):
+            return value
+        if isinstance(value, bool):
+            return cls(table=value, columns=value)
+        if isinstance(value, dict):
+            unknown = set(value) - {"table", "columns"}
+            if unknown:
+                raise ValueError(
+                    f"persist_docs has unknown key(s) {sorted(unknown)}; "
+                    "allowed keys are 'table' and 'columns'"
+                )
+            return cls(
+                table=bool(value.get("table", True)),
+                columns=bool(value.get("columns", True)),
+            )
+        raise ValueError(
+            "persist_docs must be a bool or a mapping of {table, columns}, "
+            f"got {type(value).__name__}"
+        )
 
 
 class ReplaceStrategy(str, Enum):
@@ -243,9 +297,47 @@ class TargetConfig:
                 "dlt normalizes identifiers by splitting CamelCase on word boundaries: "
                 "'TargetAmount' becomes 'target_amount', not 'targetamount'. "
                 "Using a key that matches neither form (e.g., 'oppty_targetamount') silently creates "
-                "a ghost column in the destination with all NULL values."
+                "a ghost column in the destination with all NULL values. "
+                "Each column also accepts a 'description' (str) written to the "
+                "destination column, and 'classification' (list of strings) for "
+                "lightweight data classification (e.g. ['pii']) encoded into the "
+                "column description. Both are honored when persist_docs.columns is "
+                "true. Note: 'classification' is data governance, distinct from the "
+                "top-level 'tags' used for pipeline selection."
             ),
             "$ref": "dlt_common.json#/$defs/column_hint",
+        },
+    )
+
+    # Documentation
+    description: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Table-level description written to the destination table. "
+                "Overrides any pipeline-generated description. Honored when "
+                "persist_docs.table is true."
+            )
+        },
+    )
+    classification: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Table-level data-classification labels (e.g. ['pii', "
+                "'confidential']) encoded into the table description. Honored "
+                "when persist_docs.table is true. Data governance, distinct from "
+                "the top-level 'tags' used for pipeline selection."
+            )
+        },
+    )
+    persist_docs: PersistDocs = field(
+        default_factory=PersistDocs,
+        metadata={
+            "description": (
+                "dbt-style toggle controlling whether declared table/column docs "
+                "are written to the destination. Both sub-keys default to true."
+            )
         },
     )
 
@@ -258,6 +350,7 @@ class TargetConfig:
     )
 
     def __post_init__(self):
+        self.persist_docs = PersistDocs.from_value(self.persist_docs)
         self._validate_dataset_name()
         self._validate_destination_type()
         self._validate_column_identifiers()
@@ -266,6 +359,7 @@ class TargetConfig:
         self._normalize_enums()
         self._validate_merge_strategy()
         self._initialize_columns()
+        self._validate_classification()
 
     def _validate_dataset_name(self):
         """Validate dataset_name pattern if provided."""
@@ -377,24 +471,84 @@ class TargetConfig:
         if self.hard_delete_column:
             self.columns[self.hard_delete_column] = {"hard_delete": True}
 
+    # Classification labels are encoded into the description, so they must not
+    # contain the block's delimiters (``, ; = ]``) or the encoding would be
+    # ambiguous to parse back.
+    _CLASSIFICATION_RE = re.compile(r"^[A-Za-z0-9_.:\-]+$")
+
+    def _validate_classification_values(self, values: Any, context: str) -> None:
+        """Validate a classification list is strings using the allowed charset."""
+        if values is None:
+            return
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            raise ValueError(f"{context} must be a list of strings, got {values!r}")
+        for value in values:
+            if not self._CLASSIFICATION_RE.match(value):
+                raise ValueError(
+                    f"{context} entry '{value}' contains invalid characters; "
+                    "allowed: letters, digits, and _ . : -"
+                )
+
+    def _validate_classification(self):
+        """Validate table-level and per-column classification labels."""
+        self._validate_classification_values(self.classification, "classification")
+        for col_name, col_config in self.columns.items():
+            self._validate_classification_values(
+                col_config.get("classification"),
+                f"columns.{col_name}.classification",
+            )
+
+    def resolve_table_description(self, generated: Optional[str]) -> Optional[str]:
+        """Resolve the table description written to the destination.
+
+        A configured ``description`` overrides the pipeline-generated one; any
+        table-level ``classification`` is encoded into the result as a
+        ``[saga:...]`` block. Returns ``None`` when ``persist_docs.table`` is off
+        or there is nothing to write.
+        """
+        if not self.persist_docs.table:
+            return None
+        human = self.description if self.description is not None else generated
+        composed = compose_description(
+            human,
+            {"classification": self.classification} if self.classification else None,
+        )
+        return composed or None
+
     def get_dlt_column_hints(self) -> Dict[str, Dict[str, Any]]:
         """Get column hints for dlt, filtering out custom fields like 'default'.
 
+        Column ``classification`` is saga-only (dlt has no column-tag concept) and
+        is folded into the column ``description`` as a ``[saga:...]`` block, so
+        both it and the human description reach the destination through dlt's
+        native column-description support. When ``persist_docs.columns`` is off,
+        the description is dropped (other hints, e.g. type overrides, still flow).
+
         Returns:
-            Column hints dict with only dlt-supported fields
+            Column hints dict with only dlt-supported fields.
         """
         if not self.columns:
             return {}
 
-        # Custom fields that are NOT part of dlt's column hint schema
-        # These are our extensions and should be filtered out before passing to dlt
-        black_list_fields = {"default"}
+        # Custom fields that are NOT part of dlt's column hint schema — our
+        # extensions, filtered out before passing to dlt. ``classification`` is
+        # folded into ``description`` below, which is (re)composed there too.
+        black_list_fields = {"default", "classification", "description"}
 
-        # Filter out custom fields that dlt doesn't recognize
-        dlt_columns = {}
+        dlt_columns: Dict[str, Dict[str, Any]] = {}
         for col_name, col_config in self.columns.items():
-            dlt_columns[col_name] = {
-                k: v for k, v in col_config.items() if k not in black_list_fields
-            }
+            hints = {k: v for k, v in col_config.items() if k not in black_list_fields}
+
+            if self.persist_docs.columns:
+                classification = col_config.get("classification")
+                description = compose_description(
+                    col_config.get("description"),
+                    {"classification": classification} if classification else None,
+                )
+                if description:
+                    hints["description"] = description
+
+            if hints:
+                dlt_columns[col_name] = hints
 
         return dlt_columns
