@@ -9,6 +9,7 @@ from dlt_saga.utility.orchestration.execution_plan import (
     ExecutionMetadata,
     ExecutionPlanManager,
 )
+from dlt_saga.utility.sql import escape_sql_literal
 
 
 class _RecordingDestination:
@@ -546,6 +547,36 @@ class TestRecordLocalRun:
 
         eid = manager.record_local_run(self._records())
         assert eid is not None and len(eid) == 36
+
+    def test_multiline_error_message_does_not_break_sql(self):
+        """A multi-line traceback must not leave a raw newline inside a literal.
+
+        Regression: an unescaped newline previously produced BigQuery
+        "Unclosed string literal" and silently dropped the run record.
+        """
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        multiline = "PipelineStepFailed:\n  400 Syntax error\nO'Brien \\ path"
+        records = [
+            {
+                "pipeline_type": "api",
+                "pipeline_identifier": "api/orders",
+                "table_name": "orders",
+                "status": "failed",
+                "error_message": multiline,
+            }
+        ]
+
+        eid = manager.record_local_run(records, execution_id="local-002")
+        assert eid == "local-002"
+
+        # The error is embedded as a well-formed single-quoted literal whose body
+        # carries no raw newline (which is what previously broke the statement).
+        plans_sql = next(s for s in dest.sql_calls if "error_message" in s)
+        escaped = escape_sql_literal(multiline)
+        assert "\n" not in escaped
+        assert f"'{escaped}'" in plans_sql
 
 
 @pytest.mark.unit

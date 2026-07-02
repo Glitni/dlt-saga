@@ -9,13 +9,9 @@ from dataclasses import dataclass
 from typing import Any, List, Optional
 
 from dlt_saga.utility.cli.logging import PrefixedLoggerAdapter
+from dlt_saga.utility.sql import escape_sql_literal
 
 logger = logging.getLogger(__name__)
-
-
-def _escape_sql_string(value: str) -> str:
-    """Escape a string value for safe use in SQL single-quoted literals."""
-    return value.replace("'", "''").replace("\\", "\\\\")
 
 
 def _looks_like_missing_table(exc: Exception) -> bool:
@@ -128,7 +124,7 @@ class HistorizeStateManager:
         Creates the log table on first access if it doesn't exist.
         """
         q = self.log_table_id
-        safe_name = _escape_sql_string(pipeline_name)
+        safe_name = escape_sql_literal(pipeline_name)
         sql = f"""
             SELECT snapshot_value, finished_at, config_fingerprint
             FROM {q}
@@ -234,7 +230,7 @@ class HistorizeStateManager:
                 return str(v)
             if isinstance(v, datetime):
                 return f"TIMESTAMP '{v.isoformat()}'"
-            return f"'{_escape_sql_string(str(v))}'"
+            return f"'{escape_sql_literal(str(v))}'"
 
         q = self.log_table_id
         sql = f"""
@@ -261,7 +257,7 @@ class HistorizeStateManager:
     def clear_log_entries(self, pipeline_name: str) -> None:
         """Delete all log entries for a pipeline (used during full refresh)."""
         q = self.log_table_id
-        safe_name = _escape_sql_string(pipeline_name)
+        safe_name = escape_sql_literal(pipeline_name)
         sql = f"""
             DELETE FROM {q}
             WHERE pipeline_name = '{safe_name}'
@@ -284,8 +280,8 @@ class HistorizeStateManager:
             historize_from: ISO timestamp string for the lower bound (inclusive).
         """
         q = self.log_table_id
-        safe_name = _escape_sql_string(pipeline_name)
-        safe_from = _escape_sql_string(historize_from)
+        safe_name = escape_sql_literal(pipeline_name)
+        safe_from = escape_sql_literal(historize_from)
         sql = f"""
             DELETE FROM {q}
             WHERE pipeline_name = '{safe_name}'
@@ -334,7 +330,7 @@ class HistorizeStateManager:
                 ORDER BY snapshot_val
             """
         else:
-            safe_val = _escape_sql_string(state.last_snapshot_value)
+            safe_val = escape_sql_literal(state.last_snapshot_value)
             base_where = f"{snapshot_column} > TIMESTAMP '{safe_val}'"
             sql = f"""
                 SELECT DISTINCT {cast_expr} AS snapshot_val
