@@ -17,6 +17,7 @@ from dlt_saga.pipelines.native_load.config import NativeLoadConfig
 from dlt_saga.pipelines.native_load.state import NativeLoadStateManager
 from dlt_saga.pipelines.native_load.storage import get_storage_client
 from dlt_saga.utility.cli.logging import PrefixedLoggerAdapter
+from dlt_saga.utility.naming import normalize_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -663,9 +664,6 @@ class NativeLoadPipeline(BasePipeline):
         if not raw_columns:
             return {}
 
-        from dlt.common.normalizers.naming.snake_case import NamingConvention
-
-        conv = NamingConvention()
         hints: dict = {}
         source_for_key: dict = {}
         for col_name, col_def in raw_columns.items():
@@ -674,7 +672,7 @@ class NativeLoadPipeline(BasePipeline):
             data_type = col_def.get("data_type", "")
             if not data_type:
                 continue
-            norm_key = conv.normalize_identifier(col_name).lower()
+            norm_key = normalize_identifier(col_name).lower()
             if norm_key in source_for_key and source_for_key[norm_key] != col_name:
                 raise ValueError(
                     f"Column hint collision: {source_for_key[norm_key]!r} and "

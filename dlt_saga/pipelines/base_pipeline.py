@@ -57,6 +57,10 @@ class BasePipeline:
         self.table_name = config.get(
             "table_name", self.base_table_name
         )  # Environment-aware table name
+        # Resolved table description sent to dlt during the run, reused at
+        # finalize to reconcile table-description drift (dlt only writes it at
+        # table creation). None means nothing to reconcile / persist_docs off.
+        self._resolved_table_description: Optional[str] = None
         self.pipeline_name = config.get(
             "pipeline_name"
         )  # Always includes pipeline type prefix
@@ -276,6 +280,9 @@ class BasePipeline:
         table_description = self.target_writer.config.resolve_table_description(
             description
         )
+        # Remember the resolved value so finalize can reconcile table-description
+        # drift (dlt applies it only at table creation).
+        self._resolved_table_description = table_description
         if table_description:
             hints["table_description"] = table_description
 
@@ -568,11 +575,50 @@ class BasePipeline:
         finalize_start = time.time()
         self._manage_table_access(loaded_tables)
         self._sync_destination_table_options(loaded_tables)
+        self._reconcile_descriptions(loaded_tables)
 
         if all_load_info:
             self._save_load_info(all_load_info)
 
         return time.time() - finalize_start
+
+    def _reconcile_descriptions(self, loaded_tables: List[str]) -> None:
+        """Reconcile declared column/table descriptions against the main table.
+
+        dlt writes descriptions only at column creation, so config edits don't
+        propagate to existing tables (and DuckDB gets none at all). This aligns
+        the live table with the config after each load, idempotently — a run
+        with unchanged config performs a single metadata read and no writes.
+
+        Column descriptions come from config; the table description reuses the
+        value resolved during the run (so it matches what dlt wrote at create).
+        Best-effort: never fails a successful load.
+        """
+        if not self.destination.supports_description_reconcile():
+            return
+        if self.table_name not in loaded_tables:
+            return
+
+        cfg = self.target_writer.config
+        column_descriptions = cfg.get_column_description_map()
+        if not column_descriptions and self._resolved_table_description is None:
+            return
+
+        dataset = self.pipeline.dataset_name
+        try:
+            self.destination.reconcile_descriptions(
+                dataset,
+                self.table_name,
+                descriptions=column_descriptions,
+                table_description=self._resolved_table_description,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to reconcile descriptions for %s.%s: %s",
+                dataset,
+                self.table_name,
+                exc,
+            )
 
     def _sync_destination_table_options(self, loaded_tables: List[str]) -> None:
         """Reconcile destination-level table options for each loaded table.

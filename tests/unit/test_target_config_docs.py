@@ -9,9 +9,9 @@ GENERATED = "Data from https://services.api.no/api/config/sites"
 
 @pytest.mark.unit
 class TestPersistDocsFromValue:
-    def test_default_is_all_on(self):
+    def test_default_table_on_columns_off(self):
         pd = PersistDocs.from_value(None)
-        assert pd.table is True and pd.columns is True
+        assert pd.table is True and pd.columns is False
 
     def test_bool_shorthand(self):
         assert PersistDocs.from_value(False) == PersistDocs(table=False, columns=False)
@@ -37,19 +37,22 @@ class TestPersistDocsFromValue:
         cfg = TargetConfig(persist_docs={"table": False})
         assert isinstance(cfg.persist_docs, PersistDocs)
         assert cfg.persist_docs.table is False
-        assert cfg.persist_docs.columns is True
+        assert cfg.persist_docs.columns is False  # default when key omitted
 
 
 @pytest.mark.unit
 class TestColumnHintComposition:
+    # Column docs are opt-in (persist_docs.columns defaults off), so these
+    # enable columns explicitly.
     def test_classification_folded_into_description_sorted(self):
         cfg = TargetConfig(
+            persist_docs=True,
             columns={
                 "email": {
                     "description": "Contact email",
                     "classification": ["pii", "contact"],
                 }
-            }
+            },
         )
         hints = cfg.get_dlt_column_hints()
         assert (
@@ -58,14 +61,17 @@ class TestColumnHintComposition:
         )
 
     def test_classification_never_leaks_to_dlt(self):
-        cfg = TargetConfig(columns={"email": {"classification": ["pii"]}})
+        cfg = TargetConfig(
+            persist_docs=True, columns={"email": {"classification": ["pii"]}}
+        )
         hints = cfg.get_dlt_column_hints()
         assert "classification" not in hints["email"]
         assert hints["email"]["description"] == "[saga:classification=pii]"
 
     def test_type_hints_still_flow_alongside_docs(self):
         cfg = TargetConfig(
-            columns={"amount": {"data_type": "decimal", "description": "Total"}}
+            persist_docs=True,
+            columns={"amount": {"data_type": "decimal", "description": "Total"}},
         )
         hints = cfg.get_dlt_column_hints()
         assert hints["amount"]["data_type"] == "decimal"
@@ -90,6 +96,13 @@ class TestColumnHintComposition:
         cfg = TargetConfig(
             persist_docs={"columns": False},
             columns={"email": {"description": "Contact", "classification": ["pii"]}},
+        )
+        assert cfg.get_dlt_column_hints() == {}
+
+    def test_columns_default_off_drops_description(self):
+        """persist_docs.columns defaults off — column docs are opt-in."""
+        cfg = TargetConfig(
+            columns={"email": {"description": "Contact", "classification": ["pii"]}}
         )
         assert cfg.get_dlt_column_hints() == {}
 
@@ -158,7 +171,8 @@ class TestClassificationValidation:
 
     def test_valid_classification_characters_accepted(self):
         cfg = TargetConfig(
-            columns={"email": {"classification": ["pii", "team:sales", "gdpr-art9"]}}
+            persist_docs=True,
+            columns={"email": {"classification": ["pii", "team:sales", "gdpr-art9"]}},
         )
         assert (
             "[saga:classification=gdpr-art9,pii,team:sales]"

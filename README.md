@@ -17,6 +17,7 @@ dlt-saga adds the **operational layer** that teams need to run dlt at scale:
 |---|---|
 | **Zero-code pipelines** | Drop a YAML file in `configs/` — no Python needed for common sources |
 | **SCD2 historization** | `write_disposition: append+historize` turns any snapshot table into a full change history with `_dlt_valid_from` / `_dlt_valid_to` |
+| **Docs & classification in the warehouse** | Declare `description` and `classification` (e.g. `[pii]`) on tables/columns; saga writes and reconciles them onto the destination (`persist_docs`) |
 | **dbt-style selectors** | `saga ingest --select "tag:daily,group:api"` — union, intersection, glob patterns |
 | **Multi-environment profiles** | `profiles.yml` with dev/prod targets, service account impersonation, per-environment datasets |
 | **Plugin architecture** | Register custom sources and destinations via `packages.yml` or Python entry points — no framework fork needed |

@@ -6,10 +6,11 @@ import logging
 import threading
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from dlt_saga.destinations.base import Destination
 from dlt_saga.destinations.databricks.config import DatabricksDestinationConfig
+from dlt_saga.utility.sql import escape_sql_literal
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.base import MaterializationHints
@@ -422,18 +423,15 @@ class DatabricksDestination(Destination):
         table_id = self.get_full_table_id(schema, table_name)
         self.execute_sql(f"DROP TABLE IF EXISTS {table_id}")
 
-        from dlt.common.normalizers.naming.snake_case import NamingConvention
-
         from dlt_saga.project_config import get_load_info_table_name
+        from dlt_saga.utility.naming import normalize_identifier
 
         # _dlt_version is keyed by the dlt *schema* name, which is the pipeline name
         # normalized by dlt's naming (e.g. "a__b" -> "a_b"). _dlt_pipeline_state and the
         # load-info table are keyed by the raw pipeline_name. Using pipeline_name for
         # _dlt_version leaves its row behind, so dlt thinks the (dropped) table still
         # exists and the next COPY INTO fails. (DuckDB/BigQuery already normalize.)
-        normalized_schema = NamingConvention(max_length=64).normalize_identifier(
-            pipeline_name
-        )
+        normalized_schema = normalize_identifier(pipeline_name, max_length=64)
 
         for meta_table in (
             "_dlt_pipeline_state",
@@ -582,6 +580,51 @@ class DatabricksDestination(Destination):
               AND table_name     = '{safe_table}'
             ORDER BY ordinal_position
         """
+
+    # --- Column / table description reconciliation -------------------------
+
+    def supports_description_reconcile(self) -> bool:
+        return True
+
+    def get_column_descriptions(self, dataset: str, table: str) -> Dict[str, str]:
+        # Catalog-scoped information_schema needs only USE CATALOG / schema
+        # access; the account-wide system.information_schema is often admin-gated.
+        catalog = self.quote_identifier(self.config.catalog)
+        safe_schema = dataset.replace("'", "''")
+        safe_table = table.replace("'", "''")
+        rows = self.execute_sql(
+            f"SELECT column_name, comment FROM {catalog}.information_schema.columns "
+            f"WHERE table_schema = '{safe_schema}' AND table_name = '{safe_table}'"
+        )
+        return {r.column_name: (r.comment or "") for r in rows}
+
+    def set_column_descriptions(
+        self, dataset: str, table: str, descriptions: Dict[str, str]
+    ) -> None:
+        fqn = self.get_full_table_id(dataset, table)
+        for column, description in descriptions.items():
+            self.execute_sql(
+                f"ALTER TABLE {fqn} ALTER COLUMN {self.quote_identifier(column)} "
+                f"COMMENT '{escape_sql_literal(description)}'"
+            )
+
+    def get_table_description(self, dataset: str, table: str) -> Optional[str]:
+        catalog = self.quote_identifier(self.config.catalog)
+        safe_schema = dataset.replace("'", "''")
+        safe_table = table.replace("'", "''")
+        rows = list(
+            self.execute_sql(
+                f"SELECT comment FROM {catalog}.information_schema.tables "
+                f"WHERE table_schema = '{safe_schema}' AND table_name = '{safe_table}'"
+            )
+        )
+        return rows[0].comment if rows else None
+
+    def set_table_description(self, dataset: str, table: str, description: str) -> None:
+        fqn = self.get_full_table_id(dataset, table)
+        self.execute_sql(
+            f"COMMENT ON TABLE {fqn} IS '{escape_sql_literal(description)}'"
+        )
 
     # -------------------------------------------------------------------------
     # Native-load contract

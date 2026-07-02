@@ -192,9 +192,57 @@ class HistorizeConfig:
         ),
     )
 
+    description: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Table-level description for the historized table. Overrides the "
+                "top-level 'description' for the historized table only; inherits "
+                "it when omitted. Honored when persist_docs.table is true."
+            )
+        },
+    )
+
+    classification: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Table-level classification for the historized table (e.g. "
+                "['pii']). Overrides the top-level 'classification' for the "
+                "historized table only; inherits it when omitted."
+            )
+        },
+    )
+
+    columns: Optional[Dict[str, Dict[str, Any]]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Per-column description/classification overrides for the "
+                "historized table, merged over the top-level 'columns' (override "
+                "only the keys you specify; inherit the rest). Use to document or "
+                "classify a column differently on the historized table."
+            ),
+            "$ref": "dlt_common.json#/$defs/column_hint",
+        },
+    )
+
+    persist_docs: Optional[Dict[str, bool]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Overrides the top-level persist_docs for the historized table "
+                "only ({table, columns} — whether to write the table/column "
+                "descriptions). Inherits the top-level value when omitted."
+            )
+        },
+    )
+
     def __post_init__(self):
         if isinstance(self.primary_key, str):
             self.primary_key = [self.primary_key]
+        if isinstance(self.classification, str):
+            self.classification = [self.classification]
         if isinstance(self.track_columns, str):
             self.track_columns = [self.track_columns]
         if isinstance(self.ignore_columns, str):

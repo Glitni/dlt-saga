@@ -286,6 +286,16 @@ partition_column: date
 cluster_columns: [id, category]
 partition_expiration_days: 365      # BigQuery only — sets time_partitioning.expiration_ms on the created table; reconciled (ALTER) on every subsequent run. Per-pipeline overrides the profile default.
 
+# Documentation & classification (written/reconciled onto the destination)
+description: Customer master data   # table description (overrides the auto-generated one)
+classification: [confidential]      # table-level governance labels (distinct from `tags`, which is selection-only)
+columns:
+  email:
+    description: "Primary contact email"
+    classification: [pii]           # encoded into the column description as [saga:classification=pii]
+persist_docs:                       # gates writes; defaults {table: true, columns: false}
+  columns: true                     # opt into column docs (typically set once in saga_project.yml)
+
 # Row filters (optional) — drop rows during ingest
 filters:
   - column: config

@@ -13,23 +13,34 @@ class PersistDocs:
 
     Mirrors dbt's ``persist_docs``, with two differences: the sub-key is
     ``table`` rather than dbt's ``relation`` (saga has no table/view
-    polymorphism — every output is a table), and both keys default to **on**
-    (warehouse visibility is the premise of saga's docs support, so persistence
-    is the default; opt out for the exceptions).
+    polymorphism — every output is a table), and the defaults differ per key.
+
+    ``table`` defaults **on**: a table description is a single, O(1) write that
+    every destination handles cheaply. ``columns`` defaults **off**: per-column
+    reconciliation is O(columns) and, on destinations without a batch
+    column-comment mechanism (e.g. Databricks), a per-run cost — so it's opt-in.
+    Enable it per project via ``+persist_docs: {columns: true}`` in
+    ``saga_project.yml`` (or per pipeline). Table-level classification still
+    applies by default; only the per-column layer is opt-in.
     """
 
     table: bool = field(
         default=True,
         metadata={
-            "description": "Persist the table-level description to the destination."
+            "description": (
+                "Persist the table-level description (and classification) to the "
+                "destination. Defaults to true — a single cheap write."
+            )
         },
     )
     columns: bool = field(
-        default=True,
+        default=False,
         metadata={
             "description": (
-                "Persist column descriptions (including encoded classification "
-                "tags) to the destination."
+                "Persist column descriptions (including encoded classification) "
+                "to the destination. Defaults to false — per-column writes are "
+                "O(columns) and a per-run cost on destinations without batch "
+                "column-comment DDL; enable per project/pipeline to opt in."
             )
         },
     )
@@ -52,7 +63,7 @@ class PersistDocs:
                 )
             return cls(
                 table=bool(value.get("table", True)),
-                columns=bool(value.get("columns", True)),
+                columns=bool(value.get("columns", False)),
             )
         raise ValueError(
             "persist_docs must be a bool or a mapping of {table, columns}, "
@@ -514,6 +525,20 @@ class TargetConfig:
             {"classification": self.classification} if self.classification else None,
         )
         return composed or None
+
+    def get_column_description_map(self) -> Dict[str, str]:
+        """Return {column: composed description} for columns that carry docs.
+
+        Reuses ``get_dlt_column_hints`` so it honors ``persist_docs.columns`` and
+        composes classification into the description exactly as dlt writes it at
+        create time — a reconcile against this map is therefore a no-op when
+        nothing changed. Columns without a description are omitted.
+        """
+        return {
+            col: hints["description"]
+            for col, hints in self.get_dlt_column_hints().items()
+            if hints.get("description")
+        }
 
     def get_dlt_column_hints(self) -> Dict[str, Dict[str, Any]]:
         """Get column hints for dlt, filtering out custom fields like 'default'.

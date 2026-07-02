@@ -2,10 +2,11 @@
 
 import logging
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from dlt_saga.destinations.bigquery.base import BigQueryBaseDestination
 from dlt_saga.destinations.bigquery.config import BigQueryDestinationConfig
+from dlt_saga.utility.naming import normalize_identifier
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.base import MaterializationHints
@@ -22,12 +23,9 @@ def _normalize_ext_cols(
     target_type = spec.column_hints.get(normalized_key, detected_type).
     Hint lookup always uses the normalized key so config key format doesn't matter.
     """
-    from dlt.common.normalizers.naming.snake_case import NamingConvention
-
-    _normalize = NamingConvention().normalize_identifier
     result = []
     for raw, detected in ext_cols:
-        norm = _normalize(raw)
+        norm = normalize_identifier(raw)
         target = spec.column_hints.get(norm.lower(), detected)
         result.append((raw, norm, detected, target))
     return result
@@ -91,23 +89,6 @@ class BigQueryDestination(BigQueryBaseDestination):
             return {"max_table_nesting": 0}
         return {}
 
-    @staticmethod
-    def _normalize_column_name(name: str) -> str:
-        """Normalize a column name using dlt's snake_case naming convention.
-
-        Ensures column references in hints (partition_column, cluster_columns)
-        match the actual normalized column names that dlt creates in BigQuery.
-
-        Args:
-            name: Original column name (e.g. "OrderItem_ID")
-
-        Returns:
-            Normalized column name (e.g. "order_item_id")
-        """
-        from dlt.common.normalizers.naming.snake_case import NamingConvention
-
-        return NamingConvention().normalize_identifier(name)
-
     def apply_hints(self, resource: Any, **hints) -> Any:
         """Apply hints to a dlt resource.
 
@@ -136,12 +117,10 @@ class BigQueryDestination(BigQueryBaseDestination):
         """
         # Normalize column name references to match dlt's snake_case convention
         if "partition_column" in hints and hints["partition_column"]:
-            hints["partition_column"] = self._normalize_column_name(
-                hints["partition_column"]
-            )
+            hints["partition_column"] = normalize_identifier(hints["partition_column"])
         if "cluster_columns" in hints and hints["cluster_columns"]:
             hints["cluster_columns"] = [
-                self._normalize_column_name(c) for c in hints["cluster_columns"]
+                normalize_identifier(c) for c in hints["cluster_columns"]
             ]
 
         if hints.get("insert_api"):
@@ -905,12 +884,8 @@ class BigQueryDestination(BigQueryBaseDestination):
         # Clean up schema version info (dlt uses this for schema evolution)
         # If not cleaned, dlt may query non-existent tables based on cached schema
         # dlt normalizes schema names: handles length limits, special chars, etc.
-        # Schema names are limited to 64 characters and get truncated with hashing
-        from dlt.common.normalizers.naming.snake_case import NamingConvention
-
-        # Pass max_length to constructor to enable truncation with hashing
-        naming = NamingConvention(max_length=64)
-        normalized_schema_name = naming.normalize_identifier(pipeline_name)
+        # Schema names are limited to 64 characters and get truncated with hashing.
+        normalized_schema_name = normalize_identifier(pipeline_name, max_length=64)
 
         try:
             version_table_id = self._get_dlt_table_id("_dlt_version")
@@ -998,6 +973,88 @@ class BigQueryDestination(BigQueryBaseDestination):
         self.execute_sql(
             f"ALTER TABLE {table_id} ADD COLUMN {self.quote_identifier(column)} {type_name}"
         )
+
+    # --- Column / table description reconciliation -------------------------
+
+    def supports_description_reconcile(self) -> bool:
+        return True
+
+    def _description_client_and_ref(self, dataset: str, table: str):
+        from google.cloud import bigquery
+
+        client = bigquery.Client(
+            project=self.config.job_project_id, location=self.config.location
+        )
+        table_ref = f"{self.config.project_id}.{dataset}.{table}"
+        return client, table_ref
+
+    def reconcile_descriptions(
+        self,
+        dataset: str,
+        table: str,
+        descriptions: Dict[str, str],
+        table_description: Optional[str] = None,
+    ) -> None:
+        """Reconcile column + table descriptions in one read and one write.
+
+        Overrides the generic (per-primitive) path: BigQuery's schema patch is a
+        full-schema replace, so column descriptions already require the existing
+        schema. Fetching the table once serves both the diff and the update, and
+        column + table descriptions are patched together — one ``get_table`` plus
+        at most one ``update_table``, versus several round-trips via the base
+        primitives.
+        """
+        from google.cloud import bigquery
+        from google.cloud.exceptions import NotFound
+
+        from dlt_saga.utility.naming import normalize_identifier
+
+        if not descriptions and table_description is None:
+            return
+
+        client, table_ref = self._description_client_and_ref(dataset, table)
+        try:
+            tbl = client.get_table(table_ref)
+        except NotFound:
+            return
+
+        update_fields: List[str] = []
+
+        if descriptions:
+            desired = {
+                normalize_identifier(col): (desc or "")
+                for col, desc in descriptions.items()
+            }
+            new_schema = []
+            changed = False
+            for field in tbl.schema:
+                want = desired.get(field.name)
+                if want is not None and (field.description or "") != want:
+                    api_repr = field.to_api_repr()
+                    api_repr["description"] = want
+                    new_schema.append(bigquery.SchemaField.from_api_repr(api_repr))
+                    changed = True
+                else:
+                    new_schema.append(field)
+            if changed:
+                tbl.schema = new_schema
+                update_fields.append("schema")
+
+        if (
+            table_description is not None
+            and (tbl.description or "") != table_description
+        ):
+            tbl.description = table_description
+            update_fields.append("description")
+
+        if update_fields:
+            client.update_table(tbl, update_fields)
+            logger.debug(
+                "Reconciled descriptions on %s.%s (%s)",
+                dataset,
+                table,
+                ", ".join(update_fields),
+            )
 
     def execute_sql_with_job(self, sql: str, schema: Optional[str] = None) -> tuple:
         """Execute SQL and return (rows, job_id). Uses job_project_id for billing."""
@@ -1113,16 +1170,13 @@ class BigQueryDestination(BigQueryBaseDestination):
         if not spec.column_hints:
             return ext_cols
 
-        from dlt.common.normalizers.naming.snake_case import NamingConvention
-
-        _normalize = NamingConvention().normalize_identifier
         derived_names = {c.name for c in spec.derived_columns}
         overrides: dict = {}
         for raw, detected in ext_cols:
             if raw in derived_names:
                 continue
             # Always normalize for hint lookup so config key format doesn't matter
-            norm = _normalize(raw).lower()
+            norm = normalize_identifier(raw).lower()
             if norm in spec.column_hints and detected.upper() != "STRING":
                 overrides[raw] = "STRING"
         if overrides:
@@ -1545,18 +1599,14 @@ class BigQueryDestination(BigQueryBaseDestination):
         ddl_parts = [f"CREATE TABLE IF NOT EXISTS `{table_id}` (", columns_sql, ")"]
 
         # Normalize column names to match dlt's snake_case convention
-        from dlt.common.normalizers.naming.snake_case import NamingConvention
-
-        naming = NamingConvention()
-
         # Add partitioning
         if partition_column:
-            normalized = naming.normalize_identifier(partition_column)
+            normalized = normalize_identifier(partition_column)
             ddl_parts.append(f"PARTITION BY DATE({normalized})")
 
         # Add clustering
         if cluster_columns:
-            normalized_cols = [naming.normalize_identifier(c) for c in cluster_columns]
+            normalized_cols = [normalize_identifier(c) for c in cluster_columns]
             cluster_cols = ", ".join(normalized_cols)
             ddl_parts.append(f"CLUSTER BY {cluster_cols}")
 

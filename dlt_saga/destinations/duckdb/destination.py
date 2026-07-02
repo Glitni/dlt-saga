@@ -7,12 +7,14 @@ and development without requiring cloud credentials.
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import duckdb
 
 from dlt_saga.destinations.base import Destination
 from dlt_saga.destinations.duckdb.config import DuckDBDestinationConfig
+from dlt_saga.utility.naming import normalize_identifier
+from dlt_saga.utility.sql import escape_sql_literal
 
 logger = logging.getLogger(__name__)
 
@@ -270,10 +272,7 @@ class DuckDBDestination(Destination):
         )
 
         # Clean up schema version
-        from dlt.common.normalizers.naming.snake_case import NamingConvention
-
-        naming = NamingConvention(max_length=64)
-        normalized_schema = naming.normalize_identifier(pipeline_name)
+        normalized_schema = normalize_identifier(pipeline_name, max_length=64)
 
         self._delete_rows_safe(
             conn,
@@ -379,6 +378,54 @@ class DuckDBDestination(Destination):
     def list_table_columns(self, dataset: str, table: str) -> list:
         rows = self.execute_sql(self.columns_query("", dataset, table))
         return [(r.column_name, r.data_type) for r in rows]
+
+    # --- Column / table description reconciliation -------------------------
+    # dlt emits no descriptions for DuckDB, so this reconcile is DuckDB's only
+    # source of column/table comments.
+
+    def supports_description_reconcile(self) -> bool:
+        return True
+
+    def get_column_descriptions(self, dataset: str, table: str) -> Dict[str, str]:
+        safe_schema = dataset.replace("'", "''")
+        safe_table = table.replace("'", "''")
+        rows = self.execute_sql(
+            "SELECT column_name, comment FROM duckdb_columns() "
+            f"WHERE schema_name = '{safe_schema}' AND table_name = '{safe_table}'"
+        )
+        return {r.column_name: (r.comment or "") for r in rows}
+
+    def set_column_descriptions(
+        self, dataset: str, table: str, descriptions: Dict[str, str]
+    ) -> None:
+        table_id = self.get_full_table_id(dataset, table)
+        # Execute directly on the connection: execute_sql splits scripts on ';',
+        # which would truncate a COMMENT whose text contains a semicolon (e.g. a
+        # multi-key [saga:...] block or prose).
+        conn = self.connection
+        for column, description in descriptions.items():
+            conn.execute(
+                f"COMMENT ON COLUMN {table_id}.{self.quote_identifier(column)} "
+                f"IS '{escape_sql_literal(description)}'"
+            )
+
+    def get_table_description(self, dataset: str, table: str) -> Optional[str]:
+        safe_schema = dataset.replace("'", "''")
+        safe_table = table.replace("'", "''")
+        rows = list(
+            self.execute_sql(
+                "SELECT comment FROM duckdb_tables() "
+                f"WHERE schema_name = '{safe_schema}' AND table_name = '{safe_table}'"
+            )
+        )
+        return rows[0].comment if rows else None
+
+    def set_table_description(self, dataset: str, table: str, description: str) -> None:
+        table_id = self.get_full_table_id(dataset, table)
+        # Direct execute — see set_column_descriptions (avoid ';' script split).
+        self.connection.execute(
+            f"COMMENT ON TABLE {table_id} IS '{escape_sql_literal(description)}'"
+        )
 
     def add_column(self, dataset: str, table: str, column: str, type_name: str) -> None:
         table_id = self.get_full_table_id(dataset, table)
