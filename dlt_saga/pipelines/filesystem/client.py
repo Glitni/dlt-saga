@@ -7,6 +7,7 @@ import dlt
 from dlt.sources.filesystem import FileItemDict, filesystem, readers
 
 from dlt_saga.pipelines.filesystem.config import FilesystemConfig
+from dlt_saga.utility.naming import normalize_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -191,21 +192,10 @@ class FilesystemClient:
             self._column_name_mapping_cache = None
             return None
 
-        # Import dlt's normalization function
-        try:
-            from dlt.common.normalizers.naming.snake_case import NamingConvention
-
-            naming = NamingConvention()
-        except ImportError:
-            logger.warning("Could not import dlt normalization")
-            self._column_name_mapping_cache = None
-            return None
-
         # Build map: original CSV column name -> normalized name
         header_map = {}
         for original in csv_headers:
-            normalized = naming.normalize_identifier(original)
-            header_map[original] = normalized
+            header_map[original] = normalize_identifier(original)
 
         # Cache the result
         self._column_name_mapping_cache = header_map

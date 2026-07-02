@@ -62,7 +62,10 @@ spreadsheet_id: "123ABC"
 | `insert_api` | string | — | Databricks-only: `zerobus` (low-latency append) or `copy_into` (default). See [Databricks insert API](#databricks-insert-api) |
 | `dataset_name` | string | — | Override default dataset |
 | `access` | list | — | BigQuery IAM access (`"group:email"`, `"user:email"`) |
-| `columns` | dict | — | Explicit column type hints — see [Column Hints](#column-hints) |
+| `columns` | dict | — | Explicit column type hints, plus per-column `description`/`classification` — see [Column Hints](#column-hints) and [Descriptions & Classification](#descriptions--classification) |
+| `description` | string | auto-generated | Table description written to the destination — see [Descriptions & Classification](#descriptions--classification) |
+| `classification` | list | — | Table-level data-classification labels (governance; distinct from `tags`) — see [Descriptions & Classification](#descriptions--classification) |
+| `persist_docs` | dict | `{table: true, columns: false}` | Whether table/column descriptions are written to the destination — see [Descriptions & Classification](#descriptions--classification) |
 | `dev_row_limit` | int | — | Consumer-side row cap (set on the profile target). Only shortens extraction for resources that stream lazily; for windowed/incremental sources use `dev:` instead — see [Dev Overrides](#dev-overrides) |
 | `dev` | dict | — | Override block applied only in the `dev` environment (and stripped elsewhere) — see [Dev Overrides](#dev-overrides) |
 | `task_group` | string | — | Group pipelines to run together in orchestration mode |
@@ -94,6 +97,48 @@ Keys are normalized by dlt using snake_case before being matched against the dat
 | Simple lowercase (wrong) | `oppty_targetamount` | ❌ ghost column |
 
 dlt splits CamelCase on word boundaries: `TargetAmount` → `target_amount`, `SoldPriceSum` → `sold_price_sum`. A key that is just lowercased without splitting (e.g., `oppty_targetamount`) will not match the actual column and instead creates a separate column in the destination that is always NULL.
+
+### Descriptions & Classification
+
+saga writes human descriptions and lightweight data classification to the warehouse, so documentation and governance labels live in your config (one source of truth in git) and appear on the tables.
+
+- **Table description** — top-level `description:` (overrides the pipeline's auto-generated description).
+- **Column description** — `columns.<col>.description:`.
+- **Classification** — a list of governance labels (e.g. `[pii]`), at table level (`classification:`) and per column (`columns.<col>.classification:`). This is **distinct from `tags:`**: `tags` is for pipeline selection (`--select`) and is never written to the warehouse; `classification` is warehouse metadata and is never used for selection.
+
+```yaml
+description: Customer master data
+classification: [confidential]
+columns:
+  email:
+    description: "Primary contact email"
+    classification: [pii]
+```
+
+Classification is encoded into the description as a single-line, sorted, sentinel-marked block, so every destination carries it in one portable, parseable field:
+
+```
+Primary contact email [saga:classification=pii]
+```
+
+**`persist_docs`** gates whether docs are written to the destination (dbt-style; the sub-key is `table`, not dbt's `relation`):
+
+```yaml
+persist_docs:
+  table: true       # table description (+ classification) — default: true
+  columns: false     # column descriptions (+ classification) — default: false
+```
+
+`table` defaults **on** — a single, cheap write on every destination. `columns` defaults **off**, because per-column writes are O(columns) and a per-run cost on destinations without batch column-comment DDL (e.g. Databricks). Enable column docs where you want them, typically once at the project level:
+
+```yaml
+# saga_project.yml
+pipelines:
+  +persist_docs:
+    columns: true
+```
+
+**How it reaches the warehouse.** On BigQuery and Databricks, dlt writes descriptions at table-creation time; saga additionally **reconciles** them after each load, so later edits to a description/classification propagate to existing tables (dlt only writes them when a column is first created), and DuckDB — which dlt doesn't document at all — is covered too. The reconcile is idempotent: an unchanged config performs a single metadata read and no writes.
 
 ### Row Filters
 

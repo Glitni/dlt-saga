@@ -976,13 +976,11 @@ class TestResetDestinationState:
         """_dlt_version is keyed by the dlt schema name (pipeline name normalized,
         collapsing '__' -> '_'), not the raw pipeline_name. Using the raw name left
         the row behind, so dlt skipped CREATE TABLE and COPY INTO failed on Databricks."""
-        from dlt.common.normalizers.naming.snake_case import NamingConvention
+        from dlt_saga.utility.naming import normalize_identifier
 
         calls = self._capture_reset(pipeline_name="grp__tbl")
 
-        expected_schema = NamingConvention(max_length=64).normalize_identifier(
-            "grp__tbl"
-        )
+        expected_schema = normalize_identifier("grp__tbl", max_length=64)
         assert expected_schema != "grp__tbl"  # normalization actually collapses "__"
 
         version = [(s, p) for s, p in calls if "_dlt_version" in s]

@@ -27,6 +27,9 @@ A row is active when `ts >= _dlt_valid_from AND (ts < _dlt_valid_to OR _dlt_vali
 The three SCD2 column names default to `_dlt_*` but can be renamed per pipeline — useful when a
 downstream convention expects domain-specific names. See [Renaming the SCD2 columns](#renaming-the-scd2-columns).
 
+When column docs are enabled (`persist_docs.columns`), these three columns also receive canned
+descriptions automatically. See [Descriptions & classification](#descriptions--classification).
+
 ---
 
 ## Enabling historize
@@ -83,6 +86,10 @@ saga historize --select "filesystem__snapshots__companies"
 | `output_schema` | `historize:` | — | Write the historized table to this schema instead of the source schema |
 | `output_table` | `historize:` | — | Explicit name for the historized output table (overrides the auto-generated name) |
 | `filters` | `historize:` | — | Declarative row filter applied only during historize — see [Filtering the source](#filtering-the-source) |
+| `description` | `historize:` | inherited | Table description for the historized table (overrides top-level `description`) — see [Descriptions & classification](#descriptions--classification) |
+| `classification` | `historize:` | inherited | Table classification for the historized table (overrides top-level `classification`) |
+| `columns` | `historize:` | inherited | Per-column description/classification overrides, merged over top-level `columns` (override only the keys you set) |
+| `persist_docs` | `historize:` | inherited | Override `persist_docs` (`{table, columns}`) for the historized table only |
 
 ### Renaming the SCD2 columns
 
@@ -151,6 +158,39 @@ Constraints:
   the framework prompts for a `saga historize --full-refresh`.
 - Pairs with `track_deletions`: `merge_key` refines *when* deletions are recorded, not whether
   they're recorded at all.
+
+### Descriptions & classification
+
+The historized table gets column and table descriptions/classification too — see
+[Descriptions & Classification](Configuration#descriptions--classification) for the general model.
+Because the historized table is built by saga's own SQL (dlt never sees it), the reconcile is its
+*only* source of descriptions; they're applied after each historize run.
+
+By default it inherits the pipeline's top-level `description`, `classification`, and `columns`.
+Override any of them for the historized table specifically under `historize:` — `columns` merges
+per column, per key (override only what you set, inherit the rest):
+
+```yaml
+description: Customer master data          # ingest table
+classification: [confidential]
+columns:
+  email:
+    description: "Primary contact email"
+    classification: [pii]
+
+historize:
+  track_deletions: true
+  description: "SCD2 history of customer master data"   # historized table only
+  classification: [confidential, historical]
+  columns:
+    email:
+      classification: [pii, historical]     # override classification; inherit the description
+```
+
+The SCD2 system columns (`_dlt_valid_from` / `_dlt_valid_to` / `_dlt_is_deleted`, or your renamed
+equivalents) receive canned descriptions automatically. All of this is gated by `persist_docs`
+(inherited, or overridden via `historize.persist_docs`) — with the default `columns: false`, only
+the table description is written; enable `persist_docs.columns` to document columns.
 
 ---
 

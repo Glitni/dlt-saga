@@ -15,9 +15,27 @@ Environment-based conventions:
 """
 
 import logging
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 from dlt_saga.utility.env import get_env
+
+
+def normalize_identifier(name: str, max_length: Optional[int] = None) -> str:
+    """Normalize a SQL identifier using dlt's snake_case naming convention.
+
+    dlt normalizes identifiers when it creates schemas/tables/columns (e.g.
+    ``OrderItem_ID`` → ``order_item_id``), so any code that matches
+    config-declared names against what dlt actually created — or that builds
+    identifiers to hand back to dlt — must apply the same normalization.
+    Destination-agnostic; dlt normalizes identically regardless of destination.
+
+    ``max_length`` enables dlt's length-capping (with hashing), e.g. BigQuery's
+    64-character schema-name limit.
+    """
+    from dlt.common.normalizers.naming.snake_case import NamingConvention
+
+    return NamingConvention(max_length=max_length).normalize_identifier(name)
+
 
 if TYPE_CHECKING:
     from dlt_saga.historize.config import HistorizeConfig

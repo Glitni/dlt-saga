@@ -4,10 +4,13 @@ This module defines the abstract interfaces that all destination implementations
 must follow, enabling support for multiple data warehouses (BigQuery, Snowflake, etc.).
 """
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.config import DestinationConfig
@@ -789,6 +792,103 @@ class Destination(ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement add_column"
         )
+
+    # =========================================================================
+    # Column / table description reconciliation
+    #
+    # dlt writes descriptions only when a column is created, so config edits
+    # don't propagate to existing tables; and it emits none at all for some
+    # destinations (e.g. DuckDB). Historized tables are built by saga SQL and
+    # dlt never sees them. These primitives let saga reconcile declared
+    # descriptions against the live table after each load, idempotently.
+    # =========================================================================
+
+    def supports_description_reconcile(self) -> bool:
+        """Whether this destination can read/write column and table descriptions."""
+        return False
+
+    def get_column_descriptions(self, dataset: str, table: str) -> Dict[str, str]:
+        """Return {column_name: description} for the table's columns.
+
+        Columns without a description map to "" (not omitted), so the reconcile
+        can tell "no description" from "column absent".
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_column_descriptions"
+        )
+
+    def set_column_descriptions(
+        self, dataset: str, table: str, descriptions: Dict[str, str]
+    ) -> None:
+        """Set descriptions for the given columns (only those passed)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_column_descriptions"
+        )
+
+    def get_table_description(self, dataset: str, table: str) -> Optional[str]:
+        """Return the table's description, or None if unset."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_table_description"
+        )
+
+    def set_table_description(self, dataset: str, table: str, description: str) -> None:
+        """Set the table's description."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_table_description"
+        )
+
+    def reconcile_descriptions(
+        self,
+        dataset: str,
+        table: str,
+        descriptions: Dict[str, str],
+        table_description: Optional[str] = None,
+    ) -> None:
+        """Align stored column/table descriptions with the declared set.
+
+        Idempotent: reads current state and writes only what changed, so an
+        unchanged config emits no writes (steady state is one metadata read).
+
+        Args:
+            dataset: Target dataset / schema.
+            table: Target table.
+            descriptions: {column_name: desired_description}. Keys are normalized
+                to dlt's snake_case before matching stored columns; entries for
+                columns not present in the table are skipped (e.g. columns the
+                historized table drops via ignore_columns).
+            table_description: Desired table description, or None to leave the
+                table description untouched.
+        """
+        if not self.supports_description_reconcile():
+            return
+
+        from dlt_saga.utility.naming import normalize_identifier
+
+        if descriptions:
+            desired = {
+                normalize_identifier(col): (desc or "")
+                for col, desc in descriptions.items()
+            }
+            current = self.get_column_descriptions(dataset, table)
+            changed = {
+                col: desc
+                for col, desc in desired.items()
+                if col in current and (current[col] or "") != desc
+            }
+            if changed:
+                self.set_column_descriptions(dataset, table, changed)
+                logger.debug(
+                    "Reconciled %d column description(s) on %s.%s",
+                    len(changed),
+                    dataset,
+                    table,
+                )
+
+        if table_description is not None:
+            current_td = self.get_table_description(dataset, table) or ""
+            if current_td != table_description:
+                self.set_table_description(dataset, table, table_description)
+                logger.debug("Reconciled table description on %s.%s", dataset, table)
 
     def execute_sql_with_job(self, sql: str, schema: Optional[str] = None) -> tuple:
         """Execute SQL and return (rows, job_id) for traceability."""

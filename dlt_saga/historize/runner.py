@@ -123,6 +123,110 @@ class HistorizeRunner:
         )
         return self.destination.render_filter(specs) or None if specs else None
 
+    def _resolve_persist_docs(self):
+        """Resolve persist_docs for the historized table.
+
+        ``historize.persist_docs`` overrides the top-level ``persist_docs`` for
+        the historized table only, mirroring the ``table_format`` resolution
+        chain. Returns whatever ``TargetConfig`` accepts (bool / dict / None).
+        """
+        if self.config.persist_docs is not None:
+            return self.config.persist_docs
+        return self.config_dict.get("persist_docs")
+
+    def _resolve_description(self) -> Optional[str]:
+        """historize.description overrides the top-level table description."""
+        if self.config.description is not None:
+            return self.config.description
+        return self.config_dict.get("description")
+
+    def _resolve_classification(self) -> Optional[List[str]]:
+        """historize.classification overrides the top-level table classification."""
+        if self.config.classification is not None:
+            return self.config.classification
+        return self.config_dict.get("classification")
+
+    def _resolve_columns(self) -> Optional[Dict[str, Any]]:
+        """Merge historize.columns over the top-level columns, per column per key.
+
+        A key present in ``historize.columns`` overrides only the fields it sets
+        (e.g. just classification) and inherits the rest from the top level.
+        """
+        base = self.config_dict.get("columns") or {}
+        override = self.config.columns or {}
+        if not override:
+            return base or None
+        merged = {col: dict(hints) for col, hints in base.items()}
+        for col, hints in override.items():
+            merged[col] = {**merged.get(col, {}), **hints}
+        return merged
+
+    def _scd2_system_column_descriptions(self) -> Dict[str, str]:
+        """Canned descriptions for the SCD2 system columns (auto-documentation)."""
+        c = self.config
+        return {
+            c.valid_from_column: (
+                "SCD2 validity start: when this version of the row became current."
+            ),
+            c.valid_to_column: (
+                "SCD2 validity end: when this version was superseded "
+                "(NULL is the current, open version)."
+            ),
+            c.is_deleted_column: (
+                "SCD2 deletion marker: TRUE on a marker row for a key deleted at "
+                "source. Closed change rows are FALSE."
+            ),
+        }
+
+    def _reconcile_descriptions(self) -> None:
+        """Reconcile column/table descriptions onto the historized table.
+
+        The historized table is built by saga SQL (dlt never sees it), so this
+        is its only source of descriptions. Source-column docs come from the
+        pipeline config (reusing ``TargetConfig`` so composition matches the
+        ingest table exactly); SCD2 system columns get canned descriptions.
+        Columns dropped by ``ignore_columns`` simply aren't in the table, so the
+        reconcile skips them. Best-effort — never fails the historize run.
+        """
+        if not self.destination.supports_description_reconcile():
+            return
+
+        from dlt_saga.pipelines.target.config import TargetConfig
+
+        cfg = TargetConfig(
+            columns=self._resolve_columns(),
+            description=self._resolve_description(),
+            classification=self._resolve_classification(),
+            persist_docs=self._resolve_persist_docs(),
+        )
+
+        column_descriptions = cfg.get_column_description_map()
+        if cfg.persist_docs.columns:
+            # Config columns win over the canned SCD2 defaults on any overlap.
+            column_descriptions = {
+                **self._scd2_system_column_descriptions(),
+                **column_descriptions,
+            }
+        table_description = cfg.resolve_table_description(None)
+
+        if not column_descriptions and table_description is None:
+            return
+
+        try:
+            self.destination.reconcile_descriptions(
+                self.target_schema,
+                self.target_table_name,
+                descriptions=column_descriptions,
+                table_description=table_description,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to reconcile historized descriptions for %s.%s: %s",
+                self.target_schema,
+                self.target_table_name,
+                exc,
+            )
+
     def run(self) -> Dict[str, Any]:
         """Execute historization and return stats.
 
@@ -134,6 +238,7 @@ class HistorizeRunner:
         run_start = time.time()
         try:
             stats = self._execute_run(started_at, run_start)
+            self._reconcile_descriptions()
             stats["duration"] = time.time() - run_start
             stats["status"] = "completed"
             return stats
