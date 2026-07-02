@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-import yaml
+from dlt_saga.utility.yaml_io import load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +123,7 @@ def load_packages(project_root: Optional[Path] = None) -> None:
             return
 
         try:
-            with open(packages_path) as f:
-                data = yaml.safe_load(f) or {}
+            data = load_yaml(packages_path)
         except Exception as e:
             logger.warning("Failed to load packages.yml: %s", e)
             _loaded = True
