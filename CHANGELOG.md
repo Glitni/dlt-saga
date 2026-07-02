@@ -1,3 +1,14 @@
+## 0.11.0 — 2026-07-02
+
+### Added
+- Reconcile column/table description & classification drift (+ DuckDB, historized tables) (#184)
+- Column & table descriptions and data classification in pipeline config (#181)
+
+
+### Fixed
+- Read config YAML as UTF-8 to preserve non-ASCII values (#183)
+- Escape control characters in hand-built SQL string literals (#182)
+
 ## 0.10.0 — 2026-07-01
 
 ### Breaking Changes
