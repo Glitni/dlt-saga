@@ -502,23 +502,37 @@ disappearances AS (
         src = self.source_table_id
         tgt = self.target_table_id
 
-        # Build snapshot filter (cast values to TIMESTAMP, not the column,
-        # so partition/cluster pruning can work on the source table)
+        # New-snapshot rows are read from the source; the change-detection
+        # baseline (the "reference" snapshot) is drawn from the historized
+        # target's currently-open rows rather than from the source. This is what
+        # makes replace-mode sources correct: a `replace` staging table only ever
+        # holds the latest snapshot, so the reference snapshot is absent from it
+        # and every key would otherwise appear new (re-versioning unchanged rows
+        # on every run). For append sources the target's open rows carry the same
+        # values as the reference snapshot, so the result is unchanged. Values are
+        # cast to TIMESTAMP (not the column) to preserve source-side pruning.
         snapshot_values = ", ".join(f"TIMESTAMP '{s}'" for s in new_snapshots)
+        new_snapshot_filter = f"{q_snapshot} IN ({snapshot_values})"
         if last_historized_snapshot:
-            snapshot_filter = f"{q_snapshot} IN (TIMESTAMP '{last_historized_snapshot}', {snapshot_values})"
             reference_filter = (
                 f"AND c.{q_snapshot} != TIMESTAMP '{last_historized_snapshot}'"
             )
+            baseline_union = (
+                "\n  UNION ALL\n"
+                f"  SELECT {self._qcols(all_output_cols)}, "
+                f"TIMESTAMP '{last_historized_snapshot}' AS {q_snapshot}\n"
+                f"  FROM {tgt}\n"
+                f"  WHERE {self.valid_to} IS NULL AND NOT {self.is_deleted}"
+            )
         else:
-            snapshot_filter = f"{q_snapshot} IN ({snapshot_values})"
             reference_filter = ""
+            baseline_union = ""
 
         track_deletions_sql = ""
         deletion_union = ""
         if self.config.track_deletions:
             track_deletions_sql = self._build_incremental_deletion_sql(
-                pk_cols, snapshot_col, reference_filter, src
+                pk_cols, snapshot_col
             )
             deletion_union = f"""UNION ALL
   SELECT
@@ -538,11 +552,22 @@ disappearances AS (
 
 CREATE TEMP TABLE _historize_incremental AS
 WITH
+-- New-snapshot rows from the source unioned with the change-detection baseline
+-- (the reference snapshot) taken from the historized target's open rows. The
+-- baseline is projected to the same columns and stamped at the reference
+-- snapshot value, so downstream CTEs treat it as just another snapshot. Reading
+-- the baseline from the target (not the source) is what keeps replace-mode
+-- sources from re-versioning every unchanged row.
+source_rows AS (
+  SELECT {self._qcols(all_output_cols)}, {q_snapshot}
+  FROM {src}
+  WHERE {and_filter(self.filter_sql, new_snapshot_filter)}{baseline_union}
+),
+
 -- All snapshots being processed (including reference, per merge_key group when configured)
 all_snapshots AS (
   SELECT DISTINCT {self._merge_key_cols_raw_with_comma()}{q_snapshot} AS snapshot_date
-  FROM {src}
-  WHERE {and_filter(self.filter_sql, snapshot_filter)}
+  FROM source_rows
 ),
 
 -- Previous/next snapshot per distinct snapshot (JOINed below instead of using a
@@ -559,8 +584,7 @@ snapshot_sequence AS (
 hashed AS (
   SELECT *,
     {hash_expr} AS _row_hash
-  FROM {src}
-  WHERE {and_filter(self.filter_sql, snapshot_filter)}
+  FROM source_rows
 ),
 
 -- Dedup within each snapshot
@@ -647,17 +671,20 @@ SELECT * FROM _historize_incremental;
         self,
         pk_cols: str,
         snapshot_col: str,
-        reference_filter: str,
-        src: str,
     ) -> str:
-        """Build deletion detection CTEs for incremental mode."""
+        """Build deletion detection CTEs for incremental mode.
+
+        Reads from ``source_rows`` (new snapshots + the target-derived baseline),
+        so a key present in the baseline but missing from the new snapshots is
+        detected as a deletion. ``source_rows`` is already filtered and scoped to
+        the snapshots being processed, so no extra filter is needed here.
+        """
         q_snapshot = self._q(snapshot_col)
         return f"""
 -- Detect deletions: keys present in reference but missing in new snapshots
 deletion_candidates AS (
   SELECT DISTINCT {pk_cols}, {q_snapshot} AS snapshot_date
-  FROM {src}
-  WHERE {and_filter(self.filter_sql, self._snapshot_filter_for_deletions(snapshot_col))}
+  FROM source_rows
 ),
 with_next_key AS (
   SELECT dc.*,
@@ -673,7 +700,3 @@ deletions AS (
     AND (next_key_snapshot IS NULL OR next_key_snapshot > next_overall_snapshot)
 ),
 """
-
-    def _snapshot_filter_for_deletions(self, snapshot_col: str) -> str:
-        """Build the WHERE clause for deletion candidate detection."""
-        return f"{self._q(snapshot_col)} IN (SELECT snapshot_date FROM all_snapshots)"
