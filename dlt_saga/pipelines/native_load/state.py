@@ -338,13 +338,18 @@ class NativeLoadStateManager:
             "loaded_rows, cursor_value, status, error_message, started_at, finished_at"
         )
 
+        # Pair each row with its load_id up front, then chunk the pairs — so a
+        # load_id stays with its row past the first chunk. (Chunking rows while
+        # zipping against the full load_ids list re-pairs every chunk against
+        # load_ids[0:CHUNK], misaligning load_id/size/loaded_rows for rows 1000+.)
+        paired = list(zip(rows, load_ids))
         chunks = [
-            rows[i : i + _BULK_INSERT_CHUNK]
-            for i in range(0, len(rows), _BULK_INSERT_CHUNK)
+            paired[i : i + _BULK_INSERT_CHUNK]
+            for i in range(0, len(paired), _BULK_INSERT_CHUNK)
         ]
-        for chunk_rows in chunks:
+        for chunk in chunks:
             value_rows = []
-            for (uri, cursor_value, generation), load_id in zip(chunk_rows, load_ids):
+            for (uri, cursor_value, generation), load_id in chunk:
                 size = (size_bytes_by_load_id or {}).get(load_id)
                 loaded = (loaded_rows_by_load_id or {}).get(load_id)
 
