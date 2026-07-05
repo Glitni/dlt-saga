@@ -166,10 +166,22 @@ class NativeLoadStateManager:
     ) -> set:
         """Return the set of (uri, generation) pairs already loaded or in-progress.
 
-        'In-progress' means a 'started' row younger than STALE_HOURS — these are
-        assumed to be from a concurrent run and are not re-attempted.
-        'Stale started' rows (older than STALE_HOURS) are treated as orphaned and
-        excluded so the next run retries them.
+        Only the *latest* event per (source_uri, generation) counts — a file is
+        loaded/in-progress based on its most recent row, not on any older one:
+
+        - latest 'success'                          → loaded;
+        - latest 'started' younger than STALE_HOURS  → in-progress (assumed a
+          concurrent run), not re-attempted;
+        - latest 'started' older than STALE_HOURS    → orphaned, excluded so the
+          next run retries it;
+        - latest 'failed'                            → excluded, so a retry picks
+          the file back up.
+
+        The last point is why latest-event-wins matters: a failed chunk leaves
+        both a 'started' and a trailing 'failed' row for the same file. Without
+        latest-event-wins the fresh 'started' row would shadow the 'failed' one
+        and an immediate retry would skip the file, reporting a green
+        "no new files" run that silently masks the failure.
         """
         table_id = self._dest.get_full_table_id(self._dataset, self._table)
         pn = esc_sql_literal(pipeline_name)
@@ -181,14 +193,24 @@ class NativeLoadStateManager:
             cursor_filter = f"AND (cursor_value IS NULL OR cursor_value >= '{cm}')"
 
         sql = (
-            f"SELECT DISTINCT source_uri, generation "
-            f"FROM {table_id} "
-            f"WHERE pipeline_name = '{pn}' "
+            f"SELECT source_uri, generation FROM ("
+            f"  SELECT source_uri, generation, status, started_at, "
+            f"    ROW_NUMBER() OVER ("
+            f"      PARTITION BY source_uri, generation "
+            f"      ORDER BY COALESCE(finished_at, started_at) DESC, "
+            # Tiebreak: a terminal event (success/failed, finished_at set) wins
+            # over a 'started' row (finished_at NULL) when timestamps are equal,
+            # so a same-instant failure isn't shadowed by its own started row.
+            f"      CASE WHEN finished_at IS NULL THEN 1 ELSE 0 END ASC"
+            f"    ) AS rn "
+            f"  FROM {table_id} "
+            f"  WHERE pipeline_name = '{pn}' {cursor_filter}"
+            f") t "
+            f"WHERE rn = 1 "
             f"AND ("
             f"  status = 'success' "
             f"  OR (status = 'started' AND started_at >= {stale_cutoff})"
-            f") "
-            f"{cursor_filter}"
+            f")"
         )
         try:
             rows = self._dest.execute_sql(sql, self._dataset)
