@@ -105,6 +105,26 @@ class TestNativeLoadStateManager:
         ]
         assert len(insert_calls) == 2  # two chunks
 
+    def test_bulk_insert_keeps_load_id_aligned_past_first_chunk(self):
+        # Rows past the first chunk must keep their own load_id. Regression for
+        # chunking rows while zipping against the full load_ids list, which
+        # re-paired every chunk against load_ids[0:CHUNK] — so rows 1000+ got
+        # the wrong load_id / size_bytes / loaded_rows.
+        dest = self._make_dest()
+        mgr = NativeLoadStateManager(dest, "my_dataset")
+        n = _BULK_INSERT_CHUNK + 3
+        rows = [(f"gs://b/f{i}.parquet", None, i) for i in range(n)]
+        mgr.record_loads_started_bulk("pipeline", rows)
+        combined = "\n".join(
+            c[0][0] for c in dest.execute_sql.call_args_list if "INSERT INTO" in c[0][0]
+        )
+        i = _BULK_INSERT_CHUNK  # first row of the second chunk
+        uri = f"gs://b/f{i}.parquet"
+        load_id = make_load_id("pipeline", uri, i)
+        # Each VALUES tuple is ('<load_id>', '<pipeline>', '<uri>', ...); this
+        # row's own load_id must sit next to its own uri.
+        assert f"'{load_id}', 'pipeline', '{uri}'" in combined
+
     def test_get_loaded_uri_generations_empty_on_error(self):
         dest = self._make_dest()
         dest.execute_sql.side_effect = RuntimeError("table not found")
