@@ -306,30 +306,46 @@ class NativeLoadPipeline(BasePipeline):
         cursor_re = re.compile(self.native_config.filename_date_regex)
         cursor_fmt = self.native_config.filename_date_format
 
-        if self._incremental:
-            last_cursor_str = self.state_manager.get_last_cursor(self.pipeline_name)
-            loaded = self.state_manager.get_loaded_uri_generations(
-                self.pipeline_name,
-                cursor_min=last_cursor_str
-                and self._cursor_lookback_str(last_cursor_str, cursor_fmt),
-            )
-        else:
-            last_cursor_str = None
-            loaded = set()
+        last_cursor_str = (
+            self.state_manager.get_last_cursor(self.pipeline_name)
+            if self._incremental
+            else None
+        )
 
         files_by_cursor: dict = {}
 
+        # Plan the scan first, so the dedup set can be pruned to match the scan's
+        # actual restriction. Pruning the dedup set to the lookback window while
+        # the scan silently falls back to a full listing (e.g. abfss:// sources,
+        # or whenever a start_offset can't be computed) would re-load every file
+        # older than the window on every run.
         if self._incremental and self.native_config.partition_prefix_pattern:
-            # Partition-pruned listing: issue one list_files call per date partition
-            # instead of a single recursive scan over the full source root.
+            # Partition-pruned listing: one list_files call per date partition,
+            # bounded to [cursor - lookback, today].
             uris_to_scan = self._build_partition_uris(last_cursor_str, cursor_fmt)  # type: ignore[arg-type]
+            scan_restricted = True
+        elif self._incremental:
+            start_offset = self._compute_gcs_start_offset(last_cursor_str, cursor_fmt)  # type: ignore[arg-type]
+            uris_to_scan = [(self.native_config.source_uri, start_offset)]
+            scan_restricted = start_offset is not None
         else:
-            uris_to_scan = [
-                (
-                    self.native_config.source_uri,
-                    self._compute_gcs_start_offset(last_cursor_str, cursor_fmt),  # type: ignore[arg-type]
-                )
-            ]
+            uris_to_scan = [(self.native_config.source_uri, None)]
+            scan_restricted = False
+
+        if self._incremental:
+            # Only prune the dedup set when the scan itself is restricted to the
+            # lookback window; otherwise read the full dedup set so files outside
+            # the window are still recognised as already loaded.
+            cursor_min = (
+                self._cursor_lookback_str(last_cursor_str, cursor_fmt)
+                if (scan_restricted and last_cursor_str)
+                else None
+            )
+            loaded = self.state_manager.get_loaded_uri_generations(
+                self.pipeline_name, cursor_min=cursor_min
+            )
+        else:
+            loaded = set()
 
         for scan_uri, start_offset in uris_to_scan:
             for obj in self.storage_client.list_files(

@@ -346,6 +346,66 @@ class TestFlatModeDiscovery:
 
 
 @pytest.mark.unit
+class TestDateModeDedupPruning:
+    """The dedup set must only be pruned to the lookback window when the file
+    scan is itself restricted to that window. A pruned dedup set combined with a
+    full listing (start_offset unavailable, e.g. abfss:// sources) re-loads every
+    file older than the window on every run.
+    """
+
+    def _p(self, **over):
+        p = _make_pipeline(incremental=True, **over)
+        p.native_config.filename_date_regex = r"(\d{8})"
+        p.native_config.filename_date_format = "%Y%m%d"
+        p.native_config.partition_prefix_pattern = None
+        p.native_config.date_lookback_days = 3
+        p.native_config.initial_value = None
+        p.state_manager.get_last_cursor.return_value = "20240110"
+        p.state_manager.get_loaded_uri_generations.return_value = set()
+        p.storage_client.list_files.return_value = []
+        return p
+
+    def test_restricted_scan_prunes_dedup_to_lookback(self):
+        p = self._p()
+        p._compute_gcs_start_offset = MagicMock(return_value="prefix/dt=20240107")
+        p._discover_date_mode()
+        _, kwargs = p.state_manager.get_loaded_uri_generations.call_args
+        assert kwargs["cursor_min"] == "20240107"  # 20240110 - 3 days
+
+    def test_unrestricted_scan_reads_full_dedup(self):
+        p = self._p()
+        p._compute_gcs_start_offset = MagicMock(return_value=None)  # full listing
+        p._discover_date_mode()
+        _, kwargs = p.state_manager.get_loaded_uri_generations.call_args
+        assert kwargs["cursor_min"] is None
+
+    def test_unrestricted_scan_does_not_reload_old_loaded_file(self):
+        # Regression: a full listing returns files older than the lookback
+        # window; the full dedup set must still recognise them as loaded.
+        p = self._p()
+        p._compute_gcs_start_offset = MagicMock(return_value=None)
+        old = StorageObject(
+            name="prefix/old_20240101.parquet",
+            full_uri="gs://bucket/prefix/old_20240101.parquet",
+            size=1,
+            generation=1,
+            updated=None,
+        )
+        p.storage_client.list_files.return_value = [old]
+
+        # Simulate real pruning: a pre-window file is only in the dedup set when
+        # the read is NOT pruned (cursor_min is None). On the old code the read
+        # was pruned to the lookback (cursor_min truthy) even though the scan was
+        # a full listing, so the old file was missed and re-listed.
+        def loaded(_pipeline, cursor_min=None):
+            return set() if cursor_min else {(old.full_uri, 1)}
+
+        p.state_manager.get_loaded_uri_generations.side_effect = loaded
+        result = p._discover_date_mode()
+        assert result == {}  # old file recognised as loaded, not re-listed
+
+
+@pytest.mark.unit
 class TestLoadFilesChunking:
     """`_load_files` chunks purely by `load_batch_size` — parent-directory
     homogeneity is not a requirement of either destination (BigQuery's
