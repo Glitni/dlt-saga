@@ -123,28 +123,36 @@ class TestSqlInjection:
         # No filter clause should appear after FROM proj.ds.src
         assert " FROM proj.ds.src WHERE" not in sql
 
-    def test_incremental_ands_filter_into_snapshot_where(self):
+    def test_incremental_ands_filter_into_source_rows(self):
         b = _make_builder(filter_sql="`tenant_id` = 'tenant_a'")
         sql = b.build_incremental_sql(
             value_columns=["name"],
             new_snapshots=["2026-01-01 00:00:00"],
             last_historized_snapshot=None,
         )
-        # all_snapshots and hashed CTEs each have snapshot filter — both
-        # should be AND'd with the historize filter.
-        assert sql.count("AND (`tenant_id` = 'tenant_a')") >= 2
+        # The source read is consolidated into a single source_rows CTE; the
+        # historize filter is AND'd into its WHERE exactly once. Downstream CTEs
+        # read from the (already-filtered) source_rows.
+        assert "source_rows AS (" in sql
+        assert sql.count("AND (`tenant_id` = 'tenant_a')") == 1
+        assert "FROM source_rows" in sql
+        # The only direct read of the raw source is inside source_rows, and it
+        # carries the filter — nothing bypasses it.
+        assert sql.count("FROM proj.ds.src") == 1
 
-    def test_incremental_deletion_cte_has_filter(self):
+    def test_incremental_deletion_cte_reads_filtered_source(self):
         b = _make_builder(filter_sql="`tenant_id` = 'tenant_a'")
         sql = b.build_incremental_sql(
             value_columns=["name"],
             new_snapshots=["2026-01-01 00:00:00"],
             last_historized_snapshot=None,
         )
-        # The deletion_candidates CTE reads from src too.
+        # Deletion detection flows through source_rows, so it inherits the filter
+        # without re-stating it (rather than reading the raw source directly).
         assert "deletion_candidates" in sql
-        # Three sites (all_snapshots, hashed, deletion_candidates) all AND'd.
-        assert sql.count("AND (`tenant_id` = 'tenant_a')") >= 3
+        deletion_block = sql.split("deletion_candidates AS (")[1].split(")")[0]
+        assert "FROM source_rows" in deletion_block
+        assert "proj.ds.src" not in deletion_block
 
     def test_rollback_ands_filter_into_keys_query(self):
         b = _make_builder(filter_sql="`tenant_id` = 'tenant_a'")

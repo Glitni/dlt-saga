@@ -102,3 +102,13 @@ class TestReplaceHistorize:
         assert [r["city"] for r in acme] == ["New York", "Boston"]
         assert acme[0]["_dlt_valid_to"] is not None
         assert acme[1]["_dlt_valid_to"] is None
+
+        # Beta Inc did NOT change between snapshots A and B. Because the source is
+        # `replace` mode, snapshot A's rows no longer exist in the staging table;
+        # the change-detection baseline must come from the historized target's
+        # open rows, otherwise Beta gets a spurious second (identical) version.
+        # Regression guard for "replace+historize re-versions unchanged rows".
+        beta = get_rows_for(query_historized(duckdb_destination), 2)
+        assert [r["city"] for r in beta] == ["London"]
+        assert beta[0]["_dlt_valid_from"] < acme[1]["_dlt_valid_from"]  # from run 1
+        assert beta[0]["_dlt_valid_to"] is None  # still the single open version
