@@ -94,3 +94,53 @@ class TestInjectIngestedAt:
         pipeline.target_writer.config.cluster_columns = ["company_id"]
         pipeline._inject_ingested_at(FakeResource())
         assert pipeline.target_writer.config.cluster_columns == ["company_id"]
+
+
+@pytest.mark.unit
+class TestInjectIngestedAtArrow:
+    """The PyArrow branch must stamp one run-level timestamp (not datetime.now()
+    per batch) and produce a tz-aware TIMESTAMP consistent with the dict path.
+    """
+
+    def _apply(self, disposition="append+historize"):
+        pipeline = _make_pipeline(disposition)
+        resource = FakeResource()
+        pipeline._inject_ingested_at(resource)
+        return resource
+
+    def test_all_arrow_batches_share_one_run_timestamp(self):
+        # Two separate Tables model two batches from one physical run — they must
+        # get the identical _dlt_ingested_at, or a single run splits into several
+        # spurious SCD2 snapshots.
+        import pyarrow as pa
+
+        resource = self._apply()
+        b1 = resource.apply(pa.table({"company_id": [1, 2]}))
+        b2 = resource.apply(pa.table({"company_id": [3]}))
+        vals = b1.column("_dlt_ingested_at").to_pylist() + (
+            b2.column("_dlt_ingested_at").to_pylist()
+        )
+        assert len(set(vals)) == 1, "all rows across batches must share one timestamp"
+
+    def test_arrow_timestamp_is_tz_aware(self):
+        import pyarrow as pa
+
+        resource = self._apply()
+        tbl = resource.apply(pa.table({"company_id": [1]}))
+        field = tbl.schema.field("_dlt_ingested_at")
+        assert pa.types.is_timestamp(field.type)
+        assert field.type.tz == "UTC", "arrow snapshot column must be tz-aware UTC"
+
+    def test_arrow_and_dict_paths_agree_within_a_run(self):
+        # Cross-path consistency: an Arrow batch and a dict row processed by the
+        # same run stamp the same instant (guards the tz/type drift too).
+        from datetime import datetime
+
+        import pyarrow as pa
+
+        resource = self._apply()
+        row = resource.apply({"company_id": 1})
+        tbl = resource.apply(pa.table({"company_id": [1]}))
+        dict_ts = datetime.fromisoformat(row["_dlt_ingested_at"])
+        arrow_ts = tbl.column("_dlt_ingested_at")[0].as_py()
+        assert dict_ts == arrow_ts
