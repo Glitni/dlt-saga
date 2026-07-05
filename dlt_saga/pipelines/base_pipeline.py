@@ -435,26 +435,49 @@ class BasePipeline:
         import re
         from datetime import datetime, timezone
 
-        extraction_ts = datetime.now(timezone.utc).isoformat()
+        # One run timestamp, resolved once outside the row/batch closure so a
+        # single physical run maps to a single historize snapshot. (Computing
+        # datetime.now() per Arrow batch would split one run into as many
+        # spurious SCD2 snapshots as there are batches.) tz-aware throughout so
+        # both the dict and Arrow paths land on a warehouse TIMESTAMP — a naive
+        # DATETIME snapshot column can't be compared against the TIMESTAMP
+        # literals the incremental historize SQL emits (a type error on BigQuery).
+        extraction_dt = datetime.now(timezone.utc)
+        extraction_ts = extraction_dt.isoformat()
         snapshot_date_regex = self.config_dict.get("snapshot_date_regex")
         snapshot_date_format = self.config_dict.get("snapshot_date_format")
         compiled_regex = (
             re.compile(snapshot_date_regex) if snapshot_date_regex else None
         )
         resolve = self._resolve_ingested_at
+        # Guard so the Arrow-path regex warning fires at most once per resource.
+        warned_arrow_regex = [False]
 
         def _add_ingested_at(item):
             try:
                 import pyarrow as pa
-
-                if isinstance(item, (pa.Table, pa.RecordBatch)):
-                    from datetime import datetime, timezone
-
-                    ts = datetime.now(timezone.utc).replace(tzinfo=None)
-                    ts_array = pa.array([ts] * len(item), type=pa.timestamp("us"))
-                    return item.append_column("_dlt_ingested_at", ts_array)
             except ImportError:
-                pass
+                pa = None
+
+            if pa is not None and isinstance(item, (pa.Table, pa.RecordBatch)):
+                # Arrow sources (e.g. sql_database) carry no per-row file
+                # metadata, so the regex / modification-date tiers don't apply —
+                # every row gets the single run-level extraction timestamp.
+                if compiled_regex and not warned_arrow_regex[0]:
+                    warned_arrow_regex[0] = True
+                    logger.warning(
+                        "snapshot_date_regex is set but this source yields Arrow "
+                        "batches without per-row file metadata; _dlt_ingested_at "
+                        "uses the run extraction timestamp for all rows."
+                    )
+                # pa.repeat builds the constant column directly — no N-length
+                # Python list. "us" matches Python datetime, BigQuery TIMESTAMP,
+                # and dlt's default timestamp precision.
+                ts_array = pa.repeat(
+                    pa.scalar(extraction_dt, type=pa.timestamp("us", tz="UTC")),
+                    item.num_rows,
+                )
+                return item.append_column("_dlt_ingested_at", ts_array)
 
             # Dict row
             item["_dlt_ingested_at"] = resolve(
