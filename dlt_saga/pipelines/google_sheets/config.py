@@ -44,10 +44,14 @@ class GSheetsConfig(BaseConfig):
             "required": True,
         },
     )
-    range: str = field(
-        default="A:Z",
+    range: Optional[str] = field(
+        default=None,
         metadata={
-            "description": "Cell range to read in A1 notation (e.g., 'A:Z', 'Sheet1!A1:D10')"
+            "description": (
+                "Optional cell range within the sheet in A1 notation (e.g. "
+                "'A1:D10'). Omit to read the entire sheet — the default. A fixed "
+                "range like 'A:Z' silently truncates sheets wider than that range."
+            )
         },
     )
 

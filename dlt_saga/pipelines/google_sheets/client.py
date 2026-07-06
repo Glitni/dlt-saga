@@ -1,6 +1,6 @@
 from datetime import datetime
 from itertools import zip_longest
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, Optional
 
 from dlt_saga.pipelines.google_sheets.config import GSheetsConfig
 
@@ -112,10 +112,12 @@ class GSheetsClient:
         return datetime.fromisoformat(modified_time_str.replace("Z", "+00:00"))
 
     def get_sheet_data(
-        self, spreadsheet_id: str, sheet_name: str, range: str = "A:Z"
+        self, spreadsheet_id: str, sheet_name: str, range: Optional[str] = None
     ) -> Iterator[Dict[str, Any]]:
         service = self.get_service()
-        range_name = f"'{sheet_name}'!{range}"
+        # No range → request the bare sheet name, which returns the entire grid
+        # (all columns/rows). A fixed range like 'A:Z' truncates wider sheets.
+        range_name = f"'{sheet_name}'!{range}" if range else f"'{sheet_name}'"
         result = (
             service.spreadsheets()
             .values()
