@@ -154,7 +154,10 @@ class DatabricksAccessManager(AccessManager):
             self._grant(table_id, principal, ptype)
 
     def _grant(self, table_id: str, principal: str, ptype: str) -> None:
-        sql = f"GRANT {_UNITY_PRIVILEGE} ON TABLE {table_id} TO {ptype} `{principal}`"
+        # Unity Catalog GRANT resolves the principal by name; it takes no
+        # principal-type keyword (unlike some other SQL dialects). Emitting
+        # `TO user \`p\`` is a parse error — UC wants `TO \`p\`` (matching REVOKE).
+        sql = f"GRANT {_UNITY_PRIVILEGE} ON TABLE {table_id} TO `{principal}`"
         logger.info(
             "Granting %s on %s to %s:%s", _UNITY_PRIVILEGE, table_id, ptype, principal
         )
