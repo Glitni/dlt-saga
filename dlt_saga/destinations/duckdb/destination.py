@@ -355,10 +355,16 @@ class DuckDBDestination(Destination):
         return f'"{dataset}"."{table}"'
 
     def hash_expression(self, columns: list[str]) -> str:
-        cast_cols = ", ".join(
-            f"COALESCE(CAST(\"{c}\" AS VARCHAR), '')" for c in columns
+        # JSON-serialise the value columns (named keys) before hashing, for
+        # parity with BigQuery. The old md5(concat(COALESCE(...,''))) silently
+        # missed SCD2 changes: COALESCE(...,'') conflated NULL with '', and
+        # concat() had no separator at all (adjacent column values ran together,
+        # so different rows could hash identically). A JSON object keeps NULL
+        # distinct from '' and keeps column boundaries unambiguous.
+        pairs = ", ".join(
+            f"'{self.escape_string_literal(c)}', \"{c}\"" for c in columns
         )
-        return f"md5(concat({cast_cols}))"
+        return f"md5(json_object({pairs}))"
 
     def partition_ddl(self, column: str, col_type: Optional[str] = None) -> str:
         return ""  # DuckDB doesn't support partitioning

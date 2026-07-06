@@ -156,8 +156,14 @@ class TestDatabricksDialect:
         assert "`id`" in result
         assert "`name`" in result
 
-    def test_hash_expression_handles_nulls_with_coalesce(self):
-        assert "COALESCE" in self.dest.hash_expression(["col"])
+    def test_hash_expression_json_serialises_for_null_safety(self):
+        # JSON-struct serialisation (parity with BigQuery) instead of the old
+        # concat_ws('|', COALESCE(...,'')) which conflated NULL with '' and had
+        # separator ambiguity.
+        result = self.dest.hash_expression(["col"])
+        assert "to_json(struct(" in result
+        assert "concat_ws" not in result
+        assert "COALESCE" not in result
 
     def test_partition_ddl(self):
         assert self.dest.partition_ddl("dt") == "PARTITIONED BY (dt)"
