@@ -90,6 +90,148 @@ class TestPipelineResult:
         assert r.error == "timeout"
         assert r.load_info is None
 
+    def test_config_error_defaults_false(self):
+        assert PipelineResult(pipeline_name="t", success=True).config_error is False
+
+
+# ---------------------------------------------------------------------------
+# Config/validation errors are developer feedback, not run outcomes
+# ---------------------------------------------------------------------------
+
+
+def _config(pipeline_name="p"):
+    cfg = MagicMock()
+    cfg.pipeline_group = "grp"
+    cfg.identifier = f"configs/{pipeline_name}.yml"
+    cfg.table_name = "tbl"
+    return cfg
+
+
+@pytest.mark.unit
+class TestRecordRunSkipsConfigErrors:
+    """A pre-run config/validation error never started a run, so `_record_run`
+    must not record it in `saga report` telemetry — and must not create a
+    destination/connection just to record nothing (which is what hangs on a
+    cold Databricks warehouse)."""
+
+    def _session(self):
+        session = object.__new__(Session)
+        session._profile_target = None
+        return session
+
+    def test_config_error_only_creates_no_destination(self):
+        session = self._session()
+        result = SessionResult(
+            pipeline_results=[
+                PipelineResult(
+                    pipeline_name="p",
+                    success=False,
+                    error="historize requires a primary_key",
+                    config=_config("p"),
+                    config_error=True,
+                )
+            ]
+        )
+        with patch(
+            "dlt_saga.destinations.factory.DestinationFactory.create_from_context"
+        ) as create:
+            session._record_run("historize", None, result)
+        create.assert_not_called()
+
+    def test_real_failure_is_recorded_config_error_skipped(self):
+        session = self._session()
+        result = SessionResult(
+            pipeline_results=[
+                PipelineResult(
+                    pipeline_name="cfg",
+                    success=False,
+                    error="requires a primary_key",
+                    config=_config("cfg"),
+                    config_error=True,
+                ),
+                PipelineResult(
+                    pipeline_name="real",
+                    success=False,
+                    error="connection reset",
+                    config=_config("real"),
+                    config_error=False,
+                ),
+            ]
+        )
+        with (
+            patch(
+                "dlt_saga.destinations.factory.DestinationFactory.create_from_context"
+            ) as create,
+            patch(
+                "dlt_saga.utility.orchestration.execution_plan.ExecutionPlanManager"
+            ) as manager,
+            patch("dlt_saga.utility.cli.context.get_execution_context") as ctx,
+            patch(
+                "dlt_saga.utility.naming.get_execution_plan_schema",
+                return_value="dlt_x",
+            ),
+        ):
+            ctx.return_value = MagicMock()
+            session._record_run("run", None, result)
+
+        create.assert_called_once()
+        records = manager.return_value.record_local_run.call_args.args[0]
+        recorded_names = {rec["pipeline_identifier"] for rec in records}
+        assert recorded_names == {"configs/real.yml"}  # config-error one excluded
+
+
+@pytest.mark.unit
+class TestConfigErrorClassification:
+    """ValueError (config/validation) marks config_error=True (run never
+    started); any other exception is a genuine run failure."""
+
+    def test_ingest_valueerror_flags_config_error(self):
+        with patch(
+            "dlt_saga.session.execute_pipeline",
+            side_effect=ValueError("missing required field"),
+        ):
+            r = Session._execute_single_ingest(_config("p"))
+        assert r.success is False
+        assert r.config_error is True
+
+    def test_ingest_other_exception_is_run_failure(self):
+        with patch(
+            "dlt_saga.session.execute_pipeline",
+            side_effect=RuntimeError("network reset mid-load"),
+        ):
+            r = Session._execute_single_ingest(_config("p"))
+        assert r.success is False
+        assert r.config_error is False
+
+    def test_historize_config_error_propagates(self):
+        session = object.__new__(Session)
+        runner = MagicMock()
+        runner.run.return_value = {
+            "status": "failed",
+            "error": "historize requires a primary_key",
+            "config_error": True,
+        }
+        with patch(
+            "dlt_saga.historize.factory.build_historize_runner", return_value=runner
+        ):
+            r = session._execute_single_historize(_config("p"), full_refresh=False)
+        assert r.success is False
+        assert r.config_error is True
+
+    def test_historize_run_failure_not_config_error(self):
+        session = object.__new__(Session)
+        runner = MagicMock()
+        runner.run.return_value = {
+            "status": "failed",
+            "error": "MERGE failed on the warehouse",
+        }
+        with patch(
+            "dlt_saga.historize.factory.build_historize_runner", return_value=runner
+        ):
+            r = session._execute_single_historize(_config("p"), full_refresh=False)
+        assert r.success is False
+        assert r.config_error is False
+
 
 # ---------------------------------------------------------------------------
 # Session.__init__ tests
