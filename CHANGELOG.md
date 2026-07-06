@@ -1,3 +1,18 @@
+## 0.13.0 — 2026-07-06
+
+### Breaking Changes
+- Require sheet_name so a google_sheets config maps to one table (#208)
+
+
+### Fixed
+- Apply merge_key when merge_strategy is unset so merge doesn't degrade to append (#218)
+- Database connection_string pipelines crash on SecretStr after full fetch (#216)
+- Deterministic impersonation source without global GOOGLE_APPLICATION_CREDENTIALS mutation (#214)
+- Remove no-op filesystem delete_after_load (unsafe to implement) (#212)
+- Read the full sheet by default so google_sheets doesn't truncate at column Z (#210)
+- Apply dict-valued project/group config defaults (folder detection by real dirs) (#206)
+- Remove no-op --force from historize command (#202)
+
 ## 0.12.0 — 2026-07-06
 
 ### Fixed
