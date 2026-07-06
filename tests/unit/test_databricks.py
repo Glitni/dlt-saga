@@ -14,6 +14,21 @@ from dlt_saga.utility.auth.databricks import (
     get_databricks_token,
 )
 from dlt_saga.utility.auth.providers import AuthenticationError
+from dlt_saga.utility.cli.context import (
+    clear_execution_context,
+    get_execution_context,
+    set_execution_context,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_execution_context():
+    """Access grant/revoke reads the module-level execution context (dry_run +
+    counters); reset it around every test so state doesn't leak between them."""
+    clear_execution_context()
+    yield
+    clear_execution_context()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -568,17 +583,16 @@ class TestDatabricksAccessManagerManageAccess:
 
     def test_revoke_called_for_extra_principals(self):
         mgr, dest = self._manager_with_mock_dest()
+        mgr.dataset_id = "schema"
 
-        show_grants_row = MagicMock()
-        show_grants_row.__getitem__ = lambda self, i: {
-            1: "old-user@co.com",
-            2: "SELECT",
-        }.get(i, "")
-        show_grants_row.__len__ = lambda self: 5
-        dest.execute_sql.side_effect = [[show_grants_row], []]
+        # information_schema.table_privileges returns one `grantee` column.
+        grantee_row = MagicMock()
+        grantee_row.__getitem__ = lambda self, i: "old-user@co.com" if i == 0 else ""
+        grantee_row.__len__ = lambda self: 1
+        dest.execute_sql.side_effect = [[grantee_row], []]
 
         mgr.manage_access_for_tables(
-            ["`cat`.`schema`.`tbl`"],
+            ["tbl"],
             access_config=["user:new-user@co.com"],
             revoke_extra=True,
         )
@@ -669,12 +683,12 @@ class TestDatabricksAccessQualifiesTableNames:
             access_config=["user:analyst@co.com"],
             revoke_extra=False,
         )
-        assert len(executed) == 1
+        grants = [s for s in executed if s.startswith("GRANT")]
+        assert len(grants) == 1
         assert (
-            "ON TABLE `my_catalog`.`dlt_sharepoint`.`cert_test_adgrupper`"
-            in executed[0]
+            "ON TABLE `my_catalog`.`dlt_sharepoint`.`cert_test_adgrupper`" in grants[0]
         )
-        assert "`default`" not in executed[0]
+        assert "`default`" not in grants[0]
 
     def test_full_table_id_uses_destination_catalog(self):
         mgr, _ = self._manager_with_capture(dataset_id="my_schema")
@@ -687,6 +701,142 @@ class TestDatabricksAccessQualifiesTableNames:
     def test_dataset_id_defaults_to_none(self):
         dest = _make_destination()
         assert DatabricksAccessManager(dest).dataset_id is None
+
+
+# ---------------------------------------------------------------------------
+# DatabricksAccessManager — dry-run + grant/revoke counters (mirrors BigQuery)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestDatabricksAccessDryRunAndCounters:
+    """The Databricks manager must honour --dry-run (skip the write) and bump the
+    run-level counters, so a preview doesn't apply real GRANTs/REVOKEs and the
+    summary reflects what would/did change. Diff-based, like BigQuery."""
+
+    def _manager_with_capture(self, existing_principals=()):
+        dest = _make_destination()
+        executed: list[str] = []
+
+        def _run(sql):
+            executed.append(sql)
+            # Emulate information_schema.table_privileges: one `grantee` column,
+            # already filtered to direct table SELECT grants by the query.
+            if "information_schema.table_privileges" in sql:
+                rows = []
+                for principal in existing_principals:
+                    row = MagicMock()
+                    row.__getitem__ = lambda self, i, p=principal: p if i == 0 else ""
+                    row.__len__ = lambda self: 1
+                    rows.append(row)
+                return rows
+            return []
+
+        dest.execute_sql = MagicMock(side_effect=_run)
+        mgr = DatabricksAccessManager(dest)
+        mgr.dataset_id = "sch"
+        return mgr, executed
+
+    def _sync(self, mgr, access, revoke_extra=True):
+        mgr.manage_access_for_tables(
+            table_ids=["tbl"], access_config=access, revoke_extra=revoke_extra
+        )
+
+    def test_dry_run_issues_no_grant_but_bumps_counter(self):
+        set_execution_context(None, update_access=True, dry_run=True)
+        mgr, executed = self._manager_with_capture(existing_principals=())
+        self._sync(mgr, ["user:new@co.com"], revoke_extra=False)
+
+        assert not any(s.startswith("GRANT") for s in executed)
+        assert get_execution_context().access_grants_applied == 1
+
+    def test_real_run_issues_grant_and_bumps_counter(self):
+        set_execution_context(None, update_access=True, dry_run=False)
+        mgr, executed = self._manager_with_capture(existing_principals=())
+        self._sync(mgr, ["user:new@co.com"], revoke_extra=False)
+
+        assert any(s.startswith("GRANT") and "new@co.com" in s for s in executed)
+        assert get_execution_context().access_grants_applied == 1
+
+    def test_dry_run_issues_no_revoke_but_bumps_counter(self):
+        set_execution_context(None, update_access=True, dry_run=True)
+        mgr, executed = self._manager_with_capture(existing_principals=("old@co.com",))
+        self._sync(mgr, ["user:new@co.com"], revoke_extra=True)
+
+        assert not any(s.startswith("REVOKE") for s in executed)
+        assert not any(s.startswith("GRANT") for s in executed)
+        ctx = get_execution_context()
+        assert ctx.access_grants_applied == 1
+        assert ctx.access_revokes_applied == 1
+
+    def test_already_granted_principal_is_not_regranted(self):
+        set_execution_context(None, update_access=True, dry_run=False)
+        mgr, executed = self._manager_with_capture(existing_principals=("keep@co.com",))
+        self._sync(mgr, ["user:keep@co.com"], revoke_extra=True)
+
+        assert not any(s.startswith("GRANT") for s in executed)
+        assert not any(s.startswith("REVOKE") for s in executed)
+        ctx = get_execution_context()
+        assert ctx.access_grants_applied == 0
+        assert ctx.access_revokes_applied == 0
+
+    def test_get_existing_grants_reads_grantee_from_information_schema(self):
+        """Existing grants come from information_schema.table_privileges
+        (`grantee` column), scoped to the schema/table and filtered to direct
+        SELECT grants."""
+        dest = _make_destination()
+        row = MagicMock()
+        row.__getitem__ = lambda self, i: "analyst@co.com" if i == 0 else ""
+        row.__len__ = lambda self: 1
+        dest.execute_sql = MagicMock(return_value=[row])
+
+        mgr = DatabricksAccessManager(dest)
+        mgr.dataset_id = "sch"
+        result = mgr._get_existing_grants("sch", "tbl")
+
+        assert result == {"analyst@co.com"}
+        sql = dest.execute_sql.call_args.args[0]
+        assert "information_schema.table_privileges" in sql
+        assert "table_schema = 'sch'" in sql
+        assert "table_name = 'tbl'" in sql
+        assert "privilege_type = 'SELECT'" in sql
+        # Inherited catalog/schema grants are excluded at the query level.
+        assert "inherited_from = 'NONE'" in sql
+
+    def test_no_query_and_empty_when_dataset_unknown(self):
+        """Without a dataset_id the schema can't be scoped — return empty
+        (grant desired, revoke nothing) rather than querying."""
+        dest = _make_destination()
+        dest.execute_sql = MagicMock(return_value=[])
+        mgr = DatabricksAccessManager(dest)  # dataset_id defaults to None
+
+        assert mgr._get_existing_grants(None, "tbl") == set()
+        dest.execute_sql.assert_not_called()
+
+    def test_second_run_is_noop_when_already_granted(self):
+        """Regression for the live repro: two runs in a row must not re-grant."""
+        set_execution_context(None, update_access=True, dry_run=False)
+        mgr, executed = self._manager_with_capture(existing_principals=("lars@co.com",))
+        self._sync(mgr, ["user:lars@co.com"], revoke_extra=True)
+
+        assert not any(s.startswith("GRANT") for s in executed)
+        assert get_execution_context().access_grants_applied == 0
+
+    def test_counter_not_bumped_when_grant_execution_fails(self):
+        set_execution_context(None, update_access=True, dry_run=False)
+        dest = _make_destination()
+
+        def _run(sql):
+            if "information_schema.table_privileges" in sql:
+                return []
+            raise RuntimeError("permission denied")
+
+        dest.execute_sql = MagicMock(side_effect=_run)
+        mgr = DatabricksAccessManager(dest)
+        mgr.dataset_id = "sch"
+        self._sync(mgr, ["user:new@co.com"], revoke_extra=False)
+
+        assert get_execution_context().access_grants_applied == 0
 
 
 # ---------------------------------------------------------------------------
