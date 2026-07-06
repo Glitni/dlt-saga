@@ -368,7 +368,7 @@ Selector reference:
 |-------|------|-------------|
 | `spreadsheet_id` | string | From the spreadsheet URL |
 | `sheet_name` | string | Specific sheet/tab name |
-| `range` | string | Cell range in A1 notation (default: `A:Z`) |
+| `range` | string | Cell range in A1 notation |
 
 ### SharePoint
 
