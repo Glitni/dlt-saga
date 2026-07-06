@@ -154,30 +154,6 @@ class FilePipelineConfig(ConfigSource):
                 break
         return parts
 
-    def _resolve_schema_override(
-        self, resolved_config: Dict[str, Any], config_path: str
-    ) -> Optional[str]:
-        """Return the per-pipeline schema override, or None to fall back to
-        environment-aware naming.
-
-        Honors the ``schema_name`` config key; accepts the deprecated
-        ``dataset_name`` key as an alias (mapped to ``schema_name`` with a
-        deprecation warning) for backward compatibility.
-        """
-        schema_name = resolved_config.get("schema_name")
-        if schema_name:
-            return schema_name
-        legacy = resolved_config.get("dataset_name")
-        if legacy:
-            logger.warning(
-                "Pipeline config '%s' uses deprecated 'dataset_name'; rename it to "
-                "'schema_name'. Mapping dataset_name=%r to schema_name for now.",
-                config_path,
-                legacy,
-            )
-            return legacy
-        return None
-
     def resolve_schema_name(self, config_path: str, *, layer: str = "ingest") -> str:
         """Resolve schema name for a config file.
 
@@ -373,9 +349,9 @@ class FilePipelineConfig(ConfigSource):
 
         # Resolve environment-aware names from config path
         table_name = self.resolve_table_name(config_path)
-        schema_name = self._resolve_schema_override(
-            resolved_config, config_path
-        ) or self.resolve_schema_name(config_path)
+        schema_name = resolved_config.get("schema_name") or self.resolve_schema_name(
+            config_path
+        )
 
         # Normalize tags to list and parse into ScheduleTag objects
         raw_tags = resolved_config.get("tags", [])

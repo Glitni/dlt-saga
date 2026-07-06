@@ -89,7 +89,7 @@ class TargetConfig:
     """Pipeline destination configuration and loading behavior.
 
     This class defines:
-    1. Destination connection overrides (destination_type, gcp_project_id, dataset_name, location)
+    1. Destination connection overrides (destination_type, gcp_project_id, schema_name, location)
     2. IAM/Access control (access)
     3. Loading behavior (write disposition, merge strategy, deduplication, etc.)
     4. Destination hints (partitioning, clustering, column specifications)
@@ -124,17 +124,6 @@ class TargetConfig:
                 "Schema/dataset name override for this pipeline. Defaults to "
                 "environment-aware naming (dlt_<group> in prod, the dev schema "
                 "otherwise)."
-            ),
-            "pattern": "^[a-zA-Z0-9_]+$",
-        },
-    )
-
-    dataset_name: Optional[str] = field(
-        default=None,
-        metadata={
-            "description": (
-                "Deprecated — use 'schema_name'. Still accepted as an alias "
-                "(mapped to schema_name) for backward compatibility."
             ),
             "pattern": "^[a-zA-Z0-9_]+$",
         },
@@ -388,14 +377,14 @@ class TargetConfig:
         self._validate_classification()
 
     def _validate_schema_name(self):
-        """Validate the schema_name pattern (and the deprecated dataset_name alias)."""
+        """Validate the schema_name pattern if provided."""
         import re
 
         pattern = r"^[a-zA-Z0-9_]+$"
-        for key in ("schema_name", "dataset_name"):
-            value = getattr(self, key)
-            if value and not re.match(pattern, value):
-                raise ValueError(f"{key} '{value}' must match pattern {pattern}")
+        if self.schema_name and not re.match(pattern, self.schema_name):
+            raise ValueError(
+                f"schema_name '{self.schema_name}' must match pattern {pattern}"
+            )
 
     def _validate_column_identifiers(self):
         """Validate SQL identifier format for column name fields."""

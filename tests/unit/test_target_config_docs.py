@@ -9,8 +9,7 @@ GENERATED = "Data from https://services.api.no/api/config/sites"
 
 @pytest.mark.unit
 class TestSchemaNameField:
-    """`schema_name` is the declared, working per-pipeline schema override;
-    `dataset_name` is kept only as a deprecated alias."""
+    """`schema_name` is the sole, declared per-pipeline schema override key."""
 
     def test_schema_name_accepted(self):
         assert TargetConfig(schema_name="my_schema").schema_name == "my_schema"
@@ -19,13 +18,6 @@ class TestSchemaNameField:
         with pytest.raises(ValueError, match="schema_name"):
             TargetConfig(schema_name="bad-name!")
 
-    def test_deprecated_dataset_name_still_accepted(self):
-        assert TargetConfig(dataset_name="legacy").dataset_name == "legacy"
-
-    def test_dataset_name_bad_pattern_raises(self):
-        with pytest.raises(ValueError, match="dataset_name"):
-            TargetConfig(dataset_name="bad name")
-
     def test_schema_name_is_a_declared_schema_property(self):
         # Must be a real field so `saga generate-schemas` emits it and editors
         # stop rejecting `schema_name:` as an unknown key.
@@ -33,6 +25,12 @@ class TestSchemaNameField:
 
         props = get_target_fields_from_dataclass()
         assert "schema_name" in props
+
+    def test_dataset_name_is_not_a_config_key(self):
+        # The dead `dataset_name` config override was removed — only `schema_name`.
+        from dlt_saga.utility.generate_schemas import get_target_fields_from_dataclass
+
+        assert "dataset_name" not in get_target_fields_from_dataclass()
 
 
 @pytest.mark.unit
