@@ -1,3 +1,15 @@
+## 0.15.0 — 2026-07-06
+
+### Changed
+- Hoist access-manager orchestration into an AccessManager base template (#246)
+- Rename generic-layer dataset_name to schema_name (#244)
+- Drop the dead dataset_name config-key alias; schema_name is the sole override (#242)
+
+
+### Fixed
+- Declare schema_name as a config field; deprecate dead dataset_name override (#240)
+- Don't record config/validation errors as run failures (also fixes post-run hang) (#238)
+
 ## 0.14.0 — 2026-07-06
 
 ### Fixed
