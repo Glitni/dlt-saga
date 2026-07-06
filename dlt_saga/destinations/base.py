@@ -292,7 +292,7 @@ class Destination(ABC):
         return None
 
     def save_load_info(
-        self, dataset_name: str, records: list[dict], pipeline: Any = None
+        self, schema_name: str, records: list[dict], pipeline: Any = None
     ) -> None:
         """Save load info tracking records to the destination.
 
@@ -300,7 +300,7 @@ class Destination(ABC):
         Destinations should override this with a direct insert for performance.
 
         Args:
-            dataset_name: Target dataset name
+            schema_name: Target schema name
             records: List of flat dicts to insert into _saga_load_info
             pipeline: dlt Pipeline instance (used by default implementation)
         """
@@ -331,14 +331,14 @@ class Destination(ABC):
         self.run_pipeline(pipeline, load_info_resource)
 
     def get_last_load_timestamp(
-        self, dataset_name: str, pipeline_name: str, table_name: str
+        self, schema_name: str, pipeline_name: str, table_name: str
     ) -> Optional[datetime]:
         """Get the timestamp of the last successful load that had data.
 
         Queries _saga_load_info for the most recent load that wrote rows.
 
         Args:
-            dataset_name: Dataset containing _saga_load_info
+            schema_name: Schema containing _saga_load_info
             pipeline_name: Pipeline identifier
             table_name: Table name to filter for
 
@@ -365,7 +365,7 @@ class Destination(ABC):
             f"{self.__class__.__name__} does not support get_max_column_value"
         )
 
-    def execute_sql(self, sql: str, dataset_name: Optional[str] = None) -> Any:
+    def execute_sql(self, sql: str, schema_name: Optional[str] = None) -> Any:
         """Execute a SQL statement against the destination.
 
         Used by the historize command for running historization queries
@@ -373,7 +373,7 @@ class Destination(ABC):
 
         Args:
             sql: SQL statement to execute
-            dataset_name: Optional dataset context for the query
+            schema_name: Optional schema context for the query
 
         Returns:
             Query result (implementation-specific)

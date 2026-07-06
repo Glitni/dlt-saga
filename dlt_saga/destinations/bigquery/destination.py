@@ -360,7 +360,7 @@ class BigQueryDestination(BigQueryBaseDestination):
             return pipeline.run(data)
 
     def save_load_info(
-        self, dataset_name: str, records: list[dict], pipeline: Any = None
+        self, schema_name: str, records: list[dict], pipeline: Any = None
     ) -> None:
         """Save load info records via DML INSERT.
 
@@ -371,7 +371,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         Creates the _saga_load_info table on first use.
 
         Args:
-            dataset_name: Target dataset name
+            schema_name: Target schema (BigQuery dataset) name
             records: List of flat dicts to insert into _saga_load_info
             pipeline: Unused (kept for interface compatibility)
         """
@@ -394,7 +394,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         from dlt_saga.project_config import get_load_info_table_name
 
         table_id = (
-            f"{self.config.project_id}.{dataset_name}.{get_load_info_table_name()}"
+            f"{self.config.project_id}.{schema_name}.{get_load_info_table_name()}"
         )
         client = bigquery.Client(
             project=self.config.job_project_id, location=self.config.location
@@ -475,7 +475,7 @@ class BigQueryDestination(BigQueryBaseDestination):
             client.query(insert_sql, job_config=job_config).result()
 
     def get_last_load_timestamp(
-        self, dataset_name: str, pipeline_name: str, table_name: str
+        self, schema_name: str, pipeline_name: str, table_name: str
     ) -> Optional[datetime]:
         """Get the timestamp of the last successful load that had data."""
         from google.cloud import bigquery
@@ -488,7 +488,7 @@ class BigQueryDestination(BigQueryBaseDestination):
             )
             query = f"""
                 SELECT MAX(started_at) as started_at
-                FROM `{self.config.project_id}.{dataset_name}.{get_load_info_table_name()}`
+                FROM `{self.config.project_id}.{schema_name}.{get_load_info_table_name()}`
                 WHERE pipeline_name = @pipeline_name
                 AND table_name = @table_name
                 AND row_count > 0
@@ -524,12 +524,13 @@ class BigQueryDestination(BigQueryBaseDestination):
         except Exception:
             return None
 
-    def execute_sql(self, sql: str, dataset_name: Optional[str] = None) -> Any:
+    def execute_sql(self, sql: str, schema_name: Optional[str] = None) -> Any:
         """Execute a SQL statement against BigQuery.
 
         Args:
             sql: SQL statement to execute
-            dataset_name: Optional default dataset for unqualified table references
+            schema_name: Optional default schema (BigQuery dataset) for
+                unqualified table references
 
         Returns:
             BigQuery RowIterator with query results
@@ -541,10 +542,10 @@ class BigQueryDestination(BigQueryBaseDestination):
         )
 
         job_config = bigquery.QueryJobConfig()
-        if dataset_name:
-            job_config.default_dataset = f"{self.config.project_id}.{dataset_name}"
+        if schema_name:
+            job_config.default_dataset = f"{self.config.project_id}.{schema_name}"
 
-        logger.debug(f"Executing SQL ({len(sql)} chars) in dataset={dataset_name}")
+        logger.debug(f"Executing SQL ({len(sql)} chars) in schema={schema_name}")
         result = client.query(sql, job_config=job_config).result(timeout=120)
         return result
 

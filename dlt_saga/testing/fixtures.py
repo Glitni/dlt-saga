@@ -37,15 +37,15 @@ def saga_duckdb_destination():
         def test_query(saga_duckdb_destination):
             saga_duckdb_destination.execute_sql(
                 'CREATE SCHEMA IF NOT EXISTS "test"',
-                dataset_name="test",
+                schema_name="test",
             )
             saga_duckdb_destination.execute_sql(
                 'CREATE TABLE "test"."t" (id INTEGER)',
-                dataset_name="test",
+                schema_name="test",
             )
             saga_duckdb_destination.execute_sql(
                 'INSERT INTO "test"."t" VALUES (1)',
-                dataset_name="test",
+                schema_name="test",
             )
             rows = saga_duckdb_destination.execute_sql(
                 'SELECT * FROM "test"."t"'

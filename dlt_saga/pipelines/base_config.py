@@ -22,7 +22,7 @@ class BaseConfig:
     1. Pipeline execution control (enabled, tags, task_group)
     2. Source extraction behavior (incremental loading)
 
-    Destination-related fields (destination_type, gcp_project_id, dataset_name, etc.)
+    Destination-related fields (destination_type, gcp_project_id, schema_name, etc.)
     belong in TargetConfig since they control how/where data is loaded to the destination.
     """
 
