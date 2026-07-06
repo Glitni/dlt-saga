@@ -1247,9 +1247,6 @@ def historize(
         ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts"),
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Re-process even if no new snapshots detected"
-    ),
 ):
     """Historize snapshot data into SCD2 tables.
 
@@ -1274,10 +1271,9 @@ def historize(
     if (get_env("SAGA_WORKER_MODE") or "").lower() == "true":
         logger.info("Running in worker mode (SAGA_WORKER_MODE=true)")
         profile_target = load_profile_config(profile, target)
-        effective_force = force or (get_env("SAGA_FORCE") or "").lower() == "true"
-        setup_execution_context(
-            profile_target, force=effective_force, full_refresh=full_refresh
-        )
+        # historize has no change-detection to override, so there is no `force`
+        # (unlike ingest) — it keys on actual snapshot values, not a proxy mtime.
+        setup_execution_context(profile_target, full_refresh=full_refresh)
         run_worker_mode()
         return
 
@@ -1289,7 +1285,7 @@ def historize(
 
     # Orchestrator mode
     if orchestrate:
-        setup_execution_context(profile_target, force=force, full_refresh=full_refresh)
+        setup_execution_context(profile_target, full_refresh=full_refresh)
         provider = _resolve_orchestration_provider()
         selected_configs, _ = discover_and_select_configs(
             select, filter_fn=_is_historize_enabled
@@ -1312,7 +1308,6 @@ def historize(
                 profile=profile,
                 target=target,
                 provider=provider,
-                force=force,
                 workers=workers,
             ),
         )
