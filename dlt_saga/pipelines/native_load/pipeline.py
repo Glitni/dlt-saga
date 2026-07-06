@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from dlt_saga.pipelines.base_pipeline import BasePipeline
-from dlt_saga.pipelines.native_load._sql import esc_sql_literal
 from dlt_saga.pipelines.native_load.config import NativeLoadConfig
 from dlt_saga.pipelines.native_load.state import NativeLoadStateManager
 from dlt_saga.pipelines.native_load.storage import get_storage_client
@@ -628,7 +627,7 @@ class NativeLoadPipeline(BasePipeline):
         cols = [
             DerivedColumn(
                 name=self._INGESTED_AT_COLUMN,
-                sql_expr=f"TIMESTAMP '{esc_sql_literal(self._ingest_time_iso)}'",
+                sql_expr=f"TIMESTAMP '{self.destination.escape_string_literal(self._ingest_time_iso)}'",
                 sql_type=self.destination.type_name("timestamp"),
             )
         ]
@@ -644,8 +643,12 @@ class NativeLoadPipeline(BasePipeline):
                 self.native_config.filename_date_regex
                 and self.native_config.filename_date_format
             ):
-                regex = esc_sql_literal(self.native_config.filename_date_regex)
-                fmt = esc_sql_literal(self.native_config.filename_date_format)
+                regex = self.destination.escape_string_literal(
+                    self.native_config.filename_date_regex
+                )
+                fmt = self.destination.escape_string_literal(
+                    self.native_config.filename_date_format
+                )
                 cols.append(
                     DerivedColumn(
                         name=self._FILE_DATE_COLUMN,

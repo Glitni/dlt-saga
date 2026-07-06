@@ -46,6 +46,7 @@ class TestMakeLoadId:
 class TestNativeLoadStateManager:
     def _make_dest(self) -> MagicMock:
         dest = MagicMock()
+        dest.escape_string_literal.side_effect = lambda v: v.replace("'", "\\'")
         dest.type_name.side_effect = lambda t: t.upper()
         dest.partition_ddl.return_value = "PARTITION BY DATE(started_at)"
         dest.cluster_ddl.return_value = ""
@@ -170,34 +171,37 @@ class TestNativeLoadStateManager:
 
 @pytest.mark.unit
 class TestHelperFunctions:
+    # The SQL-building helpers take the destination's dialect-aware escaper; these
+    # tests use a standard-SQL (doubling) escaper to exercise the wrapping logic.
+    _dbl = staticmethod(lambda v: v.replace("'", "''"))
+
     def test_ts_literal_formats_timestamp(self):
         from dlt_saga.pipelines.native_load.state import _ts_literal
 
-        result = _ts_literal("2024-01-15T10:30:00+00:00")
+        result = _ts_literal("2024-01-15T10:30:00+00:00", self._dbl)
         assert result == "TIMESTAMP '2024-01-15T10:30:00+00:00'"
 
     def test_ts_literal_escapes_single_quotes(self):
         from dlt_saga.pipelines.native_load.state import _ts_literal
 
-        result = _ts_literal("2024-01-15T00:00:00")
+        result = _ts_literal("2024-01-15T00:00:00", self._dbl)
         assert result.startswith("TIMESTAMP '")
         assert result.endswith("'")
 
     def test_str_or_null_none(self):
         from dlt_saga.pipelines.native_load.state import _str_or_null
 
-        assert _str_or_null(None) == "NULL"
+        assert _str_or_null(None, self._dbl) == "NULL"
 
     def test_str_or_null_value(self):
         from dlt_saga.pipelines.native_load.state import _str_or_null
 
-        assert _str_or_null("hello") == "'hello'"
+        assert _str_or_null("hello", self._dbl) == "'hello'"
 
-    def test_str_or_null_escapes_single_quote(self):
+    def test_str_or_null_applies_escaper(self):
         from dlt_saga.pipelines.native_load.state import _str_or_null
 
-        result = _str_or_null("it's")
-        assert "''" in result
+        assert _str_or_null("it's", self._dbl) == "'it''s'"
 
     def test_int_or_null_none(self):
         from dlt_saga.pipelines.native_load.state import _int_or_null
@@ -218,6 +222,7 @@ class TestHelperFunctions:
 def _make_plain_dest() -> MagicMock:
     """Minimal destination mock without a partition clause."""
     dest = MagicMock()
+    dest.escape_string_literal.side_effect = lambda v: v.replace("'", "\\'")
     dest.type_name.side_effect = lambda t: t.upper()
     dest.partition_ddl.return_value = ""
     dest.cluster_ddl.return_value = ""

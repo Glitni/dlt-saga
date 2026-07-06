@@ -183,7 +183,7 @@ class HistorizeSqlBuilder:
         tgt = self.target_table_id
         src = self.source_table_id
         q_snapshot = self._q(self.config.snapshot_column)
-        safe_date = effective_from_date.replace("'", "''")
+        safe_date = self.destination.escape_string_literal(effective_from_date)
 
         keys_table = self.destination.get_full_table_id(
             dataset, f"_rehistorize_keys_{run_id}"

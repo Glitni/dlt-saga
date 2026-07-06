@@ -428,6 +428,30 @@ class Destination(ABC):
         """
         return f"`{name}`"
 
+    def escape_string_literal(self, value: str) -> str:
+        """Escape a string for safe interpolation into a single-quoted SQL literal.
+
+        Default is the C-style backslash dialect used by BigQuery and Databricks:
+        the single quote is escaped as ``\\'`` (NOT doubled as ``''`` — GoogleSQL
+        does not accept ``''`` inside a single-quoted literal), backslash is
+        escaped first so later sequences aren't re-escaped, the control
+        characters that would break a single-quoted literal become escape
+        sequences, and NUL is dropped (unstorable / string-terminating in several
+        drivers). Destinations whose string literals follow standard SQL (double
+        the quote, backslash is literal) — e.g. DuckDB — override this.
+
+        Tolerates arbitrary input, notably multi-line error messages and
+        tracebacks.
+        """
+        return (
+            value.replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+            .replace("\x00", "")
+        )
+
     def get_full_table_id(self, dataset: str, table: str) -> str:
         """Build a fully qualified table identifier for this destination."""
         raise NotImplementedError(
@@ -637,10 +661,8 @@ class Destination(ABC):
         col = resolve(spec.column)
         if not spec.path:
             return col
-        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
-
         path_literal = "$." + ".".join(spec.path)
-        return f"JSON_VALUE({col}, '{esc_sql_literal(path_literal)}')"
+        return f"JSON_VALUE({col}, '{self.escape_string_literal(path_literal)}')"
 
     def _render_sql_literal(self, value: Any) -> str:
         """Render a Python value as a SQL literal.
@@ -655,9 +677,7 @@ class Destination(ABC):
         if isinstance(value, (int, float)):
             return str(value)
         if isinstance(value, str):
-            from dlt_saga.pipelines.native_load._sql import esc_sql_literal
-
-            return f"'{esc_sql_literal(value)}'"
+            return f"'{self.escape_string_literal(value)}'"
         raise ValueError(
             f"Cannot render value {value!r} of type {type(value).__name__} as SQL literal"
         )
@@ -673,13 +693,11 @@ class Destination(ABC):
         """
         if value is None:
             return "NULL"
-        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
-
         if isinstance(value, bool):
             literal = "true" if value else "false"
         else:
             literal = str(value)
-        return f"'{esc_sql_literal(literal)}'"
+        return f"'{self.escape_string_literal(literal)}'"
 
     def _render_regex_match(self, col_sql: str, pattern: str) -> str:
         """Render a regex-match predicate.
@@ -687,9 +705,7 @@ class Destination(ABC):
         Default uses ANSI ``SIMILAR TO`` semantics — most destinations
         override (BigQuery: ``REGEXP_CONTAINS``, Databricks: ``RLIKE``).
         """
-        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
-
-        return f"{col_sql} SIMILAR TO '{esc_sql_literal(pattern)}'"
+        return f"{col_sql} SIMILAR TO '{self.escape_string_literal(pattern)}'"
 
     def create_or_replace_view(
         self, schema: str, view_name: str, view_sql: str

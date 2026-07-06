@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional
 
 from dlt_saga.pipeline_config import PipelineConfig
 from dlt_saga.utility.cli.logging import YELLOW, colorize
-from dlt_saga.utility.sql import escape_sql_literal
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +244,7 @@ class ExecutionPlanManager:
             return "TRUE" if value else "FALSE"
         if isinstance(value, int):
             return str(value)
-        return f"'{escape_sql_literal(str(value))}'"
+        return f"'{self.destination.escape_string_literal(str(value))}'"
 
     @staticmethod
     def _config_overrides_from_metadata(
@@ -553,7 +552,7 @@ class ExecutionPlanManager:
         Returns:
             List of PipelineConfig objects assigned to this task (empty if none found)
         """
-        safe_eid = escape_sql_literal(execution_id)
+        safe_eid = self.destination.escape_string_literal(execution_id)
         query = f"""
             SELECT
                 pipeline_type,
@@ -626,7 +625,7 @@ class ExecutionPlanManager:
             error_message: Optional error message if failed
         """
         d = self.destination
-        safe_eid = escape_sql_literal(execution_id)
+        safe_eid = self.destination.escape_string_literal(execution_id)
         now = d.current_timestamp_expression()
 
         # Get current task data from view
@@ -725,7 +724,7 @@ class ExecutionPlanManager:
         Returns:
             Dict with counts by status
         """
-        safe_eid = escape_sql_literal(execution_id)
+        safe_eid = self.destination.escape_string_literal(execution_id)
         query = f"""
             SELECT
                 status,

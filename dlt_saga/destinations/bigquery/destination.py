@@ -576,9 +576,11 @@ class BigQueryDestination(BigQueryBaseDestination):
         return f"CLUSTER BY {', '.join(columns)}"
 
     def _render_regex_match(self, col_sql: str, pattern: str) -> str:
-        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
-
-        return f"REGEXP_CONTAINS({col_sql}, r'{esc_sql_literal(pattern)}')"
+        # Normal (non-raw) literal + backslash escaping: the parser unescapes
+        # ``\\d`` back to ``\d`` for the regex engine, so this preserves regex
+        # metacharacters while remaining safe for quotes — unlike a raw ``r'...'``
+        # literal, which cannot contain the delimiter quote.
+        return f"REGEXP_CONTAINS({col_sql}, '{self.escape_string_literal(pattern)}')"
 
     def type_name(self, logical_type: str) -> str:
         type_map = {
@@ -785,7 +787,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         self.execute_sql(sql)
 
     def columns_query(self, database: str, schema: str, table: str) -> str:
-        safe_table = table.replace("'", "''")
+        safe_table = self.escape_string_literal(table)
         return f"""
             SELECT column_name, data_type
             FROM `{database}.{schema}.INFORMATION_SCHEMA.COLUMNS`
@@ -1071,7 +1073,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         return rows, job.job_id
 
     def list_tables_by_pattern(self, dataset: str, pattern: str) -> list:
-        safe_pattern = pattern.replace("'", "''")
+        safe_pattern = self.escape_string_literal(pattern)
         sql = (
             f"SELECT table_name "
             f"FROM `{self.config.project_id}.{dataset}.INFORMATION_SCHEMA.TABLES` "

@@ -985,7 +985,7 @@ class HistorizeRunner:
         src = self.source_table_id
         snapshot_col = self.config.snapshot_column
         cast_expr = self.destination.cast_to_string(snapshot_col)
-        safe_date = effective_from_date.replace("'", "''")
+        safe_date = self.destination.escape_string_literal(effective_from_date)
 
         # Snapshots to reprocess
         forward_sql = f"""
