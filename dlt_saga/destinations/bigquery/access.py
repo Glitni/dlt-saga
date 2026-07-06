@@ -1,10 +1,7 @@
 """BigQuery table access control manager for automated access management."""
 
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
-
-if TYPE_CHECKING:
-    from google.iam.v1 import policy_pb2
+from typing import Dict, List, Optional, Set
 
 from dlt_saga.destinations.base import AccessManager
 from dlt_saga.utility.gcp.client_pool import bigquery_pool
@@ -19,6 +16,11 @@ class BigQueryAccessManager(AccessManager):
     roles/bigquery.dataViewer to specified users, groups, and service accounts.
     """
 
+    VIEWER_ROLE = "roles/bigquery.dataViewer"
+    # Only members with these IAM prefixes are managed; special entries
+    # (owners, domains, project-level roles) are never revoked.
+    _MANAGED_PREFIXES = ("user:", "group:", "serviceAccount:")
+
     def __init__(
         self, project_id: Optional[str] = None, dataset_id: Optional[str] = None
     ):
@@ -30,11 +32,18 @@ class BigQueryAccessManager(AccessManager):
         """
         self.project_id = project_id
         self.dataset_id = dataset_id
+        # current_principals() fetches the table's IAM policy; apply_access_changes()
+        # reuses the same policy object so a table needs one read + one write.
+        self._policy_cache: Dict[str, tuple] = {}
 
     @property
     def client(self):
         """Get BigQuery client from connection pool (lazy property)."""
         return bigquery_pool.get_client(self.project_id)
+
+    def _table_ref(self, table_id: str) -> str:
+        """Standard-SQL table reference expected by the IAM policy API."""
+        return f"{self.project_id}.{self.dataset_id}.{table_id}"
 
     def parse_access_list(self, access_list: List[str]) -> Dict[str, Set[str]]:
         """Parse access list from config into structured format.
@@ -83,35 +92,6 @@ class BigQueryAccessManager(AccessManager):
 
         return parsed
 
-    def get_current_table_iam_policy(
-        self, table_id: str
-    ) -> Optional["policy_pb2.Policy"]:
-        """Get current IAM policy for a table.
-
-        Args:
-            table_id: Table ID (name only, not fully qualified)
-
-        Returns:
-            Current IAM policy or None if fetch fails
-        """
-        # BigQuery client expects standard SQL format: project.dataset.table
-        table_ref = f"{self.project_id}.{self.dataset_id}.{table_id}"
-
-        try:
-            policy = self.client.get_iam_policy(table_ref)
-            return policy
-        except Exception as e:
-            logger.warning(f"Could not fetch IAM policy for table {table_id}: {str(e)}")
-            return None
-
-    def _get_table_policy(self, table_ref: str, table_id: str):
-        """Get IAM policy for a table."""
-        try:
-            return self.client.get_iam_policy(table_ref)
-        except Exception as e:
-            logger.error(f"Failed to fetch IAM policy for table {table_id}: {str(e)}")
-            return None
-
     def _get_or_create_viewer_binding(self, policy, viewer_role: str):
         """Find or create the viewer role binding in policy."""
         for binding in policy.bindings:
@@ -124,174 +104,43 @@ class BigQueryAccessManager(AccessManager):
         policy.bindings.append(viewer_binding)
         return viewer_binding
 
-    def _grant_missing_access(
-        self, viewer_binding, missing_members: Set[str], viewer_role: str, table_id: str
-    ):
-        """Grant access to members missing from current policy."""
-        if not missing_members:
-            return
+    def current_principals(self, table_id: str) -> Set[str]:
+        """Return the IAM members holding the viewer role on the table.
 
-        for member in missing_members:
-            logger.info(f"Granting {viewer_role} to {member} on table {table_id}")
-            viewer_binding["members"].add(member)
-
-    def _revoke_extra_access(
-        self,
-        viewer_binding,
-        current_members: Set[str],
-        all_desired_members: Set[str],
-        viewer_role: str,
-        table_id: str,
-    ) -> Set[str]:
-        """Revoke access from members not in desired list. Returns set of revoked members."""
-        revoked_members = set()
-        extra_members = current_members - all_desired_members
-
-        logger.debug(
-            f"Revocation check for {table_id}: current={current_members}, "
-            f"desired={all_desired_members}, extra={extra_members}"
-        )
-
-        for member in extra_members:
-            # Only revoke user/group/serviceAccount members, not special entries
-            if member.startswith(("user:", "group:", "serviceAccount:")):
-                logger.info(f"Revoking {viewer_role} from {member} on table {table_id}")
-                viewer_binding["members"].discard(member)
-                revoked_members.add(member)
-            else:
-                logger.debug(f"Skipping revocation of special member: {member}")
-
-        return revoked_members
-
-    def _apply_policy_update(
-        self,
-        table_ref: str,
-        policy,
-        missing_members: Set[str],
-        revoked_members: Set[str],
-        table_id: str,
-    ):
-        """Apply updated IAM policy if there were changes."""
-        if not (missing_members or revoked_members):
-            return
-
-        logger.debug(
-            f"Policy update decision for {table_id}: missing={len(missing_members)}, revoked={len(revoked_members)}"
-        )
-
-        # Honour --dry-run from the execution context: skip the destructive
-        # `set_iam_policy` call. Per-line wording stays identical to a real
-        # run — the DRY RUN banner and summary footer carry the "nothing
-        # applied" context. Counters bump in both modes.
-        from dlt_saga.utility.cli.context import get_execution_context
-
-        context = get_execution_context()
-        try:
-            if not context.dry_run:
-                self.client.set_iam_policy(table_ref, policy)
-
-            context.access_grants_applied += len(missing_members)
-            context.access_revokes_applied += len(revoked_members)
-
-            lines = [f"Updated IAM policy for table {table_id}"]
-            for member in sorted(missing_members):
-                lines.append(f"  + granted {member}")
-            for member in sorted(revoked_members):
-                lines.append(f"  - revoked {member}")
-            logger.info("\n".join(lines))
-        except Exception as e:
-            logger.error(f"Failed to update IAM policy for table {table_id}: {str(e)}")
-
-    def apply_table_access(
-        self,
-        table_id: str,
-        desired_access: Dict[str, Set[str]],
-        revoke_extra: bool = False,
-    ) -> None:
-        """Apply access control to a BigQuery table using table-level IAM.
-
-        Args:
-            table_id: Table ID to manage access for
-            desired_access: Desired access state with IAM member strings (e.g., "user:email@domain.com")
-            revoke_extra: If True, revoke access not in desired_access list
+        Fetches the table's IAM policy and caches it (plus the viewer binding)
+        so :meth:`apply_access_changes` can mutate and write the same object —
+        one read + one write per changed table. Lets fetch errors propagate so
+        the base's per-table handler skips the table cleanly.
         """
-        table_ref = f"{self.project_id}.{self.dataset_id}.{table_id}"
-        viewer_role = "roles/bigquery.dataViewer"
+        table_ref = self._table_ref(table_id)
+        policy = self.client.get_iam_policy(table_ref)
+        viewer_binding = self._get_or_create_viewer_binding(policy, self.VIEWER_ROLE)
+        self._policy_cache[table_id] = (table_ref, policy, viewer_binding)
+        return set(viewer_binding["members"])
 
-        # Get current policy
-        policy = self._get_table_policy(table_ref, table_id)
-        if policy is None:
-            return
+    def _revocable(self, current: Set[str]) -> Set[str]:
+        """Only user/group/serviceAccount members are managed and revocable.
 
-        # Flatten desired access
-        all_desired_members = (
-            desired_access["users"]
-            | desired_access["groups"]
-            | desired_access["serviceAccounts"]
-        )
-
-        # Get or create viewer binding
-        viewer_binding = self._get_or_create_viewer_binding(policy, viewer_role)
-        current_members = viewer_binding["members"].copy()
-
-        # Calculate changes
-        missing_members = all_desired_members - current_members
-        revoked_members = set()
-
-        # Apply changes
-        self._grant_missing_access(
-            viewer_binding, missing_members, viewer_role, table_id
-        )
-        if revoke_extra:
-            revoked_members = self._revoke_extra_access(
-                viewer_binding,
-                current_members,
-                all_desired_members,
-                viewer_role,
-                table_id,
-            )
-
-        # Convert set back to list for API
-        viewer_binding["members"] = list(viewer_binding["members"])
-
-        # Apply policy update
-        self._apply_policy_update(
-            table_ref, policy, missing_members, revoked_members, table_id
-        )
-
-    def manage_access_for_tables(
-        self,
-        table_ids: List[str],
-        access_config: Optional[List[str]],
-        revoke_extra: bool = True,
-    ) -> None:
-        """Manage access for multiple tables based on config.
-
-        Args:
-            table_ids: List of table IDs to manage
-            access_config: Access list from config file
-                - None: Skip access management entirely
-                - []: Empty list means revoke all managed access
-                - [...]: List of members to grant access
-            revoke_extra: If True, revoke access not in config (default: True)
+        Special IAM entries (dataset owners, domains, project-level roles) are
+        left untouched — table-level access management must never remove them.
         """
-        # None means "don't manage access" - skip entirely
-        if access_config is None:
-            logger.debug("No access configuration provided, skipping access management")
+        return {m for m in current if m.startswith(self._MANAGED_PREFIXES)}
+
+    def apply_access_changes(
+        self, table_id: str, to_grant: Set[str], to_revoke: Set[str]
+    ) -> None:
+        """Apply grants and revokes in a single ``set_iam_policy`` write.
+
+        Reuses the policy object read by :meth:`current_principals`, so both
+        directions land in one atomic update.
+        """
+        entry = self._policy_cache.get(table_id)
+        if entry is None:
+            # current_principals wasn't called (or failed) — nothing to write.
             return
-
-        if not isinstance(access_config, list):
-            logger.warning(f"Access config must be a list, got {type(access_config)}")
-            return
-
-        # Empty list [] means "revoke all access" - this is intentional
-        # Parse desired access (will be empty if access_config is [])
-        desired_access = self.parse_access_list(access_config)
-
-        # Apply access to each table
-        # Even if desired access is empty, we still process to handle revocations
-        for table_id in table_ids:
-            try:
-                self.apply_table_access(table_id, desired_access, revoke_extra)
-            except Exception as e:
-                logger.error(f"Failed to manage access for table {table_id}: {str(e)}")
+        table_ref, policy, viewer_binding = entry
+        members = set(viewer_binding["members"])
+        members |= to_grant
+        members -= to_revoke
+        viewer_binding["members"] = list(members)
+        self.client.set_iam_policy(table_ref, policy)

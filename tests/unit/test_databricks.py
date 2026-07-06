@@ -600,11 +600,16 @@ class TestDatabricksAccessManagerManageAccess:
         mgr, dest = self._manager_with_mock_dest()
         mgr.dataset_id = "schema"
 
-        # information_schema.table_privileges returns one `grantee` column.
-        grantee_row = MagicMock()
-        grantee_row.__getitem__ = lambda self, i: "old-user@co.com" if i == 0 else ""
-        grantee_row.__len__ = lambda self: 1
-        dest.execute_sql.side_effect = [[grantee_row], []]
+        # information_schema.table_privileges is read once per schema and
+        # returns (table_name, grantee) rows.
+        row = MagicMock()
+        row.__getitem__ = lambda self, i: ("tbl", "old-user@co.com")[i]
+        row.__len__ = lambda self: 2
+
+        def _run(sql):
+            return [row] if "information_schema.table_privileges" in sql else []
+
+        dest.execute_sql.side_effect = _run
 
         mgr.manage_access_for_tables(
             ["tbl"],
@@ -651,7 +656,7 @@ class TestDatabricksGrantRevokeSql:
     def test_grant_sql_shape(self, principal_type, principal, expected_verb):
         mgr, executed = self._manager_with_capture()
         table_id = "`cat`.`schema`.`tbl`"
-        mgr._grant(table_id, principal, principal_type)
+        mgr._grant(table_id, principal)
 
         assert len(executed) == 1
         # Unity Catalog GRANT resolves the principal by name — no principal-type
@@ -735,14 +740,15 @@ class TestDatabricksAccessDryRunAndCounters:
 
         def _run(sql):
             executed.append(sql)
-            # Emulate information_schema.table_privileges: one `grantee` column,
-            # already filtered to direct table SELECT grants by the query.
+            # Emulate the per-schema information_schema.table_privileges batch
+            # read: (table_name, grantee) rows, already filtered to direct
+            # table SELECT grants by the query.
             if "information_schema.table_privileges" in sql:
                 rows = []
                 for principal in existing_principals:
                     row = MagicMock()
-                    row.__getitem__ = lambda self, i, p=principal: p if i == 0 else ""
-                    row.__len__ = lambda self: 1
+                    row.__getitem__ = lambda self, i, p=principal: ("tbl", p)[i]
+                    row.__len__ = lambda self: 2
                     rows.append(row)
                 return rows
             return []
@@ -795,37 +801,41 @@ class TestDatabricksAccessDryRunAndCounters:
         assert ctx.access_grants_applied == 0
         assert ctx.access_revokes_applied == 0
 
-    def test_get_existing_grants_reads_grantee_from_information_schema(self):
-        """Existing grants come from information_schema.table_privileges
-        (`grantee` column), scoped to the schema/table and filtered to direct
-        SELECT grants."""
+    def test_prime_reads_grants_batched_from_information_schema(self):
+        """Current grants are read in one schema-scoped information_schema scan
+        (returning `table_name`, `grantee`), filtered to direct SELECT grants —
+        NOT one query per table."""
         dest = _make_destination()
         row = MagicMock()
-        row.__getitem__ = lambda self, i: "analyst@co.com" if i == 0 else ""
-        row.__len__ = lambda self: 1
+        row.__getitem__ = lambda self, i: ("tbl", "analyst@co.com")[i]
+        row.__len__ = lambda self: 2
         dest.execute_sql = MagicMock(return_value=[row])
 
         mgr = DatabricksAccessManager(dest)
         mgr.dataset_id = "sch"
-        result = mgr._get_existing_grants("sch", "tbl")
+        mgr._prime_current_grants(["tbl"])
 
-        assert result == {"analyst@co.com"}
+        assert mgr.current_principals("tbl") == {"analyst@co.com"}
+        # A single scan covers the whole schema.
+        assert dest.execute_sql.call_count == 1
         sql = dest.execute_sql.call_args.args[0]
         assert "information_schema.table_privileges" in sql
         assert "table_schema = 'sch'" in sql
-        assert "table_name = 'tbl'" in sql
         assert "privilege_type = 'SELECT'" in sql
         # Inherited catalog/schema grants are excluded at the query level.
         assert "inherited_from = 'NONE'" in sql
+        # Batched per schema — the query is not scoped to a single table.
+        assert "table_name =" not in sql
 
-    def test_no_query_and_empty_when_dataset_unknown(self):
-        """Without a dataset_id the schema can't be scoped — return empty
-        (grant desired, revoke nothing) rather than querying."""
+    def test_prime_empty_when_dataset_unknown(self):
+        """Without a dataset_id the schema can't be scoped — no query, and
+        every table reads as no current grants (grant desired, revoke nothing)."""
         dest = _make_destination()
         dest.execute_sql = MagicMock(return_value=[])
         mgr = DatabricksAccessManager(dest)  # dataset_id defaults to None
 
-        assert mgr._get_existing_grants(None, "tbl") == set()
+        mgr._prime_current_grants(["tbl"])
+        assert mgr.current_principals("tbl") == set()
         dest.execute_sql.assert_not_called()
 
     def test_second_run_is_noop_when_already_granted(self):

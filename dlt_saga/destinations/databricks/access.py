@@ -39,6 +39,9 @@ class DatabricksAccessManager(AccessManager):
         # management passes bare table names; the manager qualifies them to a
         # 3-part Unity Catalog name using this dataset (schema).
         self.dataset_id: Optional[str] = None
+        # Populated by _prime_current_grants: {table_name: {grantee, ...}} for
+        # every table in the schema, read in a single information_schema scan.
+        self._grant_cache: Optional[Dict[str, Set[str]]] = None
 
     # ------------------------------------------------------------------
     # AccessManager interface
@@ -92,46 +95,60 @@ class DatabricksAccessManager(AccessManager):
 
         return parsed
 
-    def manage_access_for_tables(
-        self,
-        table_ids: List[str],
-        access_config: Optional[List[str]],
-        revoke_extra: bool = True,
-    ) -> None:
-        """Manage Unity Catalog ``SELECT`` access for multiple tables.
+    def _prime_current_grants(self, table_ids: List[str]) -> None:
+        """Batch-read every table's direct SELECT grants in one query.
 
-        Args:
-            table_ids: Bare table names (same contract as the BigQuery access
-                manager). Each is qualified to a 3-part Unity Catalog name via
-                ``dataset_id`` and the destination catalog before use.
-            access_config: List of access entries, or ``None`` to skip.
-            revoke_extra: If ``True``, revoke any existing grants not in
-                ``access_config``.  Requires querying
-                ``system.information_schema.table_privileges``.
+        Reads ``<catalog>.information_schema.table_privileges`` scoped to the
+        whole schema (``table_schema = dataset_id``, ``inherited_from = 'NONE'``)
+        and caches ``{table_name: {grantee, ...}}``. A batch ``update-access``
+        over many pipelines in the same schema then does one metadata query per
+        schema instead of one per table.
+
+        On any failure — or when the schema is unknown — the cache is left
+        empty, so every table reads as "no current grants" (grant the desired
+        set, revoke nothing).
         """
-        if access_config is None:
-            logger.debug("No access_config — skipping Databricks access management")
+        self._grant_cache = {}
+        if not self.dataset_id:
             return
+        try:
+            catalog = self._destination.quote_identifier(
+                self._destination.config.catalog
+            )
+            safe_schema = self._destination.escape_string_literal(self.dataset_id)
+            rows = self._destination.execute_sql(
+                f"SELECT table_name, grantee FROM {catalog}.information_schema.table_privileges "
+                f"WHERE table_schema = '{safe_schema}' "
+                f"AND privilege_type = '{_UNITY_PRIVILEGE}' "
+                f"AND inherited_from = 'NONE'"
+            )
+            for row in rows:
+                if len(row) < 2 or not row[0] or not row[1]:
+                    continue
+                self._grant_cache.setdefault(str(row[0]), set()).add(str(row[1]))
+        except Exception as e:
+            logger.debug(
+                "Could not batch-read grants for schema %s: %s", self.dataset_id, e
+            )
+            self._grant_cache = {}
 
-        desired = self.parse_access_list(access_config)
+    def current_principals(self, table_id: str) -> Set[str]:
+        """Return principals with a direct table-level SELECT grant.
 
-        all_principals: Dict[str, str] = {}  # principal → principal_type SQL keyword
-        for principal in desired["users"]:
-            all_principals[principal] = "user"
-        for principal in desired["groups"]:
-            all_principals[principal] = "group"
-        for principal in desired["service_principals"]:
-            all_principals[principal] = "service_principal"
+        Reads from the per-schema cache primed by :meth:`_prime_current_grants`.
+        """
+        cache = self._grant_cache or {}
+        return set(cache.get(table_id, set()))
 
-        for table_id in table_ids:
-            try:
-                self._apply_table_access(
-                    table_id, all_principals, revoke_extra=revoke_extra
-                )
-            except Exception as e:
-                logger.error(
-                    "Failed to manage access for Databricks table %s: %s", table_id, e
-                )
+    def apply_access_changes(
+        self, table_id: str, to_grant: Set[str], to_revoke: Set[str]
+    ) -> None:
+        """Issue per-principal ``GRANT`` / ``REVOKE`` SQL for the delta."""
+        full_id = self._full_table_id(table_id)
+        for principal in sorted(to_grant):
+            self._grant(full_id, principal)
+        for principal in sorted(to_revoke):
+            self._revoke(full_id, principal)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -150,109 +167,13 @@ class DatabricksAccessManager(AccessManager):
             return self._destination.get_full_table_id(self.dataset_id, table)
         return table
 
-    def _apply_table_access(
-        self,
-        table_id: str,
-        desired_principals: Dict[str, str],
-        revoke_extra: bool,
-    ) -> None:
-        """Grant / revoke ``SELECT`` on a single table.
-
-        Args:
-            table_id: Bare table name; qualified to a 3-part name internally.
-            desired_principals: ``{principal: type_keyword}`` map.
-            revoke_extra: Whether to revoke principals not in desired set.
-        """
-        full_id = self._full_table_id(table_id)
-
-        # Diff against current grants so the counters reflect real changes (a
-        # re-grant of an already-granted principal is not a change) — mirrors the
-        # BigQuery access manager, which grants/revokes only the delta.
-        existing = self._get_existing_grants(self.dataset_id, table_id)
-
-        for principal in sorted(set(desired_principals) - existing):
-            self._grant(full_id, principal, desired_principals[principal])
-
-        if revoke_extra:
-            for principal in sorted(existing - set(desired_principals)):
-                self._revoke(full_id, principal)
-
-    def _grant(self, table_id: str, principal: str, ptype: str) -> None:
+    def _grant(self, table_id: str, principal: str) -> None:
         # Unity Catalog GRANT resolves the principal by name; it takes no
         # principal-type keyword (unlike some other SQL dialects). Emitting
         # `TO user \`p\`` is a parse error — UC wants `TO \`p\`` (matching REVOKE).
-        from dlt_saga.utility.cli.context import get_execution_context
-
-        context = get_execution_context()
         sql = f"GRANT {_UNITY_PRIVILEGE} ON TABLE {table_id} TO `{principal}`"
-        logger.info(
-            "Granting %s on %s to %s:%s", _UNITY_PRIVILEGE, table_id, ptype, principal
-        )
-        try:
-            # Honour --dry-run: skip the write, but still bump the counter so the
-            # run summary reports what *would* be applied (matches BigQuery).
-            if not context.dry_run:
-                self._destination.execute_sql(sql)
-            context.access_grants_applied += 1
-        except Exception as e:
-            logger.error(
-                "Failed to grant %s on %s to %s: %s",
-                _UNITY_PRIVILEGE,
-                table_id,
-                principal,
-                e,
-            )
+        self._destination.execute_sql(sql)
 
     def _revoke(self, table_id: str, principal: str) -> None:
-        from dlt_saga.utility.cli.context import get_execution_context
-
-        context = get_execution_context()
         sql = f"REVOKE {_UNITY_PRIVILEGE} ON TABLE {table_id} FROM `{principal}`"
-        logger.info("Revoking %s on %s from %s", _UNITY_PRIVILEGE, table_id, principal)
-        try:
-            if not context.dry_run:
-                self._destination.execute_sql(sql)
-            context.access_revokes_applied += 1
-        except Exception as e:
-            logger.error(
-                "Failed to revoke %s on %s from %s: %s",
-                _UNITY_PRIVILEGE,
-                table_id,
-                principal,
-                e,
-            )
-
-    def _get_existing_grants(self, dataset: Optional[str], table: str) -> Set[str]:
-        """Return principals with a *direct* table-level SELECT grant.
-
-        Reads ``<catalog>.information_schema.table_privileges`` filtered to
-        ``inherited_from = 'NONE'`` — the explicit signal for a grant made
-        directly on the table. Grants inherited from the parent catalog or
-        schema (``inherited_from`` CATALOG / SCHEMA) are excluded: table-level
-        access management manages only direct table grants, otherwise
-        ``revoke_extra`` would try to revoke an inherited grant on every run.
-
-        Returns an empty set when the schema is unknown (no ``dataset_id``),
-        which makes the caller grant the desired set and revoke nothing.
-        """
-        if not dataset:
-            return set()
-        try:
-            catalog = self._destination.quote_identifier(
-                self._destination.config.catalog
-            )
-            safe_schema = self._destination.escape_string_literal(dataset)
-            safe_table = self._destination.escape_string_literal(table)
-            rows = self._destination.execute_sql(
-                f"SELECT grantee FROM {catalog}.information_schema.table_privileges "
-                f"WHERE table_schema = '{safe_schema}' "
-                f"AND table_name = '{safe_table}' "
-                f"AND privilege_type = '{_UNITY_PRIVILEGE}' "
-                f"AND inherited_from = 'NONE'"
-            )
-            return {str(row[0]) for row in rows if len(row) > 0 and row[0]}
-        except Exception as e:
-            logger.debug(
-                "Could not retrieve existing grants for %s.%s: %s", dataset, table, e
-            )
-            return set()
+        self._destination.execute_sql(sql)
