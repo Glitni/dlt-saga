@@ -97,8 +97,11 @@ class DatabasePipeline(BasePipeline):
             Description of the data source
         """
         if self.source_config.connection_string:
-            # Parse database type from connection string
-            db_type = self.source_config.connection_string.split("://")[0]
+            # Parse the scheme from the resolved connection string. The config
+            # value is a SecretStr (calling .split on it raises AttributeError),
+            # so reuse the client's already-resolved, cached string — this also
+            # avoids re-hitting the secret backend for a secret-URI value.
+            db_type = self.client.get_connection_string().split("://")[0]
             if self.source_config.source_table:
                 return f"{db_type} table: {self.source_config.source_table}"
             return f"{db_type} query"
