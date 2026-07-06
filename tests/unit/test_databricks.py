@@ -270,6 +270,15 @@ class TestDatabricksExecuteSql:
         dest.execute_sql("CREATE TABLE t1 (id INT); CREATE TABLE t2 (id INT)")
         assert cursor.execute.call_count == 2
 
+    def test_semicolon_in_literal_runs_as_single_statement(self):
+        # A COMMENT whose body contains ';' must execute as ONE statement, not
+        # be truncated by naive ';' splitting.
+        dest, mock_conn = self._dest_with_mock_conn()
+        cursor = self._setup_cursor(mock_conn)
+        sql = "COMMENT ON TABLE t IS 'first; second'"
+        dest.execute_sql(sql)
+        cursor.execute.assert_called_once_with(sql)
+
     def test_dataset_name_is_ignored(self):
         # dataset_name is kept for interface compatibility but has no effect —
         # all SQL uses fully-qualified names so no USE SCHEMA is needed.

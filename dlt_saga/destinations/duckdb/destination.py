@@ -187,8 +187,12 @@ class DuckDBDestination(Destination):
         """Execute a SQL statement against DuckDB.
 
         For multi-statement scripts (separated by ;), executes each
-        statement individually and returns the result of the last one.
+        statement individually and returns the result of the last one. Uses a
+        literal/comment-aware splitter so a ``;`` inside a string literal (e.g. a
+        COMMENT body) or a comment doesn't truncate the statement.
         """
+        from dlt_saga.utility.sql import split_sql_statements
+
         conn = self.connection
 
         if dataset_name:
@@ -198,7 +202,7 @@ class DuckDBDestination(Destination):
         logger.debug(f"Executing SQL ({len(sql)} chars) in dataset={dataset_name}")
 
         # Split multi-statement scripts and execute individually
-        statements = [s.strip() for s in sql.split(";") if s.strip()]
+        statements = split_sql_statements(sql)
         result = None
         for stmt in statements:
             result = conn.execute(stmt)

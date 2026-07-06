@@ -284,7 +284,10 @@ class DatabricksDestination(Destination):
     def execute_sql(self, sql: str, dataset_name: Optional[str] = None) -> Any:
         """Execute a SQL statement (or multi-statement script) against Databricks.
 
-        Multi-statement scripts are split on ``;`` and executed individually.
+        Multi-statement scripts are split into individual statements with a
+        literal/comment-aware splitter (a plain ``;`` split would break a
+        statement whose ``;`` sits inside a string literal — e.g. a table/column
+        ``COMMENT`` or a historize-log message — or inside a comment).
         All SQL should use fully-qualified table names (catalog.schema.table);
         the ``dataset_name`` parameter is accepted for interface compatibility
         but has no effect.
@@ -296,12 +299,14 @@ class DatabricksDestination(Destination):
         Returns:
             List of row objects (attribute + index access), or ``[]`` for DDL/DML.
         """
+        from dlt_saga.utility.sql import split_sql_statements
+
         conn = self._get_connection()
 
         logger.debug("Executing Databricks SQL (%d chars)", len(sql))
 
         with conn.cursor() as cursor:
-            statements = [s.strip() for s in sql.split(";") if s.strip()]
+            statements = split_sql_statements(sql)
             last_result: Optional[Any] = None
             for stmt in statements:
                 cursor.execute(stmt)
