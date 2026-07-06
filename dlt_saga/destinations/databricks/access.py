@@ -35,6 +35,10 @@ class DatabricksAccessManager(AccessManager):
 
     def __init__(self, destination: "DatabricksDestination") -> None:
         self._destination = destination
+        # Set by the pipeline (mirrors the BigQuery access manager). Access
+        # management passes bare table names; the manager qualifies them to a
+        # 3-part Unity Catalog name using this dataset (schema).
+        self.dataset_id: Optional[str] = None
 
     # ------------------------------------------------------------------
     # AccessManager interface
@@ -97,7 +101,9 @@ class DatabricksAccessManager(AccessManager):
         """Manage Unity Catalog ``SELECT`` access for multiple tables.
 
         Args:
-            table_ids: Fully-qualified table IDs (3-part: catalog.schema.table).
+            table_ids: Bare table names (same contract as the BigQuery access
+                manager). Each is qualified to a 3-part Unity Catalog name via
+                ``dataset_id`` and the destination catalog before use.
             access_config: List of access entries, or ``None`` to skip.
             revoke_extra: If ``True``, revoke any existing grants not in
                 ``access_config``.  Requires querying
@@ -131,6 +137,19 @@ class DatabricksAccessManager(AccessManager):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _full_table_id(self, table: str) -> str:
+        """Qualify a bare table name to ``catalog.schema.table``.
+
+        Unity Catalog GRANT/REVOKE/SHOW GRANTS must target a fully-qualified
+        name; a bare name resolves against the connection's default schema
+        (saga's SQL connection sets none), which points GRANTs at the wrong —
+        usually non-existent — table. Falls back to the input unchanged when no
+        ``dataset_id`` was provided.
+        """
+        if self.dataset_id:
+            return self._destination.get_full_table_id(self.dataset_id, table)
+        return table
+
     def _apply_table_access(
         self,
         table_id: str,
@@ -140,18 +159,20 @@ class DatabricksAccessManager(AccessManager):
         """Grant / revoke ``SELECT`` on a single table.
 
         Args:
-            table_id: Fully-qualified table ID.
+            table_id: Bare table name; qualified to a 3-part name internally.
             desired_principals: ``{principal: type_keyword}`` map.
             revoke_extra: Whether to revoke principals not in desired set.
         """
+        full_id = self._full_table_id(table_id)
+
         if revoke_extra:
-            existing = self._get_existing_grants(table_id)
+            existing = self._get_existing_grants(full_id)
             to_revoke = existing - set(desired_principals)
             for principal in to_revoke:
-                self._revoke(table_id, principal)
+                self._revoke(full_id, principal)
 
         for principal, ptype in desired_principals.items():
-            self._grant(table_id, principal, ptype)
+            self._grant(full_id, principal, ptype)
 
     def _grant(self, table_id: str, principal: str, ptype: str) -> None:
         # Unity Catalog GRANT resolves the principal by name; it takes no

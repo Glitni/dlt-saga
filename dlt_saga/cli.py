@@ -1358,7 +1358,10 @@ def update_access(
         ),
     ),
 ):
-    """Update BigQuery access controls (IAM policies) without running pipelines.
+    """Update destination access controls without running pipelines.
+
+    Applies table-level access for the configured destination (BigQuery IAM
+    policies, Databricks Unity Catalog GRANT/REVOKE).
 
     Examples:
         saga update-access                                  # All tables
@@ -1370,10 +1373,10 @@ def update_access(
 
     logger.info("=" * 60)
     logger.info("UPDATE ACCESS MODE%s", " (DRY RUN)" if dry_run else "")
-    logger.info("Only updating BigQuery access controls (IAM policies)")
+    logger.info("Only updating destination access controls")
     logger.info("Pipelines will NOT be executed")
     if dry_run:
-        logger.info("DRY RUN: no changes will be applied to BigQuery")
+        logger.info("DRY RUN: no access changes will be applied")
     logger.info("=" * 60)
 
     from dlt_saga.session import Session
