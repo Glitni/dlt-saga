@@ -1,3 +1,14 @@
+## 0.12.0 — 2026-07-06
+
+### Fixed
+- Use explicit column lists in historize INSERTs to prevent positional misalignment (#199)
+- Make SQL string-literal escaping dialect-aware (BigQuery \' vs DuckDB '') (#197)
+- Prune native_load dedup set only when the file scan is restricted (#195)
+- Re-enable failed native_load files via latest-event-wins dedup (#193)
+- Keep load_id aligned with its row past the first chunk in native_load bulk insert (#191)
+- Stamp one tz-aware run timestamp for _dlt_ingested_at on the Arrow path (#189)
+- Draw incremental historize baseline from target open rows (replace+historize re-versioning) (#187)
+
 ## 0.11.0 — 2026-07-02
 
 ### Added
