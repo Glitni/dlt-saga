@@ -16,6 +16,51 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# databricks-sql-connector logs a spurious
+#   "ThriftBackend.attempt_request: Exception: I/O operation on closed file"
+# at ERROR from its thrift teardown path *after* the session has already closed
+# and the work has completed successfully — cosmetic noise, not a real failure.
+_THRIFT_CLOSED_FILE_NOISE = "I/O operation on closed file"
+
+# Connector logger names across versions: >= 4 nests under `backend`.
+_THRIFT_LOGGER_NAMES = (
+    "databricks.sql.backend.thrift_backend",
+    "databricks.sql.thrift_backend",
+)
+
+_thrift_noise_filter_installed = False
+_thrift_noise_filter_lock = threading.Lock()
+
+
+class _SuppressThriftClosedFile(logging.Filter):
+    """Drops only the connector's spurious post-close ``attempt_request`` error."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return _THRIFT_CLOSED_FILE_NOISE not in record.getMessage()
+
+
+def _install_thrift_noise_filter() -> None:
+    """Attach the suppression filter to the connector's thrift logger(s), once.
+
+    Installed when saga *opens* a Databricks connection rather than only at
+    ``close()``: the connector emits the noise from a teardown path that fires
+    asynchronously (background thread / GC / interpreter shutdown), and the
+    ``saga ingest`` path never calls ``close()`` — it opens a connection (e.g. the
+    last-load lookup during the skip-extraction check) and lets it be reclaimed at
+    exit. Installing at open time means the filter is present whenever the message
+    is eventually emitted. Idempotent and thread-safe.
+    """
+    global _thrift_noise_filter_installed
+    if _thrift_noise_filter_installed:
+        return
+    with _thrift_noise_filter_lock:
+        if _thrift_noise_filter_installed:
+            return
+        noise_filter = _SuppressThriftClosedFile()
+        for name in _THRIFT_LOGGER_NAMES:
+            logging.getLogger(name).addFilter(noise_filter)
+        _thrift_noise_filter_installed = True
+
 
 def _resolve_partition_cluster(spec: Any) -> tuple[bool, bool]:
     """Return (has_partition, has_cluster), warning and preferring CLUSTER BY when both are set."""
@@ -91,6 +136,10 @@ class DatabricksDestination(Destination):
 
         with self._connection_lock:
             if self._connection is None:
+                # Suppress the connector's spurious post-close thrift error before
+                # any connection exists — its teardown can fire long after close()
+                # (which the ingest path never calls), so install at open time.
+                _install_thrift_noise_filter()
                 token = self._get_token()
                 self._connection = databricks_sql.connect(
                     server_hostname=self.config.server_hostname,
@@ -107,20 +156,14 @@ class DatabricksDestination(Destination):
     def _close_connection(self) -> None:
         """Close the SQL connection, forcing a fresh token on next use.
 
-        The Databricks connector's ThriftBackend logs spurious "I/O operation
-        on closed file" errors from a background thread that fires asynchronously
-        after close() returns.  We attach a filter to that logger before closing
-        so the noise is suppressed regardless of when the background thread runs.
+        The connector's spurious "I/O operation on closed file" thrift error is
+        suppressed by a filter installed at connection-open time (see
+        ``_install_thrift_noise_filter``); it is re-asserted here defensively in
+        case this instance's connection was set without going through
+        ``_get_connection``.
         """
         if self._connection is not None:
-            import logging
-
-            class _SuppressClosedFile(logging.Filter):
-                def filter(self, record: logging.LogRecord) -> bool:
-                    return "I/O operation on closed file" not in record.getMessage()
-
-            thrift_logger = logging.getLogger("databricks.sql.backend.thrift_backend")
-            thrift_logger.addFilter(_SuppressClosedFile())
+            _install_thrift_noise_filter()
             try:
                 self._connection.close()
             except Exception as exc:
