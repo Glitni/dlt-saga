@@ -1,5 +1,6 @@
 """Unit tests for Databricks destination, auth provider, and access manager."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -668,6 +669,110 @@ class TestDatabricksConnectionLifecycle:
         dest._connection = mock_conn
         dest._close_connection()  # should not raise
         assert dest._connection is None
+
+
+# ---------------------------------------------------------------------------
+# DatabricksDestination — spurious thrift "closed file" noise suppression
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestThriftNoiseSuppression:
+    """The connector logs a cosmetic 'I/O operation on closed file' from its
+    thrift teardown after the work already succeeded. The ingest path never
+    calls close(), so the filter must be installed when the connection opens."""
+
+    def _noise_record(self, message_arg: str) -> logging.LogRecord:
+        return logging.LogRecord(
+            name="databricks.sql.backend.thrift_backend",
+            level=logging.ERROR,
+            pathname="",
+            lineno=0,
+            msg="ThriftBackend.attempt_request: Exception: %s",
+            args=(message_arg,),
+            exc_info=None,
+        )
+
+    def test_filter_drops_closed_file_noise(self):
+        from dlt_saga.destinations.databricks.destination import (
+            _SuppressThriftClosedFile,
+        )
+
+        rec = self._noise_record("I/O operation on closed file")
+        assert _SuppressThriftClosedFile().filter(rec) is False
+
+    def test_filter_keeps_real_errors(self):
+        from dlt_saga.destinations.databricks.destination import (
+            _SuppressThriftClosedFile,
+        )
+
+        rec = self._noise_record("connection refused")
+        assert _SuppressThriftClosedFile().filter(rec) is True
+
+    def test_install_is_idempotent_and_attaches_to_thrift_loggers(self):
+        from dlt_saga.destinations.databricks.destination import (
+            _THRIFT_LOGGER_NAMES,
+            _install_thrift_noise_filter,
+            _SuppressThriftClosedFile,
+        )
+
+        _install_thrift_noise_filter()
+        _install_thrift_noise_filter()  # idempotent — must not double-add
+
+        for name in _THRIFT_LOGGER_NAMES:
+            attached = [
+                f
+                for f in logging.getLogger(name).filters
+                if isinstance(f, _SuppressThriftClosedFile)
+            ]
+            assert len(attached) == 1, name
+
+    def test_get_connection_installs_filter(self):
+        from dlt_saga.destinations.databricks import destination as dest_mod
+
+        # Reset the install latch so we can observe _get_connection doing it.
+        dest_mod._thrift_noise_filter_installed = False
+        thrift_logger = logging.getLogger(dest_mod._THRIFT_LOGGER_NAMES[0])
+        thrift_logger.filters = [
+            f
+            for f in thrift_logger.filters
+            if not isinstance(f, dest_mod._SuppressThriftClosedFile)
+        ]
+
+        dest = _make_destination()
+        with (
+            patch.object(dest, "_get_token", return_value="tok"),
+            patch("databricks.sql.connect", return_value=MagicMock()),
+        ):
+            dest._get_connection()
+
+        attached = [
+            f
+            for f in thrift_logger.filters
+            if isinstance(f, dest_mod._SuppressThriftClosedFile)
+        ]
+        assert len(attached) == 1
+
+    def test_filter_actually_suppresses_emitted_record(self, caplog):
+        """End-to-end: after install, emitting the noise via the thrift logger
+        produces no record; a real error still comes through."""
+        from dlt_saga.destinations.databricks.destination import (
+            _install_thrift_noise_filter,
+        )
+
+        _install_thrift_noise_filter()
+        thrift_logger = logging.getLogger("databricks.sql.backend.thrift_backend")
+
+        with caplog.at_level(logging.ERROR, logger=thrift_logger.name):
+            thrift_logger.error(
+                "ThriftBackend.attempt_request: Exception: %s",
+                "I/O operation on closed file",
+            )
+            thrift_logger.error("ThriftBackend.attempt_request: Exception: %s", "boom")
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("I/O operation on closed file" in m for m in messages)
+        assert any("boom" in m for m in messages)
 
 
 # ---------------------------------------------------------------------------
