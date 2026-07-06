@@ -643,6 +643,53 @@ class TestDatabricksGrantRevokeSql:
 
 
 # ---------------------------------------------------------------------------
+# DatabricksAccessManager — bare table names are qualified to 3-part IDs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestDatabricksAccessQualifiesTableNames:
+    """Access management passes bare table names (like the BigQuery manager).
+    Unqualified, Unity Catalog resolves them against the connection's default
+    schema, so GRANTs targeted the wrong/non-existent table. The manager must
+    qualify them to `catalog`.`dataset`.`table` using dataset_id."""
+
+    def _manager_with_capture(self, dataset_id=None):
+        dest = _make_destination()  # catalog="my_catalog"
+        executed: list[str] = []
+        dest.execute_sql = MagicMock(side_effect=lambda sql: executed.append(sql) or [])
+        mgr = DatabricksAccessManager(dest)
+        mgr.dataset_id = dataset_id
+        return mgr, executed
+
+    def test_bare_name_qualified_with_dataset(self):
+        mgr, executed = self._manager_with_capture(dataset_id="dlt_sharepoint")
+        mgr.manage_access_for_tables(
+            table_ids=["cert_test_adgrupper"],
+            access_config=["user:analyst@co.com"],
+            revoke_extra=False,
+        )
+        assert len(executed) == 1
+        assert (
+            "ON TABLE `my_catalog`.`dlt_sharepoint`.`cert_test_adgrupper`"
+            in executed[0]
+        )
+        assert "`default`" not in executed[0]
+
+    def test_full_table_id_uses_destination_catalog(self):
+        mgr, _ = self._manager_with_capture(dataset_id="my_schema")
+        assert mgr._full_table_id("tbl") == "`my_catalog`.`my_schema`.`tbl`"
+
+    def test_falls_back_to_bare_without_dataset_id(self):
+        mgr, _ = self._manager_with_capture(dataset_id=None)
+        assert mgr._full_table_id("tbl") == "tbl"
+
+    def test_dataset_id_defaults_to_none(self):
+        dest = _make_destination()
+        assert DatabricksAccessManager(dest).dataset_id is None
+
+
+# ---------------------------------------------------------------------------
 # DatabricksDestination — connection lifecycle
 # ---------------------------------------------------------------------------
 
