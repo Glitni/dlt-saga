@@ -554,6 +554,7 @@ class NativeLoadPipeline(BasePipeline):
             staging_dataset=self._staging_dataset,
             chunk_label=chunk_label,
             write_disposition=base_disp,
+            incremental=self._incremental,
             column_hints=self._column_hints,
             target_location=self._target_location,
             table_format=self.native_config.table_format,

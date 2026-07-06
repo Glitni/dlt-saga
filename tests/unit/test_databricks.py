@@ -855,6 +855,64 @@ class TestDatabricksAccessDryRunAndCounters:
 
 
 # ---------------------------------------------------------------------------
+# DatabricksDestination — COPY INTO force (replace / non-incremental)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestDatabricksCopyIntoForce:
+    """COPY INTO is idempotent by default (skips already-loaded files). A
+    `replace` (target just truncated/replaced) or a non-incremental append must
+    reload the current file set, so force=true; an incremental append relies on
+    the default file-skip for cross-run dedup."""
+
+    def _spec(self, write_disposition="append", incremental=False):
+        from dlt_saga.destinations.base import NativeLoadSpec
+
+        return NativeLoadSpec(
+            target_dataset="sch",
+            target_table="tbl",
+            source_uris=["gs://bucket/dir/file.parquet"],
+            file_type="parquet",
+            autodetect_schema=True,
+            derived_columns=[],
+            target_exists=True,
+            partition_column=None,
+            cluster_columns=None,
+            format_options={},
+            staging_dataset="stg",
+            chunk_label="c",
+            write_disposition=write_disposition,
+            incremental=incremental,
+            filters=[],
+        )
+
+    def test_replace_forces_reload(self):
+        dest = _make_destination()
+        sql = dest._build_copy_into(
+            self._spec(write_disposition="replace"), "`c`.`sch`.`tbl`"
+        )
+        assert "'force' = 'true'" in sql
+
+    def test_non_incremental_append_forces_reload(self):
+        dest = _make_destination()
+        sql = dest._build_copy_into(
+            self._spec(write_disposition="append", incremental=False),
+            "`c`.`sch`.`tbl`",
+        )
+        assert "'force' = 'true'" in sql
+
+    def test_incremental_append_does_not_force(self):
+        dest = _make_destination()
+        sql = dest._build_copy_into(
+            self._spec(write_disposition="append", incremental=True),
+            "`c`.`sch`.`tbl`",
+        )
+        assert "'force'" not in sql
+        assert "'mergeSchema' = 'true'" in sql
+
+
+# ---------------------------------------------------------------------------
 # DatabricksDestination — connection lifecycle
 # ---------------------------------------------------------------------------
 
