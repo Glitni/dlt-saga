@@ -98,32 +98,19 @@ class GoogleSheetsPipeline(BasePipeline):
         if self._should_skip_extraction():
             return []  # Return empty list to skip processing
 
-        resources = []
+        # One config maps to exactly one sheet → one destination table
+        # (sheet_name is required; validated in GSheetsConfig).
         spreadsheet_title = self.client.get_spreadsheet_title(
             self.source_config.spreadsheet_id
         )
-
-        sheet_names = (
-            [self.source_config.sheet_name]
-            if self.source_config.sheet_name
-            else self.client.get_sheet_names(self.source_config.spreadsheet_id)
+        sheet_name = self.source_config.sheet_name
+        data = self.client.get_sheet_data(
+            self.source_config.spreadsheet_id,
+            sheet_name,
+            self.source_config.range,
         )
-
-        for sheet_name in sheet_names:
-            table_name = self.table_name + (
-                ""
-                if self.source_config.sheet_name
-                else f"_{sheet_name.lower().replace(' ', '_')}"
-            )
-            data = self.client.get_sheet_data(
-                self.source_config.spreadsheet_id,
-                sheet_name,
-                self.source_config.range,
-            )
-            resource = dlt.resource(data, name=table_name)
-            description = self._table_description(
-                sheet_name=sheet_name, spreadsheet_title=spreadsheet_title
-            )
-            resources.append((resource, description))
-
-        return resources
+        resource = dlt.resource(data, name=self.table_name)
+        description = self._table_description(
+            sheet_name=sheet_name, spreadsheet_title=spreadsheet_title
+        )
+        return [(resource, description)]

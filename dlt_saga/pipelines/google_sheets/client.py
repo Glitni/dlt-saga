@@ -1,6 +1,6 @@
 from datetime import datetime
 from itertools import zip_longest
-from typing import Any, Dict, Iterator, List
+from typing import Any, Dict, Iterator
 
 from dlt_saga.pipelines.google_sheets.config import GSheetsConfig
 
@@ -73,11 +73,6 @@ class GSheetsClient:
     def get_service(self):
         """Backward compatibility - returns sheets service."""
         return self.get_sheets_service()
-
-    def get_sheet_names(self, spreadsheet_id: str) -> List[str]:
-        service = self.get_service()
-        result = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-        return [sheet["properties"]["title"] for sheet in result["sheets"]]
 
     def get_spreadsheet_title(self, spreadsheet_id: str) -> str:
         service = self.get_service()
