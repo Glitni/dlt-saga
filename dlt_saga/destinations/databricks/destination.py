@@ -301,7 +301,7 @@ class DatabricksDestination(Destination):
     # Direct SQL execution
     # ------------------------------------------------------------------
 
-    def execute_sql(self, sql: str, dataset_name: Optional[str] = None) -> Any:
+    def execute_sql(self, sql: str, schema_name: Optional[str] = None) -> Any:
         """Execute a SQL statement (or multi-statement script) against Databricks.
 
         Multi-statement scripts are split into individual statements with a
@@ -309,12 +309,12 @@ class DatabricksDestination(Destination):
         statement whose ``;`` sits inside a string literal — e.g. a table/column
         ``COMMENT`` or a historize-log message — or inside a comment).
         All SQL should use fully-qualified table names (catalog.schema.table);
-        the ``dataset_name`` parameter is accepted for interface compatibility
+        the ``schema_name`` parameter is accepted for interface compatibility
         but has no effect.
 
         Args:
             sql: SQL to execute.
-            dataset_name: Unused — kept for interface compatibility.
+            schema_name: Unused — kept for interface compatibility.
 
         Returns:
             List of row objects (attribute + index access), or ``[]`` for DDL/DML.
@@ -373,7 +373,7 @@ class DatabricksDestination(Destination):
     # ------------------------------------------------------------------
 
     def save_load_info(
-        self, dataset_name: str, records: list, pipeline: Any = None
+        self, schema_name: str, records: list, pipeline: Any = None
     ) -> None:
         """Insert load info records directly into the load-info tracking table."""
         if not records:
@@ -381,7 +381,7 @@ class DatabricksDestination(Destination):
 
         from dlt_saga.project_config import get_load_info_table_name
 
-        table_id = self.get_full_table_id(dataset_name, get_load_info_table_name())
+        table_id = self.get_full_table_id(schema_name, get_load_info_table_name())
 
         self.execute_sql(
             f"""
@@ -400,7 +400,7 @@ class DatabricksDestination(Destination):
                 _dlt_id STRING NOT NULL
             )
             """,
-            dataset_name,
+            schema_name,
         )
 
         load_id = str(uuid.uuid4())
@@ -425,7 +425,7 @@ class DatabricksDestination(Destination):
                 )
 
     def _execute_parameterised(
-        self, sql: str, params: list, dataset_name: Optional[str] = None
+        self, sql: str, params: list, schema_name: Optional[str] = None
     ) -> list:
         """Execute a SQL statement with positional ``?`` bind parameters.
 
@@ -442,13 +442,13 @@ class DatabricksDestination(Destination):
                 return []
 
     def get_last_load_timestamp(
-        self, dataset_name: str, pipeline_name: str, table_name: str
+        self, schema_name: str, pipeline_name: str, table_name: str
     ) -> Optional[datetime]:
         """Get the timestamp of the last successful load that had data."""
         from dlt_saga.project_config import get_load_info_table_name
 
         try:
-            table_id = self.get_full_table_id(dataset_name, get_load_info_table_name())
+            table_id = self.get_full_table_id(schema_name, get_load_info_table_name())
             rows = self._execute_parameterised(
                 f"""
                 SELECT MAX(started_at) AS started_at
@@ -458,7 +458,7 @@ class DatabricksDestination(Destination):
                   AND row_count > 0
                 """,
                 [pipeline_name, table_name],
-                dataset_name,
+                schema_name,
             )
             if rows and rows[0][0] is not None:
                 return rows[0][0]

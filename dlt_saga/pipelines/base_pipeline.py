@@ -164,10 +164,10 @@ class BasePipeline:
         destination_type = context.get_destination_type()
 
         # schema_name is already resolved in config_dict by pipeline_config
-        dataset_name = self.config_dict.get("schema_name")
-        if not dataset_name or not isinstance(dataset_name, str):
+        schema_name = self.config_dict.get("schema_name")
+        if not schema_name or not isinstance(schema_name, str):
             raise ValueError(
-                f"schema_name must be a non-empty string, got {dataset_name!r}"
+                f"schema_name must be a non-empty string, got {schema_name!r}"
             )
 
         # Delegate all destination-specific resolution to the config class
@@ -180,7 +180,7 @@ class BasePipeline:
 
         logger.debug(
             f"Created {destination_type} destination: "
-            f"project={self.destination_database}, schema={dataset_name}"
+            f"project={self.destination_database}, schema={schema_name}"
         )
 
         # Create dlt destination from our abstraction
@@ -190,7 +190,7 @@ class BasePipeline:
         # Set pipelines_dir to isolate state per destination, project, and dataset
         # This prevents state conflicts when switching between profiles/destinations
         pipelines_dir_suffix = (
-            f"{destination_type}_{self.destination_database}_{dataset_name}".replace(
+            f"{destination_type}_{self.destination_database}_{schema_name}".replace(
                 "-", "_"
             )
         )
@@ -198,7 +198,7 @@ class BasePipeline:
 
         pipeline_params = {
             "pipeline_name": self.pipeline_name,
-            "dataset_name": dataset_name,
+            "dataset_name": schema_name,  # dlt's pipeline kwarg is dataset_name
             "destination": dlt_destination,
             "dev_mode": DEV_MODE,
             "pipelines_dir": pipelines_dir,

@@ -285,12 +285,12 @@ class TestDatabricksExecuteSql:
         dest.execute_sql(sql)
         cursor.execute.assert_called_once_with(sql)
 
-    def test_dataset_name_is_ignored(self):
-        # dataset_name is kept for interface compatibility but has no effect —
+    def test_schema_name_is_ignored(self):
+        # schema_name is kept for interface compatibility but has no effect —
         # all SQL uses fully-qualified names so no USE SCHEMA is needed.
         dest, mock_conn = self._dest_with_mock_conn()
         cursor = self._setup_cursor(mock_conn)
-        dest.execute_sql("SELECT 1", dataset_name="my_schema")
+        dest.execute_sql("SELECT 1", schema_name="my_schema")
         calls = [c[0][0] for c in cursor.execute.call_args_list]
         assert calls == ["SELECT 1"]
 
@@ -1377,7 +1377,7 @@ class TestResetDestinationState:
         dest.execute_sql = MagicMock()  # swallow the DROP TABLE
         calls = []
         dest._execute_parameterised = MagicMock(
-            side_effect=lambda sql, params, dataset_name=None: calls.append(
+            side_effect=lambda sql, params, schema_name=None: calls.append(
                 (sql, params)
             )
         )

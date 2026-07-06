@@ -168,13 +168,13 @@ class TestMakeDestination:
         try:
             dest.execute_sql(
                 'CREATE SCHEMA IF NOT EXISTS "test"',
-                dataset_name="test",
+                schema_name="test",
             )
             dest.execute_sql(
                 'CREATE TABLE "test"."t" (id INTEGER)',
-                dataset_name="test",
+                schema_name="test",
             )
-            dest.execute_sql('INSERT INTO "test"."t" VALUES (42)', dataset_name="test")
+            dest.execute_sql('INSERT INTO "test"."t" VALUES (42)', schema_name="test")
             rows = dest.execute_sql('SELECT id FROM "test"."t"')
             assert len(rows) == 1
             assert rows[0][0] == 42
@@ -190,7 +190,7 @@ class TestMakeDestination:
         try:
             dest1.execute_sql(
                 'CREATE SCHEMA IF NOT EXISTS "s"; CREATE TABLE "s"."only_in_dest1" (x INT)',
-                dataset_name="s",
+                schema_name="s",
             )
             result = dest2.execute_sql(
                 """

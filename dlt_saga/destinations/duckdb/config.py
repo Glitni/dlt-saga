@@ -42,7 +42,7 @@ class DuckDBDestinationConfig(DestinationConfig):
         """Create DuckDB config from dictionary.
 
         Args:
-            data: Configuration dictionary with keys: database_path, dataset_name
+            data: Configuration dictionary with keys: database_path, schema_name
 
         Returns:
             DuckDBDestinationConfig instance

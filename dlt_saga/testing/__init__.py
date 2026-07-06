@@ -25,7 +25,7 @@ Example::
     # Create a standalone DuckDB destination for SQL-level tests
     dest = make_destination()
     try:
-        dest.execute_sql('CREATE TABLE "test"."t" (id INT)', dataset_name="test")
+        dest.execute_sql('CREATE TABLE "test"."t" (id INT)', schema_name="test")
     finally:
         dest.close()
 

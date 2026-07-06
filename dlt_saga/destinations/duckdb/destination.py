@@ -92,13 +92,13 @@ class DuckDBDestination(Destination):
 
         Ensures the schema (dataset) exists before running.
         """
-        dataset_name = pipeline.dataset_name
-        if dataset_name:
-            self.connection.execute(f'CREATE SCHEMA IF NOT EXISTS "{dataset_name}"')
+        schema_name = pipeline.dataset_name
+        if schema_name:
+            self.connection.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"')
         return pipeline.run(data)
 
     def save_load_info(
-        self, dataset_name: str, records: list[dict], pipeline: Any = None
+        self, schema_name: str, records: list[dict], pipeline: Any = None
     ) -> None:
         """Save load info records via direct INSERT into DuckDB."""
         if not records:
@@ -107,7 +107,7 @@ class DuckDBDestination(Destination):
         from dlt_saga.project_config import get_load_info_table_name
 
         conn = self.connection
-        table_id = f'"{dataset_name}"."{get_load_info_table_name()}"'
+        table_id = f'"{schema_name}"."{get_load_info_table_name()}"'
 
         # Ensure table exists
         conn.execute(f"""
@@ -148,13 +148,13 @@ class DuckDBDestination(Destination):
             )
 
     def get_last_load_timestamp(
-        self, dataset_name: str, pipeline_name: str, table_name: str
+        self, schema_name: str, pipeline_name: str, table_name: str
     ) -> Optional[datetime]:
         """Get the timestamp of the last successful load that had data."""
         from dlt_saga.project_config import get_load_info_table_name
 
         try:
-            table_id = f'"{dataset_name}"."{get_load_info_table_name()}"'
+            table_id = f'"{schema_name}"."{get_load_info_table_name()}"'
             result = self.connection.execute(
                 f"""
                 SELECT MAX(started_at) as started_at
@@ -183,7 +183,7 @@ class DuckDBDestination(Destination):
         except Exception:
             return None
 
-    def execute_sql(self, sql: str, dataset_name: Optional[str] = None) -> Any:
+    def execute_sql(self, sql: str, schema_name: Optional[str] = None) -> Any:
         """Execute a SQL statement against DuckDB.
 
         For multi-statement scripts (separated by ;), executes each
@@ -195,11 +195,11 @@ class DuckDBDestination(Destination):
 
         conn = self.connection
 
-        if dataset_name:
-            conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{dataset_name}"')
-            conn.execute(f'SET search_path TO "{dataset_name}"')
+        if schema_name:
+            conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"')
+            conn.execute(f'SET search_path TO "{schema_name}"')
 
-        logger.debug(f"Executing SQL ({len(sql)} chars) in dataset={dataset_name}")
+        logger.debug(f"Executing SQL ({len(sql)} chars) in schema={schema_name}")
 
         # Split multi-statement scripts and execute individually
         statements = split_sql_statements(sql)

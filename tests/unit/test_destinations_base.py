@@ -41,7 +41,7 @@ class _ConcreteDestination(Destination):
     def get_full_table_id(self, dataset, table):
         return f"{dataset}.{table}"
 
-    def execute_sql(self, sql, dataset_name=None):
+    def execute_sql(self, sql, schema_name=None):
         self._sql_executed.append(sql)
         return []
 
