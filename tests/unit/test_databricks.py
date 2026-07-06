@@ -624,9 +624,11 @@ class TestDatabricksGrantRevokeSql:
         mgr._grant(table_id, principal, principal_type)
 
         assert len(executed) == 1
-        assert f"{expected_verb} SELECT ON TABLE" in executed[0]
-        assert table_id in executed[0]
-        assert f"`{principal}`" in executed[0]
+        # Unity Catalog GRANT resolves the principal by name — no principal-type
+        # keyword. The old `TO user `p`` form was a parse error swallowed by the
+        # error handler, so `update-access` reported success having granted nothing.
+        assert executed[0] == f"GRANT SELECT ON TABLE {table_id} TO `{principal}`"
+        assert f"TO {principal_type} " not in executed[0]
 
     def test_revoke_sql_shape(self):
         mgr, executed = self._manager_with_capture()
