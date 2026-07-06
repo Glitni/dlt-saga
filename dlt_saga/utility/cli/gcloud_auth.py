@@ -7,12 +7,41 @@ This module provides utilities for Google Cloud authentication, including:
 
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 
 from dlt_saga.utility.cli.logging import YELLOW, colorize
 
 logger = logging.getLogger(__name__)
+
+_GAC_ENV = "GOOGLE_APPLICATION_CREDENTIALS"
+_impersonation_source_lock = threading.Lock()
+
+
+def resolve_adc_excluding_gac(default_fn, *args, **kwargs):
+    """Resolve ADC source credentials, excluding a stray GOOGLE_APPLICATION_CREDENTIALS.
+
+    Impersonation must source from the profile's own identity — the gcloud user
+    (local) or metadata-server service account (Cloud Run/GCE), i.e. the identity
+    granted Token Creator on the target service account — deterministically,
+    regardless of whether an unrelated ``GOOGLE_APPLICATION_CREDENTIALS`` key file
+    happens to be set in the environment.
+
+    ``GOOGLE_APPLICATION_CREDENTIALS`` is excluded only for the duration of the
+    ``default_fn`` call and restored immediately (under a lock). Source resolution
+    runs once per run — the result is cached by the caller — during
+    single-threaded impersonation setup, so the process-global env is never left
+    mutated for concurrently running pipelines (unlike a permanent
+    ``os.environ.pop``, which strips it for every pipeline sharing the process).
+    """
+    with _impersonation_source_lock:
+        saved = os.environ.pop(_GAC_ENV, None)
+        try:
+            return default_fn(*args, **kwargs)
+        finally:
+            if saved is not None:
+                os.environ[_GAC_ENV] = saved
 
 
 def get_impersonated_credentials(service_account: str):
@@ -30,8 +59,8 @@ def get_impersonated_credentials(service_account: str):
     import google.auth
     from google.auth import impersonated_credentials
 
-    # Get source credentials (user's ADC)
-    source_credentials, _ = google.auth.default()
+    # Source from the profile identity (gcloud / metadata), not a stray GAC key.
+    source_credentials, _ = resolve_adc_excluding_gac(google.auth.default)
 
     # Create impersonated credentials
     target_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
@@ -80,8 +109,12 @@ def patch_google_auth_default():
                 )
                 return credentials, project_id
 
-            # Get source credentials using the original function
-            source_credentials, project_id = _original_default(*args, **kwargs)
+            # Get source credentials from the profile identity (gcloud /
+            # metadata), excluding a stray GOOGLE_APPLICATION_CREDENTIALS so
+            # impersonation is deterministic. Resolved once, then cached below.
+            source_credentials, project_id = resolve_adc_excluding_gac(
+                _original_default, *args, **kwargs
+            )
 
             # Create impersonated credentials
             from google.auth import impersonated_credentials
