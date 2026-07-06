@@ -11,9 +11,16 @@ class TargetWriter:
         """Apply hints to the data based on the target configuration"""
         # Strip "+historize" for dlt disposition checks — historization is handled separately
         base_disposition = self.config.write_disposition.replace("+historize", "")
-        if base_disposition == "merge" and self.config.merge_strategy:
-            merge_config = self._build_merge_config()
-            data.apply_hints(write_disposition=merge_config)
+        if base_disposition == "merge":
+            # An explicit strategy (scd2, upsert, insert-only, delete-insert) is
+            # passed to dlt as a dict config; a bare `write_disposition: merge`
+            # falls back to dlt's default strategy (delete-insert). Either way the
+            # merge_key/primary_key must be applied — dropping them silently
+            # degrades merge to keyless append and duplicates rows.
+            if self.config.merge_strategy:
+                data.apply_hints(write_disposition=self._build_merge_config())
+            else:
+                data.apply_hints(write_disposition="merge")
             if self.config.merge_key:
                 data.apply_hints(merge_key=self.config.merge_key)
             if self.config.primary_key:

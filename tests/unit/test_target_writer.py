@@ -61,6 +61,69 @@ class TestBuildMergeConfigInsertOnly:
         }
 
 
+def _hint_kwargs(data) -> dict:
+    """Merge all apply_hints kwargs from a mock into one dict for assertions."""
+    merged: dict = {}
+    for call in data.apply_hints.call_args_list:
+        merged.update(call.kwargs)
+    return merged
+
+
+@pytest.mark.unit
+class TestMergeWithoutStrategy:
+    """A bare `write_disposition: merge` (no merge_strategy) is valid — dlt
+    defaults to delete-insert. merge_key/primary_key must still be applied,
+    otherwise merge silently degrades to keyless append and rows duplicate."""
+
+    def test_bare_merge_applies_merge_key(self):
+        writer = _make_writer(write_disposition="merge", merge_key="id")
+        data = MagicMock()
+        writer.apply_hints(data)
+
+        hints = _hint_kwargs(data)
+        assert hints["write_disposition"] == "merge"
+        assert hints["merge_key"] == ["id"]
+
+    def test_bare_merge_applies_primary_key(self):
+        writer = _make_writer(write_disposition="merge", primary_key="id")
+        data = MagicMock()
+        writer.apply_hints(data)
+
+        hints = _hint_kwargs(data)
+        assert hints["write_disposition"] == "merge"
+        assert hints["primary_key"] == ["id"]
+
+    def test_bare_merge_applies_both_keys(self):
+        writer = _make_writer(
+            write_disposition="merge", merge_key="mk", primary_key="pk"
+        )
+        data = MagicMock()
+        writer.apply_hints(data)
+
+        hints = _hint_kwargs(data)
+        assert hints["merge_key"] == ["mk"]
+        assert hints["primary_key"] == ["pk"]
+
+    def test_bare_merge_with_historize_suffix_applies_merge_key(self):
+        writer = _make_writer(write_disposition="merge+historize", merge_key="id")
+        data = MagicMock()
+        writer.apply_hints(data)
+
+        hints = _hint_kwargs(data)
+        assert hints["write_disposition"] == "merge"
+        assert hints["merge_key"] == ["id"]
+
+    def test_append_still_ignores_merge_key(self):
+        """merge_key is meaningless for append — it must not leak into append."""
+        writer = _make_writer(write_disposition="append", merge_key="id")
+        data = MagicMock()
+        writer.apply_hints(data)
+
+        hints = _hint_kwargs(data)
+        assert hints["write_disposition"] == "append"
+        assert "merge_key" not in hints
+
+
 @pytest.mark.unit
 class TestBuildMergeConfigOtherStrategies:
     """Regression coverage so we don't accidentally rewrite the dict shape for
