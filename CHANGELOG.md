@@ -1,3 +1,15 @@
+## 0.14.0 — 2026-07-06
+
+### Fixed
+- Databricks apply_hints warns loudly instead of silently discarding hints (#235)
+- Databricks native-load replace loads 0 rows (COPY INTO skips already-loaded files) (#233)
+- SCD2 change-detection hash collisions on Databricks and DuckDB (#231)
+- Split execute_sql on ';' outside string literals and comments (Databricks + DuckDB) (#229)
+- Databricks access manager — honor --dry-run, accurate counters, table-scoped diff (#227)
+- Qualify Databricks access-management table names (was granting against 'default' schema) (#225)
+- Suppress spurious 'I/O operation on closed file' thrift ERROR after Databricks runs (#223)
+- Databricks GRANT uses invalid Unity Catalog syntax — grants fail silently (#221)
+
 ## 0.13.0 — 2026-07-06
 
 ### Breaking Changes
