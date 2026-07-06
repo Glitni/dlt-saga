@@ -8,6 +8,41 @@ from dlt_saga.pipeline_config.file_config import FilePipelineConfig
 
 
 @pytest.mark.unit
+class TestSchemaOverride:
+    """Per-pipeline schema override: `schema_name` is the key; `dataset_name`
+    is a deprecated alias mapped to it with a warning."""
+
+    def test_schema_name_key_used(self):
+        c = FilePipelineConfig()
+        assert (
+            c._resolve_schema_override({"schema_name": "my_sch"}, "configs/x.yml")
+            == "my_sch"
+        )
+
+    def test_dataset_name_alias_maps_with_warning(self, caplog):
+        c = FilePipelineConfig()
+        with caplog.at_level("WARNING"):
+            result = c._resolve_schema_override(
+                {"dataset_name": "legacy_sch"}, "configs/x.yml"
+            )
+        assert result == "legacy_sch"
+        assert any("deprecated" in r.getMessage().lower() for r in caplog.records)
+
+    def test_schema_name_wins_over_dataset_name(self):
+        c = FilePipelineConfig()
+        assert (
+            c._resolve_schema_override(
+                {"schema_name": "new", "dataset_name": "old"}, "configs/x.yml"
+            )
+            == "new"
+        )
+
+    def test_none_when_neither_set(self):
+        c = FilePipelineConfig()
+        assert c._resolve_schema_override({}, "configs/x.yml") is None
+
+
+@pytest.mark.unit
 class TestDeriveBaseTableName:
     @pytest.mark.parametrize(
         "path, expected",

@@ -117,10 +117,25 @@ class TargetConfig:
         },
     )
 
+    schema_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Schema/dataset name override for this pipeline. Defaults to "
+                "environment-aware naming (dlt_<group> in prod, the dev schema "
+                "otherwise)."
+            ),
+            "pattern": "^[a-zA-Z0-9_]+$",
+        },
+    )
+
     dataset_name: Optional[str] = field(
         default=None,
         metadata={
-            "description": "BigQuery dataset name override (defaults to environment-aware naming)",
+            "description": (
+                "Deprecated — use 'schema_name'. Still accepted as an alias "
+                "(mapped to schema_name) for backward compatibility."
+            ),
             "pattern": "^[a-zA-Z0-9_]+$",
         },
     )
@@ -362,7 +377,7 @@ class TargetConfig:
 
     def __post_init__(self):
         self.persist_docs = PersistDocs.from_value(self.persist_docs)
-        self._validate_dataset_name()
+        self._validate_schema_name()
         self._validate_destination_type()
         self._validate_column_identifiers()
         self._validate_insert_api()
@@ -372,16 +387,15 @@ class TargetConfig:
         self._initialize_columns()
         self._validate_classification()
 
-    def _validate_dataset_name(self):
-        """Validate dataset_name pattern if provided."""
-        if self.dataset_name:
-            import re
+    def _validate_schema_name(self):
+        """Validate the schema_name pattern (and the deprecated dataset_name alias)."""
+        import re
 
-            pattern = r"^[a-zA-Z0-9_]+$"
-            if not re.match(pattern, self.dataset_name):
-                raise ValueError(
-                    f"dataset_name '{self.dataset_name}' must match pattern {pattern}"
-                )
+        pattern = r"^[a-zA-Z0-9_]+$"
+        for key in ("schema_name", "dataset_name"):
+            value = getattr(self, key)
+            if value and not re.match(pattern, value):
+                raise ValueError(f"{key} '{value}' must match pattern {pattern}")
 
     def _validate_column_identifiers(self):
         """Validate SQL identifier format for column name fields."""
