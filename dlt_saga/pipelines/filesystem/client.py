@@ -1,5 +1,4 @@
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Optional
 
@@ -20,21 +19,13 @@ class FilesystemClient:
         self._column_name_mapping_cache: Optional[Dict[str, str]] = (
             None  # Lazy-loaded cache
         )
-
-        # For GCS without explicit credentials, route through ADC so that the
-        # active profile (incl. `run_as` impersonation) controls identity rather
-        # than a stray GOOGLE_APPLICATION_CREDENTIALS pointing at an unrelated
-        # service-account key. Profile-driven auth must be deterministic.
-        if config.filesystem_type == "gs" and not config.credentials:
-            previous_gac = os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-            if previous_gac:
-                logger.debug(
-                    "Cleared GOOGLE_APPLICATION_CREDENTIALS=%s for GCS read; "
-                    "ADC (gcloud / metadata server / profile impersonation) "
-                    "will be used. Pass `credentials:` in the pipeline config "
-                    "to override.",
-                    previous_gac,
-                )
+        # GCS without explicit credentials uses Application Default Credentials
+        # (gcloud / metadata server / profile `run_as` impersonation) — the same
+        # resolution as the BigQuery destination. Credential selection is left to
+        # google.auth (which the auth provider patches for impersonation); this
+        # client never mutates process-global GOOGLE_APPLICATION_CREDENTIALS,
+        # which under parallel execution would strip it for other concurrently
+        # running pipelines.
 
     def _build_filesystem_url(self) -> str:
         """Construct filesystem URL from configuration."""
