@@ -897,13 +897,26 @@ class DatabricksDestination(Destination):
 
         format_options_str = self._format_databricks_copy_options(spec)
 
+        # COPY INTO is idempotent by default: it tracks already-loaded files and
+        # skips them on re-run. That's the desired cross-run dedup only for an
+        # incremental append. For `replace` (the target was just truncated/replaced
+        # and must be fully reloaded) and for non-incremental appends (no cross-run
+        # dedup), that tracking would skip every file and load 0 rows — so force a
+        # reload. `replace` is validated as incompatible with incremental, so it
+        # always forces regardless.
+        is_replace = getattr(spec, "write_disposition", "append") == "replace"
+        force = is_replace or not getattr(spec, "incremental", False)
+        copy_options = "'mergeSchema' = 'true'"
+        if force:
+            copy_options += ", 'force' = 'true'"
+
         return (
             f"COPY INTO {target_id} "
             f"FROM ({select_clause} FROM '{self.escape_string_literal(source_prefix)}'{where_clause}) "
             f"FILEFORMAT = {file_format} "
             f"FILES = ({files_list}) "
             f"FORMAT_OPTIONS ({format_options_str}) "
-            f"COPY_OPTIONS ('mergeSchema' = 'true')"
+            f"COPY_OPTIONS ({copy_options})"
         )
 
     def _format_databricks_copy_options(self, spec: "Any") -> str:

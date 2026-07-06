@@ -47,6 +47,10 @@ class NativeLoadSpec:
     staging_dataset: str
     chunk_label: str
     write_disposition: str = "append"
+    # File-level dedup across runs (opt-in). When False (or on a `replace`),
+    # a re-run must reload the current file set — Databricks COPY INTO defaults
+    # to skipping already-loaded files, so those cases need force=true.
+    incremental: bool = False
     column_hints: Dict[str, str] = field(default_factory=dict)
     # Databricks-specific: external table LOCATION URI (None = managed table)
     target_location: Optional[str] = None
