@@ -124,20 +124,34 @@ class TestResolveValue:
 
 @pytest.mark.unit
 class TestIsPathSegmentDict:
+    """A dict is a folder scope only when its key names a real config sub-directory
+    — config-value dicts (persist_docs, historize, …) are not folders.
+    """
+
+    def _config(self, folders):
+        c = FilePipelineConfig()
+        c._folder_segment_names_cache = set(folders)
+        return c
+
     @pytest.mark.parametrize(
-        "value, expected",
+        "key, value, folders, expected",
         [
-            ({"google_sheets": {}}, True),
-            ({"asm": {}, "tags": []}, True),
-            ({"tags": [], "ENABLED": True}, True),
-            ({"TAGS": []}, False),
-            ([], False),
-            ("string", False),
-            (123, False),
+            ("google_sheets", {"+tags": []}, {"google_sheets"}, True),  # real folder
+            ("+google_sheets", {"+tags": []}, {"google_sheets"}, True),  # + stripped
+            (
+                "persist_docs",
+                {"columns": True},
+                {"google_sheets"},
+                False,
+            ),  # config block
+            ("historize", {"track_deletions": True}, {"google_sheets"}, False),
+            ("google_sheets", [], {"google_sheets"}, False),  # not a dict
+            ("google_sheets", "string", {"google_sheets"}, False),
+            ("google_sheets", {"a": 1}, set(), False),  # no such folder
         ],
     )
-    def test_is_path_segment_dict(self, value, expected):
-        assert FilePipelineConfig()._is_path_segment_dict(value) is expected
+    def test_is_path_segment_dict(self, key, value, folders, expected):
+        assert self._config(folders)._is_path_segment_dict(key, value) is expected
 
 
 @pytest.mark.unit
@@ -162,6 +176,7 @@ class TestResolveConfig:
 
     def test_with_folder_hierarchy(self):
         config = FilePipelineConfig()
+        config._folder_segment_names_cache = {"google_sheets"}
         config.project_config = {
             "pipelines": {
                 "tags": ["default"],
@@ -194,6 +209,36 @@ class TestResolveConfig:
         assert "default" in result["tags"]
         assert "custom" in result["tags"]
         assert result["enabled"] is False
+
+    def test_dict_valued_project_default_applies(self):
+        # Regression: a dict-valued project default (the documented
+        # `pipelines: {+persist_docs: {columns: true}}` opt-in) was dropped by the
+        # old "any dict with lowercase keys is a folder" heuristic.
+        config = FilePipelineConfig()
+        config._folder_segment_names_cache = {"google_sheets"}
+        config.project_config = {"pipelines": {"+persist_docs": {"columns": True}}}
+
+        result = config._resolve_config("configs/google_sheets/data.yml", {})
+        assert result["persist_docs"] == {"columns": True}
+
+    def test_group_dict_default_reaches_subfolder_config(self):
+        # Regression: group-level dict defaults (e.g. +historize) applied to
+        # configs directly in the group folder but were dropped for subfolder
+        # configs (the group block was skipped as a "path segment").
+        config = FilePipelineConfig()
+        config._folder_segment_names_cache = {"google_sheets", "team_a"}
+        config.project_config = {
+            "pipelines": {
+                "google_sheets": {
+                    "+historize": {"track_deletions": True},
+                    "team_a": {"+tags": ["a"]},
+                }
+            }
+        }
+
+        result = config._resolve_config("configs/google_sheets/team_a/data.yml", {})
+        assert result["historize"] == {"track_deletions": True}
+        assert "a" in result["tags"]
 
 
 @pytest.mark.unit
@@ -389,6 +434,7 @@ class TestExtractLevelConfig:
 
     def test_skips_path_segments(self):
         config = FilePipelineConfig()
+        config._folder_segment_names_cache = {"google_sheets"}
         current = {"tags": ["daily"], "google_sheets": {"tags": ["nested"]}}
 
         result = config._extract_level_config(current, is_last_segment=False)
@@ -396,6 +442,15 @@ class TestExtractLevelConfig:
 
         result = config._extract_level_config(current, is_last_segment=True)
         assert "google_sheets" in result
+
+    def test_keeps_dict_valued_config_block(self):
+        # A dict config value whose key is not a folder (persist_docs) must be
+        # kept even when it isn't the last segment.
+        config = FilePipelineConfig()
+        config._folder_segment_names_cache = {"google_sheets"}
+        current = {"+persist_docs": {"columns": True}, "google_sheets": {"tags": []}}
+        result = config._extract_level_config(current, is_last_segment=False)
+        assert result == {"+persist_docs": {"columns": True}}
 
 
 @pytest.mark.unit
