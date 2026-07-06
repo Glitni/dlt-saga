@@ -26,12 +26,22 @@ class GSheetsConfig(BaseConfig):
         # Validate required fields
         if not self.spreadsheet_id:
             raise ValueError("spreadsheet_id is required for Google Sheets pipelines")
+        if not self.sheet_name:
+            raise ValueError(
+                "sheet_name is required for Google Sheets pipelines. Each config maps "
+                "to exactly one sheet/tab (one destination table); for a spreadsheet "
+                "with several sheets, create one config per sheet."
+            )
 
-    # Optional
+    # Required (has default for dataclass inheritance, validated in __post_init__)
     sheet_name: Optional[str] = field(
         default=None,
         metadata={
-            "description": "Name of the specific sheet/tab to read (optional, defaults to first sheet)"
+            "description": (
+                "Name of the sheet/tab to read. Required — each config maps to "
+                "exactly one sheet (one destination table)."
+            ),
+            "required": True,
         },
     )
     range: str = field(

@@ -51,7 +51,11 @@ class TestValidationResult:
 class TestValidateWriteDisposition:
     def test_valid_append(self):
         config = _make_config(
-            config_dict={"write_disposition": "append", "spreadsheet_id": "abc123"}
+            config_dict={
+                "write_disposition": "append",
+                "spreadsheet_id": "abc123",
+                "sheet_name": "Sheet1",
+            }
         )
         result = validate_pipeline_config(config)
         assert result.is_valid
@@ -62,6 +66,7 @@ class TestValidateWriteDisposition:
                 "write_disposition": "append+historize",
                 "primary_key": ["id"],
                 "spreadsheet_id": "abc123",
+                "sheet_name": "Sheet1",
             }
         )
         result = validate_pipeline_config(config)
@@ -69,7 +74,11 @@ class TestValidateWriteDisposition:
 
     def test_valid_merge(self):
         config = _make_config(
-            config_dict={"write_disposition": "merge", "spreadsheet_id": "abc123"}
+            config_dict={
+                "write_disposition": "merge",
+                "spreadsheet_id": "abc123",
+                "sheet_name": "Sheet1",
+            }
         )
         result = validate_pipeline_config(config)
         assert result.is_valid
@@ -173,7 +182,7 @@ class TestValidateSourceConfig:
         """Valid google_sheets config passes."""
         config = _make_config(
             pipeline_group="google_sheets",
-            config_dict={"spreadsheet_id": "abc123"},
+            config_dict={"spreadsheet_id": "abc123", "sheet_name": "Sheet1"},
         )
         result = validate_pipeline_config(config)
         source_errors = [e for e in result.errors if "source config" in e.lower()]
