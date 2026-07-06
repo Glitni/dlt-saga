@@ -8,9 +8,8 @@ collapses multiple events per (pipeline, uri) to the latest one for inspection.
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
-from dlt_saga.pipelines.native_load._sql import esc_sql_literal
 from dlt_saga.project_config import (
     get_native_load_log_table_name,
     get_native_load_log_view_name,
@@ -37,15 +36,18 @@ def make_load_id(pipeline_name: str, uri: str, generation: Optional[int]) -> str
     return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
 
-def _ts_literal(iso: str) -> str:
-    """Format an ISO timestamp as a SQL TIMESTAMP literal."""
-    return f"TIMESTAMP '{esc_sql_literal(iso)}'"
+def _ts_literal(iso: str, escape: Callable[[str], str]) -> str:
+    """Format an ISO timestamp as a SQL TIMESTAMP literal.
+
+    ``escape`` is the destination's string-literal escaper (dialect-aware).
+    """
+    return f"TIMESTAMP '{escape(iso)}'"
 
 
-def _str_or_null(v: Optional[str]) -> str:
+def _str_or_null(v: Optional[str], escape: Callable[[str], str]) -> str:
     if v is None:
         return "NULL"
-    return f"'{esc_sql_literal(v)}'"
+    return f"'{escape(v)}'"
 
 
 def _int_or_null(v: Optional[int]) -> str:
@@ -136,7 +138,7 @@ class NativeLoadStateManager:
     def get_last_cursor(self, pipeline_name: str) -> Optional[str]:
         """Return the most recent successful cursor_value for this pipeline."""
         table_id = self._dest.get_full_table_id(self._dataset, self._table)
-        pn = esc_sql_literal(pipeline_name)
+        pn = self._dest.escape_string_literal(pipeline_name)
         sql = (
             f"SELECT cursor_value "
             f"FROM {table_id} "
@@ -184,12 +186,12 @@ class NativeLoadStateManager:
         "no new files" run that silently masks the failure.
         """
         table_id = self._dest.get_full_table_id(self._dataset, self._table)
-        pn = esc_sql_literal(pipeline_name)
+        pn = self._dest.escape_string_literal(pipeline_name)
         stale_cutoff = self._dest.timestamp_n_days_ago(_STALE_HOURS // 24)
 
         cursor_filter = ""
         if cursor_min:
-            cm = esc_sql_literal(cursor_min)
+            cm = self._dest.escape_string_literal(cursor_min)
             cursor_filter = f"AND (cursor_value IS NULL OR cursor_value >= '{cm}')"
 
         sql = (
@@ -330,7 +332,7 @@ class NativeLoadStateManager:
     def clear_pipeline_state(self, pipeline_name: str) -> None:
         """Delete all log rows for this pipeline. Called from --full-refresh only."""
         table_id = self._dest.get_full_table_id(self._dataset, self._table)
-        pn = esc_sql_literal(pipeline_name)
+        pn = self._dest.escape_string_literal(pipeline_name)
         self._dest.execute_sql(
             f"DELETE FROM {table_id} WHERE pipeline_name = '{pn}'",
             self._dataset,
@@ -377,18 +379,18 @@ class NativeLoadStateManager:
 
                 value_rows.append(
                     f"("
-                    f"'{esc_sql_literal(load_id)}', "
-                    f"'{esc_sql_literal(pipeline_name)}', "
-                    f"'{esc_sql_literal(uri)}', "
+                    f"'{self._dest.escape_string_literal(load_id)}', "
+                    f"'{self._dest.escape_string_literal(pipeline_name)}', "
+                    f"'{self._dest.escape_string_literal(uri)}', "
                     f"{_int_or_null(generation)}, "
                     f"{_int_or_null(size)}, "
-                    f"{_str_or_null(job_id)}, "
+                    f"{_str_or_null(job_id, self._dest.escape_string_literal)}, "
                     f"{_int_or_null(loaded)}, "
-                    f"{_str_or_null(cursor_value)}, "
-                    f"'{esc_sql_literal(status)}', "
-                    f"{_str_or_null(error_message)}, "
-                    f"{_ts_literal(started_at)}, "
-                    f"{_ts_literal(finished_at) if finished_at else 'NULL'}"
+                    f"{_str_or_null(cursor_value, self._dest.escape_string_literal)}, "
+                    f"'{self._dest.escape_string_literal(status)}', "
+                    f"{_str_or_null(error_message, self._dest.escape_string_literal)}, "
+                    f"{_ts_literal(started_at, self._dest.escape_string_literal)}, "
+                    f"{_ts_literal(finished_at, self._dest.escape_string_literal) if finished_at else 'NULL'}"
                     f")"
                 )
 

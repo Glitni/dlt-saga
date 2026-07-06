@@ -9,7 +9,6 @@ from dlt_saga.utility.orchestration.execution_plan import (
     ExecutionMetadata,
     ExecutionPlanManager,
 )
-from dlt_saga.utility.sql import escape_sql_literal
 
 
 class _RecordingDestination:
@@ -17,6 +16,17 @@ class _RecordingDestination:
 
     def __init__(self):
         self.sql_calls: list[str] = []
+
+    def escape_string_literal(self, value: str) -> str:
+        # Backslash dialect (BigQuery/Databricks), matching Destination base.
+        return (
+            value.replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+            .replace("\x00", "")
+        )
 
     def get_full_table_id(self, schema: str, table: str) -> str:
         return f"{schema}.{table}"
@@ -574,7 +584,7 @@ class TestRecordLocalRun:
         # The error is embedded as a well-formed single-quoted literal whose body
         # carries no raw newline (which is what previously broke the statement).
         plans_sql = next(s for s in dest.sql_calls if "error_message" in s)
-        escaped = escape_sql_literal(multiline)
+        escaped = dest.escape_string_literal(multiline)
         assert "\n" not in escaped
         assert f"'{escaped}'" in plans_sql
 

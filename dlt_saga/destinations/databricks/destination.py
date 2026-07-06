@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from dlt_saga.destinations.base import Destination
 from dlt_saga.destinations.databricks.config import DatabricksDestinationConfig
-from dlt_saga.utility.sql import escape_sql_literal
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.base import MaterializationHints
@@ -569,9 +568,9 @@ class DatabricksDestination(Destination):
 
     def columns_query(self, database: str, schema: str, table: str) -> str:
         catalog = database or self.config.catalog
-        safe_catalog = catalog.replace("'", "''")
-        safe_schema = schema.replace("'", "''")
-        safe_table = table.replace("'", "''")
+        safe_catalog = self.escape_string_literal(catalog)
+        safe_schema = self.escape_string_literal(schema)
+        safe_table = self.escape_string_literal(table)
         return f"""
             SELECT column_name, data_type
             FROM system.information_schema.columns
@@ -590,8 +589,8 @@ class DatabricksDestination(Destination):
         # Catalog-scoped information_schema needs only USE CATALOG / schema
         # access; the account-wide system.information_schema is often admin-gated.
         catalog = self.quote_identifier(self.config.catalog)
-        safe_schema = dataset.replace("'", "''")
-        safe_table = table.replace("'", "''")
+        safe_schema = self.escape_string_literal(dataset)
+        safe_table = self.escape_string_literal(table)
         rows = self.execute_sql(
             f"SELECT column_name, comment FROM {catalog}.information_schema.columns "
             f"WHERE table_schema = '{safe_schema}' AND table_name = '{safe_table}'"
@@ -605,13 +604,13 @@ class DatabricksDestination(Destination):
         for column, description in descriptions.items():
             self.execute_sql(
                 f"ALTER TABLE {fqn} ALTER COLUMN {self.quote_identifier(column)} "
-                f"COMMENT '{escape_sql_literal(description)}'"
+                f"COMMENT '{self.escape_string_literal(description)}'"
             )
 
     def get_table_description(self, dataset: str, table: str) -> Optional[str]:
         catalog = self.quote_identifier(self.config.catalog)
-        safe_schema = dataset.replace("'", "''")
-        safe_table = table.replace("'", "''")
+        safe_schema = self.escape_string_literal(dataset)
+        safe_table = self.escape_string_literal(table)
         rows = list(
             self.execute_sql(
                 f"SELECT comment FROM {catalog}.information_schema.tables "
@@ -623,7 +622,7 @@ class DatabricksDestination(Destination):
     def set_table_description(self, dataset: str, table: str, description: str) -> None:
         fqn = self.get_full_table_id(dataset, table)
         self.execute_sql(
-            f"COMMENT ON TABLE {fqn} IS '{escape_sql_literal(description)}'"
+            f"COMMENT ON TABLE {fqn} IS '{self.escape_string_literal(description)}'"
         )
 
     # -------------------------------------------------------------------------
@@ -733,8 +732,6 @@ class DatabricksDestination(Destination):
         already exists (preserves files and Delta time travel) or CREATE TABLE on
         first run.  DROP TABLE PURGE is reserved for --full-refresh only.
         """
-        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
-
         derived_ddl = ", ".join(
             f"{self.quote_identifier(c.name)} {c.sql_type}"
             for c in spec.derived_columns
@@ -772,7 +769,7 @@ class DatabricksDestination(Destination):
                 parts.append(self.cluster_ddl(spec.cluster_columns))
 
         if target_location:
-            parts.append(f"LOCATION '{esc_sql_literal(target_location)}'")
+            parts.append(f"LOCATION '{self.escape_string_literal(target_location)}'")
 
         if table_format == "delta_uniform":
             parts.append(
@@ -800,8 +797,6 @@ class DatabricksDestination(Destination):
 
     def _build_copy_into(self, spec: "Any", target_id: str) -> str:
         """Build COPY INTO SQL with derived column SELECT transformation."""
-        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
-
         # Prefer the immediate parent dir so the FILES list uses short basenames.
         # Fall back to the configured source_uri root when URIs span multiple dirs
         # (e.g. cross-partition chunks) — Databricks resolves FILES relative to FROM.
@@ -842,14 +837,14 @@ class DatabricksDestination(Destination):
                 if uri.startswith(source_prefix)
                 else uri.split("/")[-1]
             )
-            file_items.append(f"'{esc_sql_literal(rel)}'")
+            file_items.append(f"'{self.escape_string_literal(rel)}'")
         files_list = ", ".join(file_items)
 
         format_options_str = self._format_databricks_copy_options(spec)
 
         return (
             f"COPY INTO {target_id} "
-            f"FROM ({select_clause} FROM '{esc_sql_literal(source_prefix)}'{where_clause}) "
+            f"FROM ({select_clause} FROM '{self.escape_string_literal(source_prefix)}'{where_clause}) "
             f"FILEFORMAT = {file_format} "
             f"FILES = ({files_list}) "
             f"FORMAT_OPTIONS ({format_options_str}) "
@@ -861,18 +856,18 @@ class DatabricksDestination(Destination):
         opts = dict(spec.format_options or {})
         parts = []
         if "field_delimiter" in opts:
-            delim = opts["field_delimiter"].replace("'", "\\'")
+            delim = self.escape_string_literal(opts["field_delimiter"])
             parts.append(f"'delimiter' = '{delim}'")
         if opts.get("skip_leading_rows", 0):
             parts.append("'header' = 'true'")
         if "encoding" in opts:
-            enc = opts["encoding"].replace("'", "\\'")
+            enc = self.escape_string_literal(opts["encoding"])
             parts.append(f"'encoding' = '{enc}'")
         if "quote_character" in opts:
-            q = opts["quote_character"].replace("'", "\\'")
+            q = self.escape_string_literal(opts["quote_character"])
             parts.append(f"'quote' = '{q}'")
         if "null_marker" in opts:
-            nm = opts["null_marker"].replace("'", "\\'")
+            nm = self.escape_string_literal(opts["null_marker"])
             parts.append(f"'nullValue' = '{nm}'")
         return ", ".join(parts) if parts else "'mergeSchema' = 'true'"
 
@@ -940,6 +935,4 @@ class DatabricksDestination(Destination):
         return col + ":" + ".".join(spec.path)
 
     def _render_regex_match(self, col_sql: str, pattern: str) -> str:
-        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
-
-        return f"{col_sql} RLIKE '{esc_sql_literal(pattern)}'"
+        return f"{col_sql} RLIKE '{self.escape_string_literal(pattern)}'"

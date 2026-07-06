@@ -72,11 +72,9 @@ class AdlsStorageClient(StorageClient):
         )
         where_clause = f"({like_clauses})"
 
-        from dlt_saga.pipelines.native_load._sql import esc_sql_literal
-
         sql = (
             f"SELECT path, size, modification_time "
-            f"FROM LIST('{esc_sql_literal(uri)}', RECURSIVE => TRUE) "
+            f"FROM LIST('{self._destination.escape_string_literal(uri)}', RECURSIVE => TRUE) "
             f"WHERE {where_clause} "
             f"ORDER BY path"
         )

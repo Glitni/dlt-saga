@@ -406,9 +406,10 @@ class TestRenderFilterDefault:
         assert dest.render_filter(specs) == "`id` = 5"
 
     def test_string_escaping(self):
+        # Base dialect is backslash (BigQuery/Databricks): '' is invalid there.
         dest = _BaseDestination()
         specs = parse_filters([{"column": "x", "op": "eq", "value": "o'brien"}])
-        assert dest.render_filter(specs) == "`x` = 'o''brien'"
+        assert dest.render_filter(specs) == "`x` = 'o\\'brien'"
 
     def test_custom_column_resolver(self):
         """When a resolver is passed, column refs go through it."""
@@ -477,8 +478,9 @@ class TestRenderFilterBigQuery:
     def test_regex_uses_regexp_contains(self):
         dest = self._make_dest()
         specs = parse_filters([{"column": "x", "op": "matches", "value": "^foo"}])
-        # Raw string literal — BQ regex literals use r''
-        assert dest.render_filter(specs) == "REGEXP_CONTAINS(`x`, r'^foo')"
+        # Normal (non-raw) literal + backslash escaping — a raw r'' literal can't
+        # carry a quote; the parser unescapes \\d back to \d for the regex engine.
+        assert dest.render_filter(specs) == "REGEXP_CONTAINS(`x`, '^foo')"
 
     def test_native_load_where_resolves_case_insensitive(self):
         """Filter on logical name `config` should bind to ext column `Config`."""

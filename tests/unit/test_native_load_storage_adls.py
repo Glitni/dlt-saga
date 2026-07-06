@@ -18,6 +18,7 @@ from dlt_saga.pipelines.native_load.storage.adls import (
 
 def _make_client(rows=None):
     dest = MagicMock()
+    dest.escape_string_literal.side_effect = lambda v: v.replace("'", "'")
     dest.__class__.__name__ = "DatabricksDestination"
     dest.execute_sql.return_value = rows or []
     return AdlsStorageClient(dest)

@@ -14,7 +14,6 @@ import duckdb
 from dlt_saga.destinations.base import Destination
 from dlt_saga.destinations.duckdb.config import DuckDBDestinationConfig
 from dlt_saga.utility.naming import normalize_identifier
-from dlt_saga.utility.sql import escape_sql_literal
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +333,17 @@ class DuckDBDestination(Destination):
     def quote_identifier(self, name: str) -> str:
         return f'"{name}"'
 
+    def escape_string_literal(self, value: str) -> str:
+        """DuckDB string literals follow standard SQL: the single quote is
+        doubled (``''``) and backslash is a literal character (no C-style escape
+        processing). Newlines/tabs are valid inside a single-quoted literal, so
+        they're left as-is; only NUL is dropped. Emitting backslash escape
+        sequences here (as the backslash dialect does) would store literal
+        ``\\n`` / ``\\\\`` text and prevent description reconcile from ever
+        reaching a steady state.
+        """
+        return value.replace("'", "''").replace("\x00", "")
+
     def timestamp_n_days_ago(self, days: int) -> str:
         return f"now() - INTERVAL '{days}' DAY"
 
@@ -365,8 +375,8 @@ class DuckDBDestination(Destination):
         return f"CAST({expression} AS VARCHAR)"
 
     def columns_query(self, database: str, schema: str, table: str) -> str:
-        safe_schema = schema.replace("'", "''")
-        safe_table = table.replace("'", "''")
+        safe_schema = self.escape_string_literal(schema)
+        safe_table = self.escape_string_literal(table)
         return f"""
             SELECT column_name, data_type
             FROM information_schema.columns
@@ -387,8 +397,8 @@ class DuckDBDestination(Destination):
         return True
 
     def get_column_descriptions(self, dataset: str, table: str) -> Dict[str, str]:
-        safe_schema = dataset.replace("'", "''")
-        safe_table = table.replace("'", "''")
+        safe_schema = self.escape_string_literal(dataset)
+        safe_table = self.escape_string_literal(table)
         rows = self.execute_sql(
             "SELECT column_name, comment FROM duckdb_columns() "
             f"WHERE schema_name = '{safe_schema}' AND table_name = '{safe_table}'"
@@ -406,12 +416,12 @@ class DuckDBDestination(Destination):
         for column, description in descriptions.items():
             conn.execute(
                 f"COMMENT ON COLUMN {table_id}.{self.quote_identifier(column)} "
-                f"IS '{escape_sql_literal(description)}'"
+                f"IS '{self.escape_string_literal(description)}'"
             )
 
     def get_table_description(self, dataset: str, table: str) -> Optional[str]:
-        safe_schema = dataset.replace("'", "''")
-        safe_table = table.replace("'", "''")
+        safe_schema = self.escape_string_literal(dataset)
+        safe_table = self.escape_string_literal(table)
         rows = list(
             self.execute_sql(
                 "SELECT comment FROM duckdb_tables() "
@@ -424,7 +434,7 @@ class DuckDBDestination(Destination):
         table_id = self.get_full_table_id(dataset, table)
         # Direct execute — see set_column_descriptions (avoid ';' script split).
         self.connection.execute(
-            f"COMMENT ON TABLE {table_id} IS '{escape_sql_literal(description)}'"
+            f"COMMENT ON TABLE {table_id} IS '{self.escape_string_literal(description)}'"
         )
 
     def add_column(self, dataset: str, table: str, column: str, type_name: str) -> None:

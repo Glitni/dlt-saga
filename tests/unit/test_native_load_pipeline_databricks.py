@@ -19,6 +19,9 @@ from dlt_saga.destinations.databricks.destination import DatabricksDestination
 
 def _make_dest() -> DatabricksDestination:
     dest = MagicMock(spec=DatabricksDestination)
+    dest.escape_string_literal = DatabricksDestination.escape_string_literal.__get__(
+        dest
+    )
     dest.quote_identifier.side_effect = lambda s: f"`{s}`"
     dest.get_full_table_id.side_effect = lambda ds, tbl: f"cat.{ds}.{tbl}"
     dest.partition_ddl.side_effect = lambda col, **kw: f"PARTITIONED BY ({col})"
@@ -81,6 +84,9 @@ def _make_spec(
 class TestCreateEmptyTargetDDL:
     def test_delta_default(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.partition_ddl.return_value = ""
@@ -96,6 +102,9 @@ class TestCreateEmptyTargetDDL:
 
     def test_iceberg_format(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.partition_ddl.return_value = "PARTITIONED BY (date_col)"
@@ -111,6 +120,9 @@ class TestCreateEmptyTargetDDL:
 
     def test_delta_uniform_tblproperties(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.partition_ddl.return_value = ""
@@ -127,6 +139,9 @@ class TestCreateEmptyTargetDDL:
 
     def test_delta_uniform_with_location_orders_location_before_tblproperties(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.partition_ddl.return_value = ""
@@ -144,6 +159,9 @@ class TestCreateEmptyTargetDDL:
 
     def test_location_clause_appended(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.partition_ddl.return_value = ""
@@ -159,6 +177,9 @@ class TestCreateEmptyTargetDDL:
 
     def test_no_location_when_none(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.partition_ddl.return_value = ""
@@ -174,6 +195,9 @@ class TestCreateEmptyTargetDDL:
         import logging
 
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.partition_ddl.return_value = "PARTITIONED BY (date_col)"
@@ -191,6 +215,9 @@ class TestCreateEmptyTargetDDL:
 
     def test_framework_columns_in_ddl(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.partition_ddl.return_value = ""
@@ -213,6 +240,9 @@ class TestCreateEmptyTargetDDL:
 class TestBuildCopyInto:
     def test_single_parent_uses_parent_prefix(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         spec = _make_spec(
             source_uris=[
@@ -231,6 +261,9 @@ class TestBuildCopyInto:
 
     def test_multi_parent_falls_back_to_source_uri(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         spec = _make_spec(
             source_uris=[
@@ -250,6 +283,9 @@ class TestBuildCopyInto:
 
     def test_metadata_file_path_in_select(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         spec = _make_spec()
 
@@ -259,6 +295,9 @@ class TestBuildCopyInto:
 
     def test_merge_schema_always_true(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         spec = _make_spec()
         sql = DatabricksDestination._build_copy_into(dest, spec, "cat.ds.tbl")
@@ -267,6 +306,9 @@ class TestBuildCopyInto:
 
     def test_jsonl_format_becomes_json(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         spec = _make_spec(file_type="jsonl")
         sql = DatabricksDestination._build_copy_into(dest, spec, "cat.ds.tbl")
@@ -275,6 +317,9 @@ class TestBuildCopyInto:
 
     def test_json_excludes_rescued_data(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         spec = _make_spec(file_type="jsonl")
         sql = DatabricksDestination._build_copy_into(dest, spec, "cat.ds.tbl")
@@ -282,6 +327,9 @@ class TestBuildCopyInto:
 
     def test_parquet_no_rescued_data_exclusion(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         spec = _make_spec(file_type="parquet")
         sql = DatabricksDestination._build_copy_into(dest, spec, "cat.ds.tbl")
@@ -297,6 +345,9 @@ class TestBuildCopyInto:
 class TestFormatDatabricksCopyOptions:
     def _call(self, format_options: dict) -> str:
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         spec = _make_spec()
         spec.format_options = format_options
         return DatabricksDestination._format_databricks_copy_options(dest, spec)
@@ -339,6 +390,9 @@ class TestFormatDatabricksCopyOptions:
 class TestDropTableExternal:
     def test_purge_sql_emitted(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.get_full_table_id.return_value = "cat.ds.tbl"
 
         DatabricksDestination.drop_table_external(dest, "ds", "tbl")
@@ -357,6 +411,9 @@ class TestDropTableExternal:
 class TestReplaceModeManagedTable:
     def test_replace_managed_emits_create_or_replace(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.partition_ddl.return_value = ""
@@ -372,6 +429,9 @@ class TestReplaceModeManagedTable:
 
     def test_append_managed_emits_create_if_not_exists(self):
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.partition_ddl.return_value = ""
@@ -390,6 +450,9 @@ class TestReplaceModeExternalTable:
     def test_replace_external_existing_table_truncates(self):
         """Routine replace on an existing external table uses TRUNCATE (no PURGE)."""
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.table_exists.return_value = True
@@ -406,6 +469,9 @@ class TestReplaceModeExternalTable:
     def test_replace_external_first_run_creates(self):
         """First-run replace on external table (no table yet) emits CREATE TABLE IF NOT EXISTS."""
         dest = MagicMock(spec=DatabricksDestination)
+        dest.escape_string_literal = (
+            DatabricksDestination.escape_string_literal.__get__(dest)
+        )
         dest.quote_identifier.side_effect = lambda s: f"`{s}`"
         dest.get_full_table_id.return_value = "cat.ds.tbl"
         dest.table_exists.return_value = False

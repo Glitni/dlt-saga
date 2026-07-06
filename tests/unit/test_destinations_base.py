@@ -47,6 +47,57 @@ class _ConcreteDestination(Destination):
 
 
 @pytest.mark.unit
+class TestEscapeStringLiteral:
+    """Base escaping is the backslash dialect (BigQuery/Databricks). DuckDB
+    overrides it with standard-SQL doubling — see TestDuckDBEscapeStringLiteral.
+    """
+
+    def test_single_quote_uses_backslash_not_doubling(self):
+        # GoogleSQL rejects '' inside a single-quoted literal; it wants \'.
+        assert _ConcreteDestination().escape_string_literal("it's") == "it\\'s"
+
+    def test_backslash_escaped_first(self):
+        assert _ConcreteDestination().escape_string_literal("a\\b") == "a\\\\b"
+
+    def test_control_chars_become_escape_sequences(self):
+        assert (
+            _ConcreteDestination().escape_string_literal("a\nb\rc\td")
+            == "a\\nb\\rc\\td"
+        )
+
+    def test_nul_dropped(self):
+        assert _ConcreteDestination().escape_string_literal("a\x00b") == "ab"
+
+    def test_plain_value_unchanged(self):
+        assert _ConcreteDestination().escape_string_literal("dlt_google_sheets") == (
+            "dlt_google_sheets"
+        )
+
+
+@pytest.mark.unit
+class TestDuckDBEscapeStringLiteral:
+    def _duck(self):
+        from dlt_saga.destinations.duckdb.config import DuckDBDestinationConfig
+        from dlt_saga.destinations.duckdb.destination import DuckDBDestination
+
+        return DuckDBDestination(
+            DuckDBDestinationConfig(
+                project_id="t", location="local", database_path=":memory:"
+            )
+        )
+
+    def test_single_quote_doubled(self):
+        assert self._duck().escape_string_literal("it's") == "it''s"
+
+    def test_backslash_left_literal(self):
+        # DuckDB treats backslash literally; escaping it would store `\\` text.
+        assert self._duck().escape_string_literal("a\\b") == "a\\b"
+
+    def test_nul_dropped(self):
+        assert self._duck().escape_string_literal("a\x00b") == "ab"
+
+
+@pytest.mark.unit
 class TestDataclasses:
     def test_derived_column(self):
         col = DerivedColumn(name="my_col", sql_expr="LOWER(name)", sql_type="STRING")
