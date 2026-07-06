@@ -225,26 +225,46 @@ class DatabricksDestination(Destination):
         (``zerobus`` selects the Databricks Zerobus SDK for append loads;
         ``copy_into`` selects the default COPY INTO loader).
         Unknown hints are silently ignored.
+
+        A failure to apply configured hints (adapter unavailable or a bad kwarg)
+        is logged at WARNING — dropping partitioning/clustering silently would
+        create the table with the wrong physical layout and no visible signal.
         """
         try:
             from dlt.destinations.adapters import databricks_adapter
+        except ImportError as e:
+            logger.warning(
+                "dlt databricks_adapter is unavailable (%s); Databricks hints "
+                "will NOT be applied — the table may be created without the "
+                "configured partitioning/clustering/description.",
+                e,
+            )
+            return resource
 
-            adapter_kwargs: dict = {}
-            if "table_description" in hints:
-                adapter_kwargs["table_description"] = hints["table_description"]
-            if "cluster_columns" in hints:
-                adapter_kwargs["liquid_cluster_by"] = hints["cluster_columns"]
-            if "partition_column" in hints:
-                adapter_kwargs["partition"] = hints["partition_column"]
-            if "insert_api" in hints and hints["insert_api"]:
-                adapter_kwargs["insert_api"] = hints["insert_api"]
+        adapter_kwargs: dict = {}
+        if "table_description" in hints:
+            adapter_kwargs["table_description"] = hints["table_description"]
+        if "cluster_columns" in hints:
+            adapter_kwargs["liquid_cluster_by"] = hints["cluster_columns"]
+        if "partition_column" in hints:
+            adapter_kwargs["partition"] = hints["partition_column"]
+        if "insert_api" in hints and hints["insert_api"]:
+            adapter_kwargs["insert_api"] = hints["insert_api"]
 
-            if adapter_kwargs:
-                return databricks_adapter(resource, **adapter_kwargs)
-        except (ImportError, AttributeError, TypeError) as e:
-            logger.debug("databricks_adapter not available (%s), skipping hints", e)
+        if not adapter_kwargs:
+            return resource
 
-        return resource
+        try:
+            return databricks_adapter(resource, **adapter_kwargs)
+        except (AttributeError, TypeError) as e:
+            logger.warning(
+                "Failed to apply Databricks hints (%s) via databricks_adapter: "
+                "%s. The table may be created without the configured "
+                "partitioning/clustering/description.",
+                ", ".join(sorted(adapter_kwargs)),
+                e,
+            )
+            return resource
 
     def run_pipeline(self, pipeline: Any, data: Any) -> Any:
         """Ensure the schema exists and run the pipeline."""

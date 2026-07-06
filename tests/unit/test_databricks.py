@@ -1313,6 +1313,41 @@ class TestDatabricksApplyHints:
         # If ImportError, result should be the original resource
         assert result is resource or result is not None  # at minimum doesn't raise
 
+    def test_adapter_typeerror_warns_loudly_and_returns_unhinted(self, caplog):
+        # A bad adapter kwarg (API mismatch) must WARN, not silently discard the
+        # hints at DEBUG — otherwise the table is created with the wrong layout
+        # and nothing surfaces.
+        dest = _make_destination()
+        resource = MagicMock()
+        with patch(
+            "dlt.destinations.adapters.databricks_adapter",
+            side_effect=TypeError("unexpected keyword argument 'partition'"),
+        ):
+            with caplog.at_level(logging.WARNING):
+                result = dest.apply_hints(resource, partition_column="dt")
+
+        assert result is resource
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings, "a failed hint apply must warn, not silently discard hints"
+        assert any("partition" in r.getMessage() for r in warnings)
+
+    def test_import_error_warns_loudly(self, caplog):
+        dest = _make_destination()
+        resource = MagicMock()
+        real_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "dlt.destinations.adapters":
+                raise ImportError("adapter module unavailable")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            with caplog.at_level(logging.WARNING):
+                result = dest.apply_hints(resource, cluster_columns=["id"])
+
+        assert result is resource
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # DatabricksDestination — get_access_manager singleton
