@@ -1024,7 +1024,7 @@ def validate_configs(
 
     Examples:
         saga validate                                       # Validate all configs
-        saga validate --select "type:google_sheets"         # Validate specific type
+        saga validate --select "group:google_sheets"         # Validate specific group
         saga validate --select "tag:daily"                  # Validate by tag
     """
     setup_logging(verbose)
@@ -1118,11 +1118,11 @@ def ingest(
     Examples:
         saga ingest                                         # All ingest-enabled
         saga ingest --select "tag:daily"                    # By tag
-        saga ingest --select "type:google_sheets"           # By type
+        saga ingest --select "group:google_sheets"           # By group
         saga ingest --workers 8 --select "tag:daily"        # Parallel
         saga ingest --orchestrate --target prod             # Distributed via Cloud Run
         saga ingest --full-refresh --select "pipeline_name" # Drop and reload
-        saga ingest --select "type:api" --start-value-override "2026-01-01"  # Backfill
+        saga ingest --select "group:api" --start-value-override "2026-01-01"  # Backfill
     """
     setup_logging(verbose)
     in_cloud_run = check_cloud_run_environment()
@@ -1362,7 +1362,7 @@ def update_access(
 
     Examples:
         saga update-access                                  # All tables
-        saga update-access --select "type:google_sheets"    # Specific type
+        saga update-access --select "group:google_sheets"    # Specific group
         saga update-access --target prod                    # In production
         saga update-access --dry-run --target prod          # Preview only
     """
@@ -1575,7 +1575,7 @@ def run(
         saga run --partial-refresh --select "..."                       # Partial refresh historize
         saga run --historize-from 2025-07-01 --select "..."             # Historize from date
         saga run --orchestrate --target prod                            # Distributed via Cloud Run
-        saga run --select "type:api" --start-value-override "2026-01-01"  # Backfill
+        saga run --select "group:api" --start-value-override "2026-01-01"  # Backfill
     """
     setup_logging(verbose)
     in_cloud_run = check_cloud_run_environment()
