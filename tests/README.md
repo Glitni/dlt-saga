@@ -12,7 +12,7 @@ This document describes the test infrastructure for the saga-dlt package and pro
 Tests for the dbt-style pipeline selector system that filters pipeline configurations.
 
 - **Tag Selection**: `tag:daily`, `tag:critical`
-- **Type Selection**: `type:google_sheets`, `pipeline-type:api`
+- **Group Selection**: `group:google_sheets`, `group:api`
 - **Glob Patterns**: `*balance*`, `google_sheets__*`
 - **Union Logic**: Space-separated selectors (OR)
 - **Intersection Logic**: Comma-separated selectors (AND)

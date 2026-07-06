@@ -41,8 +41,8 @@ Schedule values in config files:
         - 9                # AND every day at 9am
 
 Selector combinations:
-- Space-separated: UNION (OR) - "tag:daily type:google_sheets"
-- Comma-separated: INTERSECTION (AND) - "tag:daily,type:google_sheets"
+- Space-separated: UNION (OR) - "tag:daily group:google_sheets"
+- Comma-separated: INTERSECTION (AND) - "tag:daily,group:google_sheets"
 """
 
 import fnmatch
@@ -90,10 +90,10 @@ class PipelineSelector:
             select(["google_sheets__data"]) -> exact match
             select(["*balance*"]) -> glob pattern
             select(["tag:daily"]) -> configs with daily tag
-            select(["type:google_sheets"]) -> all google_sheets configs
-            select(["tag:daily", "type:google_sheets"]) -> UNION (configs with daily tag OR google_sheets type)
-            select(["tag:daily type:google_sheets"]) -> UNION (space-separated in single string)
-            select(["tag:daily,type:google_sheets"]) -> INTERSECTION (google_sheets configs with daily tag)
+            select(["group:google_sheets"]) -> all google_sheets configs
+            select(["tag:daily", "group:google_sheets"]) -> UNION (configs with daily tag OR google_sheets group)
+            select(["tag:daily group:google_sheets"]) -> UNION (space-separated in single string)
+            select(["tag:daily,group:google_sheets"]) -> INTERSECTION (google_sheets configs with daily tag)
         """
         # Default: return all configs if no selectors
         if not selectors:
@@ -105,7 +105,7 @@ class PipelineSelector:
 
         for selector_group in selectors:
             # First, split by spaces to handle UNION within a single --select argument
-            # Example: --select "tag:daily type:google_sheets" -> ["tag:daily", "type:google_sheets"]
+            # Example: --select "tag:daily group:google_sheets" -> ["tag:daily", "group:google_sheets"]
             space_separated = selector_group.split()
 
             for selector in space_separated:
@@ -126,7 +126,7 @@ class PipelineSelector:
         """Apply a single selector to get matching configs.
 
         Args:
-            selector: Single selector string (e.g., "tag:daily", "type:google_sheets", "google_sheets__*")
+            selector: Single selector string (e.g., "tag:daily", "group:google_sheets", "google_sheets__*")
 
         Returns:
             List of matching configs
