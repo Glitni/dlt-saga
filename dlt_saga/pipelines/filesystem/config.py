@@ -127,14 +127,6 @@ class FilesystemConfig(BaseConfig):
         },
     )
 
-    # Post-load cleanup
-    delete_after_load: Optional[bool] = field(
-        default=False,
-        metadata={
-            "description": "Delete source files after successful load (default: False, opt-in only)"
-        },
-    )
-
     # CSV file metadata injection
     csv_include_file_metadata: Optional[bool] = field(
         default=False,
