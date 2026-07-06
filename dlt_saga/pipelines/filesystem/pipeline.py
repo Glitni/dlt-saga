@@ -25,10 +25,6 @@ class FilesystemPipeline(BasePipeline):
         # Initialize client
         self.client = FilesystemClient(self.source_config)
 
-        # Track filesystem resource for post-load cleanup
-        self._filesystem_resource = None
-        self._processed_files: list[str] = []
-
         # Initialize pipeline with optional log prefix
         super().__init__(config, log_prefix)
 
@@ -316,125 +312,9 @@ class FilesystemPipeline(BasePipeline):
         if apply_defaults_transformer:
             resource = resource | apply_defaults_transformer
 
-        # Store the base filesystem resource for potential cleanup
-        if self.source_config.delete_after_load:
-            self._filesystem_resource = resource
-
         # Apply table name AFTER transformer to ensure it's not overwritten
         if self.table_name:
             resource = resource.with_name(self.table_name)
 
         description = self._table_description()
         return [(resource, description)]
-
-    def _should_delete_files(self) -> bool:
-        """Check if file deletion should proceed."""
-        if not self.source_config.delete_after_load:
-            return False
-
-        if not self._filesystem_resource:
-            logger.debug("No filesystem resource tracked, skipping file deletion")
-            return False
-
-        return True
-
-    def _get_files_to_delete(self) -> List[str]:
-        """Get list of file paths to delete from filesystem resource."""
-        files_to_delete: List[str] = []
-        if self._filesystem_resource:
-            for file_item in self._filesystem_resource:
-                file_path = file_item.get("file_url") or file_item.get("file_name")
-                if file_path:
-                    files_to_delete.append(file_path)
-        return files_to_delete
-
-    def _normalize_file_path(self, file_path: str) -> str:
-        """Normalize file path by removing scheme prefix for fsspec.
-
-        Args:
-            file_path: File path (potentially with scheme like sftp://host/path)
-
-        Returns:
-            Normalized path without scheme
-        """
-        if "://" not in file_path:
-            return file_path
-
-        # Extract path after hostname
-        # e.g., sftp://host/path/file.txt -> /path/file.txt
-        path_parts = file_path.split("://", 1)
-        if len(path_parts) > 1:
-            # Remove hostname, keep path
-            return "/" + path_parts[1].split("/", 1)[1]
-
-        return file_path
-
-    def _delete_files(self, fs_client, files_to_delete: List[str]) -> int:
-        """Delete files using fsspec client.
-
-        Args:
-            fs_client: fsspec filesystem client
-            files_to_delete: List of file paths to delete
-
-        Returns:
-            Number of successfully deleted files
-        """
-        deleted_count = 0
-        for file_path in files_to_delete:
-            try:
-                normalized_path = self._normalize_file_path(file_path)
-                fs_client.rm(normalized_path)
-                deleted_count += 1
-                logger.debug(f"Deleted source file: {file_path}")
-            except Exception as e:
-                logger.warning(f"Failed to delete file {file_path}: {e}", exc_info=True)
-
-        return deleted_count
-
-    def _delete_source_files(self) -> None:
-        """Delete source files after successful load.
-
-        Uses fsspec to delete files that were processed during extraction.
-        Only called if delete_after_load config is enabled.
-        """
-        if not self._should_delete_files():
-            return
-
-        try:
-            from dlt.sources.filesystem.helpers import fsspec_from_resource
-
-            fs_client = fsspec_from_resource(self._filesystem_resource)
-            files_to_delete = self._get_files_to_delete()
-
-            if not files_to_delete:
-                logger.debug("No files to delete")
-                return
-
-            deleted_count = self._delete_files(fs_client, files_to_delete)
-
-            if deleted_count > 0:
-                logger.info(
-                    f"Deleted {deleted_count} source file(s) after successful load"
-                )
-
-        except Exception as e:
-            # Don't fail the pipeline if cleanup fails
-            logger.error(
-                f"Failed to delete source files: {e}. Pipeline completed successfully, but cleanup failed.",
-                exc_info=True,
-            )
-
-    def run(self) -> Dict:
-        """Run the pipeline with optional post-load cleanup.
-
-        Overrides BasePipeline.run() to add file deletion after successful load.
-        """
-        # Run the base pipeline
-        load_info = super().run()
-
-        # Delete source files if configured (only after successful load)
-        if self.source_config.delete_after_load and load_info:
-            logger.debug("Post-load cleanup: deleting source files")
-            self._delete_source_files()
-
-        return load_info
