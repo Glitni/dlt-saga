@@ -39,3 +39,41 @@ class TestDuckDBTimestampNDaysAgo:
             assert "CURRENT_TIMESTAMP" not in expr
         finally:
             dest.close()
+
+
+@pytest.mark.unit
+class TestDuckDBHashExpression:
+    """Change-detection hash must not conflate NULL with '' and must keep column
+    boundaries unambiguous (the old md5(concat(COALESCE(...,''))) did both,
+    silently missing SCD2 changes)."""
+
+    def test_shape_uses_json_not_naive_concat(self):
+        from dlt_saga.testing import make_destination
+
+        dest = make_destination()
+        try:
+            expr = dest.hash_expression(["a", "b"])
+            assert "json_object" in expr
+            assert "md5(" in expr
+            assert "COALESCE" not in expr
+            assert "concat(" not in expr
+        finally:
+            dest.close()
+
+    def test_distinguishes_null_empty_and_separator_cases(self):
+        """(NULL,'x') vs ('','x') and ('a|b','c') vs ('a','b|c') must all hash
+        differently — each collided under the old expression."""
+        from dlt_saga.testing import make_destination
+
+        dest = make_destination()
+        try:
+            dest.execute_sql("CREATE TABLE t (a VARCHAR, b VARCHAR)")
+            dest.execute_sql(
+                "INSERT INTO t VALUES (NULL,'x'), ('','x'), ('a|b','c'), ('a','b|c')"
+            )
+            expr = dest.hash_expression(["a", "b"])
+            rows = dest.execute_sql(f"SELECT {expr} AS h FROM t")
+            hashes = [r[0] for r in rows]
+            assert len(set(hashes)) == len(hashes)
+        finally:
+            dest.close()

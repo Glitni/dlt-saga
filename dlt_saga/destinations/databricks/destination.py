@@ -572,8 +572,15 @@ class DatabricksDestination(Destination):
         return f"`{self.config.catalog}`.`{dataset}`.`{table}`"
 
     def hash_expression(self, columns: list) -> str:
-        parts = ", ".join(f"COALESCE(CAST(`{c}` AS STRING), '')" for c in columns)
-        return f"xxhash64(concat_ws('|', {parts}))"
+        # JSON-serialise the value columns (named struct fields) before hashing,
+        # for parity with BigQuery. The old concat_ws('|', COALESCE(...,''))
+        # silently missed SCD2 changes two ways: COALESCE(...,'') conflated NULL
+        # with the empty string, and the '|' separator was ambiguous (values
+        # containing '|' could shift across columns and hash identically). With a
+        # named-field struct, NULL is distinct from '' (a NULL field is omitted,
+        # '' is present) and column boundaries are unambiguous.
+        cols = ", ".join(f"`{c}`" for c in columns)
+        return f"xxhash64(to_json(struct({cols})))"
 
     def partition_ddl(self, column: str, col_type: Optional[str] = None) -> str:
         return f"PARTITIONED BY ({column})"  # col_type ignored on Databricks
