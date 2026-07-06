@@ -182,58 +182,102 @@ class TestUpdateAccessIfNeededDryRun:
 
 
 # ---------------------------------------------------------------------------
-# _apply_policy_update: dry-run skip + counter bump
+# Table-level IAM reconcile (BigQueryAccessManager over the base template):
+# dry-run skip + counter bump + special-member protection
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-class TestApplyPolicyUpdateDryRun:
-    """Mirror of the dataset-level dry-run checks for table-level IAM."""
+def _make_viewer_policy(members):
+    """A fake IAM policy carrying a dataViewer binding with `members`."""
+    return SimpleNamespace(
+        bindings=[{"role": "roles/bigquery.dataViewer", "members": list(members)}]
+    )
 
-    def _call(self, dry_run, missing, revoked):
+
+@pytest.mark.unit
+class TestBigQueryAccessManagerReconcile:
+    """Table-level access is diff-based: grant/revoke only the delta, honour
+    --dry-run (skip set_iam_policy but still bump counters + log), and never
+    revoke special (non-managed) IAM members. The control flow now lives in
+    the AccessManager base template; this exercises it via the BigQuery hooks.
+    """
+
+    def _run(self, dry_run, current_members, access_config, revoke_extra=True):
+        from unittest.mock import PropertyMock, patch
+
         from dlt_saga.destinations.bigquery.access import BigQueryAccessManager
 
-        manager = MagicMock(spec=BigQueryAccessManager)
-        manager.client = MagicMock()
-        set_execution_context(None, update_access=True, dry_run=dry_run)
+        client = MagicMock()
+        client.get_iam_policy.return_value = _make_viewer_policy(current_members)
 
-        BigQueryAccessManager._apply_policy_update(
-            manager,
-            "proj.ds.tbl",
-            MagicMock(),
-            missing_members=missing,
-            revoked_members=revoked,
-            table_id="my_table",
-        )
-        return manager.client, get_execution_context()
+        mgr = BigQueryAccessManager(project_id="proj", dataset_id="ds")
+        set_execution_context(None, update_access=True, dry_run=dry_run)
+        with patch.object(
+            BigQueryAccessManager, "client", new_callable=PropertyMock
+        ) as client_prop:
+            client_prop.return_value = client
+            mgr.manage_access_for_tables(
+                ["tbl"], access_config=access_config, revoke_extra=revoke_extra
+            )
+        return client, get_execution_context()
 
     def test_dry_run_skips_set_iam_policy(self):
-        client, _ = self._call(
+        client, _ = self._run(
             dry_run=True,
-            missing={"user:alice@example.com"},
-            revoked={"user:bob@example.com"},
+            current_members=["user:owner@example.com"],
+            access_config=["user:new@example.com"],
         )
         client.set_iam_policy.assert_not_called()
 
     def test_non_dry_run_calls_set_iam_policy(self):
-        client, _ = self._call(
+        client, _ = self._run(
             dry_run=False,
-            missing={"user:alice@example.com"},
-            revoked=set(),
+            current_members=[],
+            access_config=["user:new@example.com"],
         )
         client.set_iam_policy.assert_called_once()
 
-    def test_counters_bump_for_table_level_changes(self):
-        _, ctx = self._call(
+    def test_counters_bump_in_dry_run(self):
+        _, ctx = self._run(
             dry_run=True,
-            missing={"user:alice@example.com", "user:carol@example.com"},
-            revoked={"user:bob@example.com"},
+            current_members=["user:stale@example.com"],
+            access_config=["user:new@example.com"],
         )
-        assert ctx.access_grants_applied == 2
-        assert ctx.access_revokes_applied == 1
+        assert ctx.access_grants_applied == 1  # added new@
+        assert ctx.access_revokes_applied == 1  # removed stale@
 
-    def test_no_changes_returns_without_logging_or_bumping(self):
-        client, ctx = self._call(dry_run=False, missing=set(), revoked=set())
+    def test_no_changes_returns_without_bumping(self):
+        client, ctx = self._run(
+            dry_run=False,
+            current_members=["user:keep@example.com"],
+            access_config=["user:keep@example.com"],
+        )
         client.set_iam_policy.assert_not_called()
         assert ctx.access_grants_applied == 0
         assert ctx.access_revokes_applied == 0
+
+    def test_special_members_are_not_revoked(self):
+        # A non-managed entry (no user:/group:/serviceAccount: prefix) must
+        # survive revoke_extra — table-level management never removes it.
+        _, ctx = self._run(
+            dry_run=False,
+            current_members=["projectOwner:proj", "user:stale@example.com"],
+            access_config=["user:new@example.com"],
+            revoke_extra=True,
+        )
+        assert ctx.access_grants_applied == 1
+        assert ctx.access_revokes_applied == 1  # only user:stale, not projectOwner
+
+    def test_dry_run_uses_same_log_wording_as_real_run(self, caplog):
+        with caplog.at_level("INFO"):
+            self._run(
+                dry_run=True,
+                current_members=["user:stale@example.com"],
+                access_config=["user:new@example.com"],
+            )
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "would " not in joined
+        assert "[DRY RUN]" not in joined
+        assert "Updated access for table tbl" in joined
+        assert "+ granted user:new@example.com" in joined
+        assert "- revoked user:stale@example.com" in joined

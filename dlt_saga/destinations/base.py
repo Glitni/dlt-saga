@@ -975,22 +975,140 @@ class AccessManager(ABC):
     - BigQuery: IAM policies at table level
     - Snowflake: GRANT statements for roles
     - Postgres: GRANT statements for users
+
+    The reconcile control flow — the per-table grant/revoke diff, the
+    ``--dry-run`` gate, the run-level counter bumps, and the per-table
+    logging — is shared and lives here as a template method
+    (:meth:`manage_access_for_tables`). Subclasses supply only the
+    vendor-specific pieces via the hooks below:
+
+    - :meth:`parse_access_list` — config entries → typed principal buckets.
+    - :meth:`current_principals` — principals currently granted on a table.
+    - :meth:`apply_access_changes` — write the computed grant/revoke delta.
+    - :meth:`_prime_current_grants` (optional) — batch-load current grants.
+    - :meth:`_revocable` (optional) — restrict which principals may be revoked.
+
+    ``current_principals`` and the desired set built from
+    ``parse_access_list`` must use the *same* principal representation so the
+    base can diff them directly (BigQuery: IAM member strings like
+    ``user:email``; Databricks: bare principal names).
     """
 
-    @abstractmethod
     def manage_access_for_tables(
         self,
         table_ids: list[str],
         access_config: Optional[list[str]],
         revoke_extra: bool = True,
     ) -> None:
-        """Manage access permissions for multiple tables.
+        """Reconcile read access for multiple tables against config.
+
+        Template method: owns the guards, the per-table diff, the dry-run
+        gate, the counters, and the logging. Errors are isolated per table so
+        one failure doesn't abort the rest of the batch.
 
         Args:
             table_ids: List of table identifiers (format varies by destination)
-            access_config: List of access entries (e.g., ["user:email@example.com"])
-                          None means don't manage access, [] means revoke all access
-            revoke_extra: Whether to revoke permissions not in access_config
+            access_config: List of access entries (e.g., ["user:email@example.com"]).
+                None means don't manage access; [] means revoke all managed access.
+            revoke_extra: Whether to revoke managed principals not in access_config
+        """
+        if access_config is None:
+            logger.debug("No access configuration provided, skipping access management")
+            return
+        if not isinstance(access_config, list):
+            logger.warning("Access config must be a list, got %s", type(access_config))
+            return
+
+        desired = self._desired_principal_set(access_config)
+        self._prime_current_grants(table_ids)
+
+        for table_id in table_ids:
+            try:
+                self._reconcile_table(table_id, desired, revoke_extra)
+            except Exception as e:
+                logger.error("Failed to manage access for table %s: %s", table_id, e)
+
+    def _reconcile_table(
+        self, table_id: str, desired: set[str], revoke_extra: bool
+    ) -> None:
+        """Grant/revoke the delta for a single table."""
+        current = self.current_principals(table_id)
+        to_grant = desired - current
+        to_revoke = (self._revocable(current) - desired) if revoke_extra else set()
+        if not (to_grant or to_revoke):
+            return
+
+        from dlt_saga.utility.cli.context import get_execution_context
+
+        context = get_execution_context()
+        # Honour --dry-run: skip the destructive write, but still bump the
+        # counters and log the diff so the run summary reports what *would*
+        # be applied. Per-line wording is identical in both modes.
+        if not context.dry_run:
+            self.apply_access_changes(table_id, to_grant, to_revoke)
+        context.access_grants_applied += len(to_grant)
+        context.access_revokes_applied += len(to_revoke)
+        self._log_access_changes(table_id, to_grant, to_revoke)
+
+    def _log_access_changes(
+        self, table_id: str, to_grant: set[str], to_revoke: set[str]
+    ) -> None:
+        """Emit a per-table access-change summary (same wording in dry-run)."""
+        lines = [f"Updated access for table {table_id}"]
+        for principal in sorted(to_grant):
+            lines.append(f"  + granted {principal}")
+        for principal in sorted(to_revoke):
+            lines.append(f"  - revoked {principal}")
+        logger.info("\n".join(lines))
+
+    def _desired_principal_set(self, access_config: list[str]) -> set[str]:
+        """Flatten the parsed access list into the canonical set of principals.
+
+        Unions every principal bucket returned by :meth:`parse_access_list`, so
+        the result is in the same representation :meth:`current_principals`
+        returns and can be diffed directly.
+        """
+        parsed = self.parse_access_list(access_config)
+        return set().union(*parsed.values()) if parsed else set()
+
+    def _prime_current_grants(self, table_ids: list[str]) -> None:
+        """Optional pre-pass to batch-load current grants before the per-table loop.
+
+        Default is a no-op. Destinations with a schema-wide metadata source
+        (e.g. Databricks ``information_schema``) override this to fetch every
+        table's grants in one query and cache them, so a batch update-access
+        does one metadata read per schema instead of one per table.
+        """
+        return None
+
+    def _revocable(self, current: set[str]) -> set[str]:
+        """Subset of currently-granted principals eligible for revocation.
+
+        Default: all of them. BigQuery overrides this to exclude special IAM
+        members (owners, domains, project roles) that table-level access
+        management must never touch.
+        """
+        return current
+
+    @abstractmethod
+    def current_principals(self, table_id: str) -> set[str]:
+        """Return the principals that currently hold managed read access.
+
+        Same representation as the desired set built from
+        :meth:`parse_access_list`, so the base can diff them directly.
+        """
+        pass
+
+    @abstractmethod
+    def apply_access_changes(
+        self, table_id: str, to_grant: set[str], to_revoke: set[str]
+    ) -> None:
+        """Apply the computed grant/revoke delta to a single table.
+
+        Called only when there is a change and only outside dry-run — the base
+        owns the dry-run gate, the counters, and the logging. Implementations
+        should batch where the destination allows it (BigQuery applies both
+        directions in a single ``set_iam_policy`` write).
         """
         pass
 
