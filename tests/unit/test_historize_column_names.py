@@ -57,6 +57,35 @@ def _make_builder(historize_dict=None):
 
 
 @pytest.mark.unit
+class TestExplicitInsertColumns:
+    """The final INSERTs must list columns explicitly (name-aligned), not
+    ``SELECT *``. The target is created in an earlier run whose value-column
+    discovery order may differ from the current run's, so a positional insert
+    would land columns in the wrong slots.
+    """
+
+    def test_incremental_insert_is_explicit(self):
+        b = _make_builder()
+        sql = b.build_incremental_sql(
+            value_columns=["name", "amount"],
+            new_snapshots=["2026-01-01 00:00:00"],
+            last_historized_snapshot="2025-12-31 00:00:00",
+        )
+        assert "SELECT * FROM _historize_incremental" not in sql
+        assert "INSERT INTO proj.ds.tgt (" in sql
+        # value columns + SCD2 columns named in the INSERT clause
+        insert_clause = sql.split("INSERT INTO proj.ds.tgt (")[1]
+        for col in ("`id`", "`name`", "`amount`", "`_dlt_valid_from`"):
+            assert col in insert_clause
+
+    def test_full_reprocess_insert_is_explicit(self):
+        b = _make_builder()
+        sql = b.build_full_reprocess_sql(value_columns=["name", "amount"])
+        assert "SELECT * FROM _historize_result" not in sql
+        assert "INSERT INTO proj.ds.tgt (" in sql
+
+
+@pytest.mark.unit
 class TestHistorizeConfigColumnNames:
     def test_defaults(self):
         c = HistorizeConfig.from_dict({}, top_level_primary_key=["id"])

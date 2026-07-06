@@ -107,6 +107,22 @@ class HistorizeSqlBuilder:
         """Comma-separated primary key column list, destination-quoted."""
         return self._qcols(self.primary_key)
 
+    def _all_columns_sql(self, value_columns: List[str]) -> str:
+        """Explicit, name-aligned column list for the historized-target INSERTs:
+        primary key + value columns + the SCD2 system columns, destination-quoted.
+
+        Order matches the ``_historize_result`` / ``_historize_incremental`` temp
+        tables. Listing columns by name (rather than a positional ``SELECT *``)
+        keeps the insert correct when a later run rediscovers value columns in a
+        different order than the target table was created with.
+        """
+        cols = list(self.primary_key) + list(value_columns)
+        return (
+            f"{self._qcols(cols)}, "
+            f"{self._q(self.valid_from)}, {self._q(self.valid_to)}, "
+            f"{self._q(self.is_deleted)}"
+        )
+
     def _pk_join(self, left: str, right: str) -> str:
         """JOIN condition for primary keys between two aliases, destination-quoted."""
         return " AND ".join(
@@ -307,6 +323,7 @@ class HistorizeSqlBuilder:
         hash_expr = self.destination.hash_expression(hash_columns)
         all_output_cols = list(self.primary_key) + list(value_columns)
         output_cols_from_c = ", ".join(f"c.{self._q(col)}" for col in all_output_cols)
+        all_columns_sql = self._all_columns_sql(value_columns)
         src = self.source_table_id
         tgt = self.target_table_id
 
@@ -423,8 +440,9 @@ scd2 AS (
 SELECT * FROM scd2
 {deletion_union};
 
--- Insert into historized table
-INSERT INTO {tgt} SELECT * FROM _historize_result;
+-- Insert into historized table (explicit column list — name-aligned).
+INSERT INTO {tgt} ({all_columns_sql})
+SELECT {all_columns_sql} FROM _historize_result;
 """
 
     def _build_deletion_tracking_sql(
@@ -544,6 +562,7 @@ disappearances AS (
     AND del_src.{q_snapshot} = del.last_seen"""
 
         output_cols_bare = self._qcols(all_output_cols)
+        all_columns_sql = self._all_columns_sql(value_columns)
         pk_join_t_n = self._pk_join("t", "n")
 
         return f"""
@@ -661,9 +680,10 @@ ON {pk_join_t_n} AND t.{self.valid_to} IS NULL
 WHEN MATCHED THEN
   UPDATE SET {self.valid_to} = n.{self.valid_from};
 
--- Insert all new records (changes + deletion markers)
-INSERT INTO {tgt}
-SELECT * FROM _historize_incremental;
+-- Insert all new records (changes + deletion markers). Explicit column list so
+-- the insert aligns by name against a target created in an earlier run.
+INSERT INTO {tgt} ({all_columns_sql})
+SELECT {all_columns_sql} FROM _historize_incremental;
 
 """
 
