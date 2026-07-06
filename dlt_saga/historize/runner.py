@@ -243,7 +243,9 @@ class HistorizeRunner:
             stats["status"] = "completed"
             return stats
         except ValueError as e:
-            # Configuration errors — no traceback, let CLI handle display
+            # Configuration errors — no traceback, let CLI handle display. The
+            # run never started, so this is developer feedback, not a run outcome
+            # (config_error flags it so it isn't recorded in `saga report`).
             return {
                 "mode": "failed",
                 "snapshots_processed": 0,
@@ -252,6 +254,7 @@ class HistorizeRunner:
                 "duration": time.time() - run_start,
                 "status": "failed",
                 "error": str(e),
+                "config_error": True,
             }
         except Exception as e:
             # Unexpected errors — include traceback for debugging

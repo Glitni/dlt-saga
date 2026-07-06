@@ -53,6 +53,10 @@ class PipelineResult:
     error: Optional[str] = None
     load_info: Optional[Any] = None
     config: Optional[PipelineConfig] = None
+    # True when the failure was a pre-run config/validation error (the run never
+    # started) — developer feedback, not a run outcome. Excluded from the
+    # `saga report` telemetry recorded by `_record_run`.
+    config_error: bool = False
 
 
 @dataclass
@@ -563,6 +567,12 @@ class Session:
             for r in result.pipeline_results:
                 if r.config is None:
                     continue
+                # A pre-run config/validation error means the run never started —
+                # developer feedback, not a run outcome. Skip it (don't record it
+                # as a failed run, and don't spin up a destination/connection just
+                # to record nothing).
+                if r.config_error:
+                    continue
                 entry = by_pipeline.get(r.pipeline_name)
                 if entry is None:
                     by_pipeline[r.pipeline_name] = {
@@ -757,6 +767,11 @@ class Session:
                 config=config,
             )
         except Exception as e:
+            # ValueError is the project's convention for a configuration/validation
+            # error — the run never started, so flag it as developer feedback that
+            # must not be recorded as a run outcome. Any other exception is a
+            # genuine run failure (recorded).
+            config_error = isinstance(e, ValueError)
             logger.error("%sPipeline %s failed: %s", prefix, config.pipeline_name, e)
             registry.fire(
                 ON_PIPELINE_ERROR,
@@ -772,6 +787,7 @@ class Session:
                 success=False,
                 error=str(e),
                 config=config,
+                config_error=config_error,
             )
 
     # -------------------------------------------------------------------
@@ -928,6 +944,7 @@ class Session:
                     success=False,
                     error=error,
                     config=config,
+                    config_error=run_result.get("config_error", False),
                 )
 
         except Exception as e:
