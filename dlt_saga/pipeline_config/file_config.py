@@ -69,6 +69,10 @@ class FilePipelineConfig(ConfigSource):
         self.root_dir = self._root_dirs[0]
         self.project_config_path = self._find_project_config(self.root_dir)
         self.project_config = self._load_project_config()
+        # Lazily-computed set of actual sub-directory names in the config tree,
+        # used to tell a folder-scope block from a config-value dict during
+        # hierarchical resolution (see _is_path_segment_dict).
+        self._folder_segment_names_cache: Optional[set] = None
 
     @staticmethod
     def _find_project_config(root_dir: str) -> Path:
@@ -407,15 +411,31 @@ class FilePipelineConfig(ConfigSource):
     # Hierarchical Configuration Resolution
     # =========================================================================
 
-    def _is_path_segment_dict(self, value: Any) -> bool:
-        """Check if value is a dict representing a path segment (has lowercase keys).
+    @property
+    def _folder_segment_names(self) -> set:
+        """Set of every sub-directory name in the config tree.
 
-        Strips the '+' inherit prefix before checking, since folder hierarchy
-        configs often use '+key:' syntax (e.g., '+schema_access:').
+        Folder-scope blocks in ``saga_project.yml`` are keyed by real directory
+        names (pipeline groups and their subfolders); config-value blocks
+        (``persist_docs``, ``historize``, ``columns``, …) never are. Matching
+        against actual directories is what distinguishes the two — the previous
+        "any dict with lowercase keys is a folder" heuristic dropped every
+        dict-valued config default (e.g. ``+persist_docs: {columns: true}``).
         """
-        return isinstance(value, dict) and any(
-            k.lstrip("+")[:1].islower() for k in value.keys() if k.lstrip("+")
-        )
+        if self._folder_segment_names_cache is None:
+            names: set = set()
+            for root_dir in self._root_dirs:
+                for _dirpath, dirnames, _files in os.walk(root_dir):
+                    names.update(dirnames)
+            self._folder_segment_names_cache = names
+        return self._folder_segment_names_cache
+
+    def _is_path_segment_dict(self, key: str, value: Any) -> bool:
+        """Whether ``key: value`` is a nested folder scope rather than a config
+        value — true only when ``key`` (minus any ``+`` inherit prefix) names an
+        actual sub-directory in the config tree and its value is a dict.
+        """
+        return isinstance(value, dict) and key.lstrip("+") in self._folder_segment_names
 
     def _get_pipelines_section(self) -> Optional[Dict[str, Any]]:
         """Get the pipelines section from project config."""
@@ -431,7 +451,7 @@ class FilePipelineConfig(ConfigSource):
             # Skip keys that are path segments (nested folders), but not reserved
             # config blocks (e.g. `dev:`) that merely look like one.
             if clean_key not in _RESERVED_BLOCK_KEYS and self._is_path_segment_dict(
-                value
+                key, value
             ):
                 continue
             # Remove + prefix if present (all project level uses inherit by default)
@@ -448,7 +468,7 @@ class FilePipelineConfig(ConfigSource):
             if (
                 not is_last_segment
                 and key.lstrip("+") not in _RESERVED_BLOCK_KEYS
-                and self._is_path_segment_dict(value)
+                and self._is_path_segment_dict(key, value)
             ):
                 continue
             level_config[key] = value
