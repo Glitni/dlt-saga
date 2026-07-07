@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import dlt
@@ -12,6 +12,14 @@ from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
 
 logger = logging.getLogger(__name__)
 
+# pyarrow is an optional dependency; resolve it once at import rather than
+# re-importing inside per-row/per-batch transform closures on multi-million-row
+# streams. None when not installed.
+try:
+    import pyarrow as _pa
+except ImportError:
+    _pa = None
+
 DEV_MODE = False
 
 
@@ -19,11 +27,7 @@ def _make_arrow_filter(specs: List[Any]):
     from dlt_saga.utility.filters import apply_filters_to_arrow
 
     def _arrow_filter(item: Any) -> Any:
-        try:
-            import pyarrow as pa
-        except ImportError:
-            return item
-        if not isinstance(item, (pa.Table, pa.RecordBatch)):
+        if _pa is None or not isinstance(item, (_pa.Table, _pa.RecordBatch)):
             return item
         return apply_filters_to_arrow(item, specs)
 
@@ -36,13 +40,8 @@ def _make_dict_predicate(specs: List[Any]):
     predicate = build_row_predicate(specs)
 
     def _dict_predicate(item: Any) -> bool:
-        try:
-            import pyarrow as pa
-
-            if isinstance(item, (pa.Table, pa.RecordBatch)):
-                return True  # already handled by the arrow map
-        except ImportError:
-            pass
+        if _pa is not None and isinstance(item, (_pa.Table, _pa.RecordBatch)):
+            return True  # already handled by the arrow map
         if not isinstance(item, dict):
             return True
         return predicate(item)
@@ -375,8 +374,6 @@ class BasePipeline:
         2. File modification date
         3. Extraction timestamp
         """
-        from datetime import datetime, timezone
-
         # Priority 1: Regex extraction from file path
         if compiled_regex and snapshot_date_format:
             file_name = item.get("_dlt_source_file_name", "")
@@ -433,7 +430,6 @@ class BasePipeline:
             return resource
 
         import re
-        from datetime import datetime, timezone
 
         # One run timestamp, resolved once outside the row/batch closure so a
         # single physical run maps to a single historize snapshot. (Computing
@@ -454,12 +450,7 @@ class BasePipeline:
         warned_arrow_regex = [False]
 
         def _add_ingested_at(item):
-            try:
-                import pyarrow as pa
-            except ImportError:
-                pa = None
-
-            if pa is not None and isinstance(item, (pa.Table, pa.RecordBatch)):
+            if _pa is not None and isinstance(item, (_pa.Table, _pa.RecordBatch)):
                 # Arrow sources (e.g. sql_database) carry no per-row file
                 # metadata, so the regex / modification-date tiers don't apply —
                 # every row gets the single run-level extraction timestamp.
@@ -473,8 +464,8 @@ class BasePipeline:
                 # pa.repeat builds the constant column directly — no N-length
                 # Python list. "us" matches Python datetime, BigQuery TIMESTAMP,
                 # and dlt's default timestamp precision.
-                ts_array = pa.repeat(
-                    pa.scalar(extraction_dt, type=pa.timestamp("us", tz="UTC")),
+                ts_array = _pa.repeat(
+                    _pa.scalar(extraction_dt, type=_pa.timestamp("us", tz="UTC")),
                     item.num_rows,
                 )
                 return item.append_column("_dlt_ingested_at", ts_array)

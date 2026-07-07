@@ -5,6 +5,7 @@ INSERT, or Databricks COPY INTO) without going through dlt's extract/normalize
 pipeline.  Designed for large sources where dlt would be too slow.
 """
 
+import itertools
 import logging
 import re
 from contextlib import contextmanager
@@ -485,12 +486,15 @@ class NativeLoadPipeline(BasePipeline):
             return self.native_config.date_filename_prefix
 
         date_re = re.compile(self.native_config.filename_date_regex)
-        blobs = list(
+        # islice stops after 50 items instead of materializing the full listing
+        # (which can be very large) just to inspect the first few basenames.
+        blobs = itertools.islice(
             self.storage_client.list_files(
                 self.native_config.source_uri,
                 self.native_config.file_pattern,
-            )
-        )[:50]
+            ),
+            50,
+        )
 
         for blob in blobs:
             basename = blob.full_uri.rsplit("/", 1)[-1]
