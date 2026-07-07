@@ -28,6 +28,41 @@ class TestDeriveBaseTableName:
 
 
 @pytest.mark.unit
+class TestDiscoveryCache:
+    """discover() memoizes the expensive walk but hands back fresh containers."""
+
+    def _make_source(self, tmp_path):
+        configs = tmp_path / "configs" / "google_sheets"
+        configs.mkdir(parents=True)
+        (configs / "data.yml").write_text(
+            "write_disposition: append\n", encoding="utf-8"
+        )
+        return FilePipelineConfig(root_dir=str(tmp_path / "configs"))
+
+    def test_walk_runs_once_across_calls(self, tmp_path):
+        source = self._make_source(tmp_path)
+        with patch.object(source, "_discover_all", wraps=source._discover_all) as spy:
+            source.discover()
+            source.discover()
+            source.get_config("google_sheets__data")  # also goes through discover()
+        spy.assert_called_once()
+
+    def test_returns_fresh_containers_each_call(self, tmp_path):
+        source = self._make_source(tmp_path)
+        enabled_a, _ = source.discover()
+        enabled_b, _ = source.discover()
+        # New dict + new list objects, so a caller mutating one result can't
+        # corrupt the cache or a later call.
+        assert enabled_a is not enabled_b
+        assert enabled_a["google_sheets"] is not enabled_b["google_sheets"]
+        enabled_a["google_sheets"].clear()
+        enabled_a["injected"] = []
+        enabled_c, _ = source.discover()
+        assert "injected" not in enabled_c
+        assert len(enabled_c["google_sheets"]) == 1
+
+
+@pytest.mark.unit
 class TestGetPipelineGroupFromPath:
     @pytest.mark.parametrize(
         "path, expected",
