@@ -10,6 +10,50 @@ from dlt_saga.utility.naming import normalize_identifier
 
 logger = logging.getLogger(__name__)
 
+# Rows per pandas chunk when streaming CSV files with metadata injection. Bounds
+# peak memory to one chunk instead of materializing the whole file (+ a dict copy)
+# regardless of file size.
+_CSV_METADATA_CHUNK_SIZE = 50_000
+
+
+def _iter_csv_records_with_metadata(
+    file_obj: FileItemDict,
+    separator: str,
+    encoding: str,
+    chunk_size: int = _CSV_METADATA_CHUNK_SIZE,
+) -> Iterator[dict]:
+    """Stream a CSV file as dict rows, injecting file-metadata columns.
+
+    Reads the file object directly in chunks (``pd.read_csv(chunksize=...)``)
+    rather than loading the whole file into memory and re-parsing from a string.
+    Every column is read as ``str`` (``dtype=str``) to preserve leading zeros and
+    let dlt apply schema hints downstream — unchanged from the previous behaviour.
+    An empty/whitespace-only file yields no rows (pandas raises
+    ``EmptyDataError``), matching the prior explicit skip.
+    """
+    import pandas as pd
+
+    file_name = file_obj.get("file_name", "")
+    modification_date = file_obj.get("modification_date")
+    logger.debug(f"Processing file: {file_name}")
+
+    with file_obj.open() as f:
+        try:
+            reader = pd.read_csv(
+                f,
+                sep=separator,
+                dtype=str,
+                encoding=encoding,
+                chunksize=chunk_size,
+            )
+            for chunk in reader:
+                chunk["_dlt_source_file_name"] = file_name
+                chunk["_dlt_source_modification_date"] = modification_date
+                yield from chunk.to_dict(orient="records")
+        except pd.errors.EmptyDataError:
+            logger.debug(f"Skipping empty file: {file_name}")
+            return
+
 
 class FilesystemClient:
     def __init__(self, config: FilesystemConfig):
@@ -683,16 +727,10 @@ class FilesystemClient:
     def _get_csv_with_metadata_transformer(self):
         """Get transformer for reading CSV files with file metadata injection.
 
-        Returns a dlt transformer that reads CSV files and injects file metadata
+        Returns a dlt transformer that streams CSV files and injects file metadata
         (_dlt_source_file_name, _dlt_source_modification_date) into each row.
         Uses pandas for encoding support.
         """
-        import io
-        from typing import Iterator
-
-        import dlt
-        import pandas as pd
-        from dlt.common.storages.fsspec_filesystem import FileItemDict
         from dlt.common.typing import TDataItems
 
         # Capture config values for use in transformer
@@ -705,35 +743,9 @@ class FilesystemClient:
         ) -> Iterator[TDataItems]:
             """Read CSV files and inject file metadata into each row."""
             for file_obj in items:
-                file_name = file_obj.get("file_name", "")
-                modification_date = file_obj.get("modification_date")
-                logger.debug(f"Processing file: {file_name}")
-
-                with file_obj.open() as f:
-                    # Read binary content and decode
-                    content = f.read()
-                    logger.debug(
-                        f"Read {len(content)} bytes, type: {type(content).__name__}"
-                    )
-                    if isinstance(content, bytes):
-                        content = content.decode(encoding)
-
-                    # Skip empty files (just whitespace/newlines)
-                    if not content.strip():
-                        logger.debug(f"Skipping empty file: {file_name}")
-                        continue
-
-                    # Use StringIO for pandas to read from string
-                    # Read all columns as strings to preserve leading zeros and special chars
-                    # dlt will handle type conversion based on schema hints
-                    df = pd.read_csv(io.StringIO(content), sep=csv_separator, dtype=str)
-                    logger.debug(f"Parsed {len(df)} rows from {file_name}")
-
-                    # Inject file metadata columns
-                    df["_dlt_source_file_name"] = file_name
-                    df["_dlt_source_modification_date"] = modification_date
-
-                    yield from df.to_dict(orient="records")
+                yield from _iter_csv_records_with_metadata(
+                    file_obj, csv_separator, encoding
+                )
 
         return read_csv_with_metadata
 
