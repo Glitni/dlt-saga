@@ -167,6 +167,55 @@ class TestSqlInjection:
         assert "AND (`tenant_id` = 'tenant_a')" in create_keys
 
 
+def _make_builder_with_pk(primary_key):
+    """Rollback-focused builder with an arbitrary primary key."""
+    config = HistorizeConfig.from_dict({}, top_level_primary_key=list(primary_key))
+    dest = _stub_destination()
+    dest.escape_string_literal.side_effect = lambda s: s
+    return HistorizeSqlBuilder(
+        config=config,
+        destination=dest,
+        source_table_id="proj.ds.src",
+        target_table_id="proj.ds.tgt",
+        primary_key=list(primary_key),
+        source_database="proj",
+        source_schema="ds",
+        source_table="src",
+        target_table_name="tgt",
+        target_schema="ds",
+    )
+
+
+@pytest.mark.unit
+class TestRollbackKeyMembership:
+    """build_rollback_sql PK-membership predicate is dialect-portable."""
+
+    def test_single_pk_uses_in_subquery(self):
+        stmts = _make_builder_with_pk(["id"]).build_rollback_sql(
+            effective_from_date="2026-01-01 00:00:00", run_id="abc123", dataset="ds"
+        )
+        create_keys, delete_sql, update_sql = stmts
+        assert "SELECT DISTINCT `id`" in create_keys
+        assert "`id` IN (SELECT `id` FROM" in delete_sql
+        assert "`id` IN (SELECT `id` FROM" in update_sql
+
+    def test_composite_pk_uses_correlated_exists(self):
+        stmts = _make_builder_with_pk(["order_id", "line_no"]).build_rollback_sql(
+            effective_from_date="2026-01-01 00:00:00", run_id="abc123", dataset="ds"
+        )
+        create_keys, delete_sql, update_sql = stmts
+        # Multi-column IN (subquery) is rejected by BigQuery — must not be emitted.
+        assert ") IN (SELECT" not in delete_sql
+        assert ") IN (SELECT" not in update_sql
+        # Keys table aliases its PK columns so the correlated refs bind to target.
+        assert "`order_id` AS `_rk_0`" in create_keys
+        assert "`line_no` AS `_rk_1`" in create_keys
+        for stmt in (delete_sql, update_sql):
+            assert "EXISTS (SELECT 1 FROM" in stmt
+            assert "k.`_rk_0` = `order_id`" in stmt
+            assert "k.`_rk_1` = `line_no`" in stmt
+
+
 # ---------------------------------------------------------------------------
 # state.discover_unprocessed_snapshots filter_sql
 # ---------------------------------------------------------------------------

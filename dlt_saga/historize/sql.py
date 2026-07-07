@@ -195,7 +195,6 @@ class HistorizeSqlBuilder:
             run_id: Short unique identifier used in the affected-keys table name.
             dataset: Dataset/schema where the affected-keys table will be created.
         """
-        pk_cols = self._pk_cols_sql()
         tgt = self.target_table_id
         src = self.source_table_id
         q_snapshot = self._q(self.config.snapshot_column)
@@ -205,16 +204,32 @@ class HistorizeSqlBuilder:
             dataset, f"_rehistorize_keys_{run_id}"
         )
 
-        # PK membership check via IN subquery (no table aliases needed)
+        # PK membership check against the affected-keys table.
         if len(self.primary_key) == 1:
+            # Single column: portable IN (subquery) on every dialect.
             q_pk = self._q(self.primary_key[0])
+            keys_select = f"SELECT DISTINCT {q_pk}"
             pk_in_keys = f"{q_pk} IN (SELECT {q_pk} FROM {keys_table})"
         else:
-            pk_in_keys = f"({pk_cols}) IN (SELECT {pk_cols} FROM {keys_table})"
+            # Multi-column ``(a, b) IN (subquery)`` is rejected by BigQuery, so
+            # use a correlated EXISTS instead. The keys columns are aliased with
+            # a ``_rk_`` prefix so the unqualified PK references in the correlated
+            # predicate bind to the outer (DELETE/UPDATE target) table — avoiding
+            # a target alias, which isn't portable across destination dialects.
+            key_aliases = [f"_rk_{i}" for i in range(len(self.primary_key))]
+            keys_select = "SELECT DISTINCT " + ", ".join(
+                f"{self._q(pk)} AS {self._q(alias)}"
+                for pk, alias in zip(self.primary_key, key_aliases)
+            )
+            correlated = " AND ".join(
+                f"k.{self._q(alias)} = {self._q(pk)}"
+                for pk, alias in zip(self.primary_key, key_aliases)
+            )
+            pk_in_keys = f"EXISTS (SELECT 1 FROM {keys_table} AS k WHERE {correlated})"
 
         create_keys = f"""
             CREATE TABLE {keys_table} AS
-            SELECT DISTINCT {pk_cols}
+            {keys_select}
             FROM {src}
             WHERE {and_filter(self.filter_sql, f"{q_snapshot} >= TIMESTAMP '{safe_date}'")}
         """

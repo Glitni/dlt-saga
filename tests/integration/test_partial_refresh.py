@@ -117,6 +117,73 @@ class TestPartialRefresh:
         assert result["snapshots_processed"] == 0
 
 
+class TestCompositePrimaryKey:
+    """Composite-PK partial refresh exercises the correlated-EXISTS rollback.
+
+    The rollback membership predicate uses ``EXISTS`` for composite keys (a
+    multi-column ``IN (subquery)`` is rejected by BigQuery). This runs the path
+    end-to-end on DuckDB. company_name is functionally dependent on company_id
+    in the fixtures, so results match the single-PK scenario.
+    """
+
+    def test_partial_refresh_with_composite_pk(self, duckdb_destination):
+        pk = ["company_id", "company_name"]
+        run_historize(
+            duckdb_destination,
+            [SNAPSHOT_1, SNAPSHOT_2, SNAPSHOT_3],
+            primary_key=pk,
+        )
+
+        seed_raw_table(duckdb_destination, [SNAPSHOT_4, SNAPSHOT_5])
+        runner = make_historize_runner(
+            duckdb_destination, partial_refresh=True, primary_key=pk
+        )
+        result = runner.run()
+
+        assert result["status"] == "completed"
+        assert result["mode"] == "partial_refresh"
+        assert result["snapshots_processed"] == 5
+
+        # Same end state as the single-PK case (company_name follows company_id).
+        acme = get_rows_for(query_historized(duckdb_destination), 1)
+        assert len(acme) == 4
+        assert_row(acme[0], city="New York", _dlt_valid_from=DT(2026, 1, 1))
+        assert_row(acme[1], city="Boston", _dlt_valid_from=DT(2026, 1, 2))
+        assert_row(acme[2], _dlt_is_deleted=True, _dlt_valid_from=DT(2026, 1, 3))
+        assert_row(acme[3], city="Chicago", _dlt_valid_from=DT(2026, 1, 5))
+
+
+class TestPartialRefreshHonorsFilters:
+    """Partial refresh applies ``historize.filters`` to the staging read.
+
+    Regression guard: the clone-and-swap staging builder must receive the same
+    ``filter_sql`` as a normal run, otherwise partial refresh reads the source
+    unfiltered and swaps unfiltered data into production.
+    """
+
+    def test_filter_applied_on_partial_refresh(self, duckdb_destination):
+        filters = [{"column": "company_id", "op": "ne", "value": 1}]
+        run_historize(
+            duckdb_destination,
+            [SNAPSHOT_1, SNAPSHOT_2, SNAPSHOT_3],
+            filters=filters,
+        )
+
+        seed_raw_table(duckdb_destination, [SNAPSHOT_4, SNAPSHOT_5])
+        runner = make_historize_runner(
+            duckdb_destination, partial_refresh=True, filters=filters
+        )
+        result = runner.run()
+
+        assert result["status"] == "completed"
+        rows = query_historized(duckdb_destination)
+        # company_id=1 (Acme) is filtered out — it must never appear, even though
+        # snapshot 5 reintroduces it inside the reprocess window.
+        assert get_rows_for(rows, 1) == []
+        # Filtered-in companies are still historized.
+        assert get_rows_for(rows, 2) != []
+
+
 class TestHistorizeFrom:
     """--historize-from with explicit date."""
 

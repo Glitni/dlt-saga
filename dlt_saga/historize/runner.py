@@ -757,6 +757,7 @@ class HistorizeRunner:
                 source_database=self._src_database,
                 source_schema=self._src_schema,
                 source_table=self._src_table,
+                filter_sql=self._filter_sql,
             )
 
             self._rollback_staging(
