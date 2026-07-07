@@ -3,6 +3,28 @@
 from typing import List
 
 
+def looks_like_missing_table(exc: Exception) -> bool:
+    """Best-effort detection of "relation/table does not exist" across destinations.
+
+    BigQuery emits ``Not found: Table ...``, Databricks ``TABLE_OR_VIEW_NOT_FOUND``,
+    and DuckDB ``Catalog Error: Table with name ... does not exist``. We match on
+    the substrings the three share so anything else — permission denials, network
+    errors, SQL errors — is *not* mistaken for a missing table and can propagate
+    instead of being silently swallowed as "no data" (which would trigger a full
+    re-extract or duplicate loads on incremental pipelines).
+    """
+    msg = str(exc).lower()
+    return any(
+        marker in msg
+        for marker in (
+            "not found",
+            "does not exist",
+            "no such table",
+            "table_or_view_not_found",
+        )
+    )
+
+
 def _scan_quoted(sql: str, start: int) -> int:
     """Return the index just past the string/identifier opened at ``start``.
 

@@ -342,17 +342,35 @@ class TestDatabricksQueryMethods:
         dest = self._dest_with_execute(return_value or [])
         assert dest.get_max_column_value("t", "col") is None
 
-    def test_get_max_column_value_returns_none_on_exception(self):
+    def test_get_max_column_value_none_on_missing_table(self):
         dest = _make_destination()
-        dest.execute_sql = MagicMock(side_effect=Exception("no table"))
+        dest.execute_sql = MagicMock(
+            side_effect=Exception("[TABLE_OR_VIEW_NOT_FOUND] table t")
+        )
         assert dest.get_max_column_value("t", "col") is None
 
-    def test_get_last_load_timestamp_returns_none_on_exception(self):
+    def test_get_max_column_value_raises_on_other_error(self):
+        # A permission/network error must NOT be swallowed as "no watermark" —
+        # that would silently re-extract from scratch on an incremental run.
+        dest = _make_destination()
+        dest.execute_sql = MagicMock(side_effect=Exception("PERMISSION_DENIED"))
+        with pytest.raises(Exception, match="PERMISSION_DENIED"):
+            dest.get_max_column_value("t", "col")
+
+    def test_get_last_load_timestamp_none_on_missing_table(self):
         dest = _make_destination()
         dest._execute_parameterised = MagicMock(
             side_effect=Exception("table not found")
         )
         assert dest.get_last_load_timestamp("schema", "pipeline", "table") is None
+
+    def test_get_last_load_timestamp_raises_on_other_error(self):
+        dest = _make_destination()
+        dest._execute_parameterised = MagicMock(
+            side_effect=Exception("PERMISSION_DENIED")
+        )
+        with pytest.raises(Exception, match="PERMISSION_DENIED"):
+            dest.get_last_load_timestamp("schema", "pipeline", "table")
 
 
 # ---------------------------------------------------------------------------

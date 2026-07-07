@@ -161,18 +161,19 @@ class DateWindowResolver:
         ``None`` means the table doesn't exist yet or is empty — i.e. the first
         run. The destination is the source of truth for the high-water mark, so a
         missed or failed run is caught up on the next run with no gaps.
+
+        The destination read distinguishes a missing table (returns ``None``,
+        first run) from an infrastructure error (raises). We do NOT swallow the
+        latter: treating a permission/network error as "first run" would silently
+        re-scan the entire date range on every failed run.
         """
-        try:
-            return read_destination_watermark(
-                self.destination,
-                self.destination_database,
-                self.pipeline.dataset_name,
-                self.table_name,
-                self.window_config.incremental_column,
-            )
-        except Exception as e:  # pragma: no cover - destination already guards
-            self.logger.debug(f"No watermark (likely first run): {e}")
-            return None
+        return read_destination_watermark(
+            self.destination,
+            self.destination_database,
+            self.pipeline.dataset_name,
+            self.table_name,
+            self.window_config.incremental_column,
+        )
 
     def _watermark_date(self) -> Optional[date]:
         """The watermark coerced to a ``date`` (``None`` on the first run)."""

@@ -9,28 +9,9 @@ from dataclasses import dataclass
 from typing import Any, List, Optional
 
 from dlt_saga.utility.cli.logging import PrefixedLoggerAdapter
+from dlt_saga.utility.sql import looks_like_missing_table
 
 logger = logging.getLogger(__name__)
-
-
-def _looks_like_missing_table(exc: Exception) -> bool:
-    """Best-effort detection of "relation/table does not exist" across destinations.
-
-    BigQuery emits ``Not found: Table ...``, Databricks ``TABLE_OR_VIEW_NOT_FOUND``,
-    and DuckDB ``Catalog Error: Table with name ... does not exist``. We match on
-    the substrings the three share so anything else (permissions, network,
-    syntax) propagates instead of being misread as a missing table.
-    """
-    msg = str(exc).lower()
-    return any(
-        marker in msg
-        for marker in (
-            "not found",
-            "does not exist",
-            "no such table",
-            "table_or_view_not_found",
-        )
-    )
 
 
 @dataclass
@@ -145,7 +126,7 @@ class HistorizeStateManager:
             # Only treat "table doesn't exist" as a recoverable case. Permission
             # denials, network errors, and SQL errors propagate so the operator
             # sees them instead of silently re-processing all history.
-            if not _looks_like_missing_table(exc):
+            if not looks_like_missing_table(exc):
                 raise
             self.ensure_log_table()
             return self.PipelineState()

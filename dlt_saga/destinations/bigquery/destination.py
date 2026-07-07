@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from dlt_saga.destinations.bigquery.base import BigQueryBaseDestination
 from dlt_saga.destinations.bigquery.config import BigQueryDestinationConfig
 from dlt_saga.utility.naming import normalize_identifier
+from dlt_saga.utility.sql import looks_like_missing_table
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.base import MaterializationHints
@@ -505,8 +506,13 @@ class BigQueryDestination(BigQueryBaseDestination):
             if results and results[0].started_at:
                 return results[0].started_at
             return None
-        except Exception:
-            return None
+        except Exception as e:
+            # A missing load-info table means the first run — return None. Any
+            # other error (permission, network) must propagate: swallowing it as
+            # "no last load" would silently re-extract the entire history.
+            if looks_like_missing_table(e):
+                return None
+            raise
 
     def get_max_column_value(self, table_id: str, column: str) -> Any:
         """Get the maximum value of a column in a BigQuery table."""
@@ -521,8 +527,13 @@ class BigQueryDestination(BigQueryBaseDestination):
             if results and results[0].max_value is not None:
                 return results[0].max_value
             return None
-        except Exception:
-            return None
+        except Exception as e:
+            # A missing target table means the first run — return None. Any other
+            # error must propagate: swallowing it as "no watermark" would silently
+            # re-extract from scratch (or duplicate rows) on an incremental run.
+            if looks_like_missing_table(e):
+                return None
+            raise
 
     def execute_sql(self, sql: str, schema_name: Optional[str] = None) -> Any:
         """Execute a SQL statement against BigQuery.
