@@ -18,6 +18,14 @@ class GSheetsClient:
 
         require_optional("googleapiclient", "Google Sheets pipelines")
         self.config = config
+        # Per-instance (per-run) service cache. Building a googleapiclient service
+        # fetches the API discovery document over HTTP, so without this a single
+        # run built the sheets service twice (title + values) plus the drive
+        # service — three discovery round-trips. The instance lives for one
+        # pipeline run, so this reuse is short-lived and doesn't reintroduce the
+        # stale-SSL problem that motivated the pool-level cache_client=False.
+        self._sheets_service: Any = None
+        self._drive_service: Any = None
 
     def _prepare_credentials_args(self) -> Dict:
         """Prepare credentials arguments for the connection pool.
@@ -51,24 +59,29 @@ class GSheetsClient:
         }
 
     def get_sheets_service(self):
-        """Get Google Sheets API service from connection pool."""
-        from dlt_saga.utility.gcp.client_pool import google_api_pool
+        """Get Google Sheets API service, reused for this client's lifetime."""
+        if self._sheets_service is None:
+            from dlt_saga.utility.gcp.client_pool import google_api_pool
 
-        cred_args = self._prepare_credentials_args()
-        # Disable client caching to avoid SSL connection issues in Cloud Run
-        return google_api_pool.get_client(
-            "sheets", "v4", cache_client=False, **cred_args
-        )
+            cred_args = self._prepare_credentials_args()
+            # Pool-level caching stays disabled (cache_client=False) to avoid
+            # stale-SSL issues in Cloud Run; the instance holds the service for
+            # the run so repeated calls don't re-fetch the discovery document.
+            self._sheets_service = google_api_pool.get_client(
+                "sheets", "v4", cache_client=False, **cred_args
+            )
+        return self._sheets_service
 
     def get_drive_service(self):
-        """Get Google Drive API service for metadata access from connection pool."""
-        from dlt_saga.utility.gcp.client_pool import google_api_pool
+        """Get Google Drive API service for metadata access, reused per run."""
+        if self._drive_service is None:
+            from dlt_saga.utility.gcp.client_pool import google_api_pool
 
-        cred_args = self._prepare_credentials_args()
-        # Disable client caching to avoid SSL connection issues in Cloud Run
-        return google_api_pool.get_client(
-            "drive", "v3", cache_client=False, **cred_args
-        )
+            cred_args = self._prepare_credentials_args()
+            self._drive_service = google_api_pool.get_client(
+                "drive", "v3", cache_client=False, **cred_args
+            )
+        return self._drive_service
 
     def get_service(self):
         """Backward compatibility - returns sheets service."""
