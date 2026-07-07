@@ -242,11 +242,17 @@ class DatabricksDestination(Destination):
             )
             return resource
 
+        # Map saga's generic hint keys to databricks_adapter's actual parameter
+        # names. These MUST match dlt's signature — the adapter rejects unknown
+        # kwargs with a TypeError, which (before this fix) dropped ALL hints in
+        # the call, not just the misnamed one: `table_description`/
+        # `liquid_cluster_by` were wrong (the adapter takes `table_comment`/
+        # `cluster`), so descriptions and clustering were silently never applied.
         adapter_kwargs: dict = {}
         if "table_description" in hints:
-            adapter_kwargs["table_description"] = hints["table_description"]
+            adapter_kwargs["table_comment"] = hints["table_description"]
         if "cluster_columns" in hints:
-            adapter_kwargs["liquid_cluster_by"] = hints["cluster_columns"]
+            adapter_kwargs["cluster"] = hints["cluster_columns"]
         if "partition_column" in hints:
             adapter_kwargs["partition"] = hints["partition_column"]
         if "insert_api" in hints and hints["insert_api"]:
