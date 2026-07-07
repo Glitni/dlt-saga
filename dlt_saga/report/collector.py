@@ -12,8 +12,26 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from dlt_saga.pipeline_config.base_config import PipelineConfig
+from dlt_saga.utility.sql import looks_like_missing_table
 
 logger = logging.getLogger(__name__)
+
+
+def _log_report_query_failure(kind: str, schema: str, exc: Exception) -> None:
+    """Classify a report-query failure.
+
+    A missing table is expected (that section is simply empty), so it's logged at
+    debug. Any other error — permission denial, network — would otherwise render a
+    silently-empty section; warn loudly so the gap is visible, but don't abort the
+    rest of the report.
+    """
+    if looks_like_missing_table(exc):
+        logger.debug(f"No {kind} table in {schema} (skipping): {exc}")
+    else:
+        logger.warning(
+            f"Could not read {kind} in {schema}; that report section will be "
+            f"incomplete: {exc}"
+        )
 
 
 @dataclass
@@ -198,7 +216,7 @@ def _query_load_runs(destination: Any, schema: str, days: int) -> List[LoadRun]:
         )
         return runs
     except Exception as e:
-        logger.debug(f"No load info table in {schema} (skipping): {e}")
+        _log_report_query_failure("load info", schema, e)
         return []
 
 
@@ -247,7 +265,7 @@ def _query_historize_runs(
         )
         return runs
     except Exception as e:
-        logger.debug(f"No historize log table in {schema} (skipping): {e}")
+        _log_report_query_failure("historize log", schema, e)
         return []
 
 
@@ -301,7 +319,7 @@ def _query_orchestration_runs(
         )
         return runs
     except Exception as e:
-        logger.debug(f"No execution plans table in {schema} (skipping): {e}")
+        _log_report_query_failure("execution plans", schema, e)
         return []
 
 
@@ -338,7 +356,7 @@ def _query_executions(destination: Any, schema: str, days: int) -> List[Executio
             )
         return result
     except Exception as e:
-        logger.debug(f"No executions table in {schema} (skipping): {e}")
+        _log_report_query_failure("executions", schema, e)
         return []
 
 
