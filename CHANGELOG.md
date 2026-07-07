@@ -1,3 +1,12 @@
+## 0.16.0 — 2026-07-07
+
+### Fixed
+- Swallowed exceptions hide real failures in historize log-clear and report queries (#257)
+- Incremental state reads swallow infra errors → silent full re-extract / duplicate loads (#255)
+- Worker crash leaves task 'running'; worker mode ignores typed subcommand (#253)
+- BigQuery execute_sql hard 120s client-side timeout kills long historize MERGEs (#251)
+- Empty-source historize poisons state; next run crashes (#249)
+
 ## 0.15.0 — 2026-07-06
 
 ### Changed
