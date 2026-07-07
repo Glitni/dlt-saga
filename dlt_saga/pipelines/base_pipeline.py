@@ -711,10 +711,16 @@ class BasePipeline:
 
         try:
             import time
+            from datetime import datetime, timezone
 
             all_load_info: List[Dict[str, Any]] = []
             loaded_tables: List[str] = []
 
+            # Wall-clock captured BEFORE the source is read. Recorded as each
+            # load record's started_at (below) so change detection compares
+            # source modification times against when this run began reading —
+            # not dlt's load-package start, which is after extraction.
+            extraction_started_at = datetime.now(timezone.utc)
             extraction_start = time.time()
             extraction_end = None
             load_start = None
@@ -739,6 +745,19 @@ class BasePipeline:
             if load_start is None:
                 load_start = extraction_end
                 load_end = load_start
+
+            # Record the run's extraction-start as each load record's started_at
+            # (dlt reports its load-package start, which is *after* extraction).
+            # This does two things:
+            #  1) Fixes a change-detection race: sources compare their file/sheet
+            #     modification time against MAX(started_at). With the load-start,
+            #     a source modified during extract/load has mtime < started_at and
+            #     is skipped forever; with the extraction-start it is re-extracted.
+            #  2) Makes the reported run duration (finished_at - started_at) span
+            #     extraction→load instead of the load step alone — extraction is
+            #     often the bulk of the wall-clock (e.g. a slow API pull).
+            for load_info in all_load_info:
+                load_info["started_at"] = extraction_started_at
 
             # Finalize and calculate timings
             finalize_duration = self._finalize_pipeline_run(
