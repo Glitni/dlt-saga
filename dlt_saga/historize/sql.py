@@ -322,7 +322,23 @@ class HistorizeSqlBuilder:
             hints=hints,
         )
 
-    def build_full_reprocess_sql(self, value_columns: List[str]) -> str:
+    def _source_filter_with_bound(
+        self, q_snapshot: str, snapshot_upper_bound: Optional[str]
+    ) -> Optional[str]:
+        """Combine the historize.filters WHERE body with an optional upper bound.
+
+        Returns a WHERE body (no leading ``WHERE``) that ANDs
+        ``snapshot_column <= bound`` onto the configured filter, or just the
+        filter when no bound is given.
+        """
+        if snapshot_upper_bound is None:
+            return self.filter_sql
+        bound = self.destination.escape_string_literal(snapshot_upper_bound)
+        return and_filter(self.filter_sql, f"{q_snapshot} <= TIMESTAMP '{bound}'")
+
+    def build_full_reprocess_sql(
+        self, value_columns: List[str], snapshot_upper_bound: Optional[str] = None
+    ) -> str:
         """Build SQL for full reprocess mode.
 
         Processes ALL raw data:
@@ -330,10 +346,20 @@ class HistorizeSqlBuilder:
         2. Detect all changes across full history
         3. Detect all gaps and deletions
         4. INSERT into historized table (table recreated beforehand)
+
+        Args:
+            value_columns: Non-PK columns to carry into the historized table.
+            snapshot_upper_bound: When set, every source read is bounded to
+                ``snapshot_column <= this value``. The runner resolves the max
+                snapshot once and passes it here so the recorded baseline
+                exactly matches what was processed — a snapshot arriving after
+                the max read isn't silently skipped (it's ``> bound``, picked
+                up on the next run).
         """
         pk_cols = self._pk_cols_sql()
         snapshot_col = self.config.snapshot_column
         q_snapshot = self._q(snapshot_col)
+        source_filter = self._source_filter_with_bound(q_snapshot, snapshot_upper_bound)
         hash_columns = self._get_hash_columns(value_columns)
         hash_expr = self.destination.hash_expression(hash_columns)
         all_output_cols = list(self.primary_key) + list(value_columns)
@@ -346,7 +372,7 @@ class HistorizeSqlBuilder:
         deletion_union = ""
         if self.config.track_deletions:
             track_deletions_sql = self._build_deletion_tracking_sql(
-                pk_cols, snapshot_col, src
+                pk_cols, snapshot_col, src, source_filter
             )
             # Separate deletion marker rows: one row per disappearance,
             # carrying data from the last-seen snapshot.
@@ -379,7 +405,7 @@ WITH
 -- All unique snapshot dates (per merge_key group when configured).
 all_snapshots AS (
   SELECT DISTINCT {self._merge_key_cols_raw_with_comma()}{q_snapshot} AS snapshot_date
-  FROM {src}{filter_where_clause(self.filter_sql)}
+  FROM {src}{filter_where_clause(source_filter)}
 ),
 
 -- Previous/next snapshot per distinct snapshot. Precomputed here so downstream
@@ -398,7 +424,7 @@ snapshot_sequence AS (
 hashed AS (
   SELECT *,
     {hash_expr} AS _row_hash
-  FROM {src}{filter_where_clause(self.filter_sql)}
+  FROM {src}{filter_where_clause(source_filter)}
 ),
 
 -- Deduplicate within each snapshot (one row per PK per snapshot)
@@ -461,15 +487,20 @@ SELECT {all_columns_sql} FROM _historize_result;
 """
 
     def _build_deletion_tracking_sql(
-        self, pk_cols: str, snapshot_col: str, src: str
+        self, pk_cols: str, snapshot_col: str, src: str, source_filter: Optional[str]
     ) -> str:
-        """Build the CTE for tracking deletions (keys disappearing from snapshots)."""
+        """Build the CTE for tracking deletions (keys disappearing from snapshots).
+
+        ``source_filter`` is the historize.filters WHERE body already combined
+        with any snapshot upper bound, so the deletion-detection read stays in
+        lockstep with the change-detection reads.
+        """
         q_snapshot = self._q(snapshot_col)
         return f"""
 -- Track key presence across snapshots for deletion detection
 key_presence AS (
   SELECT DISTINCT {pk_cols}, {q_snapshot} AS snapshot_date
-  FROM {src}{filter_where_clause(self.filter_sql)}
+  FROM {src}{filter_where_clause(source_filter)}
 ),
 with_next_presence AS (
   SELECT kp.*,
