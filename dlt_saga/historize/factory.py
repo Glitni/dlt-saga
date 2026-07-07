@@ -229,7 +229,7 @@ def build_historize_runner(
     config_dict = pipeline_config.config_dict
     context = get_execution_context()
 
-    historize_dict = config_dict.get("historize", {})
+    historize_dict = config_dict.get("historize") or {}
     top_level_pk = config_dict.get("primary_key")
     if isinstance(top_level_pk, str):
         top_level_pk = [top_level_pk]
