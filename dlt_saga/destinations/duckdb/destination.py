@@ -360,8 +360,12 @@ class DuckDBDestination(Destination):
     def timestamp_n_days_ago(self, days: int) -> str:
         return f"now() - INTERVAL '{days}' DAY"
 
-    def get_full_table_id(self, dataset: str, table: str) -> str:
-        return f'"{dataset}"."{table}"'
+    def get_full_table_id(
+        self, schema: str, table: str, database: Optional[str] = None
+    ) -> str:
+        if database:
+            return f'"{database}"."{schema}"."{table}"'
+        return f'"{schema}"."{table}"'
 
     def hash_expression(self, columns: list[str]) -> str:
         # JSON-serialise the value columns (named keys) before hashing, for

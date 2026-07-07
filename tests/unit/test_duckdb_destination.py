@@ -42,6 +42,31 @@ class TestDuckDBTimestampNDaysAgo:
 
 
 @pytest.mark.unit
+class TestDuckDBFullTableId:
+    def test_two_part_by_default(self):
+        from dlt_saga.testing import make_destination
+
+        dest = make_destination()
+        try:
+            assert dest.get_full_table_id("my_schema", "my_table") == (
+                '"my_schema"."my_table"'
+            )
+        finally:
+            dest.close()
+
+    def test_database_override_prepends_catalog(self):
+        from dlt_saga.testing import make_destination
+
+        dest = make_destination()
+        try:
+            assert dest.get_full_table_id(
+                "my_schema", "my_table", database="other_cat"
+            ) == ('"other_cat"."my_schema"."my_table"')
+        finally:
+            dest.close()
+
+
+@pytest.mark.unit
 class TestDuckDBHashExpression:
     """Change-detection hash must not conflate NULL with '' and must keep column
     boundaries unambiguous (the old md5(concat(COALESCE(...,''))) did both,

@@ -456,8 +456,19 @@ class Destination(ABC):
             .replace("\x00", "")
         )
 
-    def get_full_table_id(self, dataset: str, table: str) -> str:
-        """Build a fully qualified table identifier for this destination."""
+    def get_full_table_id(
+        self, schema: str, table: str, database: Optional[str] = None
+    ) -> str:
+        """Build a fully qualified table identifier for this destination.
+
+        Args:
+            schema: Schema the table lives in (a BigQuery dataset, a
+                Databricks/DuckDB schema).
+            table: Table name.
+            database: Project/catalog override. When None, the destination's own
+                configured project/catalog is used. Set it to reference a table
+                in another project/catalog (e.g. an external historize delivery).
+        """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement get_full_table_id"
         )

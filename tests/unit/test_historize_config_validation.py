@@ -100,6 +100,57 @@ class TestHistorizeEmptyBlock:
 
 
 @pytest.mark.unit
+class TestHistorizeExternalSourceQualification:
+    """External source reads are qualified with source_database when set."""
+
+    def _make_runner(self, config_dict, database="proj_a"):
+        from dlt_saga.historize.config import HistorizeConfig
+        from dlt_saga.historize.runner import HistorizeRunner
+
+        dest = MagicMock()
+        # Mirror a real destination: an explicit database overrides the own project.
+        dest.get_full_table_id.side_effect = lambda s, t, database=None: (
+            f"{database or 'proj_a'}.{s}.{t}"
+        )
+        return HistorizeRunner(
+            pipeline_name="test__pipe",
+            historize_config=HistorizeConfig(primary_key=["id"]),
+            destination=dest,
+            database=database,
+            schema="ds",
+            source_table_name="src",
+            target_table_name="tgt",
+            config_dict=config_dict,
+        )
+
+    def test_source_database_qualifies_read_and_discovery(self):
+        runner = self._make_runner(
+            {
+                "write_disposition": "historize",
+                "source_table": "orders_raw",
+                "source_schema": "ext",
+                "source_database": "proj_b",  # a different project
+            }
+        )
+        # The data read is qualified with the external project...
+        assert runner.source_table_id == "proj_b.ext.orders_raw"
+        # ...and discovery reads from the same project (kept in step).
+        assert runner.sql_builder.source_database == "proj_b"
+
+    def test_no_source_database_uses_own_project(self):
+        runner = self._make_runner(
+            {
+                "write_disposition": "historize",
+                "source_table": "orders_raw",
+                "source_schema": "ext",
+            }
+        )
+        # No override → get_full_table_id keeps its default own-project behavior.
+        assert runner.source_table_id == "proj_a.ext.orders_raw"
+        assert runner.sql_builder.source_database == "proj_a"
+
+
+@pytest.mark.unit
 class TestHistorizeRunnerCapabilityValidation:
     """Tests for destination capability checks in HistorizeRunner."""
 
