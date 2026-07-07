@@ -2,6 +2,7 @@
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote_plus
 
@@ -11,6 +12,10 @@ from dlt_saga.pipelines.database.config import DatabaseConfig
 from dlt_saga.utility.secrets import resolve_secret
 
 logger = logging.getLogger(__name__)
+
+# Placeholder a custom incremental query must contain so the resolved cursor
+# can be substituted in (mirrors the API source's placeholder contract).
+_INCREMENTAL_VALUE_PLACEHOLDER = "{incremental_value}"
 
 
 class DatabaseClient:
@@ -166,14 +171,7 @@ class DatabaseClient:
             SQL query string
         """
         if self.config.query:
-            # Use provided query, substituting placeholders if incremental
-            query = self.config.query
-            if incremental_value is not None and incremental_column:
-                query = query.format(
-                    incremental_column=incremental_column,
-                    incremental_value=incremental_value,
-                )
-            return query
+            return self._build_custom_query(incremental_value, incremental_column)
 
         # Build query from source_table
         table = self.config.source_table
@@ -186,10 +184,85 @@ class DatabaseClient:
             table = f"`{table}`"
 
         if incremental_value is not None and incremental_column:
-            # Add WHERE clause for incremental loading
-            return f"SELECT * FROM {table} WHERE {incremental_column} > '{incremental_value}'"
+            # Render the watermark by inferred type: numerics unquoted (no implicit
+            # string→number cast), everything else as an escaped string literal.
+            literal = self._render_sql_literal(incremental_value)
+            return f"SELECT * FROM {table} WHERE {incremental_column} > {literal}"
 
         return f"SELECT * FROM {table}"
+
+    def _build_custom_query(
+        self,
+        incremental_value: Optional[Any],
+        incremental_column: Optional[str],
+    ) -> str:
+        """Build the query for a user-provided custom ``query`` config.
+
+        The user controls quoting inside their own SQL, so the cursor is
+        substituted verbatim into the ``{incremental_value}`` placeholder. When
+        incremental is enabled the query MUST contain that placeholder (otherwise
+        it would silently re-read everything every run), and a watermark must be
+        available (a raw ``{incremental_value}`` sent to the DB is a hard error,
+        so first runs require ``initial_value``).
+        """
+        query = self.config.query
+        if not incremental_column:
+            # Incremental disabled — return the query as-is.
+            return query
+
+        if _INCREMENTAL_VALUE_PLACEHOLDER not in query:
+            raise ValueError(
+                "incremental is enabled but the custom query has no "
+                f"'{_INCREMENTAL_VALUE_PLACEHOLDER}' placeholder — the cursor "
+                "cannot be applied and the query would re-read everything every "
+                "run. Add a predicate such as:\n"
+                "  WHERE updated_at > '{incremental_value}'"
+            )
+
+        if incremental_value is None:
+            raise ValueError(
+                "incremental is enabled with a custom query but no watermark is "
+                "available (first run, no prior data). Set 'initial_value' to seed "
+                f"the first run's '{_INCREMENTAL_VALUE_PLACEHOLDER}'."
+            )
+
+        return query.format(
+            incremental_column=incremental_column,
+            incremental_value=incremental_value,
+        )
+
+    def _render_sql_literal(self, value: Any) -> str:
+        """Render a watermark value as a SQL literal for the auto-built WHERE.
+
+        Numerics are emitted unquoted; datetimes are normalised to naive UTC
+        (a trailing timezone offset is rejected by some engines, e.g. SQL Server
+        DATETIME); everything else is an escaped, single-quoted string.
+        """
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                value = value.astimezone(timezone.utc).replace(tzinfo=None)
+            text = value.isoformat(sep=" ")
+        else:
+            text = str(value)
+        return "'" + self._escape_sql_string(text) + "'"
+
+    def _escape_sql_string(self, text: str) -> str:
+        """Escape single quotes in a string literal for the target dialect.
+
+        BigQuery escapes with a backslash (``\\'``); ANSI dialects (Postgres,
+        MySQL, SQL Server, etc.) double the quote (``''``). Mirrors the
+        dialect-aware escaping used on the destination side.
+        """
+        if (
+            self.config.database_type
+            and self.config.database_type.lower() == "bigquery"
+        ):
+            return text.replace("\\", "\\\\").replace("'", "\\'")
+        return text.replace("'", "''")
 
     def fetch_data(
         self,
