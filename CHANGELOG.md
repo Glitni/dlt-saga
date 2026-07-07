@@ -1,3 +1,18 @@
+## 0.17.0 — 2026-07-07
+
+### Fixed
+- Databricks apply_hints passes wrong kwargs to databricks_adapter (description + clustering silently dropped) (#272)
+
+
+### Performance
+- Cache google_sheets API services per run (#274)
+- Cache DefaultAzureCredential for Databricks azure_default auth (#270)
+- Batch BigQuery load-info inserts into one multi-row DML (#268)
+- Eliminate per-iteration overhead in hot paths (per-row imports; full-listing slice) (#266)
+- Stream filesystem CSV metadata reads instead of loading the whole file (#264)
+- Pool BigQuery clients instead of constructing one per operation (#262)
+- Cache config discovery in FilePipelineConfig (#260)
+
 ## 0.16.0 — 2026-07-07
 
 ### Fixed
