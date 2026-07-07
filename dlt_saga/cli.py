@@ -630,6 +630,30 @@ def _execute_worker_run(
     return failed_pipelines
 
 
+def _mark_task_failed_best_effort(
+    plan_manager,
+    execution_id: str,
+    task_index: int,
+    exc: BaseException,
+):
+    """Mark a task ``failed`` after an unexpected crash, swallowing any error.
+
+    Called from the crash path, so a failure to write the status must not mask
+    the original exception — the caller re-raises it.
+    """
+    try:
+        plan_manager.update_task_status(
+            execution_id, task_index, "failed", f"Worker crashed: {exc}"
+        )
+    except Exception:
+        logger.error(
+            "[Task %d] Failed to record 'failed' status after a crash; "
+            "the task may remain 'running' in the plan",
+            task_index,
+            exc_info=True,
+        )
+
+
 def _update_worker_status(
     plan_manager,
     execution_id: str,
@@ -705,19 +729,29 @@ def run_worker_mode(
     _log_assigned_pipelines(pipeline_configs)
     plan_manager.update_task_status(execution_id, task_index, "running")
 
-    if worker_command == "historize":
-        failed_pipelines = _execute_worker_historize(
-            pipeline_configs, task_index, full_refresh, max_workers=max_workers
-        )
-    elif worker_command == "run":
-        failed_pipelines = _execute_worker_run(
-            pipeline_configs, task_index, full_refresh, max_workers=max_workers
-        )
-    else:
-        # Default: ingest only (backward compatible)
-        failed_pipelines = _execute_worker_ingest(
-            pipeline_configs, task_index, max_workers=max_workers
-        )
+    # Any crash between here and the final status write (OOM, SIGTERM-turned-
+    # KeyboardInterrupt, connection loss, an unexpected bug) would otherwise
+    # leave the task "running" forever, and the orchestrator waits on task
+    # status — a stuck "running" blocks the whole plan from ever completing.
+    # Catch BaseException so SystemExit/KeyboardInterrupt are recorded too, mark
+    # the task failed best-effort, then re-raise to preserve the exit/traceback.
+    try:
+        if worker_command == "historize":
+            failed_pipelines = _execute_worker_historize(
+                pipeline_configs, task_index, full_refresh, max_workers=max_workers
+            )
+        elif worker_command == "run":
+            failed_pipelines = _execute_worker_run(
+                pipeline_configs, task_index, full_refresh, max_workers=max_workers
+            )
+        else:
+            # Default: ingest only (backward compatible)
+            failed_pipelines = _execute_worker_ingest(
+                pipeline_configs, task_index, max_workers=max_workers
+            )
+    except BaseException as exc:
+        _mark_task_failed_best_effort(plan_manager, execution_id, task_index, exc)
+        raise
 
     _update_worker_status(
         plan_manager, execution_id, task_index, pipeline_configs, failed_pipelines
@@ -1142,7 +1176,9 @@ def ingest(
             start_value_override=start_value_override,
             end_value_override=end_value_override,
         )
-        run_worker_mode()
+        # Orchestrated runs always set SAGA_WORKER_COMMAND (authoritative); the
+        # typed subcommand is the fallback for a manual `saga ingest` worker.
+        run_worker_mode(worker_command=get_env("SAGA_WORKER_COMMAND") or "ingest")
         return
 
     _confirm_full_refresh(full_refresh, in_cloud_run)
@@ -1274,7 +1310,10 @@ def historize(
         # historize has no change-detection to override, so there is no `force`
         # (unlike ingest) — it keys on actual snapshot values, not a proxy mtime.
         setup_execution_context(profile_target, full_refresh=full_refresh)
-        run_worker_mode()
+        # Orchestrated runs always set SAGA_WORKER_COMMAND (authoritative); the
+        # typed subcommand is the fallback for a manual `saga historize` worker
+        # (which previously fell through to ingest).
+        run_worker_mode(worker_command=get_env("SAGA_WORKER_COMMAND") or "historize")
         return
 
     _confirm_historize_full_refresh(full_refresh, in_cloud_run)
@@ -1598,7 +1637,9 @@ def run(
             start_value_override=start_value_override,
             end_value_override=end_value_override,
         )
-        run_worker_mode()
+        # Orchestrated runs always set SAGA_WORKER_COMMAND (authoritative); the
+        # typed subcommand is the fallback for a manual `saga run` worker.
+        run_worker_mode(worker_command=get_env("SAGA_WORKER_COMMAND") or "run")
         return
 
     # Load profile once — shared by orchestrator check and Session below
