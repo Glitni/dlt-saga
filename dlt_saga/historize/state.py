@@ -124,11 +124,18 @@ class HistorizeStateManager:
         """
         q = self.log_table_id
         safe_name = self.destination.escape_string_literal(pipeline_name)
+        # snapshot_value IS NOT NULL excludes empty-source runs: a full reprocess
+        # over an empty/fully-filtered source has no max snapshot, so it does not
+        # establish a baseline. Reading such an entry as the last successful run
+        # would feed NULL into discover_unprocessed_snapshots (crash) and mask the
+        # real prior baseline. Also self-heals pre-existing tables poisoned with a
+        # NULL-snapshot completed row.
         sql = f"""
             SELECT snapshot_value, finished_at, config_fingerprint
             FROM {q}
             WHERE pipeline_name = '{safe_name}'
               AND status = 'completed'
+              AND snapshot_value IS NOT NULL
             ORDER BY finished_at DESC
             LIMIT 1
         """

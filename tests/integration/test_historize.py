@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+from dlt_saga.historize.state import HistorizeLogEntry
 from tests.integration.conftest import (
     SNAPSHOT_1,
     SNAPSHOT_2,
@@ -95,6 +96,77 @@ class TestFullReprocess:
             new_or_changed_rows=5,
             deleted_rows=1,
         )
+
+
+class TestEmptySource:
+    """An empty/fully-filtered source must not crash or poison state (#2)."""
+
+    def test_empty_source_records_no_baseline(self, duckdb_destination):
+        """Full reprocess over an empty source completes with 0 rows and writes
+        no log entry — a NULL-snapshot 'completed' row would poison state."""
+        seed_raw_table(duckdb_destination, [])  # create the table, no rows
+        result = make_historize_runner(duckdb_destination, full_refresh=True).run()
+
+        assert result["status"] == "completed"
+        assert result["mode"] == "full_reprocess"
+        assert result["new_or_changed_rows"] == 0
+        assert result["deleted_rows"] == 0
+
+        # No baseline recorded, so the next run is free to reprocess.
+        assert query_log(duckdb_destination) == []
+
+    def test_empty_then_populated_source(self, duckdb_destination):
+        """After an empty run, a later run with data historizes normally — the
+        old code crashed here with escape_string_literal(None)."""
+        seed_raw_table(duckdb_destination, [])
+        make_historize_runner(duckdb_destination, full_refresh=True).run()
+
+        # In production each run is a fresh process; here both runs share one
+        # DuckDB connection, so drop the connection-scoped full-reprocess temp
+        # table to simulate that process boundary (it is otherwise re-used across
+        # both full reprocesses and collides — a DuckDB-test-only artifact).
+        duckdb_destination.connection.execute("DROP TABLE IF EXISTS _historize_result")
+
+        seed_raw_table(duckdb_destination, [SNAPSHOT_1, SNAPSHOT_2, SNAPSHOT_3])
+        result = make_historize_runner(duckdb_destination, full_refresh=False).run()
+
+        assert result["status"] == "completed"
+        # No usable baseline existed, so this is a full reprocess, not incremental.
+        assert result["mode"] == "full_reprocess"
+        assert len(query_historized(duckdb_destination)) == 6
+
+    def test_recovers_from_poisoned_null_log_entry(self, duckdb_destination):
+        """A pre-existing NULL-snapshot 'completed' entry (left by the old buggy
+        empty-source path) is ignored as a baseline, so the next run self-heals
+        instead of crashing."""
+        seed_raw_table(duckdb_destination, [SNAPSHOT_1, SNAPSHOT_2, SNAPSHOT_3])
+        runner = make_historize_runner(duckdb_destination, full_refresh=False)
+
+        # Reproduce the poisoned state a pre-fix empty run left behind.
+        runner.state_manager.ensure_log_table()
+        runner.state_manager.write_log_entry(
+            HistorizeLogEntry(
+                pipeline_name="test__raw_companies",
+                source_table=runner.source_table_id,
+                target_table=runner.target_table_id,
+                snapshot_value=None,
+                new_or_changed_rows=0,
+                deleted_rows=0,
+                config_fingerprint=runner.state_manager.compute_fingerprint(
+                    runner.config
+                ),
+                is_full_reprocess=True,
+                started_at=DT(2026, 1, 1),
+                finished_at=DT(2026, 1, 1),
+                status="completed",
+            )
+        )
+
+        result = runner.run()
+
+        assert result["status"] == "completed"
+        assert result["mode"] == "full_reprocess"
+        assert len(query_historized(duckdb_destination)) == 6
 
 
 class TestIncremental:

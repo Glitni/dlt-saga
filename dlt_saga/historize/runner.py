@@ -529,27 +529,40 @@ class HistorizeRunner:
         """
         rows = list(self.destination.execute_sql(stats_sql, self.schema))
         row = rows[0] if rows else None
-        new_or_changed = row.new_or_changed_rows if row else 0
-        deleted = row.deleted_rows if row else 0
+        # SUM over an empty target returns NULL, and MAX over an empty source
+        # returns NULL — coalesce so downstream formatting and logging never see
+        # None (an un-coalesced NULL count crashes the f"{n:,}" summary below).
+        new_or_changed = (row.new_or_changed_rows if row else 0) or 0
+        deleted = (row.deleted_rows if row else 0) or 0
         max_snapshot = row.last_snapshot if row else None
 
-        # Log the run
-        fingerprint = self.state_manager.compute_fingerprint(self.config)
-        self.state_manager.write_log_entry(
-            HistorizeLogEntry(
-                pipeline_name=self.pipeline_name,
-                source_table=self.source_table_id,
-                target_table=self.target_table_id,
-                snapshot_value=max_snapshot,
-                new_or_changed_rows=new_or_changed,
-                deleted_rows=deleted,
-                config_fingerprint=fingerprint,
-                is_full_reprocess=True,
-                started_at=started_at,
-                finished_at=finished_at,
-                status="completed",
+        # An empty/fully-filtered source has no snapshot, so no baseline exists.
+        # Skip the log entry rather than record a NULL-snapshot "completed" run:
+        # such an entry poisons state (the next run reads it as the baseline and
+        # feeds NULL into snapshot discovery). Next run re-runs full reprocess,
+        # which is correct — nothing has been historized yet.
+        if max_snapshot is None:
+            self.logger.info(
+                f"Source for {self.pipeline_name} is empty; nothing to historize. "
+                "No baseline recorded."
             )
-        )
+        else:
+            fingerprint = self.state_manager.compute_fingerprint(self.config)
+            self.state_manager.write_log_entry(
+                HistorizeLogEntry(
+                    pipeline_name=self.pipeline_name,
+                    source_table=self.source_table_id,
+                    target_table=self.target_table_id,
+                    snapshot_value=max_snapshot,
+                    new_or_changed_rows=new_or_changed,
+                    deleted_rows=deleted,
+                    config_fingerprint=fingerprint,
+                    is_full_reprocess=True,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    status="completed",
+                )
+            )
 
         self.logger.info(
             f"Full reprocess complete for {self.pipeline_name}: "
@@ -607,8 +620,10 @@ class HistorizeRunner:
         """
         rows = list(self.destination.execute_sql(stats_sql, self.schema))
         row = rows[0] if rows else None
-        new_or_changed = row.new_or_changed_rows if row else 0
-        deleted = row.deleted_rows if row else 0
+        # SUM over the affected rows returns NULL when a snapshot batch produced
+        # no changes/deletions — coalesce to 0 so stats and logging never see None.
+        new_or_changed = (row.new_or_changed_rows if row else 0) or 0
+        deleted = (row.deleted_rows if row else 0) or 0
         self.logger.debug(f"Stats query executed in {time.time() - t_stats:.1f}s")
 
         # Log with last snapshot value for state tracking
