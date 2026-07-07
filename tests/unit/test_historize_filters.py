@@ -22,6 +22,7 @@ def _stub_destination():
     """Minimal stub for HistorizeSqlBuilder — only the methods actually called."""
     dest = MagicMock()
     dest.quote_identifier.side_effect = lambda s: f"`{s}`"
+    dest.escape_string_literal.side_effect = lambda s: s
     dest.hash_expression.side_effect = lambda cols: f"HASH({', '.join(cols)})"
     dest.cast_to_string.side_effect = lambda expr: f"CAST({expr} AS STRING)"
     dest.type_name.side_effect = lambda t: t.upper()
@@ -121,6 +122,43 @@ class TestSqlInjection:
         b = _make_builder()
         sql = b.build_full_reprocess_sql(value_columns=["name", "amount"])
         # No filter clause should appear after FROM proj.ds.src
+        assert " FROM proj.ds.src WHERE" not in sql
+
+    def test_full_reprocess_bounds_all_source_reads(self):
+        # No historize.filters — the upper bound alone gates every source read
+        # (all_snapshots, hashed, key_presence).
+        b = _make_builder()
+        sql = b.build_full_reprocess_sql(
+            value_columns=["name", "amount"],
+            snapshot_upper_bound="2026-01-02 00:00:00",
+        )
+        assert (
+            sql.count(
+                " FROM proj.ds.src WHERE `_dlt_ingested_at` "
+                "<= TIMESTAMP '2026-01-02 00:00:00'"
+            )
+            == 3
+        )
+
+    def test_full_reprocess_bound_anded_with_filter(self):
+        b = _make_builder(filter_sql="`tenant_id` = 'tenant_a'")
+        sql = b.build_full_reprocess_sql(
+            value_columns=["name"],
+            snapshot_upper_bound="2026-01-02 00:00:00",
+        )
+        # and_filter puts the bound first, then AND (filter).
+        assert (
+            sql.count(
+                "`_dlt_ingested_at` <= TIMESTAMP '2026-01-02 00:00:00' "
+                "AND (`tenant_id` = 'tenant_a')"
+            )
+            == 3
+        )
+
+    def test_full_reprocess_no_bound_unchanged(self):
+        b = _make_builder()
+        sql = b.build_full_reprocess_sql(value_columns=["name"])
+        # Without a bound (and no filter) source reads carry no WHERE clause.
         assert " FROM proj.ds.src WHERE" not in sql
 
     def test_incremental_ands_filter_into_source_rows(self):

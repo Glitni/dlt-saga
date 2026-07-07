@@ -500,68 +500,79 @@ class HistorizeRunner:
         """Execute full reprocess: rebuild entire historized table from all raw data."""
         self.logger.info(f"Full reprocess historization for {self.pipeline_name}")
 
-        sql = self.sql_builder.build_full_reprocess_sql(value_columns)
-        self.logger.debug(f"Full reprocess SQL ({len(sql)} chars)")
-
-        self.destination.execute_sql(sql, self.schema)
-
-        finished_at = datetime.now(timezone.utc)
-
-        # Single query: stats from target + max snapshot from source
-        # (max snapshot must come from source, not target, because unchanged
-        # snapshots don't produce rows in the target table)
-        tgt = self.target_table_id
         src = self.source_table_id
+        tgt = self.target_table_id
         q_snapshot = self.destination.quote_identifier(self.config.snapshot_column)
+
+        # Resolve the max source snapshot BEFORE processing and use it both as the
+        # reprocess upper bound and as the recorded baseline. Reading it afterwards
+        # would record a snapshot that arrived between the reprocess read and the
+        # max read as "processed" — the next run then discovers nothing past it and
+        # that snapshot is skipped forever. Bounding the reads with <= max keeps the
+        # baseline exactly in step with what was historized.
         cast_max = self.destination.cast_to_string(f"MAX({q_snapshot})")
-        stats_sql = f"""
-            WITH target_stats AS (
-                SELECT SUM(CASE WHEN NOT {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS new_or_changed_rows,
-                       SUM(CASE WHEN {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS deleted_rows
-                FROM {tgt}
-            ),
-            source_stats AS (
-                SELECT {cast_max} AS last_snapshot
-                FROM {src}{filter_where_clause(self._filter_sql)}
-            )
-            SELECT * FROM target_stats CROSS JOIN source_stats
-        """
-        rows = list(self.destination.execute_sql(stats_sql, self.schema))
-        row = rows[0] if rows else None
-        # SUM over an empty target returns NULL, and MAX over an empty source
-        # returns NULL — coalesce so downstream formatting and logging never see
-        # None (an un-coalesced NULL count crashes the f"{n:,}" summary below).
-        new_or_changed = (row.new_or_changed_rows if row else 0) or 0
-        deleted = (row.deleted_rows if row else 0) or 0
-        max_snapshot = row.last_snapshot if row else None
+        max_sql = (
+            f"SELECT {cast_max} AS last_snapshot "
+            f"FROM {src}{filter_where_clause(self._filter_sql)}"
+        )
+        max_rows = list(self.destination.execute_sql(max_sql, self.schema))
+        max_snapshot = max_rows[0].last_snapshot if max_rows else None
 
         # An empty/fully-filtered source has no snapshot, so no baseline exists.
-        # Skip the log entry rather than record a NULL-snapshot "completed" run:
-        # such an entry poisons state (the next run reads it as the baseline and
-        # feeds NULL into snapshot discovery). Next run re-runs full reprocess,
-        # which is correct — nothing has been historized yet.
+        # Skip processing and the log entry rather than record a NULL-snapshot
+        # "completed" run: such an entry poisons state (the next run reads it as
+        # the baseline and feeds NULL into snapshot discovery). The target table
+        # was already (re)created empty by _setup_full_reprocess; the next run
+        # re-runs full reprocess, which is correct — nothing has been historized.
         if max_snapshot is None:
             self.logger.info(
                 f"Source for {self.pipeline_name} is empty; nothing to historize. "
                 "No baseline recorded."
             )
-        else:
-            fingerprint = self.state_manager.compute_fingerprint(self.config)
-            self.state_manager.write_log_entry(
-                HistorizeLogEntry(
-                    pipeline_name=self.pipeline_name,
-                    source_table=self.source_table_id,
-                    target_table=self.target_table_id,
-                    snapshot_value=max_snapshot,
-                    new_or_changed_rows=new_or_changed,
-                    deleted_rows=deleted,
-                    config_fingerprint=fingerprint,
-                    is_full_reprocess=True,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    status="completed",
-                )
+            return {
+                "mode": "full_reprocess",
+                "snapshots_processed": "all",
+                "new_or_changed_rows": 0,
+                "deleted_rows": 0,
+            }
+
+        sql = self.sql_builder.build_full_reprocess_sql(
+            value_columns, snapshot_upper_bound=max_snapshot
+        )
+        self.logger.debug(f"Full reprocess SQL ({len(sql)} chars)")
+        self.destination.execute_sql(sql, self.schema)
+
+        finished_at = datetime.now(timezone.utc)
+
+        # Stats from the target (the rows we just wrote).
+        stats_sql = f"""
+            SELECT SUM(CASE WHEN NOT {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS new_or_changed_rows,
+                   SUM(CASE WHEN {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS deleted_rows
+            FROM {tgt}
+        """
+        rows = list(self.destination.execute_sql(stats_sql, self.schema))
+        row = rows[0] if rows else None
+        # SUM over an empty target returns NULL — coalesce so downstream formatting
+        # and logging never see None (an un-coalesced NULL count crashes f"{n:,}").
+        new_or_changed = (row.new_or_changed_rows if row else 0) or 0
+        deleted = (row.deleted_rows if row else 0) or 0
+
+        fingerprint = self.state_manager.compute_fingerprint(self.config)
+        self.state_manager.write_log_entry(
+            HistorizeLogEntry(
+                pipeline_name=self.pipeline_name,
+                source_table=self.source_table_id,
+                target_table=self.target_table_id,
+                snapshot_value=max_snapshot,
+                new_or_changed_rows=new_or_changed,
+                deleted_rows=deleted,
+                config_fingerprint=fingerprint,
+                is_full_reprocess=True,
+                started_at=started_at,
+                finished_at=finished_at,
+                status="completed",
             )
+        )
 
         self.logger.info(
             f"Full reprocess complete for {self.pipeline_name}: "

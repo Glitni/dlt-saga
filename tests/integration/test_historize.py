@@ -169,6 +169,59 @@ class TestEmptySource:
         assert len(query_historized(duckdb_destination)) == 6
 
 
+class TestFullReprocessSnapshotOrdering:
+    """The recorded baseline must match what was actually reprocessed (#3-med).
+
+    If the max snapshot is read *after* the reprocess, a snapshot landing in
+    between gets recorded as processed but was never historized — the next run
+    discovers nothing past it and it is skipped forever. Resolving the max first
+    and bounding the reprocess by it closes that window.
+    """
+
+    def test_snapshot_arriving_mid_run_not_lost(self, duckdb_destination):
+        from unittest.mock import patch
+
+        # max source snapshot at start = 2026-01-02
+        seed_raw_table(duckdb_destination, [SNAPSHOT_1, SNAPSHOT_2])
+        runner = make_historize_runner(duckdb_destination, full_refresh=True)
+
+        original = duckdb_destination.execute_sql
+        injected = {"done": False}
+
+        def hook(sql, *args, **kwargs):
+            result = original(sql, *args, **kwargs)
+            # Simulate a newer snapshot landing right after the reprocess read.
+            # With the old ordering the subsequent max read would pick it up and
+            # record it as the baseline though it was never processed.
+            if not injected["done"] and "_historize_result" in sql:
+                injected["done"] = True
+                seed_raw_table(duckdb_destination, [SNAPSHOT_3])  # 2026-01-03
+            return result
+
+        with patch.object(duckdb_destination, "execute_sql", side_effect=hook):
+            result = runner.run()
+
+        assert result["status"] == "completed"
+        assert injected["done"]  # the reprocess ran and we injected afterwards
+
+        # Baseline is the pre-injection max, not the snapshot that arrived mid-run.
+        log = query_log(duckdb_destination)
+        assert len(log) == 1
+        assert "2026-01-02" in str(log[-1]["snapshot_value"])
+        assert "2026-01-03" not in str(log[-1]["snapshot_value"])
+
+        # Delta (company 4, introduced in snapshot 3) was not historized yet.
+        assert get_rows_for(query_historized(duckdb_destination), 4) == []
+
+        # A subsequent incremental run picks up the snapshot that arrived mid-run
+        # (it is > the recorded baseline), rather than skipping it forever.
+        duckdb_destination.connection.execute("DROP TABLE IF EXISTS _historize_result")
+        r2 = make_historize_runner(duckdb_destination, full_refresh=False).run()
+        assert r2["status"] == "completed"
+        assert r2["mode"] == "incremental"
+        assert get_rows_for(query_historized(duckdb_destination), 4) != []
+
+
 class TestIncremental:
     """Test incremental historization."""
 
