@@ -546,8 +546,11 @@ class BigQueryDestination(BigQueryBaseDestination):
             job_config.default_dataset = f"{self.config.project_id}.{schema_name}"
 
         logger.debug(f"Executing SQL ({len(sql)} chars) in schema={schema_name}")
-        result = client.query(sql, job_config=job_config).result(timeout=120)
-        return result
+        # No client-side timeout: result() waits for the job to complete server-side
+        # (bounded by BigQuery's own job timeout). The old hard 120s wait killed long
+        # historize MERGEs client-side while the job kept running server-side, so saga
+        # recorded failure for a statement that then committed — a partial-failure hazard.
+        return client.query(sql, job_config=job_config).result()
 
     # -------------------------------------------------------------------------
     # SQL dialect overrides
