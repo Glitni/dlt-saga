@@ -252,8 +252,13 @@ class HistorizeStateManager:
         try:
             self.destination.execute_sql(sql, self.schema)
             self.logger.info(f"Cleared historize log entries for {pipeline_name}")
-        except Exception:
-            # Table might not exist yet
+        except Exception as exc:
+            # A missing log table is fine (nothing to clear on first run). But a
+            # permission/transient failure must propagate: leaving stale
+            # `completed` entries makes the next run go incremental against a
+            # freshly rebuilt table — silent data divergence during full refresh.
+            if not looks_like_missing_table(exc):
+                raise
             self.logger.debug(f"No historize log entries to clear for {pipeline_name}")
 
     def clear_log_entries_from(self, pipeline_name: str, historize_from: str) -> None:
@@ -279,7 +284,11 @@ class HistorizeStateManager:
             self.logger.info(
                 f"Cleared historize log entries from {historize_from} for {pipeline_name}"
             )
-        except Exception:
+        except Exception as exc:
+            # Missing log table is fine; a real failure must propagate rather
+            # than silently leaving stale entries for the range being reprocessed.
+            if not looks_like_missing_table(exc):
+                raise
             self.logger.debug(
                 f"No historize log entries to clear from {historize_from} "
                 f"for {pipeline_name}"
