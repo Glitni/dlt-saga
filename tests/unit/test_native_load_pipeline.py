@@ -1064,3 +1064,56 @@ class TestIncrementalStateLog:
 
         p.state_manager.record_loads_started_bulk.assert_called_once()
         p.state_manager.record_loads_success_bulk.assert_called_once()
+
+
+@pytest.mark.unit
+class TestPrefixAutodetectLazyListing:
+    """_resolve_date_filename_prefix inspects only the first 50 blobs (islice),
+    never materializing the full — potentially huge — listing."""
+
+    def _blob(self, uri: str):
+        b = MagicMock()
+        b.full_uri = uri
+        return b
+
+    def test_stops_after_50_blobs_when_no_match(self):
+        p = _make_pipeline()
+        p.native_config = MagicMock(
+            date_filename_prefix=None,
+            filename_date_regex=r"(\d{8})",
+            source_uri="gs://b/",
+            file_pattern="*",
+        )
+        consumed = [0]
+
+        def gen():
+            for i in range(1000):
+                consumed[0] += 1
+                yield self._blob(f"gs://b/nomatch_{i}.csv")  # no 8-digit date
+
+        p.storage_client = MagicMock()
+        p.storage_client.list_files.return_value = gen()
+
+        assert p._resolve_date_filename_prefix() is None
+        assert consumed[0] == 50  # bounded by islice, not the full 1000
+
+    def test_returns_prefix_on_early_match(self):
+        p = _make_pipeline()
+        p.native_config = MagicMock(
+            date_filename_prefix=None,
+            filename_date_regex=r"(\d{8})",
+            source_uri="gs://b/",
+            file_pattern="*",
+        )
+        p.storage_client = MagicMock()
+        p.storage_client.list_files.return_value = iter(
+            [self._blob("gs://b/report_20260101.csv")]
+        )
+        assert p._resolve_date_filename_prefix() == "report_"
+
+    def test_explicit_prefix_skips_listing(self):
+        p = _make_pipeline()
+        p.native_config = MagicMock(date_filename_prefix="pre_")
+        p.storage_client = MagicMock()
+        assert p._resolve_date_filename_prefix() == "pre_"
+        p.storage_client.list_files.assert_not_called()
