@@ -86,6 +86,26 @@ class TestBigQueryFromContextPartitionExpiration:
 
 
 @pytest.mark.unit
+class TestBigQueryExecuteSqlNoClientTimeout:
+    """execute_sql must not impose a client-side timeout: result() waits for the
+    job to complete server-side. A hard client timeout previously killed long
+    historize MERGEs while the job kept committing server-side (#7)."""
+
+    def _make_dest(self):
+        return BigQueryDestination(BigQueryDestinationConfig(project_id="proj"))
+
+    def test_result_called_without_timeout(self):
+        dest = self._make_dest()
+        with patch("google.cloud.bigquery.Client") as mock_client_cls:
+            query_job = mock_client_cls.return_value.query.return_value
+            query_job.result.return_value = "rows"
+            result = dest.execute_sql("SELECT 1", schema_name="ds")
+        assert result == "rows"
+        # No timeout kwarg (and no positional) — wait for job completion.
+        query_job.result.assert_called_once_with()
+
+
+@pytest.mark.unit
 class TestApplyNativeHintsPartitionExpiration:
     """`_apply_native_hints` should propagate partition_expiration_days into bigquery_adapter."""
 
