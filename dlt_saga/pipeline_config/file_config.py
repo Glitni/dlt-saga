@@ -73,6 +73,14 @@ class FilePipelineConfig(ConfigSource):
         # used to tell a folder-scope block from a config-value dict during
         # hierarchical resolution (see _is_path_segment_dict).
         self._folder_segment_names_cache: Optional[set] = None
+        # Memoized discovery result. Discovery walks the config tree, parses+
+        # templates every YAML, and runs the hierarchical merge — expensive, and
+        # a single `saga run` triggers it several times (ingest + historize
+        # selection, plus every get_config-by-name). Configs don't change within
+        # a process, so compute once. See discover().
+        self._discovery_cache: Optional[
+            Tuple[Dict[str, List[PipelineConfig]], Dict[str, List[PipelineConfig]]]
+        ] = None
 
     @staticmethod
     def _find_project_config(root_dir: str) -> Path:
@@ -232,12 +240,31 @@ class FilePipelineConfig(ConfigSource):
     ) -> Tuple[Dict[str, List[PipelineConfig]], Dict[str, List[PipelineConfig]]]:
         """Discover all YAML config files across all configured directories.
 
+        The (expensive) walk+parse+merge runs once per instance and is memoized;
+        subsequent calls return copies of the cached result. Fresh top-level
+        dicts and lists are returned each call so callers can filter or reorganize
+        them without corrupting the cache (the pre-cache behaviour returned
+        independent containers every time). The ``PipelineConfig`` values are
+        shared and treated read-only.
+
         When multiple directories are configured, pipeline names must be unique
         across all of them — a duplicate raises ValueError.
 
         Returns:
             Tuple of (enabled_configs, disabled_configs)
         """
+        if self._discovery_cache is None:
+            self._discovery_cache = self._discover_all()
+        enabled, disabled = self._discovery_cache
+        return (
+            {group: list(configs) for group, configs in enabled.items()},
+            {group: list(configs) for group, configs in disabled.items()},
+        )
+
+    def _discover_all(
+        self,
+    ) -> Tuple[Dict[str, List[PipelineConfig]], Dict[str, List[PipelineConfig]]]:
+        """Walk every configured directory and build the discovery result."""
         enabled_configs: Dict[str, List[PipelineConfig]] = {}
         disabled_configs: Dict[str, List[PipelineConfig]] = {}
         seen_names: Dict[str, str] = {}
