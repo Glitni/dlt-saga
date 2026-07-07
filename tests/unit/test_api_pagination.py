@@ -1,8 +1,10 @@
 """Unit tests for API pipeline pagination."""
 
 import logging
+from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from dlt_saga.pipelines.api.base import BaseApiPipeline
 from dlt_saga.pipelines.api.config import ApiConfig
@@ -146,16 +148,40 @@ class TestOffsetPagination:
             },
             [
                 {"data": [{"id": 1}, {"id": 2}]},
-                {"data": [{"id": 3}]},  # fewer than limit → last page
+                {"data": [{"id": 3}]},  # short page — NOT necessarily the last
+                {"data": []},  # empty page terminates
             ],
         )
         pipeline.api_config.response_path = "data"
 
         records = list(pipeline._fetch_all_pages())
         assert [r["id"] for r in records] == [1, 2, 3]
-        # Check offset progression
-        assert pipeline._calls[0]["query_params"]["offset"] == 0
-        assert pipeline._calls[1]["query_params"]["offset"] == 2
+        # Offset advances by the actual page size (2, then 1), not the limit.
+        assert [c["query_params"]["offset"] for c in pipeline._calls] == [0, 2, 3]
+
+    def test_offset_capped_page_size_not_truncated(self):
+        # The server caps the page size at 2 even though limit=5 is requested. A
+        # short page must not end iteration (that was the truncation bug) — the
+        # loop continues, advancing by the real page size, until an empty page.
+        pipeline = FakeApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/items",
+                "pagination": {"type": "offset", "limit": 5},
+            },
+            [
+                {"data": [{"id": 1}, {"id": 2}]},
+                {"data": [{"id": 3}, {"id": 4}]},
+                {"data": [{"id": 5}]},
+                {"data": []},
+            ],
+        )
+        pipeline.api_config.response_path = "data"
+
+        records = list(pipeline._fetch_all_pages())
+        assert [r["id"] for r in records] == [1, 2, 3, 4, 5]
+        # Advanced by real page size (2, 2, 1), not the requested limit of 5.
+        assert [c["query_params"]["offset"] for c in pipeline._calls] == [0, 2, 4, 5]
 
     def test_offset_stops_on_empty(self):
         pipeline = FakeApiPipeline(
@@ -689,6 +715,65 @@ class TestExtractDataIncrementalGating:
         )
         with pytest.raises(ValueError, match="incremental is enabled but no query"):
             pipeline.extract_data()
+
+
+class RetryApiPipeline(BaseApiPipeline):
+    """Drives the REAL _make_request retry loop (requests.request is mocked)."""
+
+    def __init__(self, **overrides):
+        cfg = {
+            "base_url": "https://api.example.com",
+            "endpoint": "/data",
+            "max_retries": 2,
+            "retry_backoff_base": 1,
+        }
+        cfg.update(overrides)
+        self.api_config = self._create_api_config(cfg)
+        self.logger = logging.getLogger("test")
+
+
+@pytest.mark.unit
+class TestMakeRequestRetry:
+    def test_connection_error_retried_then_succeeds(self):
+        pipeline = RetryApiPipeline()
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"data": [{"id": 1}]}
+        with (
+            patch(
+                "dlt_saga.pipelines.api.base.requests.request",
+                side_effect=[requests.ConnectionError("connection reset"), ok],
+            ) as req,
+            patch("dlt_saga.pipelines.api.base.time.sleep"),
+        ):
+            result = pipeline._make_request()
+        assert result == {"data": [{"id": 1}]}
+        assert req.call_count == 2  # retried once, then succeeded
+
+    def test_connection_error_exhausts_retries(self):
+        pipeline = RetryApiPipeline()
+        with (
+            patch(
+                "dlt_saga.pipelines.api.base.requests.request",
+                side_effect=requests.ConnectionError("connection reset"),
+            ) as req,
+            patch("dlt_saga.pipelines.api.base.time.sleep"),
+        ):
+            with pytest.raises(ValueError, match="connection error"):
+                pipeline._make_request()
+        assert req.call_count == 3  # initial + 2 retries
+
+    def test_non_transient_request_error_not_retried(self):
+        pipeline = RetryApiPipeline()
+        with (
+            patch(
+                "dlt_saga.pipelines.api.base.requests.request",
+                side_effect=requests.exceptions.InvalidURL("bad url"),
+            ) as req,
+            patch("dlt_saga.pipelines.api.base.time.sleep"),
+        ):
+            with pytest.raises(ValueError, match="API request failed"):
+                pipeline._make_request()
+        assert req.call_count == 1  # fail fast, no retry
 
 
 @pytest.mark.unit

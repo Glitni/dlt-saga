@@ -253,16 +253,26 @@ class BaseApiPipeline(BasePipeline):
                     f"API request timed out after {max_retries} retries "
                     f"(timeout: {self.api_config.timeout}s): {e}"
                 )
-            except requests.RequestException as e:
-                # Check if it's a transient network error
-                if attempt < max_retries and ("503" in str(e) or "429" in str(e)):
+            except requests.ConnectionError as e:
+                # Transient network error (DNS failure, connection reset/refused).
+                # Retryable — retryable HTTP statuses (429/5xx) are handled above
+                # by status code, so this branch is genuinely a connection-level
+                # failure, not a status carried in the exception string.
+                if attempt < max_retries:
                     wait_seconds = self.api_config.retry_backoff_base**attempt
                     self.logger.warning(
-                        f"Network error: {e}. "
+                        f"Connection error: {e}. "
                         f"Retrying in {wait_seconds}s (attempt {attempt + 1}/{max_retries})..."
                     )
                     time.sleep(wait_seconds)
                     continue
+                raise ValueError(
+                    f"API request failed after {max_retries} retries "
+                    f"(connection error): {e}"
+                )
+            except requests.RequestException as e:
+                # Other request errors (invalid URL, too many redirects, etc.) are
+                # not transient — fail fast.
                 raise ValueError(f"API request failed: {e}")
 
         # Should never reach here
@@ -338,21 +348,22 @@ class BaseApiPipeline(BasePipeline):
             if not records:
                 break
             yield from records
+
+            # Advance by the actual page size, not the requested limit. A server
+            # that caps the page size below `limit` still returns a short (but
+            # non-empty) page, which is NOT the last page — advancing by `limit`
+            # would skip records, and stopping on a short page would truncate.
+            # Terminate only on an empty page or once the reported total is reached.
+            offset += len(records)
             self.logger.debug(
-                f"Page {page_num + 1}: {len(records)} records (offset={offset})"
+                f"Page {page_num + 1}: {len(records)} records (next offset={offset})"
             )
 
-            # Check total-based stop condition
             if total_path:
                 total = self._resolve_json_path(response, total_path)
-                if total is not None and offset + limit >= int(total):
+                if total is not None and offset >= int(total):
                     break
 
-            # Fewer items than limit means last page
-            if len(records) < limit:
-                break
-
-            offset += limit
             if page_delay:
                 time.sleep(page_delay)
 
