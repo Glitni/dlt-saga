@@ -460,8 +460,6 @@ class BigQueryDestination(BigQueryBaseDestination):
             "_dlt_id",
         ]
         col_names = ", ".join(columns)
-        placeholders = ", ".join(f"@{c}" for c in columns)
-        insert_sql = f"INSERT INTO `{table_id}` ({col_names}) VALUES ({placeholders})"
 
         param_types = {
             "row_count": "INT64",
@@ -470,18 +468,27 @@ class BigQueryDestination(BigQueryBaseDestination):
             "finished_at": "TIMESTAMP",
         }
 
+        # One multi-row INSERT (a VALUES tuple per row, parameters suffixed by row
+        # index) instead of one DML job per row — a run loading N tables issued N
+        # jobs, each paying job-submission latency.
         load_id = str(uuid.uuid4())
-        for row in rows:
+        value_tuples: list[str] = []
+        params: list[Any] = []
+        for i, row in enumerate(rows):
             row["_dlt_load_id"] = load_id
             row["_dlt_id"] = str(uuid.uuid4())
-            params = [
+            value_tuples.append(", ".join(f"@{c}_{i}" for c in columns))
+            params.extend(
                 bigquery.ScalarQueryParameter(
-                    c, param_types.get(c, "STRING"), row.get(c)
+                    f"{c}_{i}", param_types.get(c, "STRING"), row.get(c)
                 )
                 for c in columns
-            ]
-            job_config = bigquery.QueryJobConfig(query_parameters=params)
-            client.query(insert_sql, job_config=job_config).result()
+            )
+
+        values_sql = ", ".join(f"({t})" for t in value_tuples)
+        insert_sql = f"INSERT INTO `{table_id}` ({col_names}) VALUES {values_sql}"
+        job_config = bigquery.QueryJobConfig(query_parameters=params)
+        client.query(insert_sql, job_config=job_config).result()
 
     def get_last_load_timestamp(
         self, schema_name: str, pipeline_name: str, table_name: str
