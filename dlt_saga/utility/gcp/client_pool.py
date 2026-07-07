@@ -252,28 +252,33 @@ class BigQueryClientPool:
 
     def __init__(self):
         if not self._initialized:
-            self._clients: Dict[tuple[int, str], Any] = {}
+            self._clients: Dict[tuple[int, str, Optional[str]], Any] = {}
             self._client_lock = threading.Lock()
             self._initialized = True
 
-    def get_client(self, project_id: str) -> Any:
+    def get_client(self, project_id: str, location: Optional[str] = None) -> Any:
         """Get or create a BigQuery client for the current thread and project.
 
-        Each thread gets its own client per project to avoid gRPC stream corruption
-        when making concurrent requests.
+        Each thread gets its own client per (project, location) to avoid gRPC
+        stream corruption when making concurrent requests. Location is part of the
+        key because a client is bound to the location it was created with; callers
+        that run jobs in a specific region must not share a client built for
+        another (or for the default) location.
 
         Args:
             project_id: GCP project ID
+            location: BigQuery location (e.g. "EU"). ``None`` lets the client
+                infer location per job, matching ``bigquery.Client(project=...)``.
 
         Returns:
-            BigQuery client for current thread and project
+            BigQuery client for current thread, project, and location
         """
         from google.cloud import bigquery
 
         thread_id = threading.get_ident()
-        client_key = (thread_id, project_id)
+        client_key = (thread_id, project_id, location)
 
-        # Check if current thread has a client for this project (fast path without lock)
+        # Check if current thread has a client for this key (fast path without lock)
         if client_key in self._clients:
             return self._clients[client_key]
 
@@ -283,11 +288,12 @@ class BigQueryClientPool:
             if client_key in self._clients:
                 return self._clients[client_key]
 
-            # Create new client for this thread and project
-            client = bigquery.Client(project=project_id)
+            # Create new client for this thread and (project, location)
+            client = bigquery.Client(project=project_id, location=location)
             self._clients[client_key] = client
             logger.debug(
-                f"Created BigQuery client for thread {thread_id}, project {project_id}"
+                f"Created BigQuery client for thread {thread_id}, project "
+                f"{project_id}, location {location}"
             )
             return client
 
