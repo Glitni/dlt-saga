@@ -2,7 +2,34 @@
 
 import pytest
 
-from dlt_saga.utility.sql import split_sql_statements
+from dlt_saga.utility.sql import looks_like_missing_table, split_sql_statements
+
+
+@pytest.mark.unit
+class TestLooksLikeMissingTable:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Not found: Table my-project:ds.tbl was not found",  # BigQuery
+            "[TABLE_OR_VIEW_NOT_FOUND] The table or view cannot be found",  # Databricks
+            'Catalog Error: Table with name "t" does not exist!',  # DuckDB
+            "no such table: t",  # SQLite-style
+        ],
+    )
+    def test_matches_missing_table_messages(self, message):
+        assert looks_like_missing_table(Exception(message)) is True
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "PERMISSION_DENIED: caller lacks bigquery.tables.get",
+            "Connection reset by peer",
+            "Syntax error: unexpected token",
+            "Quota exceeded",
+        ],
+    )
+    def test_does_not_match_infra_errors(self, message):
+        assert looks_like_missing_table(Exception(message)) is False
 
 
 @pytest.mark.unit

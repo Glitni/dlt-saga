@@ -126,7 +126,7 @@ class TestNativeLoadStateManager:
         # row's own load_id must sit next to its own uri.
         assert f"'{load_id}', 'pipeline', '{uri}'" in combined
 
-    def test_get_loaded_uri_generations_empty_on_error(self):
+    def test_get_loaded_uri_generations_empty_on_missing_table(self):
         dest = self._make_dest()
         dest.execute_sql.side_effect = RuntimeError("table not found")
         mgr = NativeLoadStateManager(dest, "my_dataset")
@@ -275,11 +275,20 @@ class TestGetLastCursor:
         mgr = NativeLoadStateManager(dest, "ds")
         assert mgr.get_last_cursor("pipeline") == "2024-02-01"
 
-    def test_returns_none_on_exception(self):
+    def test_returns_none_on_missing_table(self):
         dest = _make_plain_dest()
-        dest.execute_sql.side_effect = RuntimeError("table not found")
+        dest.execute_sql.side_effect = RuntimeError("Table with name x does not exist")
         mgr = NativeLoadStateManager(dest, "ds")
         assert mgr.get_last_cursor("pipeline") is None
+
+    def test_raises_on_other_error(self):
+        # A real error must propagate — a silent None widens the scan window
+        # (re-lists already-loaded files) instead of surfacing the failure.
+        dest = _make_plain_dest()
+        dest.execute_sql.side_effect = RuntimeError("connection reset")
+        mgr = NativeLoadStateManager(dest, "ds")
+        with pytest.raises(RuntimeError, match="connection reset"):
+            mgr.get_last_cursor("pipeline")
 
 
 @pytest.mark.unit
@@ -328,11 +337,20 @@ class TestGetLoadedUriGenerations:
         sql = dest.execute_sql.call_args[0][0]
         assert "cursor_value" not in sql
 
-    def test_returns_empty_on_exception(self):
+    def test_returns_empty_on_missing_table(self):
         dest = _make_plain_dest()
-        dest.execute_sql.side_effect = RuntimeError("table gone")
+        dest.execute_sql.side_effect = RuntimeError("Table with name x does not exist")
         mgr = NativeLoadStateManager(dest, "ds")
         assert mgr.get_loaded_uri_generations("pipeline") == set()
+
+    def test_raises_on_other_error(self):
+        # Critical: an empty dedup set on a real failure makes every file look
+        # new, re-loading the entire source (mass duplicates). Must abort.
+        dest = _make_plain_dest()
+        dest.execute_sql.side_effect = RuntimeError("connection reset")
+        mgr = NativeLoadStateManager(dest, "ds")
+        with pytest.raises(RuntimeError, match="connection reset"):
+            mgr.get_loaded_uri_generations("pipeline")
 
 
 @pytest.mark.unit

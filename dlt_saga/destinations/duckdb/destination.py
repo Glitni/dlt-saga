@@ -14,6 +14,7 @@ import duckdb
 from dlt_saga.destinations.base import Destination
 from dlt_saga.destinations.duckdb.config import DuckDBDestinationConfig
 from dlt_saga.utility.naming import normalize_identifier
+from dlt_saga.utility.sql import looks_like_missing_table
 
 logger = logging.getLogger(__name__)
 
@@ -168,8 +169,12 @@ class DuckDBDestination(Destination):
             if result and result[0] is not None:
                 return result[0]
             return None
-        except Exception:
-            return None
+        except Exception as e:
+            # Missing load-info table = first run → None. Other errors propagate
+            # rather than silently re-extracting the entire history.
+            if looks_like_missing_table(e):
+                return None
+            raise
 
     def get_max_column_value(self, table_id: str, column: str) -> Any:
         """Get the maximum value of a column in a DuckDB table."""
@@ -180,8 +185,12 @@ class DuckDBDestination(Destination):
             if result and result[0] is not None:
                 return result[0]
             return None
-        except Exception:
-            return None
+        except Exception as e:
+            # Missing target table = first run → None. Other errors propagate
+            # rather than silently re-extracting from scratch / duplicating rows.
+            if looks_like_missing_table(e):
+                return None
+            raise
 
     def execute_sql(self, sql: str, schema_name: Optional[str] = None) -> Any:
         """Execute a SQL statement against DuckDB.

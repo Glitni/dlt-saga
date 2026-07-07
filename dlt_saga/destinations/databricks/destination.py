@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from dlt_saga.destinations.base import Destination
 from dlt_saga.destinations.databricks.config import DatabricksDestinationConfig
+from dlt_saga.utility.sql import looks_like_missing_table
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.base import MaterializationHints
@@ -463,8 +464,12 @@ class DatabricksDestination(Destination):
             if rows and rows[0][0] is not None:
                 return rows[0][0]
             return None
-        except Exception:
-            return None
+        except Exception as e:
+            # Missing load-info table = first run → None. Other errors propagate
+            # rather than silently re-extracting the entire history.
+            if looks_like_missing_table(e):
+                return None
+            raise
 
     def get_max_column_value(self, table_id: str, column: str) -> Any:
         """Get the maximum value of a column in a Databricks table."""
@@ -475,8 +480,12 @@ class DatabricksDestination(Destination):
             if rows and rows[0][0] is not None:
                 return rows[0][0]
             return None
-        except Exception:
-            return None
+        except Exception as e:
+            # Missing target table = first run → None. Other errors propagate
+            # rather than silently re-extracting from scratch / duplicating rows.
+            if looks_like_missing_table(e):
+                return None
+            raise
 
     def reset_destination_state(self, pipeline_name: str, table_name: str) -> None:
         """Drop tables and clean up metadata for a full refresh."""

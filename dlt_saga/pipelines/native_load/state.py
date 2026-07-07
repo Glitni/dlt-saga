@@ -14,6 +14,7 @@ from dlt_saga.project_config import (
     get_native_load_log_table_name,
     get_native_load_log_view_name,
 )
+from dlt_saga.utility.sql import looks_like_missing_table
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.base import Destination
@@ -158,7 +159,12 @@ class NativeLoadStateManager:
                 )
                 return str(val) if val is not None else None
         except Exception as exc:
-            logger.debug("Could not get last cursor: %s", exc)
+            # Missing log table = first run → no cursor. Other errors propagate:
+            # silently returning None widens the scan window (re-lists already
+            # loaded files) instead of surfacing the real failure.
+            if looks_like_missing_table(exc):
+                return None
+            raise
         return None
 
     def get_loaded_uri_generations(
@@ -224,8 +230,13 @@ class NativeLoadStateManager:
                     result.add((row[0], row[1]))
             return result
         except Exception as exc:
-            logger.debug("Could not get loaded uri/generations: %s", exc)
-            return set()
+            # Missing log table = first run → nothing loaded yet (empty set).
+            # Any other error MUST propagate: an empty dedup set on a real failure
+            # makes every file look new, re-loading the entire source (mass
+            # duplicates). This read must abort rather than silently return {}.
+            if looks_like_missing_table(exc):
+                return set()
+            raise
 
     def get_loaded_uris(
         self, pipeline_name: str, cursor_min: Optional[str] = None
