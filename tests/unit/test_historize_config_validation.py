@@ -38,6 +38,68 @@ class TestHistorizeConfigValidation:
 
 
 @pytest.mark.unit
+class TestHistorizeIdentifierValidation:
+    """Column-name config fields interpolated into SQL must be bare identifiers."""
+
+    def test_invalid_snapshot_column_raises(self):
+        from dlt_saga.historize.config import HistorizeConfig
+
+        with pytest.raises(ValueError, match="snapshot_column"):
+            HistorizeConfig(primary_key=["id"], snapshot_column="ts; DROP TABLE t")
+
+    def test_invalid_track_columns_raises(self):
+        from dlt_saga.historize.config import HistorizeConfig
+
+        with pytest.raises(ValueError, match="track_columns"):
+            HistorizeConfig(primary_key=["id"], track_columns=["ok", "bad col"])
+
+    def test_invalid_ignore_columns_raises(self):
+        from dlt_saga.historize.config import HistorizeConfig
+
+        with pytest.raises(ValueError, match="ignore_columns"):
+            HistorizeConfig(primary_key=["id"], ignore_columns=["a`b"])
+
+    def test_invalid_primary_key_raises_on_validate(self):
+        from dlt_saga.historize.config import HistorizeConfig
+
+        # primary_key may be inherited after construction, so it's checked in
+        # validate() rather than __post_init__.
+        config = HistorizeConfig(primary_key=["id) OR 1=1"])
+        with pytest.raises(ValueError, match="primary_key contains invalid"):
+            config.validate()
+
+    def test_valid_identifiers_accepted(self):
+        from dlt_saga.historize.config import HistorizeConfig
+
+        config = HistorizeConfig(
+            primary_key=["order_id"],
+            snapshot_column="loaded_at",
+            track_columns=["amount"],
+            ignore_columns=["_audit_col"],
+        )
+        config.validate()  # should not raise
+
+
+@pytest.mark.unit
+class TestHistorizeEmptyBlock:
+    """An empty ``historize:`` YAML block parses to None, not {}."""
+
+    def test_from_dict_none_uses_defaults(self):
+        from dlt_saga.historize.config import HistorizeConfig
+
+        config = HistorizeConfig.from_dict(None, top_level_primary_key=["id"])
+        assert config.primary_key == ["id"]
+        assert config.snapshot_column == "_dlt_ingested_at"
+
+    def test_from_dict_empty_equivalent_to_none(self):
+        from dlt_saga.historize.config import HistorizeConfig
+
+        from_none = HistorizeConfig.from_dict(None, top_level_primary_key=["id"])
+        from_empty = HistorizeConfig.from_dict({}, top_level_primary_key=["id"])
+        assert from_none == from_empty
+
+
+@pytest.mark.unit
 class TestHistorizeRunnerCapabilityValidation:
     """Tests for destination capability checks in HistorizeRunner."""
 

@@ -317,7 +317,8 @@ class HistorizeStateManager:
         from dlt_saga.utility.filters import and_filter, filter_where_clause
 
         src = source_table_id
-        cast_expr = self.destination.cast_to_string(snapshot_column)
+        q_snapshot = self.destination.quote_identifier(snapshot_column)
+        cast_expr = self.destination.cast_to_string(q_snapshot)
 
         if not state.has_successful_run:
             sql = f"""
@@ -327,7 +328,7 @@ class HistorizeStateManager:
             """
         else:
             safe_val = self.destination.escape_string_literal(state.last_snapshot_value)
-            base_where = f"{snapshot_column} > TIMESTAMP '{safe_val}'"
+            base_where = f"{q_snapshot} > TIMESTAMP '{safe_val}'"
             sql = f"""
                 SELECT DISTINCT {cast_expr} AS snapshot_val
                 FROM {src}

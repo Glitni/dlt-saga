@@ -227,6 +227,7 @@ class TestDiscoverUnprocessedSnapshots:
         sm = HistorizeStateManager.__new__(HistorizeStateManager)
         sm.destination = MagicMock()
         sm.destination.cast_to_string.side_effect = lambda e: f"CAST({e} AS STRING)"
+        sm.destination.quote_identifier.side_effect = lambda s: f"`{s}`"
         sm.destination.execute_sql.return_value = []
         sm.schema = "ds"
         sm.logger = MagicMock()
@@ -270,9 +271,23 @@ class TestDiscoverUnprocessedSnapshots:
             filter_sql="`tenant_id` = 'tenant_a'",
         )
         sql = sm.destination.execute_sql.call_args[0][0]
-        # Existing snapshot WHERE clause remains; filter is AND'd.
-        assert "event_ts > TIMESTAMP" in sql
+        # Existing snapshot WHERE clause remains; filter is AND'd. The snapshot
+        # column is quoted so reserved-word / mixed-case names are safe.
+        assert "`event_ts` > TIMESTAMP" in sql
         assert "AND (`tenant_id` = 'tenant_a')" in sql
+
+    def test_snapshot_column_is_quoted(self):
+        sm = self._stub()
+        state = MagicMock()
+        state.has_successful_run = False
+        sm.discover_unprocessed_snapshots(
+            state=state,
+            source_table_id="proj.ds.src",
+            snapshot_column="event_ts",
+        )
+        sql = sm.destination.execute_sql.call_args[0][0]
+        # The raw, unquoted column name must not appear bare in the SQL.
+        assert "CAST(`event_ts` AS STRING)" in sql
 
 
 # ---------------------------------------------------------------------------

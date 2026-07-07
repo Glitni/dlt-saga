@@ -512,9 +512,8 @@ class HistorizeRunner:
         # snapshots don't produce rows in the target table)
         tgt = self.target_table_id
         src = self.source_table_id
-        cast_max = self.destination.cast_to_string(
-            f"MAX({self.config.snapshot_column})"
-        )
+        q_snapshot = self.destination.quote_identifier(self.config.snapshot_column)
+        cast_max = self.destination.cast_to_string(f"MAX({q_snapshot})")
         stats_sql = f"""
             WITH target_stats AS (
                 SELECT SUM(CASE WHEN NOT {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS new_or_changed_rows,
@@ -960,7 +959,7 @@ class HistorizeRunner:
             - was_clamped: True if historize_from was adjusted to min_raw_snapshot
         """
         src = self.source_table_id
-        snapshot_col = self.config.snapshot_column
+        snapshot_col = self.destination.quote_identifier(self.config.snapshot_column)
         target_schema = self.config.output_schema or self.schema
 
         sql = f"SELECT MIN({snapshot_col}) AS min_snap FROM {src}{filter_where_clause(self._filter_sql)}"
@@ -1002,7 +1001,7 @@ class HistorizeRunner:
             - lag_reference: Last snapshot value before the boundary, or None
         """
         src = self.source_table_id
-        snapshot_col = self.config.snapshot_column
+        snapshot_col = self.destination.quote_identifier(self.config.snapshot_column)
         cast_expr = self.destination.cast_to_string(snapshot_col)
         safe_date = self.destination.escape_string_literal(effective_from_date)
 

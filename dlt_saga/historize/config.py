@@ -10,6 +10,11 @@ from typing import Any, Dict, List, Optional
 
 from dlt_saga.utility.filters import filter_field_metadata as _filter_field_metadata
 
+# Bare SQL identifier: letters/underscore start, then letters/digits/underscore.
+# Column names interpolated into historize SQL are checked against this so a
+# config value can't inject SQL or silently break unquoted interpolation.
+_SQL_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
 
 @dataclass
 class HistorizeConfig:
@@ -257,10 +262,14 @@ class HistorizeConfig:
         self._validate_column_identifiers()
 
     def _validate_column_identifiers(self):
-        """Validate SQL identifier format for column name fields."""
-        _SQL_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+        """Validate SQL identifier format for column name fields.
 
+        Covers every config-supplied column name interpolated into historize
+        SQL. ``primary_key`` is validated separately in ``validate()`` because
+        it may still be inherited from the top-level config after construction.
+        """
         for attr in (
+            "snapshot_column",
             "valid_from_column",
             "valid_to_column",
             "is_deleted_column",
@@ -271,29 +280,23 @@ class HistorizeConfig:
                 raise ValueError(
                     f"{attr} must be a valid SQL identifier, got '{value}'"
                 )
-        if self.cluster_columns:
-            for col in self.cluster_columns:
+        for attr in ("cluster_columns", "merge_key", "track_columns", "ignore_columns"):
+            for col in getattr(self, attr) or []:
                 if not _SQL_IDENT.match(col):
-                    raise ValueError(
-                        f"cluster_columns contains invalid SQL identifier: '{col}'"
-                    )
-        if self.merge_key:
-            for col in self.merge_key:
-                if not _SQL_IDENT.match(col):
-                    raise ValueError(
-                        f"merge_key contains invalid SQL identifier: '{col}'"
-                    )
+                    raise ValueError(f"{attr} contains invalid SQL identifier: '{col}'")
 
     @classmethod
     def from_dict(
         cls,
-        historize_dict: Dict[str, Any],
+        historize_dict: Optional[Dict[str, Any]],
         top_level_primary_key: Optional[List[str]] = None,
     ) -> "HistorizeConfig":
         """Create HistorizeConfig from a config dictionary.
 
         Args:
-            historize_dict: The `historize:` section from pipeline YAML
+            historize_dict: The `historize:` section from pipeline YAML. May be
+                ``None`` when the key is present with an empty/null value
+                (an empty ``historize:`` block in YAML parses to ``None``).
             top_level_primary_key: Primary key from top-level config, used as fallback
 
         Returns:
@@ -302,6 +305,8 @@ class HistorizeConfig:
         Raises:
             ValueError: If primary_key is not set and cannot be inherited
         """
+        # An empty ``historize:`` block parses to None; treat it as no overrides.
+        historize_dict = historize_dict or {}
         # Filter to only known fields to avoid passing unexpected keys
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in historize_dict.items() if k in known_fields}
@@ -331,6 +336,10 @@ class HistorizeConfig:
                 "historize requires a primary_key. Set it in the historize section "
                 "or as a top-level primary_key in the pipeline config."
             )
+
+        for pk in self.primary_key:
+            if not _SQL_IDENT.match(pk):
+                raise ValueError(f"primary_key contains invalid SQL identifier: '{pk}'")
 
         if self.track_columns is not None and len(self.track_columns) == 0:
             raise ValueError(

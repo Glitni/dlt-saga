@@ -157,7 +157,7 @@ def _validate_historize_config(config: PipelineConfig, result: ValidationResult)
 
     from dlt_saga.historize.config import HistorizeConfig
 
-    historize_dict = config.config_dict.get("historize", {})
+    historize_dict = config.config_dict.get("historize") or {}
     top_level_pk = config.config_dict.get("primary_key")
     if isinstance(top_level_pk, str):
         top_level_pk = [top_level_pk]
