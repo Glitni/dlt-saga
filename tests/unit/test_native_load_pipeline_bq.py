@@ -186,28 +186,28 @@ class TestCreateExternalTableCsvOptions:
     """Verify CSV format_options propagate through to bigquery.CSVOptions."""
 
     def _invoke_with_format_options(self, format_options: dict):
-        from unittest.mock import patch
-
         dest = _make_dest()
         dest.config = MagicMock()
         dest.config.job_project_id = "proj"
         dest.config.project_id = "proj"
         dest.config.location = "EU"
 
+        # create_external_table obtains its client from the pooled _client() seam;
+        # the real bigquery.ExternalConfig/Table are still used to build the table.
         captured = []
-        with patch("google.cloud.bigquery.Client") as mock_client:
-            mock_client.return_value.create_table.side_effect = lambda t: (
-                captured.append(t)
-            )
-            BigQueryDestination.create_external_table(
-                dest,
-                dataset="ds",
-                name="ext",
-                source_uris=["gs://bucket/f.csv"],
-                source_format="CSV",
-                autodetect=True,
-                format_options=format_options,
-            )
+        client = MagicMock()
+        client.create_table.side_effect = lambda t: captured.append(t)
+        dest._client.return_value = client
+
+        BigQueryDestination.create_external_table(
+            dest,
+            dataset="ds",
+            name="ext",
+            source_uris=["gs://bucket/f.csv"],
+            source_format="CSV",
+            autodetect=True,
+            format_options=format_options,
+        )
         assert len(captured) == 1
         return captured[0].external_data_configuration.csv_options
 

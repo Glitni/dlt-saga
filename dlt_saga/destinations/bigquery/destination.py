@@ -204,6 +204,17 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         return self._client_pool
 
+    def _client(self) -> Any:
+        """Return a pooled BigQuery client for this destination's job project.
+
+        Reuses a per-thread client (via the pool) instead of paying credential
+        resolution + HTTP session setup on every ``execute_sql`` / metadata call;
+        a single historize run issues dozens.
+        """
+        return self.get_client_pool().get_client(
+            self.config.job_project_id, self.config.location
+        )
+
     @classmethod
     def prepare_for_execution(cls, pipeline_configs: list[Any]) -> None:
         """Pre-create all unique datasets needed by the pipelines.
@@ -255,7 +266,7 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         # Create all unique datasets
         if datasets_to_create:
-            from google.cloud import bigquery
+            from dlt_saga.utility.gcp.client_pool import bigquery_pool
 
             # Use billing_project for the client (job execution), falling back to data project
             billing_project = None
@@ -263,7 +274,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                 billing_project = context.profile_target.billing_project
             first = next(iter(datasets_to_create))
             client_project = billing_project or first[0]
-            client = bigquery.Client(project=client_project, location=first[1])
+            client = bigquery_pool.get_client(client_project, first[1])
 
             for (
                 project,
@@ -376,7 +387,6 @@ class BigQueryDestination(BigQueryBaseDestination):
             records: List of flat dicts to insert into _saga_load_info
             pipeline: Unused (kept for interface compatibility)
         """
-        from google.cloud import bigquery
         from google.cloud.exceptions import NotFound
 
         if not records:
@@ -397,9 +407,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         table_id = (
             f"{self.config.project_id}.{schema_name}.{get_load_info_table_name()}"
         )
-        client = bigquery.Client(
-            project=self.config.job_project_id, location=self.config.location
-        )
+        client = self._client()
 
         try:
             self._insert_load_info_dml(client, table_id, serialized)
@@ -484,9 +492,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         from dlt_saga.project_config import get_load_info_table_name
 
         try:
-            client = bigquery.Client(
-                project=self.config.job_project_id, location=self.config.location
-            )
+            client = self._client()
             query = f"""
                 SELECT MAX(started_at) as started_at
                 FROM `{self.config.project_id}.{schema_name}.{get_load_info_table_name()}`
@@ -516,12 +522,9 @@ class BigQueryDestination(BigQueryBaseDestination):
 
     def get_max_column_value(self, table_id: str, column: str) -> Any:
         """Get the maximum value of a column in a BigQuery table."""
-        from google.cloud import bigquery
 
         try:
-            client = bigquery.Client(
-                project=self.config.job_project_id, location=self.config.location
-            )
+            client = self._client()
             query = f"SELECT MAX(`{column}`) as max_value FROM `{table_id}`"
             results = list(client.query(query).result())
             if results and results[0].max_value is not None:
@@ -548,9 +551,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         """
         from google.cloud import bigquery
 
-        client = bigquery.Client(
-            project=self.config.job_project_id, location=self.config.location
-        )
+        client = self._client()
 
         job_config = bigquery.QueryJobConfig()
         if schema_name:
@@ -610,9 +611,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         """Ensure a BigQuery dataset exists, creating it with the configured location."""
         from google.cloud import bigquery
 
-        client = bigquery.Client(
-            project=self.config.job_project_id, location=self.config.location
-        )
+        client = self._client()
         dataset_ref = bigquery.DatasetReference(self.config.project_id, schema)
         try:
             client.get_dataset(dataset_ref)
@@ -642,12 +641,9 @@ class BigQueryDestination(BigQueryBaseDestination):
         if self.config.table_format == "iceberg":
             return
 
-        from google.cloud import bigquery
         from google.cloud.exceptions import NotFound
 
-        client = bigquery.Client(
-            project=self.config.job_project_id, location=self.config.location
-        )
+        client = self._client()
         table_ref = f"{self.config.project_id}.{dataset}.{table}"
 
         try:
@@ -964,12 +960,9 @@ class BigQueryDestination(BigQueryBaseDestination):
         )
 
     def table_exists(self, dataset: str, table: str) -> bool:
-        from google.cloud import bigquery
         from google.cloud.exceptions import NotFound
 
-        client = bigquery.Client(
-            project=self.config.job_project_id, location=self.config.location
-        )
+        client = self._client()
         try:
             client.get_table(f"{self.config.project_id}.{dataset}.{table}")
             return True
@@ -997,11 +990,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         return True
 
     def _description_client_and_ref(self, dataset: str, table: str):
-        from google.cloud import bigquery
-
-        client = bigquery.Client(
-            project=self.config.job_project_id, location=self.config.location
-        )
+        client = self._client()
         table_ref = f"{self.config.project_id}.{dataset}.{table}"
         return client, table_ref
 
@@ -1077,9 +1066,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         """Execute SQL and return (rows, job_id). Uses job_project_id for billing."""
         from google.cloud import bigquery
 
-        client = bigquery.Client(
-            project=self.config.job_project_id, location=self.config.location
-        )
+        client = self._client()
         job_config = bigquery.QueryJobConfig()
         if schema:
             job_config.default_dataset = f"{self.config.project_id}.{schema}"
@@ -1113,9 +1100,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         """Create a transient external table over GCS URIs."""
         from google.cloud import bigquery
 
-        client = bigquery.Client(
-            project=self.config.job_project_id, location=self.config.location
-        )
+        client = self._client()
         table_ref = f"{self.config.project_id}.{dataset}.{name}"
 
         ext_config = bigquery.ExternalConfig(source_format)
@@ -1156,9 +1141,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         """
         from google.cloud import bigquery
 
-        client = bigquery.Client(
-            project=self.config.job_project_id, location=self.config.location
-        )
+        client = self._client()
         dataset_ref = bigquery.DatasetReference(self.config.project_id, dataset)
         table_ref = bigquery.TableReference(dataset_ref, name)
         table = client.get_table(table_ref)
@@ -1405,9 +1388,7 @@ class BigQueryDestination(BigQueryBaseDestination):
             sql = f"{sql} WHERE {where_sql}"
 
         # Execute and capture affected rows from job stats
-        client = bigquery.Client(
-            project=self.config.job_project_id, location=self.config.location
-        )
+        client = self._client()
         job_config = bigquery.QueryJobConfig()
         job_config.default_dataset = f"{self.config.project_id}.{spec.staging_dataset}"
         job = client.query(sql, job_config=job_config)
@@ -1663,12 +1644,9 @@ class BigQueryDestination(BigQueryBaseDestination):
             not_null_columns: Optional list of column names that must be NOT NULL
             columns: Optional column definitions dict from config
         """
-        from google.cloud import bigquery
         from google.cloud.exceptions import NotFound
 
-        client = bigquery.Client(
-            project=self.config.job_project_id, location=self.config.location
-        )
+        client = self._client()
 
         table_id = f"{self.config.project_id}.{self.config.dataset_name}.{table_name}"
 

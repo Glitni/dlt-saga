@@ -9,6 +9,33 @@ from dlt_saga.destinations.bigquery.destination import BigQueryDestination
 
 
 @pytest.mark.unit
+class TestBigQueryClientPool:
+    """The pool reuses clients per (thread, project, location)."""
+
+    def test_caches_per_project_and_location(self):
+        import dlt_saga.utility.gcp.client_pool as client_pool
+
+        pool = client_pool.bigquery_pool
+        with patch("google.cloud.bigquery.Client") as mock_cls:
+            mock_cls.side_effect = lambda **kw: MagicMock()
+            c1 = pool.get_client("proj", "EU")
+            c2 = pool.get_client("proj", "EU")
+            c3 = pool.get_client("proj", "US")
+        assert c1 is c2  # same (project, location) → cached
+        assert c3 is not c1  # different location → distinct client
+        assert mock_cls.call_count == 2
+        mock_cls.assert_any_call(project="proj", location="EU")
+        mock_cls.assert_any_call(project="proj", location="US")
+
+    def test_location_defaults_to_none(self):
+        import dlt_saga.utility.gcp.client_pool as client_pool
+
+        with patch("google.cloud.bigquery.Client") as mock_cls:
+            client_pool.bigquery_pool.get_client("proj")
+        mock_cls.assert_called_once_with(project="proj", location=None)
+
+
+@pytest.mark.unit
 class TestBigQueryDestinationConfig:
     def test_partition_expiration_defaults_to_none(self):
         cfg = BigQueryDestinationConfig(project_id="p")
@@ -187,14 +214,15 @@ class TestSyncTableOptionsPartitionExpiration:
     def _invoke(self, dest, table_mock=None, not_found=False):
         from google.cloud.exceptions import NotFound
 
-        with patch("google.cloud.bigquery.Client") as mock_client_cls:
-            client = mock_client_cls.return_value
-            if not_found:
-                client.get_table.side_effect = NotFound("nope")
-            else:
-                client.get_table.return_value = table_mock
-            BigQueryDestination.sync_table_options(dest, "ds", "tbl")
-            return client
+        # sync_table_options obtains its client from the pooled _client() seam.
+        client = MagicMock()
+        if not_found:
+            client.get_table.side_effect = NotFound("nope")
+        else:
+            client.get_table.return_value = table_mock
+        dest._client.return_value = client
+        BigQueryDestination.sync_table_options(dest, "ds", "tbl")
+        return client
 
     def test_sets_expiration_when_table_unbounded(self):
         dest = self._make_dest(partition_expiration_days=90)
@@ -230,10 +258,9 @@ class TestSyncTableOptionsPartitionExpiration:
 
     def test_noop_on_iceberg(self):
         dest = self._make_dest(partition_expiration_days=90, table_format="iceberg")
-        # Iceberg branch returns before instantiating a Client at all.
-        with patch("google.cloud.bigquery.Client") as mock_client_cls:
-            BigQueryDestination.sync_table_options(dest, "ds", "tbl")
-            mock_client_cls.assert_not_called()
+        # Iceberg branch returns before acquiring a client at all.
+        BigQueryDestination.sync_table_options(dest, "ds", "tbl")
+        dest._client.assert_not_called()
 
     def test_warns_when_table_not_partitioned(self, caplog):
         import logging

@@ -5,6 +5,22 @@ import pytest
 from dlt_saga.pipeline_config.base_config import PipelineConfig, ScheduleTag
 
 
+@pytest.fixture(autouse=True)
+def _clear_bigquery_client_pool():
+    """Isolate the process-singleton BigQuery client pool between tests.
+
+    Destination query paths resolve their client through the pool, which caches
+    per (thread, project, location). Without clearing, a client cached under one
+    test's patched ``bigquery.Client`` leaks into later tests that expect their
+    own patched client. clear_cache() is a cheap no-op when the pool is empty.
+    """
+    import dlt_saga.utility.gcp.client_pool as client_pool
+
+    client_pool.bigquery_pool.clear_cache()
+    yield
+    client_pool.bigquery_pool.clear_cache()
+
+
 @pytest.fixture
 def sample_configs():
     """Create sample pipeline configs for testing.

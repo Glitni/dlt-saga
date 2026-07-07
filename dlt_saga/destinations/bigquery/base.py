@@ -503,13 +503,13 @@ class BigQueryBaseDestination(Destination):
 
     @staticmethod
     def _build_bq_client(project_id: str, location: str) -> Any:
-        """Build a BQ client, logging the impersonated SA if one is set."""
-        from google.cloud import bigquery
+        """Return a pooled BQ client, logging the impersonated SA if one is set."""
+        from dlt_saga.utility.gcp.client_pool import bigquery_pool
 
         service_account = os.getenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT")
         if service_account:
             logger.debug(f"Using impersonated credentials for {service_account}")
-        return bigquery.Client(project=project_id, location=location)
+        return bigquery_pool.get_client(project_id, location)
 
     @staticmethod
     def _prepare_access_entries(
@@ -816,11 +816,12 @@ class BigQueryBaseDestination(Destination):
 
         # Create all unique datasets
         if datasets_to_create:
-            from google.cloud import bigquery
+            # Reuse a single pooled client for all datasets to avoid repeated
+            # credential + HTTP session setup.
+            from dlt_saga.utility.gcp.client_pool import bigquery_pool
 
-            # Reuse a single client for all datasets to avoid repeated credential setup
             first = next(iter(datasets_to_create))
-            client = bigquery.Client(project=first[0], location=first[1])
+            client = bigquery_pool.get_client(first[0], first[1])
 
             for (
                 project,
@@ -859,9 +860,9 @@ class BigQueryBaseDestination(Destination):
             table_id: Fully qualified table ID
             description: Description for logging
         """
-        from google.cloud import bigquery
+        from dlt_saga.utility.gcp.client_pool import bigquery_pool
 
-        client = bigquery.Client(project=self.config.project_id)
+        client = bigquery_pool.get_client(self.config.project_id)
         client.delete_table(table_id, not_found_ok=True)
         logger.debug(f"Dropped {description or 'table'}: {table_id}")
 
@@ -877,7 +878,9 @@ class BigQueryBaseDestination(Destination):
         """
         from google.cloud import bigquery
 
-        client = bigquery.Client(project=self.config.project_id)
+        from dlt_saga.utility.gcp.client_pool import bigquery_pool
+
+        client = bigquery_pool.get_client(self.config.project_id)
         delete_query = f"DELETE FROM `{table_id}` WHERE {where_clause}"
 
         job_config = bigquery.QueryJobConfig(query_parameters=parameters)
