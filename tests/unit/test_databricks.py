@@ -460,6 +460,53 @@ class TestGetDatabricksToken:
 
 
 @pytest.mark.unit
+class TestAzureDefaultCredentialCaching:
+    """azure_default reuses one DefaultAzureCredential instead of rebuilding the
+    whole credential chain per token fetch."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_cached_credential(self):
+        import dlt_saga.utility.auth.databricks as databricks_auth
+
+        databricks_auth._azure_credential = None
+        yield
+        databricks_auth._azure_credential = None
+
+    def _token(self, **overrides):
+        kwargs = dict(
+            host="https://adb.azuredatabricks.net",
+            auth_mode="azure_default",
+            access_token=None,
+            client_id=None,
+            client_secret=None,
+        )
+        kwargs.update(overrides)
+        return get_databricks_token(**kwargs)
+
+    def test_credential_constructed_once_across_calls(self):
+        cred = MagicMock()
+        cred.get_token.return_value.token = "azure-token"
+        with patch(
+            "azure.identity.DefaultAzureCredential", return_value=cred
+        ) as mock_cred_cls:
+            assert self._token() == "azure-token"
+            assert self._token() == "azure-token"
+        mock_cred_cls.assert_called_once()  # credential built once, reused
+        assert (
+            cred.get_token.call_count == 2
+        )  # token fetched (cached/refreshed) each call
+
+    def test_auth_failure_wrapped(self):
+        cred = MagicMock()
+        cred.get_token.side_effect = RuntimeError("no managed identity")
+        with patch("azure.identity.DefaultAzureCredential", return_value=cred):
+            with pytest.raises(
+                AuthenticationError, match="azure_default authentication failed"
+            ):
+                self._token()
+
+
+@pytest.mark.unit
 class TestBuildSdkConfig:
     # Config is imported lazily inside _build_sdk_config, so patch at source.
     _PATCH = "databricks.sdk.config.Config"

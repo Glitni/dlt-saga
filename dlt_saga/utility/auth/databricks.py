@@ -20,12 +20,22 @@ Auth modes:
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import contextmanager
 from typing import Any, Generator, Optional
 
 from dlt_saga.utility.auth.providers import AuthenticationError, AuthProvider
 
 logger = logging.getLogger(__name__)
+
+# Cached DefaultAzureCredential. It's host-agnostic here (the audience/scope is
+# the fixed Databricks AAD resource below), so a single process-wide instance
+# serves every workspace. Reusing it — instead of rebuilding the whole credential
+# chain per call — avoids re-probing every source (env, managed identity, CLI, …)
+# on each token fetch AND lets the credential cache/refresh the token internally,
+# so a long run doesn't fail on mid-run token expiry.
+_azure_credential: Any = None
+_azure_credential_lock = threading.Lock()
 
 
 def _build_sdk_config(
@@ -111,8 +121,13 @@ def _get_token_via_azure_default(host: str) -> str:
     original_level = azure_identity_logger.level
     try:
         azure_identity_logger.setLevel(logging.ERROR)
-        credential = DefaultAzureCredential()
-        token = credential.get_token(scope)
+        global _azure_credential
+        if _azure_credential is None:
+            with _azure_credential_lock:
+                if _azure_credential is None:
+                    _azure_credential = DefaultAzureCredential()
+        # get_token caches internally and refreshes when near expiry.
+        token = _azure_credential.get_token(scope)
         return token.token
     except ImportError:
         raise
