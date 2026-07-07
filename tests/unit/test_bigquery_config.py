@@ -9,6 +9,33 @@ from dlt_saga.destinations.bigquery.destination import BigQueryDestination
 
 
 @pytest.mark.unit
+class TestInsertLoadInfoDml:
+    """Load-info rows go in one multi-row INSERT, not one DML job per row."""
+
+    def test_batches_rows_into_single_insert(self):
+        client = MagicMock()
+        rows = [
+            {"pipeline_name": "p1", "table_name": "t1", "row_count": 5},
+            {"pipeline_name": "p2", "table_name": "t2", "row_count": 6},
+        ]
+        BigQueryDestination._insert_load_info_dml(client, "proj.ds.tbl", rows)
+
+        client.query.assert_called_once()  # one job for both rows
+        sql = client.query.call_args.args[0]
+        assert sql.count("VALUES") == 1
+        assert "@pipeline_name_0" in sql and "@pipeline_name_1" in sql
+
+        params = client.query.call_args.kwargs["job_config"].query_parameters
+        by_name = {p.name: p.value for p in params}
+        assert by_name["pipeline_name_0"] == "p1"
+        assert by_name["pipeline_name_1"] == "p2"
+        assert by_name["row_count_0"] == 5
+        # shared load_id, per-row _dlt_id
+        assert by_name["_dlt_load_id_0"] == by_name["_dlt_load_id_1"]
+        assert by_name["_dlt_id_0"] != by_name["_dlt_id_1"]
+
+
+@pytest.mark.unit
 class TestBigQueryClientPool:
     """The pool reuses clients per (thread, project, location)."""
 
