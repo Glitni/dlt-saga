@@ -68,11 +68,18 @@ class HistorizeRunner:
         is_historize_only = write_disposition == "historize"
         src_table = self.config_dict.get("source_table") if is_historize_only else None
         if src_table:
-            self._src_database = self.config_dict.get("source_database") or database
+            # An external delivery may live in another project/catalog. When
+            # source_database is set explicitly, qualify BOTH discovery and the
+            # data read with it (discovery already reads cross-project via
+            # columns_query; passing it here keeps the data read in step rather
+            # than silently hitting the destination's own project). Omitted →
+            # None, so get_full_table_id keeps its default own-project behavior.
+            configured_db = self.config_dict.get("source_database")
+            self._src_database = configured_db or database
             self._src_schema = self.config_dict.get("source_schema")
             self._src_table = src_table
             self.source_table_id = destination.get_full_table_id(
-                self._src_schema, src_table
+                self._src_schema, src_table, database=configured_db
             )
         else:
             self._src_database = database

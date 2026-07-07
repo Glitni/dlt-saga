@@ -578,8 +578,10 @@ class BigQueryDestination(BigQueryBaseDestination):
     def quote_identifier(self, name: str) -> str:
         return f"`{name}`"
 
-    def get_full_table_id(self, dataset: str, table: str) -> str:
-        return f"`{self.config.project_id}.{dataset}.{table}`"
+    def get_full_table_id(
+        self, schema: str, table: str, database: Optional[str] = None
+    ) -> str:
+        return f"`{database or self.config.project_id}.{schema}.{table}`"
 
     def timestamp_n_days_ago(self, days: int) -> str:
         return f"TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"

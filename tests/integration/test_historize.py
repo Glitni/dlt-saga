@@ -169,6 +169,69 @@ class TestEmptySource:
         assert len(query_historized(duckdb_destination)) == 6
 
 
+class TestCrossCatalogSource:
+    """An external source in another catalog is read from that catalog (#2).
+
+    `source_database` already qualified column discovery; the data read now uses
+    it too, instead of silently hitting the destination's own catalog. Proven
+    end-to-end on DuckDB via an attached in-memory catalog.
+    """
+
+    def test_external_source_read_from_other_catalog(self, duckdb_destination):
+        from dlt_saga.historize.config import HistorizeConfig
+        from dlt_saga.historize.runner import HistorizeRunner
+        from tests.integration.conftest import SCHEMA
+
+        conn = duckdb_destination.connection
+        # A separate catalog holding the external delivery.
+        conn.execute("ATTACH ':memory:' AS ext_cat")
+        conn.execute("CREATE SCHEMA ext_cat.ext")
+        conn.execute(
+            "CREATE TABLE ext_cat.ext.orders_raw "
+            "(order_id INTEGER, status VARCHAR, snapshot_date TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO ext_cat.ext.orders_raw VALUES "
+            "(1, 'new', TIMESTAMP '2026-01-01'), "
+            "(1, 'shipped', TIMESTAMP '2026-01-02')"
+        )
+
+        runner = HistorizeRunner(
+            pipeline_name="test__ext_orders",
+            historize_config=HistorizeConfig(
+                primary_key=["order_id"], snapshot_column="snapshot_date"
+            ),
+            destination=duckdb_destination,
+            database="memory",  # the destination's own default catalog
+            schema=SCHEMA,
+            source_table_name="orders_raw",
+            target_table_name="ext_orders_historized",
+            config_dict={
+                "write_disposition": "historize",
+                "primary_key": ["order_id"],
+                "source_table": "orders_raw",
+                "source_schema": "ext",
+                "source_database": "ext_cat",  # a different catalog
+            },
+        )
+
+        # The source read is qualified with the external catalog.
+        assert runner.source_table_id == '"ext_cat"."ext"."orders_raw"'
+
+        result = runner.run()
+        assert result["status"] == "completed"
+
+        # The status change was historized — i.e. the read actually hit the
+        # external-catalog table (not an own-catalog table, which doesn't exist).
+        rows = duckdb_destination.connection.execute(
+            f'SELECT status, _dlt_valid_to FROM "{SCHEMA}"."ext_orders_historized" '
+            "ORDER BY _dlt_valid_from"
+        ).fetchall()
+        statuses = [r[0] for r in rows]
+        assert "new" in statuses
+        assert "shipped" in statuses
+
+
 class TestFullReprocessSnapshotOrdering:
     """The recorded baseline must match what was actually reprocessed (#3-med).
 

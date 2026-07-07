@@ -603,8 +603,10 @@ class DatabricksDestination(Destination):
     def quote_identifier(self, name: str) -> str:
         return f"`{name}`"
 
-    def get_full_table_id(self, dataset: str, table: str) -> str:
-        return f"`{self.config.catalog}`.`{dataset}`.`{table}`"
+    def get_full_table_id(
+        self, schema: str, table: str, database: Optional[str] = None
+    ) -> str:
+        return f"`{database or self.config.catalog}`.`{schema}`.`{table}`"
 
     def hash_expression(self, columns: list) -> str:
         # JSON-serialise the value columns (named struct fields) before hashing,

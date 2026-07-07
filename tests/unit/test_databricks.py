@@ -150,6 +150,13 @@ class TestDatabricksDialect:
             "`my_catalog`.`my_schema`.`my_table`"
         )
 
+    def test_get_full_table_id_database_override(self):
+        # An explicit database overrides the destination's own catalog (used for
+        # cross-catalog external historize sources).
+        assert self.dest.get_full_table_id(
+            "my_schema", "my_table", database="other_catalog"
+        ) == ("`other_catalog`.`my_schema`.`my_table`")
+
     def test_hash_expression_uses_xxhash64(self):
         result = self.dest.hash_expression(["id", "name"])
         assert "xxhash64" in result
