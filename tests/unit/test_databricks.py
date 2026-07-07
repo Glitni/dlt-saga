@@ -1308,7 +1308,7 @@ class TestDatabricksApplyHints:
             "dlt.destinations.adapters.databricks_adapter", return_value=adapted
         ) as mock_adapter:
             result = dest.apply_hints(resource, cluster_columns=["id", "ts"])
-        mock_adapter.assert_called_once_with(resource, liquid_cluster_by=["id", "ts"])
+        mock_adapter.assert_called_once_with(resource, cluster=["id", "ts"])
         assert result is adapted
 
     def test_partition_column_calls_adapter(self):
@@ -1330,7 +1330,7 @@ class TestDatabricksApplyHints:
             "dlt.destinations.adapters.databricks_adapter", return_value=adapted
         ) as mock_adapter:
             result = dest.apply_hints(resource, table_description="My table")
-        mock_adapter.assert_called_once_with(resource, table_description="My table")
+        mock_adapter.assert_called_once_with(resource, table_comment="My table")
         assert result is adapted
 
     def test_zerobus_insert_api_passes_through(self):
@@ -1362,11 +1362,42 @@ class TestDatabricksApplyHints:
         with patch(
             "dlt.destinations.adapters.databricks_adapter", return_value=adapted
         ) as mock_adapter:
-            # Only table_description should reach the adapter; insert_api=None
+            # Only the table comment should reach the adapter; insert_api=None
             # must be dropped so dlt's destination-level default kicks in.
             result = dest.apply_hints(resource, table_description="t", insert_api=None)
-        mock_adapter.assert_called_once_with(resource, table_description="t")
+        mock_adapter.assert_called_once_with(resource, table_comment="t")
         assert result is adapted
+
+    def test_all_adapter_kwargs_accepted_by_real_signature(self):
+        """Guard against dlt-saga passing a kwarg the real databricks_adapter
+        rejects — a TypeError there drops ALL hints in the call. The other tests
+        mock the adapter, so only a signature check catches a misnamed kwarg."""
+        import inspect
+
+        from dlt.destinations.adapters import databricks_adapter
+
+        valid = set(inspect.signature(databricks_adapter).parameters)
+
+        captured: dict = {}
+
+        def fake_adapter(resource, **kwargs):
+            captured.update(kwargs)
+            return resource
+
+        dest = _make_destination()
+        with patch(
+            "dlt.destinations.adapters.databricks_adapter", side_effect=fake_adapter
+        ):
+            dest.apply_hints(
+                MagicMock(),
+                table_description="d",
+                cluster_columns=["id"],
+                partition_column="dt",
+                insert_api="zerobus",
+            )
+        assert captured, "expected hints to reach the adapter"
+        unknown = set(captured) - valid
+        assert not unknown, f"kwargs rejected by databricks_adapter: {unknown}"
 
     def test_import_error_falls_back_to_resource(self):
         dest = _make_destination()
