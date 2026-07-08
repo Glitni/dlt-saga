@@ -617,17 +617,32 @@ class BigQueryDestination(BigQueryBaseDestination):
         return type_map.get(logical_type, logical_type.upper())
 
     def ensure_schema_exists(self, schema: str) -> None:
-        """Ensure a BigQuery dataset exists, creating it with the configured location."""
+        """Ensure a BigQuery dataset exists, creating it with the configured location.
+
+        Race-safe: only a genuine ``NotFound`` triggers creation, so a
+        permission/network error on the existence check propagates instead of
+        being misread as "missing" (which would attempt a doomed create). The
+        create uses ``exists_ok=True`` and swallows ``Conflict`` so parallel
+        runs racing to create the same dataset don't fail.
+        """
+        from google.api_core.exceptions import Conflict
         from google.cloud import bigquery
+        from google.cloud.exceptions import NotFound
 
         client = self._client()
         dataset_ref = bigquery.DatasetReference(self.config.project_id, schema)
         try:
             client.get_dataset(dataset_ref)
-        except Exception:
-            dataset = bigquery.Dataset(dataset_ref)
-            dataset.location = self.config.location
-            client.create_dataset(dataset)
+            return
+        except NotFound:
+            pass
+
+        dataset = bigquery.Dataset(dataset_ref)
+        dataset.location = self.config.location
+        try:
+            client.create_dataset(dataset, exists_ok=True)
+        except Conflict:
+            logger.debug(f"Dataset {schema} created by another process")
 
     def sync_table_options(self, dataset: str, table: str) -> None:
         """Reconcile partition_expiration_days against an existing BigQuery table.
