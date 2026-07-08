@@ -48,21 +48,21 @@ class _ConcreteDestination(Destination):
 
 @pytest.mark.unit
 class TestEscapeStringLiteral:
-    """Base escaping is the backslash dialect (BigQuery/Databricks). DuckDB
-    overrides it with standard-SQL doubling — see TestDuckDBEscapeStringLiteral.
+    """Base escaping is standard SQL (double the quote). DuckDB inherits it;
+    BigQuery/Databricks override with the backslash helper (tested below).
     """
 
-    def test_single_quote_uses_backslash_not_doubling(self):
-        # GoogleSQL rejects '' inside a single-quoted literal; it wants \'.
-        assert _ConcreteDestination().escape_string_literal("it's") == "it\\'s"
+    def test_single_quote_doubled(self):
+        assert _ConcreteDestination().escape_string_literal("it's") == "it''s"
 
-    def test_backslash_escaped_first(self):
-        assert _ConcreteDestination().escape_string_literal("a\\b") == "a\\\\b"
+    def test_backslash_left_literal(self):
+        # Standard SQL treats backslash as a literal character.
+        assert _ConcreteDestination().escape_string_literal("a\\b") == "a\\b"
 
-    def test_control_chars_become_escape_sequences(self):
+    def test_control_chars_left_as_is(self):
+        # Newlines/tabs are valid inside a single-quoted standard-SQL literal.
         assert (
-            _ConcreteDestination().escape_string_literal("a\nb\rc\td")
-            == "a\\nb\\rc\\td"
+            _ConcreteDestination().escape_string_literal("a\nb\rc\td") == "a\nb\rc\td"
         )
 
     def test_nul_dropped(self):
@@ -71,6 +71,33 @@ class TestEscapeStringLiteral:
     def test_plain_value_unchanged(self):
         assert _ConcreteDestination().escape_string_literal("dlt_google_sheets") == (
             "dlt_google_sheets"
+        )
+
+
+@pytest.mark.unit
+class TestBackslashEscapeHelper:
+    """The C-style helper BigQuery/Databricks use — GoogleSQL/Spark reject '',
+    so the single quote becomes \\' and control chars become escape sequences.
+    """
+
+    def test_single_quote_backslash_escaped(self):
+        assert _ConcreteDestination()._backslash_escape_string_literal("it's") == (
+            "it\\'s"
+        )
+
+    def test_backslash_escaped_first(self):
+        assert _ConcreteDestination()._backslash_escape_string_literal("a\\b") == (
+            "a\\\\b"
+        )
+
+    def test_control_chars_become_escape_sequences(self):
+        assert _ConcreteDestination()._backslash_escape_string_literal(
+            "a\nb\rc\td"
+        ) == ("a\\nb\\rc\\td")
+
+    def test_nul_dropped(self):
+        assert _ConcreteDestination()._backslash_escape_string_literal("a\x00b") == (
+            "ab"
         )
 
 
@@ -288,14 +315,16 @@ class TestLifecycleMethods:
 
 @pytest.mark.unit
 class TestSqlDialectDefaults:
-    def test_quote_identifier_uses_backticks(self):
-        assert _ConcreteDestination().quote_identifier("my_table") == "`my_table`"
+    def test_quote_identifier_uses_ansi_double_quotes(self):
+        assert _ConcreteDestination().quote_identifier("my_table") == '"my_table"'
 
-    def test_hash_expression_uses_farm_fingerprint(self):
-        result = _ConcreteDestination().hash_expression(["col_a", "col_b"])
-        assert "FARM_FINGERPRINT" in result
-        assert "col_a" in result
-        assert "col_b" in result
+    def test_quote_identifier_doubles_embedded_double_quote(self):
+        assert _ConcreteDestination().quote_identifier('a"b') == '"a""b"'
+
+    def test_hash_expression_has_no_portable_default(self):
+        # No SQL-standard hashing function — each destination must supply one.
+        with pytest.raises(NotImplementedError):
+            _ConcreteDestination().hash_expression(["col_a", "col_b"])
 
     def test_partition_ddl_returns_empty_string(self):
         assert _ConcreteDestination().partition_ddl("date_col") == ""
@@ -306,13 +335,13 @@ class TestSqlDialectDefaults:
     @pytest.mark.parametrize(
         "logical, expected",
         [
-            ("string", "STRING"),
-            ("int64", "INT64"),
-            ("bool", "BOOL"),
+            ("string", "VARCHAR"),
+            ("int64", "BIGINT"),
+            ("bool", "BOOLEAN"),
             ("timestamp", "TIMESTAMP"),
         ],
     )
-    def test_type_name_maps_logical_types(self, logical, expected):
+    def test_type_name_maps_logical_types_to_standard_sql(self, logical, expected):
         assert _ConcreteDestination().type_name(logical) == expected
 
     def test_type_name_unknown_uppercases_fallback(self):
@@ -320,17 +349,16 @@ class TestSqlDialectDefaults:
 
     def test_cast_to_string(self):
         assert (
-            _ConcreteDestination().cast_to_string("my_col") == "CAST(my_col AS STRING)"
+            _ConcreteDestination().cast_to_string("my_col") == "CAST(my_col AS VARCHAR)"
         )
 
     def test_json_type_name(self):
         assert _ConcreteDestination().json_type_name() == "JSON"
 
-    def test_parse_json_expression(self):
-        assert _ConcreteDestination().parse_json_expression("col") == "PARSE_JSON(col)"
-
-    def test_extract_json_value(self):
-        assert _ConcreteDestination().extract_json_value("col") == "TO_JSON_STRING(col)"
+    def test_parse_json_expression_uses_standard_cast(self):
+        assert (
+            _ConcreteDestination().parse_json_expression("col") == "CAST(col AS JSON)"
+        )
 
     def test_current_timestamp_expression(self):
         assert (
@@ -350,7 +378,7 @@ class TestSchemaAndViewHelpers:
         dest = _ConcreteDestination()
         dest.ensure_schema_exists("my_schema")
         assert any("CREATE SCHEMA IF NOT EXISTS" in s for s in dest._sql_executed)
-        assert any("`my_schema`" in s for s in dest._sql_executed)
+        assert any('"my_schema"' in s for s in dest._sql_executed)
 
     def test_create_or_replace_view_executes_ddl(self):
         dest = _ConcreteDestination()

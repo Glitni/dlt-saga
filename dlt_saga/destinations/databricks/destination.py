@@ -601,7 +601,10 @@ class DatabricksDestination(Destination):
     # ------------------------------------------------------------------
 
     def quote_identifier(self, name: str) -> str:
-        return f"`{name}`"
+        # Spark SQL / Unity Catalog escapes an embedded backtick by doubling it
+        # inside a backtick-quoted identifier (backslash is literal here), so a
+        # column name containing a backtick can't terminate the identifier.
+        return f"`{name.replace('`', '``')}`"
 
     def get_full_table_id(
         self, schema: str, table: str, database: Optional[str] = None
@@ -620,10 +623,12 @@ class DatabricksDestination(Destination):
         return f"xxhash64(to_json(struct({cols})))"
 
     def partition_ddl(self, column: str, col_type: Optional[str] = None) -> str:
-        return f"PARTITIONED BY ({column})"  # col_type ignored on Databricks
+        # col_type ignored on Databricks
+        return f"PARTITIONED BY ({self.quote_identifier(column)})"
 
     def cluster_ddl(self, columns: list) -> str:
-        return f"CLUSTER BY ({', '.join(columns)})"
+        cols = ", ".join(self.quote_identifier(c) for c in columns)
+        return f"CLUSTER BY ({cols})"
 
     def partition_cluster_ddl(
         self,
@@ -657,6 +662,11 @@ class DatabricksDestination(Destination):
 
     def cast_to_string(self, expression: str) -> str:
         return f"CAST({expression} AS STRING)"
+
+    def escape_string_literal(self, value: str) -> str:
+        # Spark SQL uses C-style backslash escapes in single-quoted literals
+        # (rejects the ANSI '' doubling of the base default; see base helper).
+        return self._backslash_escape_string_literal(value)
 
     def columns_query(self, database: str, schema: str, table: str) -> str:
         catalog = database or self.config.catalog
@@ -1027,9 +1037,6 @@ class DatabricksDestination(Destination):
 
     def parse_json_expression(self, value_expr: str) -> str:
         return value_expr  # Databricks stores JSON as STRING — no parse needed
-
-    def extract_json_value(self, json_expr: str) -> str:
-        return f"to_json({json_expr})"
 
     def _render_filter_column(self, spec: Any, resolve: Any) -> str:
         col = resolve(spec.column)

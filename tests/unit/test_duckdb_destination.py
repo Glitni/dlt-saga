@@ -102,3 +102,41 @@ class TestDuckDBHashExpression:
             assert len(set(hashes)) == len(hashes)
         finally:
             dest.close()
+
+
+@pytest.mark.unit
+class TestDuckDBQuoteIdentifier:
+    def test_plain_identifier_double_quoted(self):
+        from dlt_saga.testing import make_destination
+
+        dest = make_destination()
+        try:
+            assert dest.quote_identifier("my_col") == '"my_col"'
+        finally:
+            dest.close()
+
+    def test_embedded_double_quote_is_doubled(self):
+        from dlt_saga.testing import make_destination
+
+        dest = make_destination()
+        try:
+            # A " in the name must be doubled so it can't terminate the
+            # identifier early.
+            assert dest.quote_identifier('a"b') == '"a""b"'
+        finally:
+            dest.close()
+
+    def test_reserved_word_column_round_trips(self):
+        """A reserved-word column name survives a real CREATE/INSERT/SELECT once
+        quoted — the point of routing DDL through quote_identifier."""
+        from dlt_saga.testing import make_destination
+
+        dest = make_destination()
+        try:
+            col = dest.quote_identifier("select")
+            dest.execute_sql(f"CREATE TABLE t ({col} INTEGER)")
+            dest.execute_sql(f"INSERT INTO t ({col}) VALUES (1)")
+            rows = dest.execute_sql(f"SELECT {col} FROM t")
+            assert rows[0][0] == 1
+        finally:
+            dest.close()
