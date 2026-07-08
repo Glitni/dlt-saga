@@ -1,3 +1,13 @@
+## 0.19.0 — 2026-07-08
+
+### Fixed
+- CLI/report/config-loading polish (--yes prompts, orchestrate flags, report NULL sort, impersonation scopes, config-loading robustness) (#306)
+- Native_load cursor correctness (max-cursor + monotonic format) and orphan-sweep race (#304)
+- Loaded_tables leaks dlt system tables into access grants / option sync / doc reconcile (#302)
+- Quote_identifier escaping + partition/cluster DDL quoting; de-BigQuery-ify base dialect defaults (#300)
+- Update-access reports success despite failed dataset sync / table grants (#298)
+- BigQuery ensure_schema_exists race — any error read as missing + no exists_ok (#296)
+
 ## 0.18.0 — 2026-07-08
 
 ### Added
