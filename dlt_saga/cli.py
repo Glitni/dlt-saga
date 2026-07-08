@@ -758,7 +758,7 @@ def run_worker_mode(
     )
 
 
-def _confirm_full_refresh(full_refresh: bool, in_cloud_run: bool):
+def _confirm_full_refresh(full_refresh: bool, in_cloud_run: bool, yes: bool = False):
     """Confirm full refresh operation if specified."""
     if not full_refresh:
         return
@@ -776,14 +776,17 @@ This will permanently delete:
         _sep,
     )
 
-    if not in_cloud_run:
+    # --yes (or Cloud Run) skips the prompt so CI/cron doesn't hang on stdin.
+    if not (in_cloud_run or yes):
         confirmation = typer.confirm("Are you sure you want to proceed?", default=False)
         if not confirmation:
             logger.info("Operation cancelled by user")
             raise typer.Exit(0)
 
 
-def _confirm_historize_full_refresh(full_refresh: bool, in_cloud_run: bool):
+def _confirm_historize_full_refresh(
+    full_refresh: bool, in_cloud_run: bool, yes: bool = False
+):
     """Confirm historize full refresh operation if specified."""
     if not full_refresh:
         return
@@ -800,7 +803,8 @@ This will permanently delete and rebuild:
         _sep,
     )
 
-    if not in_cloud_run:
+    # --yes (or Cloud Run) skips the prompt so CI/cron doesn't hang on stdin.
+    if not (in_cloud_run or yes):
         confirmation = typer.confirm("Are you sure you want to proceed?", default=False)
         if not confirmation:
             logger.info("Operation cancelled by user")
@@ -853,12 +857,24 @@ def _validate_historize_flags(
     full_refresh: bool,
     partial_refresh: bool,
     historize_from: Optional[str],
+    orchestrate: bool = False,
 ) -> None:
     """Validate mutual exclusivity and format of historize flags."""
     flag_count = sum([full_refresh, partial_refresh, historize_from is not None])
     if flag_count > 1:
         logger.error(
             "--full-refresh, --partial-refresh, and --historize-from are mutually exclusive"
+        )
+        raise typer.Exit(1)
+
+    # Partial-refresh scope isn't carried in the execution plan, so workers
+    # would silently run plain incremental. Reject rather than mislead — the
+    # banner would otherwise imply a partial refresh that never happens.
+    if orchestrate and (partial_refresh or historize_from is not None):
+        logger.error(
+            "--partial-refresh / --historize-from are not supported with "
+            "--orchestrate (the refresh scope isn't propagated to workers). "
+            "Run the partial refresh locally, without --orchestrate."
         )
         raise typer.Exit(1)
 
@@ -1143,6 +1159,7 @@ def ingest(
         "--end-value-override",
         help="Override end value for incremental loading (backfill). Defaults to current period.",
     ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts"),
 ):
     """Run data ingestion pipelines.
 
@@ -1181,7 +1198,7 @@ def ingest(
         run_worker_mode(worker_command=get_env("SAGA_WORKER_COMMAND") or "ingest")
         return
 
-    _confirm_full_refresh(full_refresh, in_cloud_run)
+    _confirm_full_refresh(full_refresh, in_cloud_run, yes)
 
     # Load profile once — shared by orchestrator check and Session below
     profile_target = load_profile_config(profile, target)
@@ -1301,7 +1318,9 @@ def historize(
     setup_logging(verbose)
     in_cloud_run = check_cloud_run_environment()
 
-    _validate_historize_flags(full_refresh, partial_refresh, historize_from)
+    _validate_historize_flags(
+        full_refresh, partial_refresh, historize_from, orchestrate
+    )
 
     # Worker mode
     if (get_env("SAGA_WORKER_MODE") or "").lower() == "true":
@@ -1316,7 +1335,7 @@ def historize(
         run_worker_mode(worker_command=get_env("SAGA_WORKER_COMMAND") or "historize")
         return
 
-    _confirm_historize_full_refresh(full_refresh, in_cloud_run)
+    _confirm_historize_full_refresh(full_refresh, in_cloud_run, yes)
     _confirm_partial_refresh(partial_refresh, historize_from, in_cloud_run, yes)
 
     # Load profile once — shared by orchestrator check and Session below
@@ -1443,6 +1462,7 @@ def _confirm_run_full_refresh(
     in_cloud_run: bool,
     has_ingest: bool,
     has_historize: bool,
+    yes: bool = False,
 ) -> tuple:
     """Ask about ingest and historize full refresh independently.
 
@@ -1453,7 +1473,9 @@ def _confirm_run_full_refresh(
     if not full_refresh:
         return False, False
 
-    if in_cloud_run:
+    # --yes (or Cloud Run) refreshes both phases without prompting, so CI/cron
+    # doesn't hang on stdin.
+    if in_cloud_run or yes:
         return True, True
 
     _sep = "=" * 70
@@ -1504,6 +1526,7 @@ def _run_orchestrate(
     start_value_override: Optional[str],
     end_value_override: Optional[str],
     workers: int,
+    yes: bool = False,
 ) -> None:
     """Handle the orchestrator path for ``saga run``.
 
@@ -1530,7 +1553,7 @@ def _run_orchestrate(
         raise typer.Exit(1)
     validate_credentials(in_cloud_run)
     refresh_ingest, _ = _confirm_run_full_refresh(
-        full_refresh, in_cloud_run, bool(ingest_configs), bool(historize_configs)
+        full_refresh, in_cloud_run, bool(ingest_configs), bool(historize_configs), yes
     )
     get_execution_context().full_refresh = refresh_ingest
     # Merge ingest + historize configs, dedup by identifier
@@ -1628,7 +1651,9 @@ def run(
     in_cloud_run = check_cloud_run_environment()
     select_str = " ".join(select) if select else None
 
-    _validate_historize_flags(full_refresh, partial_refresh, historize_from)
+    _validate_historize_flags(
+        full_refresh, partial_refresh, historize_from, orchestrate
+    )
 
     # Worker mode
     if (get_env("SAGA_WORKER_MODE") or "").lower() == "true":
@@ -1665,6 +1690,7 @@ def run(
             start_value_override=start_value_override,
             end_value_override=end_value_override,
             workers=workers,
+            yes=yes,
         )
         return
 
@@ -1688,7 +1714,7 @@ def run(
     )
 
     refresh_ingest, refresh_historize = _confirm_run_full_refresh(
-        full_refresh, in_cloud_run, bool(ingest_cfgs), bool(historize_cfgs)
+        full_refresh, in_cloud_run, bool(ingest_cfgs), bool(historize_cfgs), yes
     )
     _confirm_partial_refresh(partial_refresh, historize_from, in_cloud_run, yes)
 

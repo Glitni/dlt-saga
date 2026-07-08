@@ -526,6 +526,27 @@ class TestMultipleRootDirs:
 
 
 @pytest.mark.unit
+class TestMalformedConfigFails:
+    """A malformed config must fail discovery loudly, not silently vanish."""
+
+    def test_collect_records_failure_instead_of_swallowing(self):
+        fpc = FilePipelineConfig()
+        failures: list = []
+        with patch.object(fpc, "_load_config_file", side_effect=ValueError("bad yaml")):
+            fpc._collect_config_file("configs/x.yml", {}, {}, {}, [], failures)
+        assert len(failures) == 1
+        assert "configs/x.yml" in failures[0]
+
+    def test_discover_raises_on_malformed_config(self, tmp_path):
+        cfg_dir = tmp_path / "configs" / "grp"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "bad.yml").write_text("foo: [unclosed", encoding="utf-8")
+        fpc = FilePipelineConfig(root_dir=str(tmp_path / "configs"))
+        with pytest.raises(ValueError, match="Failed to load pipeline config"):
+            fpc.discover()
+
+
+@pytest.mark.unit
 class TestDiscoverNonExistentDirectory:
     def test_warns_and_returns_empty_on_missing_dir(self, caplog):
         import logging

@@ -492,6 +492,7 @@ def _find_profiles_file() -> Optional[Path]:
     Search order:
         1. SAGA_PROFILES_DIR env var (directory containing profiles.yml)
         2. ./profiles.yml (repo root)
+        3. .dlt/profiles.yml (legacy fallback)
 
     Returns:
         Path to profiles.yml, or None if not found.
@@ -508,6 +509,12 @@ def _find_profiles_file() -> Optional[Path]:
     candidate = Path("profiles.yml")
     if candidate.exists():
         return candidate
+
+    # Legacy layout (kept for back-compat; matches the documented search path
+    # and the not-found error message below).
+    legacy = Path(".dlt") / "profiles.yml"
+    if legacy.exists():
+        return legacy
 
     return None
 

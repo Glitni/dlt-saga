@@ -66,6 +66,25 @@ class TestApplyModeline:
         assert "tags: [daily]" in lines
         assert "write_disposition: append" in lines
 
+    def test_bom_prefixed_config_not_corrupted(self, tmp_path):
+        # A UTF-8 BOM must be stripped on read, not pushed mid-stream by the
+        # inserted modeline (which would make the first key parse as "﻿tags").
+        cfg = tmp_path / "configs" / "filesystem" / "sample.yml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_bytes(b"\xef\xbb\xbftags: [daily]\n")
+
+        changed = apply_modeline(
+            str(cfg), str(tmp_path / "schemas"), "filesystem_config.json"
+        )
+
+        assert changed is True
+        raw = cfg.read_bytes()
+        # No BOM anywhere in the rewritten file.
+        assert b"\xef\xbb\xbf" not in raw
+        lines = cfg.read_text(encoding="utf-8").splitlines()
+        assert lines[0] == f"{MODELINE_PREFIX}../../schemas/filesystem_config.json"
+        assert "tags: [daily]" in lines
+
     def test_idempotent_when_correct(self, tmp_path):
         cfg = self._write(
             tmp_path,

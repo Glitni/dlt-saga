@@ -65,6 +65,31 @@ class TestFindProfilesFile:
         result = _find_profiles_file()
         assert result is None
 
+    def test_finds_legacy_dlt_profiles(self, tmp_path, monkeypatch):
+        """.dlt/profiles.yml legacy fallback is found (matches the documented
+        search path and the not-found error message)."""
+        dlt_dir = tmp_path / ".dlt"
+        dlt_dir.mkdir()
+        (dlt_dir / "profiles.yml").write_text(SAMPLE_PROFILES)
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SAGA_PROFILES_DIR", raising=False)
+
+        result = _find_profiles_file()
+        assert result == Path(".dlt") / "profiles.yml"
+
+    def test_repo_root_wins_over_legacy(self, tmp_path, monkeypatch):
+        (tmp_path / "profiles.yml").write_text(SAMPLE_PROFILES)
+        dlt_dir = tmp_path / ".dlt"
+        dlt_dir.mkdir()
+        (dlt_dir / "profiles.yml").write_text(SAMPLE_PROFILES)
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SAGA_PROFILES_DIR", raising=False)
+
+        result = _find_profiles_file()
+        assert result == Path("profiles.yml")
+
     def test_env_var_dir_without_file(self, tmp_path, monkeypatch):
         """If SAGA_PROFILES_DIR points to a dir without profiles.yml, continue searching."""
         env_dir = tmp_path / "empty_dir"
