@@ -216,6 +216,7 @@ class FilePipelineConfig(ConfigSource):
         enabled_configs: Dict[str, List[PipelineConfig]],
         disabled_configs: Dict[str, List[PipelineConfig]],
         duplicates: List[str],
+        failures: List[str],
     ) -> None:
         """Load one config file and slot it into the discovery accumulators."""
         try:
@@ -233,7 +234,10 @@ class FilePipelineConfig(ConfigSource):
             target = enabled_configs if config.enabled else disabled_configs
             target.setdefault(config.pipeline_group, []).append(config)
         except Exception as e:
-            logger.error(f"Error processing {os.path.basename(config_path)}: {e}")
+            # Record and re-raise later (see _discover_all). Swallowing here
+            # dropped the pipeline from discovery on one log line with exit 0 —
+            # a malformed config silently disappeared instead of failing loudly.
+            failures.append(f"  {config_path}: {e}")
 
     def discover(
         self,
@@ -269,6 +273,7 @@ class FilePipelineConfig(ConfigSource):
         disabled_configs: Dict[str, List[PipelineConfig]] = {}
         seen_names: Dict[str, str] = {}
         duplicates: List[str] = []
+        failures: List[str] = []
 
         for root_dir in self._root_dirs:
             if not os.path.isdir(root_dir):
@@ -286,7 +291,15 @@ class FilePipelineConfig(ConfigSource):
                         enabled_configs,
                         disabled_configs,
                         duplicates,
+                        failures,
                     )
+
+        if failures:
+            raise ValueError(
+                "Failed to load pipeline config file(s) — fix or remove them "
+                "(a broken config must not silently disappear from discovery):\n"
+                + "\n".join(failures)
+            )
 
         if duplicates:
             raise ValueError(

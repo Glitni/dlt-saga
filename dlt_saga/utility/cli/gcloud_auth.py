@@ -101,9 +101,20 @@ def patch_google_auth_default():
         service_account = os.getenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT")
 
         if service_account:
-            # Return cached credentials if available for this service account
-            if service_account in _cached_credentials:
-                credentials, project_id = _cached_credentials[service_account]
+            # Extract scopes from kwargs or use default. The cache key includes
+            # them: impersonated credentials are scope-bound, so caching on the
+            # service account alone would hand a later caller the first caller's
+            # scopes — order-dependent 403s when scopes differ.
+            scopes = tuple(
+                kwargs.get("scopes")
+                or kwargs.get("default_scopes")
+                or ["https://www.googleapis.com/auth/cloud-platform"]
+            )
+            cache_key = (service_account, scopes)
+
+            # Return cached credentials if available for this (SA, scopes) pair
+            if cache_key in _cached_credentials:
+                credentials, project_id = _cached_credentials[cache_key]
                 logger.debug(
                     f"google.auth.default() returning cached impersonated credentials for {service_account}"
                 )
@@ -119,21 +130,14 @@ def patch_google_auth_default():
             # Create impersonated credentials
             from google.auth import impersonated_credentials
 
-            # Extract scopes from kwargs or use default
-            scopes = (
-                kwargs.get("scopes")
-                or kwargs.get("default_scopes")
-                or ["https://www.googleapis.com/auth/cloud-platform"]
-            )
-
             credentials = impersonated_credentials.Credentials(
                 source_credentials=source_credentials,
                 target_principal=service_account,
-                target_scopes=scopes,
+                target_scopes=list(scopes),
                 lifetime=3600,  # 1 hour
             )
 
-            _cached_credentials[service_account] = (credentials, project_id)
+            _cached_credentials[cache_key] = (credentials, project_id)
             logger.debug(
                 f"google.auth.default() returning impersonated credentials for {service_account}"
             )

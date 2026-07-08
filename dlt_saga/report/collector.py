@@ -8,7 +8,7 @@ report data.
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from dlt_saga.pipeline_config.base_config import PipelineConfig
@@ -360,6 +360,21 @@ def _query_executions(destination: Any, schema: str, days: int) -> List[Executio
         return []
 
 
+def _sortable_ts(dt: Optional[datetime]) -> datetime:
+    """A tz-aware sort key for a possibly-NULL, possibly-naive timestamp.
+
+    NULL ``started_at`` sorts oldest; a naive timestamp (e.g. from DuckDB) is
+    treated as UTC. Both avoid the ``TypeError`` from comparing naive
+    ``datetime.min`` against tz-aware warehouse timestamps, which aborted the
+    whole report.
+    """
+    if dt is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _run_queries_parallel(
     tasks: List[Tuple[str, Any]],
 ) -> Tuple[
@@ -393,8 +408,8 @@ def _run_queries_parallel(
             elif tag == "exec":
                 executions = result
 
-    all_load_runs.sort(key=lambda r: r.started_at or datetime.min, reverse=True)
-    all_historize_runs.sort(key=lambda r: r.started_at or datetime.min, reverse=True)
+    all_load_runs.sort(key=lambda r: _sortable_ts(r.started_at), reverse=True)
+    all_historize_runs.sort(key=lambda r: _sortable_ts(r.started_at), reverse=True)
 
     return all_load_runs, all_historize_runs, orchestration_runs, executions
 

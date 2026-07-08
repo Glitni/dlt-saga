@@ -26,6 +26,23 @@ class TestRenderTemplateStr:
         monkeypatch.delenv("MISSING_VAR", raising=False)
         assert render_template_str("{{ env_var('MISSING_VAR') }}") == ""
 
+    def test_missing_var_no_default_warns(self, monkeypatch, caplog):
+        monkeypatch.delenv("MISSING_VAR", raising=False)
+        with caplog.at_level("WARNING"):
+            render_template_str("{{ env_var('MISSING_VAR') }}")
+        assert any("MISSING_VAR" in r.getMessage() for r in caplog.records)
+
+    def test_missing_var_explicit_default_does_not_warn(self, monkeypatch, caplog):
+        monkeypatch.delenv("MISSING_VAR", raising=False)
+        with caplog.at_level("WARNING"):
+            render_template_str("{{ env_var('MISSING_VAR', 'fallback') }}")
+        assert not any("MISSING_VAR" in r.getMessage() for r in caplog.records)
+
+    def test_bare_undefined_name_raises(self):
+        # StrictUndefined: a typo'd bare name is a config error, not silent "".
+        with pytest.raises(ValueError):
+            render_template_str("{{ typo_variable }}")
+
     def test_filter_replace(self, monkeypatch):
         monkeypatch.setenv("GCP_DATASET", "my-proj-dev")
         result = render_template_str("{{ env_var('GCP_DATASET') | replace('-', '_') }}")

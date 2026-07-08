@@ -5,11 +5,12 @@ loudly so a permission/network failure doesn't render a silently-empty section.
 """
 
 import logging
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
 
-from dlt_saga.report.collector import _query_load_runs
+from dlt_saga.report.collector import _query_load_runs, _sortable_ts
 
 
 def _dest_raising(exc):
@@ -38,3 +39,29 @@ class TestReportQueryErrorClassification:
             r.levelno == logging.WARNING and "incomplete" in r.getMessage()
             for r in caplog.records
         )
+
+
+@pytest.mark.unit
+class TestSortableTs:
+    """The report sort must not crash comparing a NULL/naive started_at against
+    tz-aware warehouse timestamps."""
+
+    def test_none_sorts_before_real_timestamp(self):
+        aware = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        assert _sortable_ts(None) < _sortable_ts(aware)
+
+    def test_naive_is_treated_as_utc_and_comparable(self):
+        naive = datetime(2026, 1, 1)
+        aware = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        # No TypeError, and equal instants compare equal.
+        assert _sortable_ts(naive) == _sortable_ts(aware)
+
+    def test_mixed_list_sorts_without_typeerror(self):
+        items = [
+            datetime(2026, 3, 1, tzinfo=timezone.utc),
+            None,
+            datetime(2026, 1, 1),  # naive
+        ]
+        ordered = sorted(items, key=_sortable_ts, reverse=True)
+        assert ordered[0] == datetime(2026, 3, 1, tzinfo=timezone.utc)
+        assert ordered[-1] is None

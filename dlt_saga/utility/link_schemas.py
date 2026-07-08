@@ -77,7 +77,11 @@ def apply_modeline(config_path: str, schema_dir: str, schema_filename: str) -> b
     rel = _relative_schema_path(config_path, schema_dir, schema_filename)
     desired = f"{MODELINE_PREFIX}{rel}"
 
-    with open(config_path, encoding="utf-8") as f:
+    # utf-8-sig strips a leading BOM on read. Reading as plain utf-8 kept the
+    # BOM in the content, so inserting the modeline at line 0 pushed the BOM
+    # mid-stream and the first real key parsed as "﻿tags". The file is
+    # rewritten without a BOM (unnecessary for UTF-8 YAML).
+    with open(config_path, encoding="utf-8-sig") as f:
         content = f.read()
 
     newline = "\r\n" if "\r\n" in content else "\n"

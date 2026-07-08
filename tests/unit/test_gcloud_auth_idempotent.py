@@ -107,3 +107,41 @@ class TestPatchGoogleAuthDefaultIdempotency:
             "Second call to patch_google_auth_default() replaced the wrapper — "
             "this would cause doubly-impersonated credentials."
         )
+
+
+@pytest.mark.unit
+class TestImpersonationScopeCache:
+    """The credential cache must key on (service account, scopes). Keying on the
+    service account alone hands a later caller the first caller's scopes."""
+
+    def test_different_scopes_get_distinct_credentials(self, monkeypatch):
+        import google.auth
+        from google.auth import impersonated_credentials
+
+        from dlt_saga.utility.cli.gcloud_auth import patch_google_auth_default
+
+        monkeypatch.setattr(google.auth, "default", lambda *a, **k: ("src", "proj"))
+        monkeypatch.setenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", "sa@x.iam")
+
+        built: list = []
+
+        def fake_credentials(
+            *, source_credentials, target_principal, target_scopes, lifetime
+        ):
+            built.append(tuple(target_scopes))
+            return f"creds-{'|'.join(target_scopes)}"
+
+        monkeypatch.setattr(impersonated_credentials, "Credentials", fake_credentials)
+
+        patch_google_auth_default()
+        default = google.auth.default
+
+        creds_a, _ = default(scopes=["scope-a"])
+        creds_b, _ = default(scopes=["scope-b"])
+        creds_a_again, _ = default(scopes=["scope-a"])
+
+        # scope-b must not inherit scope-a's cached credentials.
+        assert creds_a != creds_b
+        # scope-a is cached: built once, not rebuilt on the repeat call.
+        assert creds_a == creds_a_again
+        assert built == [("scope-a",), ("scope-b",)]

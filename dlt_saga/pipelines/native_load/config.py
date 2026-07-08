@@ -129,7 +129,16 @@ class NativeLoadConfig(BaseConfig):
         metadata={
             "description": (
                 "strftime format string for the value captured by "
-                "`filename_date_regex`. Example: '%Y%m%d' for '20260115'."
+                "`filename_date_regex`. Example: '%Y%m%d' for '20260115'. "
+                "Must be lexicographically monotonic — big-endian and "
+                "fixed-width, fields ordered most- to least-significant "
+                "('%Y%m%d', '%Y-%m-%d', '%Y-%m-%dT%H:%M:%S'). The captured date "
+                "is compared as a string throughout the incremental machinery "
+                "(the cursor high-water mark, the dedup window, and the "
+                "cloud-storage list start_offset, which skips by byte-wise "
+                "object-name order), so a format whose lexical order differs "
+                "from chronological order (e.g. '%d%m%Y') is rejected at config "
+                "validation."
             ),
         },
     )
