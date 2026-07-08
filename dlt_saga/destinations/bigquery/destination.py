@@ -576,7 +576,12 @@ class BigQueryDestination(BigQueryBaseDestination):
     # -------------------------------------------------------------------------
 
     def quote_identifier(self, name: str) -> str:
-        return f"`{name}`"
+        # GoogleSQL uses C-style backslash escapes inside backtick-quoted
+        # identifiers. Escape backslash first (so we don't re-escape the
+        # sequences we add), then the backtick delimiter, so a column name
+        # containing a backtick can't break out of the identifier.
+        escaped = name.replace("\\", "\\\\").replace("`", "\\`")
+        return f"`{escaped}`"
 
     def get_full_table_id(
         self, schema: str, table: str, database: Optional[str] = None
@@ -590,15 +595,25 @@ class BigQueryDestination(BigQueryBaseDestination):
         cols = ", ".join(columns)
         return f"FARM_FINGERPRINT(TO_JSON_STRING(STRUCT({cols})))"
 
+    def escape_string_literal(self, value: str) -> str:
+        # GoogleSQL rejects '' inside a single-quoted literal and uses C-style
+        # backslash escapes instead (see base helper).
+        return self._backslash_escape_string_literal(value)
+
+    def parse_json_expression(self, value_expr: str) -> str:
+        return f"PARSE_JSON({value_expr})"
+
     def partition_ddl(self, column: str, col_type: Optional[str] = None) -> str:
+        col = self.quote_identifier(column)
         if col_type and col_type.upper() == "DATE":
-            return f"PARTITION BY {column}"
-        return f"PARTITION BY DATE({column})"
+            return f"PARTITION BY {col}"
+        return f"PARTITION BY DATE({col})"
 
     def cluster_ddl(self, columns: list[str]) -> str:
         if not columns:
             return ""
-        return f"CLUSTER BY {', '.join(columns)}"
+        cols = ", ".join(self.quote_identifier(c) for c in columns)
+        return f"CLUSTER BY {cols}"
 
     def _render_regex_match(self, col_sql: str, pattern: str) -> str:
         # Normal (non-raw) literal + backslash escaping: the parser unescapes

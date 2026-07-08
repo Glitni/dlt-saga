@@ -343,20 +343,6 @@ class DuckDBDestination(Destination):
     # SQL dialect overrides
     # -------------------------------------------------------------------------
 
-    def quote_identifier(self, name: str) -> str:
-        return f'"{name}"'
-
-    def escape_string_literal(self, value: str) -> str:
-        """DuckDB string literals follow standard SQL: the single quote is
-        doubled (``''``) and backslash is a literal character (no C-style escape
-        processing). Newlines/tabs are valid inside a single-quoted literal, so
-        they're left as-is; only NUL is dropped. Emitting backslash escape
-        sequences here (as the backslash dialect does) would store literal
-        ``\\n`` / ``\\\\`` text and prevent description reconcile from ever
-        reaching a steady state.
-        """
-        return value.replace("'", "''").replace("\x00", "")
-
     def timestamp_n_days_ago(self, days: int) -> str:
         return f"now() - INTERVAL '{days}' DAY"
 

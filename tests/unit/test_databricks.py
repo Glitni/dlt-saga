@@ -172,14 +172,19 @@ class TestDatabricksDialect:
         assert "concat_ws" not in result
         assert "COALESCE" not in result
 
+    def test_quote_identifier_escapes_embedded_backtick(self):
+        # Spark SQL doubles an embedded backtick inside a quoted identifier.
+        assert self.dest.quote_identifier("a`b") == "`a``b`"
+
     def test_partition_ddl(self):
-        assert self.dest.partition_ddl("dt") == "PARTITIONED BY (dt)"
+        # Column name is quoted so reserved-word/dash columns don't break DDL.
+        assert self.dest.partition_ddl("dt") == "PARTITIONED BY (`dt`)"
 
     @pytest.mark.parametrize(
         "columns, expected",
         [
-            (["id"], "CLUSTER BY (id)"),
-            (["id", "ts"], "CLUSTER BY (id, ts)"),
+            (["id"], "CLUSTER BY (`id`)"),
+            (["id", "ts"], "CLUSTER BY (`id`, `ts`)"),
         ],
     )
     def test_cluster_ddl(self, columns, expected):
@@ -188,14 +193,14 @@ class TestDatabricksDialect:
     def test_partition_cluster_ddl_prefers_clustering_when_both_set(self):
         # Databricks rejects PARTITIONED BY + CLUSTER BY on one table.
         result = self.dest.partition_cluster_ddl("dt", ["id", "ts"])
-        assert result == "CLUSTER BY (id, ts)"
+        assert result == "CLUSTER BY (`id`, `ts`)"
         assert "PARTITIONED BY" not in result
 
     def test_partition_cluster_ddl_partition_only(self):
-        assert self.dest.partition_cluster_ddl("dt", None) == "PARTITIONED BY (dt)"
+        assert self.dest.partition_cluster_ddl("dt", None) == "PARTITIONED BY (`dt`)"
 
     def test_partition_cluster_ddl_cluster_only(self):
-        assert self.dest.partition_cluster_ddl(None, ["id"]) == "CLUSTER BY (id)"
+        assert self.dest.partition_cluster_ddl(None, ["id"]) == "CLUSTER BY (`id`)"
 
     @pytest.mark.parametrize(
         "logical, sql",
@@ -228,9 +233,6 @@ class TestDatabricksDialect:
 
     def test_parse_json_expression_passthrough(self):
         assert self.dest.parse_json_expression("my_col") == "my_col"
-
-    def test_extract_json_value_wraps_in_to_json(self):
-        assert self.dest.extract_json_value("col") == "to_json(col)"
 
 
 # ---------------------------------------------------------------------------

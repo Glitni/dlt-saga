@@ -311,44 +311,44 @@ class TestRenderFilterDefault:
     def test_eq_string(self):
         dest = _BaseDestination()
         specs = parse_filters([{"column": "name", "op": "eq", "value": "alice"}])
-        assert dest.render_filter(specs) == "`name` = 'alice'"
+        assert dest.render_filter(specs) == "\"name\" = 'alice'"
 
     def test_eq_int(self):
         dest = _BaseDestination()
         specs = parse_filters([{"column": "id", "op": "eq", "value": 42}])
-        assert dest.render_filter(specs) == "`id` = 42"
+        assert dest.render_filter(specs) == '"id" = 42'
 
     def test_eq_bool(self):
         dest = _BaseDestination()
         specs = parse_filters([{"column": "active", "op": "eq", "value": True}])
-        assert dest.render_filter(specs) == "`active` = TRUE"
+        assert dest.render_filter(specs) == '"active" = TRUE'
 
     def test_in(self):
         dest = _BaseDestination()
         specs = parse_filters(
             [{"column": "name", "op": "in", "value": ["a", "b", "c"]}]
         )
-        assert dest.render_filter(specs) == "`name` IN ('a', 'b', 'c')"
+        assert dest.render_filter(specs) == "\"name\" IN ('a', 'b', 'c')"
 
     def test_not_in(self):
         dest = _BaseDestination()
         specs = parse_filters([{"column": "id", "op": "not_in", "value": [1, 2]}])
-        assert dest.render_filter(specs) == "`id` NOT IN (1, 2)"
+        assert dest.render_filter(specs) == '"id" NOT IN (1, 2)'
 
     def test_is_null(self):
         dest = _BaseDestination()
         specs = parse_filters([{"column": "x", "op": "is_null"}])
-        assert dest.render_filter(specs) == "`x` IS NULL"
+        assert dest.render_filter(specs) == '"x" IS NULL'
 
     def test_is_not_null(self):
         dest = _BaseDestination()
         specs = parse_filters([{"column": "x", "op": "is_not_null"}])
-        assert dest.render_filter(specs) == "`x` IS NOT NULL"
+        assert dest.render_filter(specs) == '"x" IS NOT NULL'
 
     def test_ne(self):
         dest = _BaseDestination()
         specs = parse_filters([{"column": "x", "op": "ne", "value": "y"}])
-        assert dest.render_filter(specs) == "`x` <> 'y'"
+        assert dest.render_filter(specs) == "\"x\" <> 'y'"
 
     def test_and_join(self):
         dest = _BaseDestination()
@@ -358,7 +358,7 @@ class TestRenderFilterDefault:
                 {"column": "y", "op": "eq", "value": 2},
             ]
         )
-        assert dest.render_filter(specs) == "`x` = 1 AND `y` = 2"
+        assert dest.render_filter(specs) == '"x" = 1 AND "y" = 2'
 
     def test_default_json_path(self):
         """Default dialect uses JSON_VALUE — works on BigQuery/DuckDB/Postgres."""
@@ -368,7 +368,7 @@ class TestRenderFilterDefault:
         )
         assert (
             dest.render_filter(specs)
-            == "JSON_VALUE(`config`, '$.aid.legal_entity') = 'bm'"
+            == "JSON_VALUE(\"config\", '$.aid.legal_entity') = 'bm'"
         )
 
     def test_path_renders_int_value_as_string(self):
@@ -380,14 +380,16 @@ class TestRenderFilterDefault:
         # 5 (int) renders as '5' (quoted string), not bare 5.
         assert (
             dest.render_filter(specs)
-            == "JSON_VALUE(`config`, '$.settings.version') = '5'"
+            == "JSON_VALUE(\"config\", '$.settings.version') = '5'"
         )
 
     def test_path_renders_bool_lowercase(self):
         dest = _BaseDestination()
         specs = parse_filters([{"column": "config", "path": "enabled", "value": True}])
         # True renders as 'true' to match JSON wire form.
-        assert dest.render_filter(specs) == "JSON_VALUE(`config`, '$.enabled') = 'true'"
+        assert (
+            dest.render_filter(specs) == "JSON_VALUE(\"config\", '$.enabled') = 'true'"
+        )
 
     def test_path_in_renders_values_as_strings(self):
         dest = _BaseDestination()
@@ -396,20 +398,20 @@ class TestRenderFilterDefault:
         )
         assert (
             dest.render_filter(specs)
-            == "JSON_VALUE(`config`, '$.version') IN ('1', '2')"
+            == "JSON_VALUE(\"config\", '$.version') IN ('1', '2')"
         )
 
     def test_no_path_preserves_value_type(self):
         """Top-level column without path keeps native SQL literal types."""
         dest = _BaseDestination()
         specs = parse_filters([{"column": "id", "value": 5}])
-        assert dest.render_filter(specs) == "`id` = 5"
+        assert dest.render_filter(specs) == '"id" = 5'
 
     def test_string_escaping(self):
-        # Base dialect is backslash (BigQuery/Databricks): '' is invalid there.
+        # Base dialect is standard SQL: the single quote is doubled ('').
         dest = _BaseDestination()
         specs = parse_filters([{"column": "x", "op": "eq", "value": "o'brien"}])
-        assert dest.render_filter(specs) == "`x` = 'o\\'brien'"
+        assert dest.render_filter(specs) == "\"x\" = 'o''brien'"
 
     def test_custom_column_resolver(self):
         """When a resolver is passed, column refs go through it."""

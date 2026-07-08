@@ -428,24 +428,44 @@ class Destination(ABC):
     def quote_identifier(self, name: str) -> str:
         """Quote a table or column identifier for this destination.
 
-        Default uses backticks (BigQuery style). Override for other destinations.
+        Default is the ANSI SQL delimited identifier: double quotes, with an
+        embedded double quote doubled so a config-supplied name can't break out
+        of the identifier (DuckDB follows this exactly and inherits it).
+        Destinations whose delimiter differs override — BigQuery and Databricks
+        both use backticks (BigQuery backslash-escapes an embedded backtick,
+        Databricks doubles it).
         """
-        return f"`{name}`"
+        escaped = name.replace('"', '""')
+        return f'"{escaped}"'
 
     def escape_string_literal(self, value: str) -> str:
         """Escape a string for safe interpolation into a single-quoted SQL literal.
 
-        Default is the C-style backslash dialect used by BigQuery and Databricks:
-        the single quote is escaped as ``\\'`` (NOT doubled as ``''`` — GoogleSQL
-        does not accept ``''`` inside a single-quoted literal), backslash is
-        escaped first so later sequences aren't re-escaped, the control
-        characters that would break a single-quoted literal become escape
-        sequences, and NUL is dropped (unstorable / string-terminating in several
-        drivers). Destinations whose string literals follow standard SQL (double
-        the quote, backslash is literal) — e.g. DuckDB — override this.
+        Default is standard SQL: the single quote is doubled (``''``), backslash
+        is a literal character, and newlines/tabs are valid inside a single-quoted
+        literal so they're left as-is; only NUL is dropped (unstorable /
+        string-terminating in several drivers). DuckDB follows this and inherits
+        it. Destinations that use C-style backslash escapes — BigQuery and
+        Databricks, whose GoogleSQL/Spark dialects reject ``''`` and want ``\\'``
+        — override with :meth:`_backslash_escape_string_literal`.
 
         Tolerates arbitrary input, notably multi-line error messages and
         tracebacks.
+        """
+        return self._ansi_escape_string_literal(value)
+
+    @staticmethod
+    def _ansi_escape_string_literal(value: str) -> str:
+        """Standard-SQL literal escaping: double the quote, drop NUL."""
+        return value.replace("'", "''").replace("\x00", "")
+
+    @staticmethod
+    def _backslash_escape_string_literal(value: str) -> str:
+        """C-style (GoogleSQL/Spark) literal escaping for BigQuery/Databricks.
+
+        Backslash is escaped first so later sequences aren't re-escaped; the
+        single quote and the control characters that would break a single-quoted
+        literal become escape sequences; NUL is dropped.
         """
         return (
             value.replace("\\", "\\\\")
@@ -476,11 +496,15 @@ class Destination(ABC):
     def hash_expression(self, columns: list[str]) -> str:
         """Build a SQL expression that hashes multiple columns for change detection.
 
-        Default uses BigQuery's FARM_FINGERPRINT(TO_JSON_STRING(STRUCT(...))).
-        Override for other destinations.
+        There is no portable SQL-standard hashing function, so there is no
+        sensible default — each destination must supply its own (BigQuery
+        ``FARM_FINGERPRINT``, Databricks ``xxhash64``, DuckDB ``md5``), all over
+        a JSON serialisation of the columns so NULL is distinct from ``''`` and
+        column boundaries are unambiguous.
         """
-        cols = ", ".join(columns)
-        return f"FARM_FINGERPRINT(TO_JSON_STRING(STRUCT({cols})))"
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement hash_expression"
+        )
 
     def partition_ddl(self, column: str, col_type: Optional[str] = None) -> str:
         """Return DDL clause for table partitioning, or empty string if unsupported.
@@ -522,12 +546,13 @@ class Destination(ABC):
         """Map a logical type name to the destination's SQL type.
 
         Supported logical types: string, int64, bool, timestamp.
-        Default returns BigQuery types.
+        Default returns standard SQL types; destinations with different type
+        names (BigQuery ``STRING``/``INT64``/``BOOL``) override.
         """
         type_map = {
-            "string": "STRING",
-            "int64": "INT64",
-            "bool": "BOOL",
+            "string": "VARCHAR",
+            "int64": "BIGINT",
+            "bool": "BOOLEAN",
             "timestamp": "TIMESTAMP",
         }
         return type_map.get(logical_type, logical_type.upper())
@@ -567,19 +592,10 @@ class Destination(ABC):
         Args:
             value_expr: SQL expression that evaluates to a JSON string.
 
-        Default uses ``PARSE_JSON(expr)`` (BigQuery). Override for other
-        destinations (e.g. ``expr::jsonb`` for Postgres).
+        Default uses the standard ``CAST(expr AS JSON)`` (DuckDB, Postgres,
+        etc.). BigQuery overrides with ``PARSE_JSON(expr)``.
         """
-        return f"PARSE_JSON({value_expr})"
-
-    def extract_json_value(self, json_expr: str) -> str:
-        """Return SQL to extract a JSON column back to a string.
-
-        Used when reading JSON data and converting back to a dict.
-        Default uses ``TO_JSON_STRING(expr)`` (BigQuery). Override for
-        destinations where JSON columns are returned as strings already.
-        """
-        return f"TO_JSON_STRING({json_expr})"
+        return f"CAST({value_expr} AS {self.json_type_name()})"
 
     def current_timestamp_expression(self) -> str:
         """Return SQL expression for the current timestamp.
