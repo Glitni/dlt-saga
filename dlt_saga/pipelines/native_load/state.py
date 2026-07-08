@@ -137,16 +137,23 @@ class NativeLoadStateManager:
     # ------------------------------------------------------------------
 
     def get_last_cursor(self, pipeline_name: str) -> Optional[str]:
-        """Return the most recent successful cursor_value for this pipeline."""
+        """Return the highest successful cursor_value for this pipeline.
+
+        Uses ``MAX(cursor_value)``, not the latest-finished row: the cursor is
+        the incremental high-water mark, so the furthest-progressed value is what
+        bounds the next scan. Ordering by ``finished_at`` instead let an
+        out-of-order or backfill run whose latest row carried a *lower* cursor
+        regress the watermark and re-widen the scan window. Safe because
+        ``filename_date_format`` is validated lexicographically monotonic, so the
+        string MAX matches the chronological max.
+        """
         table_id = self._dest.get_full_table_id(self._dataset, self._table)
         pn = self._dest.escape_string_literal(pipeline_name)
         sql = (
-            f"SELECT cursor_value "
+            f"SELECT MAX(cursor_value) AS cursor_value "
             f"FROM {table_id} "
             f"WHERE pipeline_name = '{pn}' AND status = 'success' "
-            f"AND cursor_value IS NOT NULL "
-            f"ORDER BY COALESCE(finished_at, started_at) DESC "
-            f"LIMIT 1"
+            f"AND cursor_value IS NOT NULL"
         )
         try:
             rows = self._dest.execute_sql(sql, self._dataset)

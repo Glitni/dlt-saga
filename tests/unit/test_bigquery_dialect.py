@@ -56,3 +56,26 @@ class TestBigQueryStringAndJson:
 
     def test_parse_json_expression_uses_parse_json(self):
         assert _dest().parse_json_expression("'{}'") == "PARSE_JSON('{}')"
+
+
+@pytest.mark.unit
+class TestBigQueryListTablesByPattern:
+    def _dest_with_capture(self):
+        from types import SimpleNamespace
+
+        dest = _dest()
+        dest.config = SimpleNamespace(project_id="proj")
+        captured = {}
+        dest.execute_sql = lambda sql: captured.setdefault("sql", sql) or []
+        return dest, captured
+
+    def test_no_age_filter_by_default(self):
+        dest, captured = self._dest_with_capture()
+        dest.list_tables_by_pattern("ds", "t__ext_%")
+        assert "creation_time" not in captured["sql"]
+
+    def test_age_filter_applied_when_set(self):
+        dest, captured = self._dest_with_capture()
+        dest.list_tables_by_pattern("ds", "t__ext_%", min_age_hours=6)
+        assert "creation_time <" in captured["sql"]
+        assert "INTERVAL 6 HOUR" in captured["sql"]

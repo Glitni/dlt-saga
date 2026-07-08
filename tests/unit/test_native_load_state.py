@@ -290,6 +290,17 @@ class TestGetLastCursor:
         with pytest.raises(RuntimeError, match="connection reset"):
             mgr.get_last_cursor("pipeline")
 
+    def test_selects_max_cursor_not_latest_finished(self):
+        # The high-water mark is MAX(cursor_value), not the latest-finished row —
+        # an out-of-order run must not regress the watermark.
+        dest = _make_plain_dest()
+        dest.execute_sql.return_value = [("2024-03-01",)]
+        mgr = NativeLoadStateManager(dest, "ds")
+        mgr.get_last_cursor("pipeline")
+        sql = dest.execute_sql.call_args[0][0]
+        assert "MAX(cursor_value)" in sql
+        assert "ORDER BY" not in sql
+
 
 @pytest.mark.unit
 class TestGetLoadedUriGenerations:

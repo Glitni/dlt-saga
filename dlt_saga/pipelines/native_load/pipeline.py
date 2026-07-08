@@ -21,6 +21,12 @@ from dlt_saga.utility.naming import normalize_identifier
 
 logger = logging.getLogger(__name__)
 
+# Minimum age before an orphan external table is swept, chosen well above any
+# plausible single-run load time so a concurrent run's live table is never
+# dropped mid-load (external tables are cheap metadata; lingering orphans are
+# harmless).
+_ORPHAN_EXT_TABLE_MIN_AGE_HOURS = 6
+
 
 class NativeLoadPipeline(BasePipeline):
     """Generic cloud-storage → warehouse loader.
@@ -254,13 +260,22 @@ class NativeLoadPipeline(BasePipeline):
         self._target_exists = False
 
     def _sweep_orphan_ext_tables(self) -> None:
-        """Drop leftover BigQuery external tables from prior crashes. No-op on Databricks."""
+        """Drop leftover BigQuery external tables from prior crashes. No-op on Databricks.
+
+        Only sweeps tables older than ``_ORPHAN_EXT_TABLE_MIN_AGE_HOURS``: the
+        ``{table}__ext_%`` pattern also matches a *concurrent* run's live
+        external table (names are per-run UUIDs), and an unconditional sweep
+        would drop it mid-load. External tables are cheap metadata, so waiting
+        out the age window before reclaiming a genuine orphan is the safe trade.
+        """
         if not hasattr(self.destination, "list_tables_by_pattern"):
             return
         pattern = f"{self.table_name}__ext_%"
         try:
             names = self.destination.list_tables_by_pattern(
-                self._staging_dataset, pattern
+                self._staging_dataset,
+                pattern,
+                min_age_hours=_ORPHAN_EXT_TABLE_MIN_AGE_HOURS,
             )
         except Exception as exc:
             self.logger.debug("Orphan sweep: could not list staging dataset: %s", exc)

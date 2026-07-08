@@ -951,8 +951,15 @@ class Destination(ABC):
         """
         return dlt_type.upper()
 
-    def list_tables_by_pattern(self, dataset: str, pattern: str) -> list:
-        """Return table names matching a SQL LIKE pattern in the given dataset."""
+    def list_tables_by_pattern(
+        self, dataset: str, pattern: str, min_age_hours: Optional[int] = None
+    ) -> list:
+        """Return table names matching a SQL LIKE pattern in the given dataset.
+
+        When ``min_age_hours`` is set, only tables created at least that many
+        hours ago are returned (used to avoid sweeping a concurrent run's live
+        staging tables). Destinations without a metadata source return ``[]``.
+        """
         return []
 
     def build_historize_create_table_sql(

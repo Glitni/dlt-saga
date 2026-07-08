@@ -1113,12 +1113,20 @@ class BigQueryDestination(BigQueryBaseDestination):
         rows = list(job.result(timeout=600))
         return rows, job.job_id
 
-    def list_tables_by_pattern(self, dataset: str, pattern: str) -> list:
+    def list_tables_by_pattern(
+        self, dataset: str, pattern: str, min_age_hours: Optional[int] = None
+    ) -> list:
         safe_pattern = self.escape_string_literal(pattern)
+        age_filter = ""
+        if min_age_hours is not None:
+            age_filter = (
+                f" AND creation_time < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), "
+                f"INTERVAL {int(min_age_hours)} HOUR)"
+            )
         sql = (
             f"SELECT table_name "
             f"FROM `{self.config.project_id}.{dataset}.INFORMATION_SCHEMA.TABLES` "
-            f"WHERE table_name LIKE '{safe_pattern}'"
+            f"WHERE table_name LIKE '{safe_pattern}'{age_filter}"
         )
         try:
             rows = self.execute_sql(sql)
