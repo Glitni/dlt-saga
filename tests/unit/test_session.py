@@ -437,6 +437,46 @@ class TestSessionDiscover:
         configs = session.discover(resource_type="historize")
         assert len(configs) == 1
 
+    def test_discover_resolves_within_profile_context(self):
+        """`Session.discover()` must resolve names inside the session's profile
+        execution context, even when no context is active yet.
+
+        Regression: `saga run` pre-discovers pipelines (for its count/confirm)
+        before entering a scope. Because discovery is memoized on the config
+        source, resolving it unscoped cached the ``dlt_dev`` dev-schema fallback
+        and poisoned the later scoped run — so `saga run` landed in the wrong
+        dev schema while `saga ingest` did not.
+        """
+        from types import SimpleNamespace
+
+        from dlt_saga.utility.cli.context import (
+            clear_execution_context,
+            get_execution_context,
+        )
+
+        session = self._make_session()
+        session._profile_target = SimpleNamespace(schema="dbt_grindheim")
+
+        seen = {}
+
+        def _record_context():
+            # Capture the schema visible via the global context at the exact
+            # moment discovery runs (where schema_name would be resolved).
+            seen["schema"] = get_execution_context().get_schema()
+            return ({}, {})
+
+        session._config_source = MagicMock()
+        session._config_source.discover.side_effect = _record_context
+
+        # Mirror `saga run`: no execution context active when discover() is called.
+        clear_execution_context()
+        try:
+            session.discover()
+        finally:
+            clear_execution_context()
+
+        assert seen["schema"] == "dbt_grindheim"
+
     def test_discover_invalid_resource_type(self):
         session = self._make_session()
         with pytest.raises(ValueError, match="Invalid resource_type"):

@@ -183,7 +183,16 @@ class Session:
             Flat list of matching PipelineConfig objects.
         """
         filter_fn = self._resource_type_filter(resource_type)
-        configs, _ = self._discover_and_select(select, filter_fn)
+        # Resolve inside the profile's execution context so environment-aware
+        # names (notably the dev schema from a profile's ``env_var()``) bind to
+        # the profile rather than the bare ``dlt_dev``/``SAGA_SCHEMA_NAME``
+        # fallback. The config source memoizes discovery, so resolving this
+        # unscoped would cache the fallback names and poison later scoped runs
+        # that share the same Session — the cause of ``saga run`` (which
+        # pre-discovers for its pipeline count) landing in ``dlt_dev`` while
+        # ``saga ingest`` resolved correctly.
+        with execution_context_scope(self._profile_target):
+            configs, _ = self._discover_and_select(select, filter_fn)
         return flatten_configs(configs)
 
     def ingest(
