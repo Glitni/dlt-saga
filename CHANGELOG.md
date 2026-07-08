@@ -1,3 +1,19 @@
+## 0.18.0 — 2026-07-08
+
+### Added
+- Report active build and resolved schema in saga doctor (#292)
+
+
+### Fixed
+- Resolve saga run dev schema from profile instead of dlt_dev fallback (#293)
+- Record extraction-start as started_at to close change-detection race (+ correct run duration) (#289)
+- Database incremental WHERE quoting/injection + custom-query first-run placeholder (#287)
+- Api offset pagination truncation on capped page size + retry connection errorr (#285)
+- Honor source_database for historize reads (cross-project external delivery) (#283)
+- Resolve historize max snapshot before reprocess to avoid losing mid-run snapshots (#281)
+- Validate historize column-name fields and handle empty historize: block (#279)
+- Apply historize.filters on partial refresh and use EXISTS for composite-PK rollback (#277)
+
 ## 0.17.0 — 2026-07-07
 
 ### Fixed
