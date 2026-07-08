@@ -2541,10 +2541,17 @@ def _doctor_check_profile(
         dest_type = context.get_destination_type() or "unknown"
         env = context.get_environment() or "unknown"
         active_target = target or (profile_target.name if profile_target else "dev")
+        # Surface the resolved dev schema. context.get_schema() is the profile
+        # target's rendered `schema` (dbt-style `env_var()` already applied); in
+        # dev that IS the schema pipelines land in, so an empty/None value here
+        # is exactly what silently falls back to `dlt_dev` at run time. In prod
+        # the schema is per-group, so only show this when the profile sets one.
+        schema = context.get_schema()
+        schema_detail = f", schema={schema}" if schema else ""
         emit(
             "\u2713",
             "profiles.yml",
-            f"[{resolved_profile} → {active_target}, {dest_type}, {env}]",
+            f"[{resolved_profile} → {active_target}, {dest_type}, {env}{schema_detail}]",
         )
         return profile_target, context, dest_type
     except Exception as e:
@@ -2575,18 +2582,78 @@ def _doctor_check_project(verbose: bool, emit: Callable[..., None]) -> bool:
         return False
 
 
-def _doctor_check_configs(verbose: bool, emit: Callable[..., None]) -> dict:
-    """Discover pipeline configs. Returns selected_configs (empty dict on failure)."""
+def _doctor_emit_version(emit: Callable[..., None]) -> None:
+    """Report the active dlt-saga version and whether it's an editable/local
+    checkout or an installed (PyPI) build.
+
+    This is the fast answer to "which dlt-saga am I actually running?" \u2014 the
+    exact question that bites when switching between a local editable install
+    (``uv pip install -e``) and the pinned release (``uv sync``).
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    import dlt_saga
+
+    try:
+        ver = version("dlt-saga")
+    except PackageNotFoundError:
+        ver = "unknown"
+    location = Path(dlt_saga.__file__).resolve().parent
+    # An editable/local checkout lives outside site-packages; a released build
+    # is unpacked into site-packages. Good enough to tell the two apart.
+    kind = (
+        "editable/local" if "site-packages" not in location.as_posix() else "installed"
+    )
+    emit("\u2713", f"dlt-saga {ver}", f"[{kind}] {location}")
+
+
+def _doctor_check_configs(
+    select: Optional[List[str]],
+    context: "ExecutionContext",
+    verbose: bool,
+    emit: Callable[..., None],
+) -> dict:
+    """Discover pipeline configs and report their resolved destination targets.
+
+    Prints the distinct schema(s) the selected pipelines resolve to \u2014 the
+    single most useful value for catching a mis-resolved schema (e.g. a profile
+    that fell back to ``dlt_dev`` because ``env_var()`` was empty at load time)
+    without having to run ``saga ingest``. When a ``--select`` is given (or in
+    ``--verbose``), each pipeline's full ``project.schema.table`` is listed too.
+
+    Returns the selected configs (empty dict on failure).
+    """
     import traceback
 
     try:
-        selected, _ = discover_and_select_configs(None)
+        selected, _ = discover_and_select_configs(select)
         total = sum(len(v) for v in selected.values())
+        flat = flatten_configs(selected) if selected else []
+        schemas = sorted({c.schema_name for c in flat if c.schema_name})
+        schema_detail = f" \u2192 schema(s): {', '.join(schemas)}" if schemas else ""
         emit(
             "\u2713",
             "Pipeline configs",
-            f"{total} pipeline(s) in {len(selected)} group(s)",
+            f"{total} pipeline(s) in {len(selected)} group(s){schema_detail}",
         )
+
+        # Per-pipeline resolved target: useful when zooming in on one pipeline
+        # (or debugging naming), noisy for a whole project \u2014 so gate on --select
+        # or --verbose. Cap the list but report how many were hidden (never a
+        # silent truncation).
+        if flat and (select or verbose):
+            project = context.get_database()
+            limit = len(flat) if verbose else 20
+            for c in flat[:limit]:
+                target = ".".join(
+                    p for p in (project, c.schema_name, c.table_name) if p
+                )
+                typer.echo(f"        {c.pipeline_name} \u2192 {target}")
+            hidden = len(flat) - limit
+            if hidden > 0:
+                typer.echo(
+                    f"        \u2026 and {hidden} more (use --verbose to list all)"
+                )
         return selected
     except Exception as e:
         emit(
@@ -2649,11 +2716,26 @@ def doctor(
     target: Optional[str] = typer.Option(
         None, "--target", help="Target within profile"
     ),
+    select: Optional[List[str]] = typer.Option(
+        None,
+        "--select",
+        "-s",
+        help=(
+            "Selector(s) to scope the config check and list each matched "
+            "pipeline's resolved project.schema.table target."
+        ),
+    ),
 ):
     """Validate configuration and test destination connectivity.
 
-    Checks profiles, project config, pipeline discovery, destination connection,
-    and registered pipeline plugins — similar to dbt debug.
+    Checks the active dlt-saga build, profiles, project config, pipeline
+    discovery (with resolved schema), destination connection, and registered
+    pipeline plugins — similar to dbt debug.
+
+    Use ``--select`` to print the fully resolved ``project.schema.table`` for
+    specific pipelines without running them — handy for confirming a profile's
+    ``env_var()`` schema resolved as expected, or which build is active after
+    switching between an editable install and the pinned release.
 
     For interactive OAuth (Databricks U2M), the browser will open during the
     connection check, establishing credentials before any pipeline work.
@@ -2670,11 +2752,12 @@ def doctor(
 
     typer.echo("")
 
+    _doctor_emit_version(_emit)
     profile_target, context, dest_type = _doctor_check_profile(
         profile, target, verbose, _emit
     )
     ok = _doctor_check_project(verbose, _emit)
-    selected_configs = _doctor_check_configs(verbose, _emit)
+    selected_configs = _doctor_check_configs(select, context, verbose, _emit)
     ok = (
         _doctor_check_connection(
             dest_type, context, selected_configs, profile_target, verbose, _emit
