@@ -1117,3 +1117,21 @@ class TestPrefixAutodetectLazyListing:
         p.storage_client = MagicMock()
         assert p._resolve_date_filename_prefix() == "pre_"
         p.storage_client.list_files.assert_not_called()
+
+
+@pytest.mark.unit
+class TestOrphanExtTableSweep:
+    def test_sweep_passes_age_gate_and_drops_matches(self):
+        # The sweep must age-gate the listing so a concurrent run's live
+        # external table (same name pattern, per-run UUID) isn't dropped.
+        p = _make_pipeline()
+        p.destination.list_tables_by_pattern.return_value = [
+            "test__my_table__ext_abc123"
+        ]
+        p._sweep_orphan_ext_tables()
+
+        _, kwargs = p.destination.list_tables_by_pattern.call_args
+        assert kwargs.get("min_age_hours") == 6
+        p.destination.drop_table.assert_called_once_with(
+            p._staging_dataset, "test__my_table__ext_abc123"
+        )

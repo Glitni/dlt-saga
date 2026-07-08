@@ -95,6 +95,24 @@ class TestDateModeValidation:
         with pytest.raises(ValueError, match="one capture group"):
             _make(filename_date_regex=r"(\d{4})(\d{2})", filename_date_format="%Y%m%d")
 
+    @pytest.mark.parametrize(
+        "fmt",
+        ["%Y%m%d", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d", "%Y%m", "%Y"],
+    )
+    def test_monotonic_date_format_accepted(self, fmt):
+        cfg = _make(filename_date_regex=r"(.+)", filename_date_format=fmt)
+        assert cfg.filename_date_format == fmt
+
+    @pytest.mark.parametrize(
+        "fmt",
+        ["%d%m%Y", "%m/%d/%Y", "%d-%m-%Y", "%H%M%S", "%d"],
+    )
+    def test_non_monotonic_date_format_rejected(self, fmt):
+        # Formats whose lexical order != chronological order would mis-scope the
+        # incremental window.
+        with pytest.raises(ValueError, match="lexicographically monotonic"):
+            _make(filename_date_regex=r"(.+)", filename_date_format=fmt)
+
 
 @pytest.mark.unit
 class TestInitialValue:

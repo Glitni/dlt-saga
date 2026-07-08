@@ -15,6 +15,46 @@ _VALID_FILE_TYPES = ("parquet", "csv", "jsonl")
 _VALID_URI_SCHEMES = ("gs://", "s3://", "abfss://")
 _DEFAULT_PATTERNS = {"parquet": "*.parquet", "csv": "*.csv", "jsonl": "*.jsonl"}
 
+# Strictly ascending probe timestamps spanning day/month/year/hour boundaries.
+# Used to check that a date format sorts lexicographically the same as
+# chronologically (see _validate_lexicographic_date_format).
+_MONOTONIC_PROBE_TIMESTAMPS = (
+    (2024, 1, 2, 3, 4, 5),
+    (2024, 1, 20, 3, 4, 5),
+    (2024, 2, 1, 3, 4, 5),
+    (2024, 11, 1, 3, 4, 5),
+    (2025, 1, 1, 1, 1, 1),
+    (2025, 1, 1, 2, 0, 0),
+    (2025, 1, 1, 10, 0, 0),
+)
+
+
+def _validate_lexicographic_date_format(date_format: str) -> None:
+    """Reject a filename date format that doesn't sort lexicographically.
+
+    The whole cursor machinery (``MAX(cursor_value)``, ``cursor_value >= min``,
+    GCS ``start_offset``, ``sorted(files_by_cursor)``) compares the extracted
+    date *as a string*, so it only works when the format's lexical order matches
+    chronological order — i.e. fields run most- to least-significant and are
+    fixed-width (``%Y%m%d``, ``%Y-%m-%d %H:%M:%S``). A format like ``%d%m%Y``
+    orders ``02012024`` (2 Jan) after ``01022024`` (1 Feb) and would silently
+    mis-scope the incremental window, so it's a config error.
+    """
+    import datetime
+
+    formatted = [
+        datetime.datetime(*parts).strftime(date_format)
+        for parts in _MONOTONIC_PROBE_TIMESTAMPS
+    ]
+    if formatted != sorted(formatted):
+        raise ValueError(
+            f"filename_date_format={date_format!r} is not lexicographically "
+            "monotonic: sorting the extracted date as a string does not match "
+            "chronological order, which would mis-scope incremental loads. Use a "
+            "big-endian, fixed-width format (fields most- to least-significant), "
+            "e.g. '%Y%m%d', '%Y-%m-%d', or '%Y-%m-%dT%H:%M:%S'."
+        )
+
 
 @dataclass
 class NativeLoadConfig(BaseConfig):
@@ -394,6 +434,8 @@ class NativeLoadConfig(BaseConfig):
                 raise ValueError(
                     f"filename_date_format is not a valid strftime string: {exc}"
                 ) from exc
+
+            _validate_lexicographic_date_format(self.filename_date_format)
 
         if self.initial_value is not None:
             if not has_format:
