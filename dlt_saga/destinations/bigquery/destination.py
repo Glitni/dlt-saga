@@ -204,15 +204,20 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         return self._client_pool
 
-    def _client(self) -> Any:
+    def _client(self, location: Optional[str] = None) -> Any:
         """Return a pooled BigQuery client for this destination's job project.
 
         Reuses a per-thread client (via the pool) instead of paying credential
         resolution + HTTP session setup on every ``execute_sql`` / metadata call;
         a single historize run issues dozens.
+
+        ``location`` overrides the default query-job region — needed for the
+        cross-cloud (BigQuery Omni) native_load path, where statements that read
+        an S3 external table must run in the Omni region (e.g. aws-eu-west-1)
+        while the rest of the run stays in ``self.config.location``.
         """
         return self.get_client_pool().get_client(
-            self.config.job_project_id, self.config.location
+            self.config.job_project_id, location or self.config.location
         )
 
     @classmethod
@@ -545,20 +550,26 @@ class BigQueryDestination(BigQueryBaseDestination):
                 return None
             raise
 
-    def execute_sql(self, sql: str, schema_name: Optional[str] = None) -> Any:
+    def execute_sql(
+        self,
+        sql: str,
+        schema_name: Optional[str] = None,
+        location: Optional[str] = None,
+    ) -> Any:
         """Execute a SQL statement against BigQuery.
 
         Args:
             sql: SQL statement to execute
             schema_name: Optional default schema (BigQuery dataset) for
                 unqualified table references
+            location: Optional query-job region override (cross-cloud native_load).
 
         Returns:
             BigQuery RowIterator with query results
         """
         from google.cloud import bigquery
 
-        client = self._client()
+        client = self._client(location)
 
         job_config = bigquery.QueryJobConfig()
         if schema_name:
@@ -985,7 +996,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         return True
 
     def supported_native_load_uri_schemes(self) -> set:
-        return {"gs"}
+        return {"gs", "s3"}
 
     def native_load_file_name_expr(self) -> str:
         return "_FILE_NAME"
@@ -1012,9 +1023,13 @@ class BigQueryDestination(BigQueryBaseDestination):
         full_id = f"{self.config.project_id}.{dataset}.{table}"
         self._drop_table(full_id)
 
-    def list_table_columns(self, dataset: str, table: str) -> list:
+    def list_table_columns(
+        self, dataset: str, table: str, location: Optional[str] = None
+    ) -> list:
         sql = self.columns_query(self.config.project_id, dataset, table)
-        rows = self.execute_sql(sql)
+        # INFORMATION_SCHEMA queries are region-scoped: an external table in the
+        # Omni region must be introspected with a matching query location.
+        rows = self.execute_sql(sql, location=location)
         return [(r.column_name, r.data_type) for r in rows]
 
     def add_column(self, dataset: str, table: str, column: str, type_name: str) -> None:
@@ -1101,11 +1116,16 @@ class BigQueryDestination(BigQueryBaseDestination):
                 ", ".join(update_fields),
             )
 
-    def execute_sql_with_job(self, sql: str, schema: Optional[str] = None) -> tuple:
-        """Execute SQL and return (rows, job_id). Uses job_project_id for billing."""
+    def execute_sql_with_job(
+        self, sql: str, schema: Optional[str] = None, location: Optional[str] = None
+    ) -> tuple:
+        """Execute SQL and return (rows, job_id). Uses job_project_id for billing.
+
+        ``location`` overrides the query-job region (cross-cloud native_load).
+        """
         from google.cloud import bigquery
 
-        client = self._client()
+        client = self._client(location)
         job_config = bigquery.QueryJobConfig()
         if schema:
             job_config.default_dataset = f"{self.config.project_id}.{schema}"
@@ -1135,6 +1155,35 @@ class BigQueryDestination(BigQueryBaseDestination):
             logger.debug("list_tables_by_pattern failed: %s", exc)
             return []
 
+    def _resolve_connection_id(self, conn: str, omni_location: Optional[str]) -> str:
+        """Normalize a source_connection to a fully-qualified connection path.
+
+        Accepts the short ``<omni-region>.<id>`` form (built into
+        ``projects/<project>/locations/<region>/connections/<id>``) or an already
+        fully-qualified ``projects/.../connections/<id>`` path (returned as-is).
+        """
+        if "/connections/" in conn:
+            return conn
+        conn_id = conn.split(".", 1)[1] if "." in conn else conn
+        return (
+            f"projects/{self.config.project_id}/locations/{omni_location}"
+            f"/connections/{conn_id}"
+        )
+
+    def _ensure_dataset(self, dataset: str, location: str) -> None:
+        """Create ``dataset`` in ``location`` if absent (idempotent).
+
+        Used to provision the Omni-region staging dataset that holds the S3
+        external table (it must be colocated with the connection, not in the
+        destination region).
+        """
+        from google.cloud import bigquery
+
+        client = self._client(location)
+        ds = bigquery.Dataset(f"{self.config.project_id}.{dataset}")
+        ds.location = location
+        client.create_dataset(ds, exists_ok=True)
+
     def create_external_table(
         self,
         dataset: str,
@@ -1143,40 +1192,72 @@ class BigQueryDestination(BigQueryBaseDestination):
         source_format: str = "PARQUET",
         autodetect: bool = True,
         format_options: Optional[dict] = None,
+        connection_id: Optional[str] = None,
+        location: Optional[str] = None,
+        schema: Optional[list] = None,
     ) -> None:
-        """Create a transient external table over GCS URIs."""
+        """Create a transient external table over cloud-storage URIs.
+
+        ``connection_id`` binds a BigQuery connection (required for BigLake /
+        cross-cloud S3 external tables via BigQuery Omni). It accepts a
+        fully-qualified ``projects/.../connections/<id>`` path.
+
+        ``schema`` is an explicit ordered list of ``(name, type)`` column
+        definitions used instead of autodetect — required for headerless CSV/TSV
+        where positional column typing must be fixed (BigQuery maps columns
+        positionally to this schema).
+        """
         from google.cloud import bigquery
 
-        client = self._client()
+        client = self._client(location)
         table_ref = f"{self.config.project_id}.{dataset}.{name}"
+
+        schema_fields = (
+            [bigquery.SchemaField(n, t) for n, t in schema] if schema else None
+        )
 
         ext_config = bigquery.ExternalConfig(source_format)
         ext_config.source_uris = source_uris
-        ext_config.autodetect = autodetect
-
+        ext_config.autodetect = autodetect if schema_fields is None else False
+        if connection_id:
+            ext_config.connection_id = connection_id
+        # BigLake (connection-backed) external tables require the explicit schema
+        # on the Table, not on ExternalConfig; plain external tables take it on
+        # ExternalConfig. Set it in the right place based on connection presence.
+        if schema_fields is not None and not connection_id:
+            ext_config.schema = schema_fields
         if source_format == "CSV" and format_options:
-            csv_opts = bigquery.CSVOptions()
-            if "field_delimiter" in format_options:
-                csv_opts.field_delimiter = format_options["field_delimiter"]
-            if "skip_leading_rows" in format_options:
-                csv_opts.skip_leading_rows = int(format_options["skip_leading_rows"])
-            if "quote_character" in format_options:
-                csv_opts.quote_character = format_options["quote_character"]
-            if "null_marker" in format_options:
-                csv_opts.null_markers = [format_options["null_marker"]]
-            if "encoding" in format_options:
-                csv_opts.encoding = format_options["encoding"].upper()
-            if format_options.get("allow_quoted_newlines"):
-                csv_opts.allow_quoted_newlines = True
-            if format_options.get("allow_jagged_rows"):
-                csv_opts.allow_jagged_rows = True
-            if format_options.get("preserve_ascii_control_characters"):
-                csv_opts.preserve_ascii_control_characters = True
-            ext_config.csv_options = csv_opts
+            ext_config.csv_options = self._build_csv_external_options(format_options)
 
         table = bigquery.Table(table_ref)
         table.external_data_configuration = ext_config
+        if schema_fields is not None and connection_id:
+            table.schema = schema_fields
         client.create_table(table)
+
+    @staticmethod
+    def _build_csv_external_options(format_options: dict) -> Any:
+        """Translate saga CSV format_options into a bigquery.CSVOptions."""
+        from google.cloud import bigquery
+
+        csv_opts = bigquery.CSVOptions()
+        if "field_delimiter" in format_options:
+            csv_opts.field_delimiter = format_options["field_delimiter"]
+        if "skip_leading_rows" in format_options:
+            csv_opts.skip_leading_rows = int(format_options["skip_leading_rows"])
+        if "quote_character" in format_options:
+            csv_opts.quote_character = format_options["quote_character"]
+        if "null_marker" in format_options:
+            csv_opts.null_markers = [format_options["null_marker"]]
+        if "encoding" in format_options:
+            csv_opts.encoding = format_options["encoding"].upper()
+        if format_options.get("allow_quoted_newlines"):
+            csv_opts.allow_quoted_newlines = True
+        if format_options.get("allow_jagged_rows"):
+            csv_opts.allow_jagged_rows = True
+        if format_options.get("preserve_ascii_control_characters"):
+            csv_opts.preserve_ascii_control_characters = True
+        return csv_opts
 
     def patch_external_table_schema(
         self, dataset: str, name: str, column_type_overrides: dict
@@ -1249,6 +1330,19 @@ class BigQueryDestination(BigQueryBaseDestination):
         }
         bq_format = _BQ_FORMAT_MAP.get(spec.file_type, "PARQUET")
 
+        # Cross-cloud (BigQuery Omni) path: statements that read the S3 external
+        # table run in the Omni region; the external table lives in an Omni-region
+        # staging dataset. GCS keeps the default (self.config.location) throughout.
+        omni_location = getattr(spec, "omni_location", None)
+        query_location = omni_location or None
+        connection_id = (
+            self._resolve_connection_id(spec.source_connection, omni_location)
+            if getattr(spec, "source_connection", None)
+            else None
+        )
+        if omni_location:
+            self._ensure_dataset(spec.staging_dataset, omni_location)
+
         ext_name = f"{spec.target_table}__ext_{uuid.uuid4().hex[:8]}"
 
         try:
@@ -1259,18 +1353,23 @@ class BigQueryDestination(BigQueryBaseDestination):
                 source_format=bq_format,
                 autodetect=spec.autodetect_schema,
                 format_options=spec.format_options or None,
+                connection_id=connection_id,
+                location=query_location,
+                schema=getattr(spec, "external_schema", None),
             )
             ext_id = self.get_full_table_id(spec.staging_dataset, ext_name)
-            ext_cols = self.list_table_columns(spec.staging_dataset, ext_name)
+            ext_cols = self.list_table_columns(
+                spec.staging_dataset, ext_name, location=query_location
+            )
             ext_cols = self._patch_ext_for_hints(spec, ext_name, ext_cols)
 
             if not spec.target_exists:
                 rows_loaded, job_id = self._native_load_create_target(
-                    spec, ext_id, ext_cols
+                    spec, ext_id, ext_cols, query_location=query_location
                 )
             else:
                 rows_loaded, job_id = self._native_load_insert_into_target(
-                    spec, ext_id, ext_cols
+                    spec, ext_id, ext_cols, query_location=query_location
                 )
 
             rows_by_uri = self._native_load_rowcounts(spec)
@@ -1285,13 +1384,27 @@ class BigQueryDestination(BigQueryBaseDestination):
                 logger.warning("Could not drop external table %s: %s", ext_name, exc)
 
     def _native_load_create_target(
-        self, spec: "Any", ext_id: str, ext_cols: list
+        self,
+        spec: "Any",
+        ext_id: str,
+        ext_cols: list,
+        query_location: Optional[str] = None,
     ) -> tuple:
-        """CTAS on first run. Returns (rows_loaded, job_id)."""
-        if spec.file_type == "csv" and not spec.autodetect_schema:
+        """CTAS on first run. Returns (rows_loaded, job_id).
+
+        ``query_location`` runs the CTAS in the Omni region for cross-cloud S3
+        loads; the target-row COUNT reads the (destination-region) target and
+        stays on the default location.
+        """
+        if (
+            spec.file_type == "csv"
+            and not spec.autodetect_schema
+            and not getattr(spec, "external_schema", None)
+        ):
             raise ValueError(
-                "Cannot create target table from CSV with autodetect_schema=False: "
-                "schema cannot be inferred. Set autodetect_schema=True or pre-create the target."
+                "Cannot create target table from CSV with autodetect_schema=False and "
+                "no explicit schema: schema cannot be inferred. Set autodetect_schema=True, "
+                "provide `columns:` for a positional schema, or pre-create the target."
             )
 
         derived_names = {c.name for c in spec.derived_columns}
@@ -1350,12 +1463,37 @@ class BigQueryDestination(BigQueryBaseDestination):
             )
 
         where_sql = self._render_native_load_where(spec, ext_cols)
-        select_sql = f"AS SELECT {all_select} FROM {ext_id}"
-        if where_sql:
-            select_sql = f"{select_sql} WHERE {where_sql}"
-        parts.append(select_sql)
 
-        _, job_id = self.execute_sql_with_job(" ".join(parts), spec.staging_dataset)
+        if query_location:
+            # Cross-cloud: materialize the transformed rows into a
+            # destination-region transfer table (cross-cloud CTAS), then build the
+            # real target from it in-region — so PARTITION BY / CLUSTER BY apply
+            # (a cross-cloud write can't create a clustered table directly).
+            import uuid
+
+            xfer = f"{spec.target_table}__xfer_{uuid.uuid4().hex[:8]}"
+            xfer_id = self.get_full_table_id(spec.target_dataset, xfer)
+            ctas = f"CREATE TABLE {xfer_id} AS SELECT {all_select} FROM {ext_id}"
+            if where_sql:
+                ctas = f"{ctas} WHERE {where_sql}"
+            self.execute_sql_with_job(
+                ctas, spec.staging_dataset, location=query_location
+            )
+            try:
+                parts.append(f"AS SELECT * FROM {xfer_id}")
+                _, job_id = self.execute_sql_with_job(" ".join(parts))
+            finally:
+                try:
+                    self.drop_table(spec.target_dataset, xfer)
+                except Exception as exc:
+                    logger.warning("Could not drop transfer table %s: %s", xfer, exc)
+        else:
+            # Same-cloud: one CTAS straight from the external table.
+            select_sql = f"AS SELECT {all_select} FROM {ext_id}"
+            if where_sql:
+                select_sql = f"{select_sql} WHERE {where_sql}"
+            parts.append(select_sql)
+            _, job_id = self.execute_sql_with_job(" ".join(parts), spec.staging_dataset)
 
         # COUNT(*) to get rows written (CTAS doesn't expose num_dml_affected_rows)
         count_rows = list(self.execute_sql(f"SELECT COUNT(*) AS cnt FROM {target_id}"))
@@ -1363,9 +1501,19 @@ class BigQueryDestination(BigQueryBaseDestination):
         return total_rows, job_id
 
     def _native_load_insert_into_target(
-        self, spec: "Any", ext_id: str, ext_cols: list
+        self,
+        spec: "Any",
+        ext_id: str,
+        ext_cols: list,
+        query_location: Optional[str] = None,
     ) -> tuple:
-        """INSERT INTO existing target. Returns (rows_loaded, job_id)."""
+        """INSERT INTO existing target. Returns (rows_loaded, job_id).
+
+        ``query_location`` runs the INSERT…SELECT in the Omni region for
+        cross-cloud S3 loads (it reads the S3 external table); target column
+        reconciliation (list/add column) touches only the destination-region
+        target and stays on the default location.
+        """
         from google.cloud import bigquery
 
         target_id = self.get_full_table_id(spec.target_dataset, spec.target_table)
@@ -1418,7 +1566,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                 )
                 logger.info("Added new column %r to %s", norm, spec.target_table)
 
-        # 3. Build INSERT
+        # 3. Build the column list + transformed SELECT
         all_insert_cols = [norm for norm, _ in insert_col_exprs] + [
             c.name for c in spec.derived_columns
         ]
@@ -1429,12 +1577,23 @@ class BigQueryDestination(BigQueryBaseDestination):
             for c in spec.derived_columns
         )
         full_select = ", ".join(filter(None, [data_select, derived_select]))
-        sql = f"INSERT INTO {target_id} ({col_list}) SELECT {full_select} FROM {ext_id}"
         where_sql = self._render_native_load_where(spec, ext_cols)
+
+        if query_location:
+            return self._native_load_insert_cross_cloud(
+                spec,
+                ext_id,
+                target_id,
+                col_list,
+                full_select,
+                where_sql,
+                query_location,
+            )
+
+        # Same-cloud: one INSERT … SELECT directly from the external table.
+        sql = f"INSERT INTO {target_id} ({col_list}) SELECT {full_select} FROM {ext_id}"
         if where_sql:
             sql = f"{sql} WHERE {where_sql}"
-
-        # Execute and capture affected rows from job stats
         client = self._client()
         job_config = bigquery.QueryJobConfig()
         job_config.default_dataset = f"{self.config.project_id}.{spec.staging_dataset}"
@@ -1442,6 +1601,50 @@ class BigQueryDestination(BigQueryBaseDestination):
         job.result(timeout=600)
         rows_loaded = job.num_dml_affected_rows or 0
         return int(rows_loaded), job.job_id
+
+    def _native_load_insert_cross_cloud(
+        self,
+        spec: "Any",
+        ext_id: str,
+        target_id: str,
+        col_list: str,
+        full_select: str,
+        where_sql: str,
+        query_location: str,
+    ) -> tuple:
+        """Cross-cloud append via a destination-region transfer table.
+
+        A single statement can't reference both the Omni-region external table
+        and the destination-region target (BigQuery runs a query in its datasets'
+        location and won't span regions). So materialize the transformed rows into
+        a transfer table in the destination dataset via cross-cloud CTAS (the
+        supported transfer — reads S3 in the Omni region, writes the destination
+        region), then INSERT from it in-region and drop it.
+        """
+        import uuid
+
+        xfer = f"{spec.target_table}__xfer_{uuid.uuid4().hex[:8]}"
+        xfer_id = self.get_full_table_id(spec.target_dataset, xfer)
+
+        ctas = f"CREATE TABLE {xfer_id} AS SELECT {full_select} FROM {ext_id}"
+        if where_sql:
+            ctas = f"{ctas} WHERE {where_sql}"
+        self.execute_sql_with_job(ctas, spec.staging_dataset, location=query_location)
+
+        try:
+            insert_sql = (
+                f"INSERT INTO {target_id} ({col_list}) SELECT {col_list} FROM {xfer_id}"
+            )
+            client = self._client()  # destination region
+            job = client.query(insert_sql)
+            job.result(timeout=600)
+            rows_loaded = job.num_dml_affected_rows or 0
+            return int(rows_loaded), job.job_id
+        finally:
+            try:
+                self.drop_table(spec.target_dataset, xfer)
+            except Exception as exc:
+                logger.warning("Could not drop transfer table %s: %s", xfer, exc)
 
     def _render_native_load_where(self, spec: "Any", ext_cols: list) -> str:
         """Resolve filter column names against the external table and render WHERE.

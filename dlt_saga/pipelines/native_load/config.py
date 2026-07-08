@@ -15,6 +15,11 @@ _VALID_FILE_TYPES = ("parquet", "csv", "jsonl")
 _VALID_URI_SCHEMES = ("gs://", "s3://", "abfss://")
 _DEFAULT_PATTERNS = {"parquet": "*.parquet", "csv": "*.csv", "jsonl": "*.jsonl"}
 
+# Conservative default cap for cross-cloud (s3://) chunk size: 5 GiB of
+# *compressed* input. BigQuery's 60 GiB cross-cloud limit is on uncompressed
+# result bytes, which a listing can't reveal, so the default errs low.
+_DEFAULT_LOAD_BATCH_BYTES = 5 * 1024**3
+
 # Strictly ascending probe timestamps spanning day/month/year/hour boundaries.
 # Used to check that a date format sorts lexicographically the same as
 # chronologically (see _validate_lexicographic_date_format).
@@ -82,8 +87,9 @@ class NativeLoadConfig(BaseConfig):
             "required": True,
             "description": (
                 "Root URI to load from. Must start with gs://, s3://, or abfss:// "
-                "and end with /. v1 only exercises gs://; s3:// and abfss:// are "
-                "accepted by validation but raise NotImplementedError at runtime."
+                "and end with /. gs:// → BigQuery/Databricks; s3:// → BigQuery via "
+                "an Omni cross-cloud connection (see source_connection) or "
+                "Databricks; abfss:// → Databricks."
             ),
         },
     )
@@ -104,6 +110,58 @@ class NativeLoadConfig(BaseConfig):
         metadata={
             "description": "File format: parquet, csv, or jsonl.",
             "enum": list(_VALID_FILE_TYPES),
+        },
+    )
+
+    # -------------------------------------------------------------------------
+    # S3 / BigQuery Omni (cross-cloud) — required when source_uri is s3://
+    # -------------------------------------------------------------------------
+
+    source_connection: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "BigQuery Omni cross-cloud connection used to read s3:// data. "
+                "Either the short form '<omni-region>.<connection-id>' "
+                "(e.g. 'aws-eu-west-1.my-s3-conn') or the fully-qualified "
+                "'projects/<project>/locations/<omni-region>/connections/<id>'. "
+                "Required for s3:// sources on BigQuery. The source S3 region and "
+                "the destination BigQuery region must be colocated per BigQuery "
+                "Omni rules (e.g. EU S3 via aws-eu-west-1 → EU BigQuery)."
+            ),
+        },
+    )
+
+    aws_access_key_id: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "AWS access key id for listing s3:// objects (discovery/dedup only; "
+                "BigQuery reads object contents via source_connection). Accepts a "
+                "plain value or a secret URI (e.g. googlesecretmanager::proj::name). "
+                "Required for s3:// sources."
+            ),
+        },
+    )
+
+    aws_secret_access_key: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "AWS secret access key paired with aws_access_key_id. Accepts a "
+                "plain value or a secret URI. Required for s3:// sources."
+            ),
+        },
+    )
+
+    aws_region: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "AWS region for the S3 listing client (e.g. 'eu-west-1'). "
+                "Defaults to the source_connection's Omni region with the 'aws-' "
+                "prefix stripped (aws-eu-west-1 → eu-west-1)."
+            ),
         },
     )
 
@@ -173,6 +231,20 @@ class NativeLoadConfig(BaseConfig):
     load_batch_size: int = field(
         default=5000,
         metadata={"description": "Maximum number of source URIs per load chunk."},
+    )
+
+    load_batch_bytes: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Cross-cloud only (s3://): additionally split a load chunk once the "
+                "cumulative listed file size crosses this many bytes, keeping each "
+                "cross-cloud transfer under BigQuery's 60 GiB per-statement result "
+                "cap. Defaults to a conservative 5 GiB of compressed input (the cap "
+                "is on uncompressed result bytes, which we can't know from a listing, "
+                "so the default is deliberately low). Ignored for gs:///abfss://."
+            ),
+        },
     )
 
     incremental: bool = field(
@@ -386,11 +458,13 @@ class NativeLoadConfig(BaseConfig):
             self.tags = []
 
         self._validate_source_uri()
+        self._validate_s3()
         self._validate_file_type()
         self._validate_date_fields()
         self._validate_numeric_floors()
         self._apply_format_defaults()
         self._validate_csv_fields()
+        self._validate_csv_schema()
         self._validate_table_format()
         self._validate_inert_date_settings()
 
@@ -404,6 +478,70 @@ class NativeLoadConfig(BaseConfig):
             )
         if not self.source_uri.endswith("/"):
             raise ValueError(f"source_uri must end with '/', got: {self.source_uri!r}")
+
+    @property
+    def is_s3(self) -> bool:
+        """True when the source is an s3:// URI (cross-cloud via BigQuery Omni)."""
+        return self.source_uri.startswith("s3://")
+
+    @property
+    def omni_location(self) -> Optional[str]:
+        """BigQuery Omni region parsed from source_connection (e.g. aws-eu-west-1)."""
+        conn = self.source_connection
+        if not conn:
+            return None
+        if "/locations/" in conn:
+            # projects/<p>/locations/<region>/connections/<id>
+            after = conn.split("/locations/", 1)[1]
+            return after.split("/", 1)[0]
+        if "." in conn:
+            # <region>.<connection-id>
+            return conn.split(".", 1)[0]
+        return None
+
+    @property
+    def resolved_load_batch_bytes(self) -> int:
+        """Effective cross-cloud chunk byte cap (explicit value or the default)."""
+        return self.load_batch_bytes or _DEFAULT_LOAD_BATCH_BYTES
+
+    @property
+    def resolved_aws_region(self) -> Optional[str]:
+        """AWS region for the S3 listing client.
+
+        Explicit ``aws_region`` wins; otherwise derived from the Omni region by
+        stripping the ``aws-`` prefix (aws-eu-west-1 → eu-west-1).
+        """
+        if self.aws_region:
+            return self.aws_region
+        loc = self.omni_location
+        if loc and loc.startswith("aws-"):
+            return loc[len("aws-") :]
+        return loc
+
+    def _validate_s3(self) -> None:
+        if not self.is_s3:
+            return
+        missing = [
+            name
+            for name, val in (
+                ("source_connection", self.source_connection),
+                ("aws_access_key_id", self.aws_access_key_id),
+                ("aws_secret_access_key", self.aws_secret_access_key),
+            )
+            if not val
+        ]
+        if missing:
+            raise ValueError(
+                "s3:// native load requires "
+                f"{', '.join(missing)} to be set (BigQuery reads S3 via "
+                "source_connection; the AWS keys are for listing only)."
+            )
+        if self.omni_location is None:
+            raise ValueError(
+                f"Could not parse an Omni region from source_connection="
+                f"{self.source_connection!r}. Expected '<omni-region>.<id>' or "
+                "'projects/<p>/locations/<omni-region>/connections/<id>'."
+            )
 
     def _validate_file_type(self) -> None:
         if self.file_type not in _VALID_FILE_TYPES:
@@ -468,6 +606,8 @@ class NativeLoadConfig(BaseConfig):
     def _validate_numeric_floors(self) -> None:
         if self.load_batch_size < 1:
             raise ValueError("load_batch_size must be >= 1")
+        if self.load_batch_bytes is not None and self.load_batch_bytes < 1:
+            raise ValueError("load_batch_bytes must be >= 1")
         if self.date_lookback_days < 0:
             raise ValueError("date_lookback_days must be >= 0")
         if self.max_bad_records < 0:
@@ -502,6 +642,18 @@ class NativeLoadConfig(BaseConfig):
                         "it will be ignored.",
                         stacklevel=4,
                     )
+
+    def _validate_csv_schema(self) -> None:
+        # Headerless CSV/TSV can't be read without a schema: autodetect mis-types
+        # columns non-deterministically, so with autodetect off an explicit,
+        # ordered `columns:` schema is required (it becomes the positional
+        # external-table schema).
+        if self.file_type == "csv" and not self.autodetect_schema and not self.columns:
+            raise ValueError(
+                "file_type: csv with autodetect_schema: false requires an ordered "
+                "`columns:` block (used as the positional column schema for the "
+                "headerless file). Add columns: or set autodetect_schema: true."
+            )
 
     def _validate_table_format(self) -> None:
         valid = ("delta", "iceberg", "delta_uniform")

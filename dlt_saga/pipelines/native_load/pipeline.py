@@ -99,8 +99,17 @@ class NativeLoadPipeline(BasePipeline):
         if not self._dataset:
             raise ValueError("schema_name must be set in the pipeline config")
 
+        # For cross-cloud S3 the staging dataset holds the S3 external table and
+        # must live in the Omni region, so use a distinct name from the (default)
+        # destination-region staging dataset — it is created lazily in the Omni
+        # region by the destination, not here.
+        default_staging = (
+            f"{self._dataset}_omni_staging"
+            if self.native_config.is_s3
+            else f"{self._dataset}_staging"
+        )
         self._staging_dataset: str = (
-            self.native_config.staging_dataset or f"{self._dataset}_staging"
+            self.native_config.staging_dataset or default_staging
         )
 
         self.state_manager = NativeLoadStateManager(
@@ -112,6 +121,9 @@ class NativeLoadPipeline(BasePipeline):
             billing_project=getattr(self.destination.config, "billing_project_id", None)
             or getattr(self.destination.config, "project_id", None),
             destination=self.destination,
+            aws_access_key_id=self.native_config.aws_access_key_id,
+            aws_secret_access_key=self.native_config.aws_secret_access_key,
+            aws_region=self.native_config.resolved_aws_region,
         )
 
         # Resolve external-table LOCATION (Databricks only; None = managed table)
@@ -121,6 +133,7 @@ class NativeLoadPipeline(BasePipeline):
         self._target_exists: bool = False
         self._ingest_time_iso: str = datetime.now(timezone.utc).isoformat()
         self._column_hints: dict = self._build_column_hints()
+        self._external_schema: Optional[list] = self._build_external_schema()
         self._filters: list = self._parse_filters()
 
     # ------------------------------------------------------------------
@@ -152,7 +165,7 @@ class NativeLoadPipeline(BasePipeline):
 
         try:
             with self._phase("init"):
-                self.destination.ensure_schema_exists(self._staging_dataset)
+                self._ensure_staging_schema()
                 if self._incremental:
                     self.state_manager.ensure_table_exists()
                 else:
@@ -182,13 +195,10 @@ class NativeLoadPipeline(BasePipeline):
                 self.logger.info("No new files to load.")
                 return [self._build_load_info_entry(loaded=0)]
 
-            batch = self.native_config.load_batch_size
-            n_chunks = max(1, (total_files + batch - 1) // batch)
             self.logger.info(
-                "Found %d new file(s) across %d cursor group(s); loading in %d chunk(s)",
+                "Found %d new file(s) across %d cursor group(s)",
                 total_files,
                 len(new_files_by_cursor),
-                n_chunks,
             )
 
             first_run = not self._target_exists
@@ -489,9 +499,16 @@ class NativeLoadPipeline(BasePipeline):
     def _cursor_lookback_str(self, last_cursor: str, fmt: str) -> Optional[str]:
         try:
             dt = datetime.strptime(last_cursor, fmt)
-            return (
-                dt - timedelta(days=self.native_config.date_lookback_days)
-            ).strftime(fmt)
+            back = dt - timedelta(days=self.native_config.date_lookback_days)
+            if self.native_config.partition_prefix_pattern:
+                # The partition walk lists whole days from the start of
+                # (cursor - lookback), so the dedup lower bound must be that day's
+                # midnight too. Keeping the cursor's time-of-day here would exclude
+                # files earlier in that day (a sub-day cursor like an hourly run=
+                # timestamp), so they'd be re-listed by the scan yet fall below the
+                # dedup window and reload on every run.
+                back = back.replace(hour=0, minute=0, second=0, microsecond=0)
+            return back.strftime(fmt)
         except Exception:
             return None
 
@@ -527,18 +544,72 @@ class NativeLoadPipeline(BasePipeline):
     # Load phase
     # ------------------------------------------------------------------
 
+    def _ensure_staging_schema(self) -> None:
+        """Ensure the staging dataset exists (destination-region loads only).
+
+        The Omni-region staging dataset for S3 is created lazily by the
+        destination in the Omni region; creating it here would place it in the
+        destination region, which is wrong for the S3 external table.
+        """
+        if not self.native_config.is_s3:
+            self.destination.ensure_schema_exists(self._staging_dataset)
+
     def _load_files(self, files_by_cursor: dict) -> int:
         flat: list = [(f, cv) for cv, files in files_by_cursor.items() for f in files]
         if not flat:
             return 0
-        batch = self.native_config.load_batch_size
-        total_chunks = (len(flat) + batch - 1) // batch
+
+        chunks = self._build_chunks(flat)
+        self.logger.info("Loading %d file(s) in %d chunk(s)", len(flat), len(chunks))
 
         total_rows = 0
-        for chunk_num in range(1, total_chunks + 1):
-            i = (chunk_num - 1) * batch
-            total_rows += self._load_chunk(flat[i : i + batch], chunk_num, total_chunks)
+        for chunk_num, chunk in enumerate(chunks, start=1):
+            total_rows += self._load_chunk(chunk, chunk_num, len(chunks))
         return total_rows
+
+    def _build_chunks(self, flat: list) -> list:
+        """Split discovered files into load chunks.
+
+        Chunks are bounded by ``load_batch_size`` (file count) and, for
+        cross-cloud S3 loads, additionally by cumulative file size
+        (``load_batch_bytes``) so each cross-cloud transfer stays under
+        BigQuery's 60 GiB per-statement result cap. Sizes come from listing; the
+        cap is on uncompressed result bytes we can't know, so the default errs
+        low (see NativeLoadConfig.load_batch_bytes).
+        """
+        batch = self.native_config.load_batch_size
+        byte_cap = (
+            self.native_config.resolved_load_batch_bytes
+            if self.native_config.is_s3
+            else None
+        )
+
+        chunks: list = []
+        current: list = []
+        current_bytes = 0
+        for item in flat:
+            f = item[0]
+            if current and (
+                len(current) >= batch
+                or (byte_cap is not None and current_bytes + f.size > byte_cap)
+            ):
+                chunks.append(current)
+                current = []
+                current_bytes = 0
+            if byte_cap is not None and not current and f.size > byte_cap:
+                self.logger.warning(
+                    "Single file %s (%d bytes) exceeds load_batch_bytes (%d); "
+                    "loading it alone. If the cross-cloud transfer hits the 60 GiB "
+                    "result cap, split the source file.",
+                    f.full_uri,
+                    f.size,
+                    byte_cap,
+                )
+            current.append(item)
+            current_bytes += f.size
+        if current:
+            chunks.append(current)
+        return chunks
 
     def _load_chunk(self, chunk: list, chunk_num: int, total_chunks: int) -> int:
         from dlt_saga.destinations.base import NativeLoadSpec
@@ -578,6 +649,15 @@ class NativeLoadPipeline(BasePipeline):
             target_location=self._target_location,
             table_format=self.native_config.table_format,
             filters=self._filters,
+            omni_location=(
+                self.native_config.omni_location if self.native_config.is_s3 else None
+            ),
+            external_schema=self._external_schema,
+            source_connection=(
+                self.native_config.source_connection
+                if self.native_config.is_s3
+                else None
+            ),
         )
         # Expose source_uri so Databricks COPY INTO can compute basenames
         spec._source_uri = self.native_config.source_uri  # type: ignore[attr-defined]
@@ -722,6 +802,21 @@ class NativeLoadPipeline(BasePipeline):
             hints[norm_key] = self.destination.dlt_type_to_native(str(data_type))
         return hints
 
+    def _build_external_schema(self) -> Optional[list]:
+        """Ordered all-STRING external-table schema for headerless CSV/TSV.
+
+        Returns a positional ``[(normalized_name, "STRING"), ...]`` list built
+        from ``columns:`` (in file order) when the source is CSV with autodetect
+        off. The external table reads every field as STRING (never parse-fails on
+        headerless data); SAFE_CAST in the load SELECT — driven by column_hints —
+        converts to the declared target types. Returns None otherwise (autodetect
+        or non-CSV), leaving discovery to infer the schema.
+        """
+        cfg = self.native_config
+        if cfg.file_type != "csv" or cfg.autodetect_schema or not cfg.columns:
+            return None
+        return [(normalize_identifier(name), "STRING") for name in cfg.columns]
+
     def _build_format_options(self) -> dict:
         opts: dict = {}
         if self.native_config.file_type == "csv":
@@ -739,7 +834,10 @@ class NativeLoadPipeline(BasePipeline):
             opts["field_delimiter"] = cfg.csv_separator
         if cfg.csv_skip_leading_rows:
             opts["skip_leading_rows"] = cfg.csv_skip_leading_rows
-        if cfg.csv_quote_character:
+        if cfg.csv_quote_character is not None:
+            # Empty string is meaningful: it disables quoting entirely (required
+            # for headerless TSV whose fields contain raw, unescaped quotes, e.g.
+            # JSON columns). Distinguish "" (disable) from None (unset → default).
             opts["quote_character"] = cfg.csv_quote_character
         if cfg.csv_null_marker:
             opts["null_marker"] = cfg.csv_null_marker

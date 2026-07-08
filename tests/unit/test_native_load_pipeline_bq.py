@@ -44,6 +44,9 @@ def _make_spec(
     source_uris=None,
     column_hints=None,
     write_disposition="append",
+    omni_location=None,
+    source_connection=None,
+    external_schema=None,
 ) -> NativeLoadSpec:
     if source_uris is None:
         source_uris = ["gs://bucket/prefix/file1.parquet"]
@@ -69,6 +72,9 @@ def _make_spec(
         chunk_label="chunk 1/1",
         write_disposition=write_disposition,
         column_hints=column_hints or {},
+        omni_location=omni_location,
+        source_connection=source_connection,
+        external_schema=external_schema,
     )
 
 
@@ -198,6 +204,10 @@ class TestCreateExternalTableCsvOptions:
         client = MagicMock()
         client.create_table.side_effect = lambda t: captured.append(t)
         dest._client.return_value = client
+        # CSV option translation is a real static helper; run it, don't mock it.
+        dest._build_csv_external_options.side_effect = (
+            BigQueryDestination._build_csv_external_options
+        )
 
         BigQueryDestination.create_external_table(
             dest,
@@ -245,6 +255,152 @@ class TestCreateExternalTableCsvOptions:
         assert opts.allow_quoted_newlines is True
         assert opts.allow_jagged_rows is True
         assert opts.preserve_ascii_control_characters is True
+
+
+@pytest.mark.unit
+class TestCreateExternalTableExplicitSchema:
+    """Explicit positional schema builds an all-STRING, autodetect-off ext table."""
+
+    def test_schema_sets_fields_and_disables_autodetect(self):
+        dest = _make_dest()
+        dest.config = MagicMock()
+        dest.config.project_id = "proj"
+        captured = []
+        client = MagicMock()
+        client.create_table.side_effect = lambda t: captured.append(t)
+        dest._client.return_value = client
+
+        BigQueryDestination.create_external_table(
+            dest,
+            dataset="ds",
+            name="ext",
+            source_uris=["s3://bucket/f.txt.gz"],
+            source_format="CSV",
+            autodetect=False,
+            schema=[("app_id", "STRING"), ("txn_id", "STRING")],
+        )
+
+        ext_config = captured[0].external_data_configuration
+        assert ext_config.autodetect is False
+        assert [f.name for f in ext_config.schema] == ["app_id", "txn_id"]
+        assert {f.field_type for f in ext_config.schema} == {"STRING"}
+
+    def test_schema_on_table_when_connection(self):
+        # BigLake (connection-backed) external tables require the schema on the
+        # Table, not on ExternalConfig — else BigQuery 400s.
+        dest = _make_dest()
+        dest.config = MagicMock()
+        dest.config.project_id = "proj"
+        captured = []
+        client = MagicMock()
+        client.create_table.side_effect = lambda t: captured.append(t)
+        dest._client.return_value = client
+
+        BigQueryDestination.create_external_table(
+            dest,
+            dataset="ds",
+            name="ext",
+            source_uris=["s3://bucket/f.txt.gz"],
+            source_format="CSV",
+            autodetect=False,
+            connection_id="projects/proj/locations/aws-eu-west-1/connections/c",
+            schema=[("app_id", "STRING"), ("txn_id", "STRING")],
+        )
+
+        table = captured[0]
+        assert [f.name for f in table.schema] == ["app_id", "txn_id"]
+        assert not table.external_data_configuration.schema
+        assert table.external_data_configuration.autodetect is False
+
+
+@pytest.mark.unit
+class TestNativeLoadChunkExternalSchema:
+    def test_external_schema_passed_to_create_external_table(self):
+        dest = _make_dest()
+        dest.list_table_columns.return_value = [("app_id", "STRING")]
+        dest._patch_ext_for_hints.return_value = [("app_id", "STRING")]
+        dest._native_load_create_target.return_value = (1, "job")
+        dest._native_load_rowcounts.return_value = {}
+        schema = [("app_id", "STRING"), ("txn_id", "STRING")]
+        spec = _make_spec(file_type="csv", target_exists=False, external_schema=schema)
+
+        BigQueryDestination.native_load_chunk(dest, spec)
+
+        _, kwargs = dest.create_external_table.call_args
+        assert kwargs["schema"] == schema
+
+
+@pytest.mark.unit
+class TestNativeLoadInsertCrossCloud:
+    """Cross-cloud append: CTAS to a destination-region transfer table, then
+    in-region INSERT (a single statement can't span the Omni + destination
+    regions)."""
+
+    def test_ctas_transfer_then_in_region_insert_then_drop(self):
+        dest = _make_dest()
+        dest.config = MagicMock()
+        dest.config.project_id = "proj"
+        dest.get_full_table_id.side_effect = lambda ds, tbl: f"proj.{ds}.{tbl}"
+
+        job = MagicMock()
+        job.job_id = "job-x"
+        job.num_dml_affected_rows = 3
+        client = MagicMock()
+        client.query.return_value = job
+        dest._client.return_value = client
+
+        spec = _make_spec(target_exists=True, omni_location="aws-eu-west-1")
+
+        rows, job_id = BigQueryDestination._native_load_insert_cross_cloud(
+            dest,
+            spec,
+            "proj.omni.ext",
+            "proj.ds.tbl",
+            "`a`, `b`",
+            "`a`, `b`",
+            "",
+            "aws-eu-west-1",
+        )
+
+        # 1. CTAS materializes a transfer table, run in the Omni region.
+        ctas_args = dest.execute_sql_with_job.call_args
+        assert ctas_args[0][0].startswith("CREATE TABLE")
+        assert "FROM proj.omni.ext" in ctas_args[0][0]
+        assert ctas_args[1]["location"] == "aws-eu-west-1"
+        # 2. In-region INSERT from the transfer table (no location override).
+        insert_sql = client.query.call_args[0][0]
+        assert insert_sql.startswith("INSERT INTO proj.ds.tbl")
+        assert "FROM proj.ds.tbl__xfer_" in insert_sql
+        dest._client.assert_called_once_with()  # default (destination) location
+        # 3. Transfer table dropped.
+        dest.drop_table.assert_called_once()
+        assert rows == 3
+        assert job_id == "job-x"
+
+    def test_same_cloud_insert_stays_single_statement(self):
+        # No omni_location → _native_load_insert_into_target keeps the direct
+        # INSERT and never builds a transfer table.
+        from unittest.mock import patch
+
+        dest = _make_dest()
+        dest.config = MagicMock()
+        dest.config.project_id = "proj"
+        dest.config.location = "EU"
+        dest.list_table_columns.return_value = [("col1", "STRING")]
+        spec = _make_spec(target_exists=True)  # omni_location=None
+
+        job = MagicMock()
+        job.job_id = "job-gcs"
+        job.num_dml_affected_rows = 4
+        with patch("google.cloud.bigquery.Client") as mock_client:
+            mock_client.return_value.query.return_value = job
+            BigQueryDestination._native_load_insert_into_target(
+                dest, spec, "proj.ds_staging.ext", [("col1", "STRING")]
+            )
+
+        # Direct INSERT ... FROM the external table; no transfer CTAS.
+        dest.execute_sql_with_job.assert_not_called()
+        dest.drop_table.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -489,3 +645,125 @@ class TestSchemaEvolutionAlwaysOn:
         # add_column called for framework cols + new data col
         added = [c[0][2] for c in dest.add_column.call_args_list]
         assert "new_col" in added
+
+
+# ---------------------------------------------------------------------------
+# Cross-cloud (S3 / BigQuery Omni) routing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSupportedSchemes:
+    def test_bigquery_supports_gs_and_s3(self):
+        dest = _make_dest()
+        assert BigQueryDestination.supported_native_load_uri_schemes(dest) == {
+            "gs",
+            "s3",
+        }
+
+
+@pytest.mark.unit
+class TestResolveConnectionId:
+    def test_short_form_expanded_to_full_path(self):
+        dest = _make_dest()
+        dest.config.project_id = "proj"
+        result = BigQueryDestination._resolve_connection_id(
+            dest, "aws-eu-west-1.my-conn", "aws-eu-west-1"
+        )
+        assert result == ("projects/proj/locations/aws-eu-west-1/connections/my-conn")
+
+    def test_full_path_passed_through(self):
+        dest = _make_dest()
+        full = "projects/99/locations/aws-eu-west-1/connections/my-conn"
+        result = BigQueryDestination._resolve_connection_id(dest, full, "aws-eu-west-1")
+        assert result == full
+
+
+@pytest.mark.unit
+class TestClientLocationOverride:
+    def test_client_uses_override_location(self):
+        dest = _make_dest()
+        dest.config.job_project_id = "proj"
+        dest.config.location = "EU"
+        BigQueryDestination._client(dest, "aws-eu-west-1")
+        dest.get_client_pool.return_value.get_client.assert_called_once_with(
+            "proj", "aws-eu-west-1"
+        )
+
+    def test_client_defaults_to_config_location(self):
+        dest = _make_dest()
+        dest.config.job_project_id = "proj"
+        dest.config.location = "EU"
+        BigQueryDestination._client(dest)
+        dest.get_client_pool.return_value.get_client.assert_called_once_with(
+            "proj", "EU"
+        )
+
+
+@pytest.mark.unit
+class TestNativeLoadChunkCrossCloud:
+    def _omni_spec(self, target_exists=False):
+        return _make_spec(
+            target_exists=target_exists,
+            source_uris=["s3://bucket/prefix/file1.parquet"],
+            omni_location="aws-eu-west-1",
+            source_connection="aws-eu-west-1.my-conn",
+        )
+
+    def _dest_for_omni(self):
+        dest = _make_dest()
+        dest.list_table_columns.return_value = [("col1", "STRING")]
+        dest._patch_ext_for_hints.return_value = [("col1", "STRING")]
+        dest._resolve_connection_id.return_value = (
+            "projects/proj/locations/aws-eu-west-1/connections/my-conn"
+        )
+        dest._native_load_create_target.return_value = (5, "job-omni")
+        dest._native_load_insert_into_target.return_value = (5, "job-omni")
+        dest._native_load_rowcounts.return_value = {}
+        return dest
+
+    def test_omni_staging_dataset_ensured_in_omni_region(self):
+        dest = self._dest_for_omni()
+        BigQueryDestination.native_load_chunk(dest, self._omni_spec())
+        dest._ensure_dataset.assert_called_once_with("ds_staging", "aws-eu-west-1")
+
+    def test_external_table_created_with_connection_and_omni_location(self):
+        dest = self._dest_for_omni()
+        BigQueryDestination.native_load_chunk(dest, self._omni_spec())
+        _, kwargs = dest.create_external_table.call_args
+        assert kwargs["location"] == "aws-eu-west-1"
+        assert kwargs["connection_id"] == (
+            "projects/proj/locations/aws-eu-west-1/connections/my-conn"
+        )
+
+    def test_ext_columns_listed_in_omni_region(self):
+        dest = self._dest_for_omni()
+        BigQueryDestination.native_load_chunk(dest, self._omni_spec())
+        _, kwargs = dest.list_table_columns.call_args
+        assert kwargs["location"] == "aws-eu-west-1"
+
+    def test_ctas_receives_omni_query_location(self):
+        dest = self._dest_for_omni()
+        BigQueryDestination.native_load_chunk(
+            dest, self._omni_spec(target_exists=False)
+        )
+        _, kwargs = dest._native_load_create_target.call_args
+        assert kwargs["query_location"] == "aws-eu-west-1"
+
+    def test_insert_receives_omni_query_location(self):
+        dest = self._dest_for_omni()
+        BigQueryDestination.native_load_chunk(dest, self._omni_spec(target_exists=True))
+        _, kwargs = dest._native_load_insert_into_target.call_args
+        assert kwargs["query_location"] == "aws-eu-west-1"
+
+    def test_gcs_path_uses_no_omni_location_or_connection(self):
+        dest = _make_dest()
+        dest.list_table_columns.return_value = [("col1", "STRING")]
+        dest._patch_ext_for_hints.return_value = [("col1", "STRING")]
+        dest._native_load_create_target.return_value = (5, "job-gcs")
+        dest._native_load_rowcounts.return_value = {}
+        BigQueryDestination.native_load_chunk(dest, _make_spec(target_exists=False))
+        dest._ensure_dataset.assert_not_called()
+        _, kwargs = dest.create_external_table.call_args
+        assert kwargs["location"] is None
+        assert kwargs["connection_id"] is None

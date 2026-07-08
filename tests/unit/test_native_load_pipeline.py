@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dlt_saga.pipelines.native_load.config import NativeLoadConfig
 from dlt_saga.pipelines.native_load.pipeline import NativeLoadPipeline
 from dlt_saga.pipelines.native_load.storage.base import StorageObject
 
@@ -200,6 +201,60 @@ class TestBuildFormatOptions:
         assert "allow_quoted_newlines" not in opts
         assert "allow_jagged_rows" not in opts
         assert "preserve_ascii_control_characters" not in opts
+
+    def test_empty_quote_character_disables_quoting(self):
+        # "" is meaningful (disable quoting for headerless TSV with raw quotes);
+        # it must pass through, unlike the falsy-skip that would drop it.
+        p = _make_pipeline(file_type="csv")
+        p.native_config.csv_quote_character = ""
+        opts = p._build_format_options()
+        assert "quote_character" in opts
+        assert opts["quote_character"] == ""
+
+    def test_quote_character_unset_is_omitted(self):
+        p = _make_pipeline(file_type="csv")
+        p.native_config.csv_quote_character = None
+        opts = p._build_format_options()
+        assert "quote_character" not in opts
+
+
+@pytest.mark.unit
+class TestBuildExternalSchema:
+    def test_none_for_autodetect(self):
+        p = _make_pipeline(file_type="csv", autodetect_schema=True)
+        assert p._build_external_schema() is None
+
+    def test_none_for_parquet(self):
+        p = _make_pipeline(file_type="parquet", autodetect_schema=False)
+        assert p._build_external_schema() is None
+
+    def test_ordered_all_string_schema_from_columns(self):
+        p = _make_pipeline(
+            file_type="csv",
+            autodetect_schema=False,
+            columns={
+                "app_id": {"data_type": "text"},
+                "collector_tstamp": {"data_type": "timestamp"},
+                "txn_id": {"data_type": "bigint"},
+            },
+        )
+        schema = p._build_external_schema()
+        # All columns are STRING in the external table (SAFE_CAST happens later),
+        # and order is preserved from the config.
+        assert schema == [
+            ("app_id", "STRING"),
+            ("collector_tstamp", "STRING"),
+            ("txn_id", "STRING"),
+        ]
+
+    def test_names_normalized(self):
+        p = _make_pipeline(
+            file_type="csv",
+            autodetect_schema=False,
+            columns={"App Id": {"data_type": "text"}},
+        )
+        schema = p._build_external_schema()
+        assert schema[0][0] == "app_id"
 
 
 @pytest.mark.unit
@@ -403,6 +458,33 @@ class TestDateModeDedupPruning:
         p.state_manager.get_loaded_uri_generations.side_effect = loaded
         result = p._discover_date_mode()
         assert result == {}  # old file recognised as loaded, not re-listed
+
+    def test_partition_walk_floors_dedup_window_to_day_start(self):
+        # Sub-day cursor (hourly run= timestamp) + day-granular partition walk:
+        # the scan lists whole days, so cursor_min must floor to the day boundary,
+        # else files earlier in the day than the cursor's time reload every run.
+        p = self._p()
+        p.native_config.filename_date_regex = r"run=([^/]+)/"
+        p.native_config.filename_date_format = "%Y-%m-%dT%H.%M.%S"
+        p.native_config.partition_prefix_pattern = (
+            "year={year}/month={month}/day={day}/"
+        )
+        p.native_config.date_lookback_days = 2
+        p.state_manager.get_last_cursor.return_value = "2026-07-08T11.00.00"
+        p._discover_date_mode()
+        _, kwargs = p.state_manager.get_loaded_uri_generations.call_args
+        assert kwargs["cursor_min"] == "2026-07-06T00.00.00"
+
+    def test_cursor_lookback_keeps_time_without_partition_walk(self):
+        # GCS start_offset path (no partition walk) keeps the cursor's time-of-day
+        # so the dedup window matches the lexicographic scan offset exactly.
+        p = self._p()
+        p.native_config.partition_prefix_pattern = None
+        p.native_config.date_lookback_days = 2
+        assert (
+            p._cursor_lookback_str("2026-07-08T11.00.00", "%Y-%m-%dT%H.%M.%S")
+            == "2026-07-06T11.00.00"
+        )
 
 
 @pytest.mark.unit
@@ -1135,3 +1217,60 @@ class TestOrphanExtTableSweep:
         p.destination.drop_table.assert_called_once_with(
             p._staging_dataset, "test__my_table__ext_abc123"
         )
+
+
+def _sobj(uri: str, size: int) -> StorageObject:
+    return StorageObject(name=uri, full_uri=uri, size=size, generation=1, updated=None)
+
+
+def _s3_config(**overrides) -> NativeLoadConfig:
+    base = {
+        "source_uri": "s3://bucket/prefix/",
+        "source_connection": "aws-eu-west-1.my-conn",
+        "aws_access_key_id": "k",
+        "aws_secret_access_key": "s",
+    }
+    base.update(overrides)
+    return NativeLoadConfig(**base)
+
+
+@pytest.mark.unit
+class TestBuildChunks:
+    def test_count_based_chunking_gcs(self):
+        p = _make_pipeline(load_batch_size=2)
+        flat = [(_sobj(f"gs://b/f{i}", 10), None) for i in range(5)]
+        chunks = p._build_chunks(flat)
+        assert [len(c) for c in chunks] == [2, 2, 1]
+
+    def test_gcs_ignores_file_size(self):
+        # Byte cap never applies to gs://: only the count bound splits.
+        p = _make_pipeline(load_batch_size=10)
+        flat = [(_sobj(f"gs://b/f{i}", 10**12), None) for i in range(3)]
+        chunks = p._build_chunks(flat)
+        assert len(chunks) == 1
+
+    def test_byte_based_chunking_s3(self):
+        p = _make_pipeline(load_batch_size=1000)
+        p.native_config = _s3_config(load_batch_bytes=25)
+        flat = [(_sobj(f"s3://b/f{i}", 10), None) for i in range(5)]
+        # cap 25: [10,10]=20 ok; +10=30>25 → split. Groups: (f0,f1)(f2,f3)(f4)
+        chunks = p._build_chunks(flat)
+        assert [len(c) for c in chunks] == [2, 2, 1]
+
+    def test_count_bound_still_applies_for_s3(self):
+        p = _make_pipeline()
+        p.native_config = _s3_config(load_batch_size=2, load_batch_bytes=10**12)
+        flat = [(_sobj(f"s3://b/f{i}", 1), None) for i in range(5)]
+        chunks = p._build_chunks(flat)
+        assert [len(c) for c in chunks] == [2, 2, 1]
+
+    def test_single_file_over_cap_gets_own_chunk(self):
+        p = _make_pipeline(load_batch_size=1000)
+        p.native_config = _s3_config(load_batch_bytes=25)
+        flat = [
+            (_sobj("s3://b/small", 10), None),
+            (_sobj("s3://b/big", 100), None),
+            (_sobj("s3://b/small2", 10), None),
+        ]
+        chunks = p._build_chunks(flat)
+        assert [len(c) for c in chunks] == [1, 1, 1]

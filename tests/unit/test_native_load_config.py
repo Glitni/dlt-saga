@@ -48,7 +48,12 @@ class TestSourceUriValidation:
         assert cfg.source_uri == "gs://bucket/prefix/"
 
     def test_s3_scheme(self):
-        cfg = _make(source_uri="s3://bucket/prefix/")
+        cfg = _make(
+            source_uri="s3://bucket/prefix/",
+            source_connection="aws-eu-west-1.my-conn",
+            aws_access_key_id="k",
+            aws_secret_access_key="s",
+        )
         assert cfg.source_uri.startswith("s3://")
 
     def test_abfss_scheme(self):
@@ -57,10 +62,94 @@ class TestSourceUriValidation:
 
 
 @pytest.mark.unit
+class TestS3OmniValidation:
+    def _s3(self, **kwargs):
+        base = {
+            "source_uri": "s3://bucket/prefix/",
+            "source_connection": "aws-eu-west-1.my-conn",
+            "aws_access_key_id": "k",
+            "aws_secret_access_key": "s",
+        }
+        base.update(kwargs)
+        return _make(**base)
+
+    def test_s3_requires_source_connection(self):
+        with pytest.raises(ValueError, match="source_connection"):
+            self._s3(source_connection=None)
+
+    def test_s3_requires_aws_credentials(self):
+        with pytest.raises(ValueError, match="aws_access_key_id"):
+            self._s3(aws_access_key_id=None)
+        with pytest.raises(ValueError, match="aws_secret_access_key"):
+            self._s3(aws_secret_access_key=None)
+
+    def test_gs_does_not_require_connection(self):
+        # is_s3 gate: gs:// configs never trip the S3 validation.
+        cfg = _make(source_uri="gs://bucket/prefix/")
+        assert cfg.is_s3 is False
+        assert cfg.omni_location is None
+
+    def test_omni_location_from_short_form(self):
+        assert self._s3().omni_location == "aws-eu-west-1"
+
+    def test_omni_location_from_full_path(self):
+        cfg = self._s3(
+            source_connection="projects/p/locations/aws-eu-west-1/connections/my-conn"
+        )
+        assert cfg.omni_location == "aws-eu-west-1"
+
+    def test_unparseable_connection_raises(self):
+        with pytest.raises(ValueError, match="Omni region"):
+            self._s3(source_connection="justaname")
+
+    def test_aws_region_derived_from_omni_location(self):
+        assert self._s3().resolved_aws_region == "eu-west-1"
+
+    def test_explicit_aws_region_wins(self):
+        assert self._s3(aws_region="us-east-1").resolved_aws_region == "us-east-1"
+
+    def test_is_s3_flag(self):
+        assert self._s3().is_s3 is True
+
+    def test_load_batch_bytes_floor(self):
+        with pytest.raises(ValueError, match="load_batch_bytes must be >= 1"):
+            self._s3(load_batch_bytes=0)
+
+    def test_load_batch_bytes_defaults_conservative(self):
+        cfg = self._s3()
+        assert cfg.load_batch_bytes is None
+        assert cfg.resolved_load_batch_bytes == 5 * 1024**3
+
+
+@pytest.mark.unit
 class TestFileTypeValidation:
     def test_invalid_file_type(self):
         with pytest.raises(ValueError, match="file_type"):
             _make(file_type="xlsx")
+
+
+@pytest.mark.unit
+class TestCsvSchemaValidation:
+    def test_csv_no_autodetect_no_columns_raises(self):
+        with pytest.raises(ValueError, match="columns:"):
+            _make(file_type="csv", autodetect_schema=False)
+
+    def test_csv_no_autodetect_with_columns_ok(self):
+        cfg = _make(
+            file_type="csv",
+            autodetect_schema=False,
+            columns={"app_id": {"data_type": "text"}},
+        )
+        assert cfg.autodetect_schema is False
+
+    def test_csv_autodetect_needs_no_columns(self):
+        cfg = _make(file_type="csv", autodetect_schema=True)
+        assert cfg.columns == {}
+
+    def test_parquet_no_autodetect_no_columns_ok(self):
+        # Non-CSV can rely on a self-describing format / pre-created target.
+        cfg = _make(file_type="parquet", autodetect_schema=False)
+        assert cfg.file_type == "parquet"
 
 
 @pytest.mark.unit
