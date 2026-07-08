@@ -55,6 +55,11 @@ class ExecutionContext:
         # but don't abort the run — we want every broken dataset visible
         # in one pass. CLI checks this counter to decide the exit code.
         self.access_config_error_count: int = 0
+        # Per-table access-reconcile failures (e.g. a table IAM grant that
+        # errored). Isolated per table so one failure doesn't abort the batch,
+        # but counted here so `saga update-access` exits non-zero instead of
+        # reporting success with grants silently missing.
+        self.access_error_count: int = 0
 
     def get_database(self) -> Optional[str]:
         """Get the database (GCP project, Snowflake account, etc.) from profile."""

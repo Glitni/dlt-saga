@@ -429,13 +429,18 @@ class BigQueryBaseDestination(Destination):
             logger.debug(f"Dataset {dataset_name} already synced, skipping")
             return
 
-        self._sync_dataset_and_access_static(
+        synced = self._sync_dataset_and_access_static(
             project_id=self.config.project_id,
             location=self.config.location,
             dataset_name=dataset_name,
             schema_access=self.config.schema_access,
         )
-        BigQueryBaseDestination._synced_datasets.add(cache_key)
+        # Only cache a genuine success (or a terminal, already-counted config
+        # error). A transient/permission failure returns False so the next
+        # pipeline sharing this dataset retries instead of inheriting silent
+        # drift from a "synced" marker that never actually synced.
+        if synced:
+            BigQueryBaseDestination._synced_datasets.add(cache_key)
 
     @staticmethod
     def _sync_dataset_and_access_static(
@@ -444,7 +449,7 @@ class BigQueryBaseDestination(Destination):
         dataset_name: str,
         schema_access: Optional[List[str]] = None,
         client: Any = None,
-    ) -> None:
+    ) -> bool:
         """Sync BigQuery dataset existence and access controls (static implementation).
 
         Creates dataset if needed and synchronizes access controls with config (in prod).
@@ -456,6 +461,13 @@ class BigQueryBaseDestination(Destination):
             dataset_name: Name of the dataset to ensure exists
             schema_access: Optional dataset-level access control list
             client: Optional BigQuery client to reuse (avoids creating a new one)
+
+        Returns:
+            True when the dataset reached a terminal, cacheable state (created,
+            or exists with access reconciled, or a deterministic config error
+            already counted). False for a transient/permission failure or a
+            mid-sync disappearance, so the caller retries instead of caching a
+            sync that never happened.
         """
         from google.cloud.exceptions import NotFound
 
@@ -477,13 +489,14 @@ class BigQueryBaseDestination(Destination):
                 BigQueryBaseDestination._create_dataset_with_access(
                     client, project_id, location, dataset_name, access_entries
                 )
-                return
+                return True
 
             # Step 2: Sync access controls on existing dataset (prod only)
             if access_entries:
                 BigQueryBaseDestination._update_access_if_needed(
                     client, existing_dataset, dataset_name, access_entries
                 )
+            return True
 
         except (DatasetAccessLockoutError, DatasetAccessMissingOwnerError) as e:
             # Config errors are unrecoverable until the operator fixes the
@@ -491,15 +504,22 @@ class BigQueryBaseDestination(Destination):
             # broken dataset surfaces in one pass. Bump the run-level
             # counter; the CLI checks it at the end to exit non-zero.
             # Message is logged verbatim (it names the dataset + the fix).
+            # Deterministic within the process → cacheable (True): retrying
+            # would only re-log and double-count the same error.
             logger.error(str(e))
             get_execution_context().access_config_error_count += 1
+            return True
         except NotFound:
             logger.debug(
                 f"Could not find dataset {dataset_name}, "
                 f"DLT will handle dataset creation."
             )
+            # Dataset vanished mid-sync; access wasn't reconciled. Don't cache
+            # — a retry can sync once dlt recreates it.
+            return False
         except Exception as e:
             logger.warning(f"Failed to sync dataset access for {dataset_name}: {e}")
+            return False
 
     @staticmethod
     def _build_bq_client(project_id: str, location: str) -> Any:

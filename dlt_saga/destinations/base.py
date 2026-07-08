@@ -1038,6 +1038,12 @@ class AccessManager(ABC):
                 self._reconcile_table(table_id, desired, revoke_extra)
             except Exception as e:
                 logger.error("Failed to manage access for table %s: %s", table_id, e)
+                # Count the failure so `saga update-access` exits non-zero —
+                # a swallowed grant error must not read as success. Errors are
+                # still isolated per table so the rest of the batch proceeds.
+                from dlt_saga.utility.cli.context import get_execution_context
+
+                get_execution_context().access_error_count += 1
 
     def _reconcile_table(
         self, table_id: str, desired: set[str], revoke_extra: bool

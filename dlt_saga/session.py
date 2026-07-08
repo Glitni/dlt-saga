@@ -690,10 +690,14 @@ class Session:
             grants = context.access_grants_applied
             revokes = context.access_revokes_applied
             config_errors = context.access_config_error_count
+            access_errors = context.access_error_count
             dry_run_suffix = " (DRY RUN — nothing applied)" if context.dry_run else ""
             verb = "would apply" if context.dry_run else "applied"
-            errors_suffix = (
-                f", {config_errors} config error(s)" if config_errors else ""
+            errors_suffix = "".join(
+                [
+                    f", {config_errors} config error(s)" if config_errors else "",
+                    f", {access_errors} table error(s)" if access_errors else "",
+                ]
             )
             if grants == 0 and revokes == 0:
                 # Distinguish "actually nothing to change" from a partial

@@ -281,3 +281,77 @@ class TestBigQueryAccessManagerReconcile:
         assert "Updated access for table tbl" in joined
         assert "+ granted user:new@example.com" in joined
         assert "- revoked user:stale@example.com" in joined
+
+    def test_table_failure_bumps_access_error_count(self):
+        # A grant that errors must be counted (so update-access exits non-zero)
+        # but isolated per table — the batch still proceeds.
+        from unittest.mock import PropertyMock, patch
+
+        from dlt_saga.destinations.bigquery.access import BigQueryAccessManager
+
+        client = MagicMock()
+        # Fresh policy per table — the manager mutates the policy object in
+        # place, so a shared return_value would leak tbl_a's grant into tbl_b.
+        client.get_iam_policy.side_effect = lambda *a, **k: _make_viewer_policy([])
+        client.set_iam_policy.side_effect = Exception("IAM write failed")
+
+        mgr = BigQueryAccessManager(project_id="proj", dataset_id="ds")
+        set_execution_context(None, update_access=True, dry_run=False)
+        with patch.object(
+            BigQueryAccessManager, "client", new_callable=PropertyMock
+        ) as client_prop:
+            client_prop.return_value = client
+            # Two tables both fail — no raise, both counted.
+            mgr.manage_access_for_tables(
+                ["tbl_a", "tbl_b"],
+                access_config=["user:new@example.com"],
+                revoke_extra=False,
+            )
+        assert get_execution_context().access_error_count == 2
+
+
+# ---------------------------------------------------------------------------
+# sync_dataset_and_access: cache only on success
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSyncDatasetCaching:
+    """A failed dataset access-sync must not be cached as synced — otherwise
+    the next pipeline sharing the dataset skips it and drift persists silently.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_synced(self):
+        BigQueryBaseDestination._synced_datasets.clear()
+        yield
+        BigQueryBaseDestination._synced_datasets.clear()
+
+    def _fake_dest(self):
+        dest = MagicMock(spec=BigQueryBaseDestination)
+        dest.config = SimpleNamespace(
+            project_id="proj", location="EU", schema_access=None
+        )
+        return dest
+
+    def test_success_is_cached(self):
+        dest = self._fake_dest()
+        dest._sync_dataset_and_access_static.return_value = True
+        BigQueryBaseDestination.sync_dataset_and_access(dest, "ds")
+        assert ("proj", "ds") in BigQueryBaseDestination._synced_datasets
+
+    def test_failure_is_not_cached(self):
+        dest = self._fake_dest()
+        dest._sync_dataset_and_access_static.return_value = False
+        BigQueryBaseDestination.sync_dataset_and_access(dest, "ds")
+        assert ("proj", "ds") not in BigQueryBaseDestination._synced_datasets
+
+    def test_failure_then_retry(self):
+        # First call fails (not cached), second succeeds (cached) — the static
+        # sync must be re-invoked rather than short-circuited by the cache.
+        dest = self._fake_dest()
+        dest._sync_dataset_and_access_static.side_effect = [False, True]
+        BigQueryBaseDestination.sync_dataset_and_access(dest, "ds")
+        BigQueryBaseDestination.sync_dataset_and_access(dest, "ds")
+        assert dest._sync_dataset_and_access_static.call_count == 2
+        assert ("proj", "ds") in BigQueryBaseDestination._synced_datasets

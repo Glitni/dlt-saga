@@ -1426,10 +1426,15 @@ def update_access(
         workers=workers,
         dry_run=dry_run,
     )
-    # Config errors (lockout / missing-OWNER) are logged as they occur
-    # rather than raised, so the operator sees every broken dataset in
-    # one pass. Exit non-zero here if any fired during the run.
-    if result.has_failures or get_execution_context().access_config_error_count > 0:
+    # Config errors (lockout / missing-OWNER) and per-table reconcile failures
+    # are logged as they occur rather than raised, so the operator sees every
+    # broken dataset/table in one pass. Exit non-zero here if any fired.
+    context = get_execution_context()
+    if (
+        result.has_failures
+        or context.access_config_error_count > 0
+        or context.access_error_count > 0
+    ):
         raise typer.Exit(1)
 
 
