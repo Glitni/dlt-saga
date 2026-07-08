@@ -1,3 +1,8 @@
+## 0.20.0 — 2026-07-08
+
+### Added
+- Support S3 native load via BigQuery Omni (#309)
+
 ## 0.19.0 — 2026-07-08
 
 ### Fixed
