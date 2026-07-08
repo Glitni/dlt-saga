@@ -570,9 +570,16 @@ class BasePipeline:
 
         self._capture_trace_timings(load_info)
 
-        loaded_tables = []
+        # Exclude dlt system tables (_dlt_loads, _dlt_pipeline_state, _dlt_version):
+        # they must never be granted to end users, get user table options, or be
+        # documented. Matches the filter already applied in _save_load_info. Real
+        # nested child tables (`<table>__<child>`) are not _dlt_-prefixed and are
+        # kept.
+        loaded_tables: List[str] = []
         if "row_counts" in load_info:
-            loaded_tables.extend(load_info["row_counts"].keys())
+            loaded_tables.extend(
+                t for t in load_info["row_counts"].keys() if not t.startswith("_dlt_")
+            )
 
         return load_info, loaded_tables
 
@@ -758,6 +765,11 @@ class BasePipeline:
             #     often the bulk of the wall-clock (e.g. a slow API pull).
             for load_info in all_load_info:
                 load_info["started_at"] = extraction_started_at
+
+            # Dedupe (order-preserving) so access grants, option sync, and doc
+            # reconcile run once per real table even if a table surfaced under
+            # more than one resource.
+            loaded_tables = list(dict.fromkeys(loaded_tables))
 
             # Finalize and calculate timings
             finalize_duration = self._finalize_pipeline_run(
