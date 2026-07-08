@@ -76,8 +76,13 @@ azure = [
     "requests>=2.32.0",
     "openpyxl>=3.1.0",
 ]
+aws = [
+    # Amazon S3 listing for native_load via BigQuery Omni. Listing only —
+    # BigQuery reads S3 object contents through the Omni cross-cloud connection.
+    "boto3>=1.34.0",
+]
 dev = [
-    "dlt-saga[gcp,databricks,azure]",
+    "dlt-saga[gcp,databricks,azure,aws]",
     "ruff>=0.14.14",
     "mypy>=1.19.1",
     "types-PyYAML>=6.0.0",

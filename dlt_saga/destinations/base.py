@@ -58,6 +58,17 @@ class NativeLoadSpec:
     table_format: str = "delta"
     # Declarative row filters pushed down into the load SELECT.
     filters: list = field(default_factory=list)
+    # Cross-cloud (BigQuery Omni) only: the Omni region (e.g. "aws-eu-west-1")
+    # that S3-reading statements run in, and the connection used to read S3.
+    # None for same-cloud (gs://) loads.
+    omni_location: Optional[str] = None
+    source_connection: Optional[str] = None
+    # Explicit, ordered external-table schema for headerless CSV/TSV (list of
+    # (name, type)). When set, the external table is created with this schema
+    # instead of autodetect — required for headerless files where autodetect
+    # mis-types columns. Types are typically all STRING; SAFE_CAST in the load
+    # SELECT (driven by column_hints) converts to the target types.
+    external_schema: Optional[list] = None
 
 
 @dataclass

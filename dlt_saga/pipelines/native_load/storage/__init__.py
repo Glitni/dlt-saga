@@ -9,6 +9,9 @@ def get_storage_client(
     uri: str,
     billing_project: Optional[str] = None,
     destination: Optional[object] = None,
+    aws_access_key_id: Optional[str] = None,
+    aws_secret_access_key: Optional[str] = None,
+    aws_region: Optional[str] = None,
 ) -> StorageClient:
     """Dispatch by URI scheme to the appropriate storage client.
 
@@ -17,6 +20,9 @@ def get_storage_client(
         billing_project: GCS billing project for requester-pays buckets.
         destination: Required for abfss:// URIs — must be a DatabricksDestination
                      so that listing flows through Databricks SQL LIST.
+        aws_access_key_id: AWS key (plain value or secret URI) for s3:// listing.
+        aws_secret_access_key: AWS secret (plain value or secret URI) for s3:// listing.
+        aws_region: AWS region for the s3:// client.
     """
     if uri.startswith("gs://"):
         from dlt_saga.pipelines.native_load.storage.gcs import GcsStorageClient
@@ -39,8 +45,12 @@ def get_storage_client(
         return AdlsStorageClient(destination)  # type: ignore[arg-type]
 
     if uri.startswith("s3://"):
-        raise NotImplementedError(
-            "S3 native load is not implemented in v1; contributions welcome"
+        from dlt_saga.pipelines.native_load.storage.s3 import S3StorageClient
+
+        return S3StorageClient(
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+            region_name=aws_region,
         )
 
     scheme = uri.split("://")[0] if "://" in uri else uri[:20]

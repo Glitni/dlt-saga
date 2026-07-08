@@ -23,10 +23,49 @@ For smaller or more complex sources (type coercions, multi-sheet, REST APIs), th
 
 | Destination | Mechanic | Supported URI schemes |
 |---|---|---|
-| BigQuery | External table → `INSERT INTO` (or CTAS on first run) | `gs://` |
+| BigQuery | External table → `INSERT INTO` (or CTAS on first run) | `gs://`, `s3://` (via BigQuery Omni) |
 | Databricks | `COPY INTO` with `mergeSchema = true` | `gs://`, `abfss://` |
 
-S3 (`s3://`) is accepted by config validation on Databricks but raises `NotImplementedError` at runtime until a future release.
+Loading from Amazon S3 into BigQuery uses a BigQuery Omni cross-cloud connection — see [Amazon S3 via BigQuery Omni](#amazon-s3-via-bigquery-omni) below. `s3://` on Databricks is not yet supported.
+
+---
+
+## Amazon S3 via BigQuery Omni
+
+BigQuery reads S3 through a [BigQuery Omni](https://cloud.google.com/bigquery/docs/omni-introduction) cross-cloud connection. saga creates a transient BigLake external table over the S3 files (in the Omni region), runs a cross-cloud CTAS to materialize the transformed rows into a **destination-region transfer table**, then creates or appends the real target **in-region** from it. The two hops are required because a single BigQuery statement can't reference both the Omni-region external table and the destination-region target. File discovery/dedup lists S3 with boto3 (listing only; BigQuery reads the object contents via the connection).
+
+### Prerequisites (one-time, outside saga)
+
+1. An AWS IAM role that trusts the BigQuery connection (`AssumeRoleWithWebIdentity`) and can read the bucket. Its **maximum session duration must be 12 hours** (BigQuery Omni requests a 12h session).
+2. A BigQuery connection of type AWS in an Omni region, e.g. `bq mk --connection --connection_type=AWS --location=aws-eu-west-1 …`. Paste the connection's Google identity back into the role's trust policy.
+3. An AWS access key (with `s3:ListBucket` on the source prefixes) for saga's listing, stored as a secret.
+
+### Config
+
+```yaml
+adapter: dlt_saga.native_load
+source_uri: s3://my-bucket/raw/events/
+file_type: parquet
+
+# BigQuery Omni cross-cloud connection (short form or full resource path)
+source_connection: aws-eu-west-1.my-s3-conn
+
+# AWS credentials for listing only (secret URIs recommended)
+aws_access_key_id: googlesecretmanager::my-project::s3-listing-key
+aws_secret_access_key: googlesecretmanager::my-project::s3-listing-secret
+# aws_region: eu-west-1        # optional; derived from the connection's Omni region
+
+write_disposition: append+historize
+incremental: true
+```
+
+### Constraints
+
+- **Region colocation is required.** The S3 bucket region and the BigQuery destination region must be colocated per BigQuery Omni rules (the only EU Omni region is `aws-eu-west-1`, i.e. EU S3 → EU BigQuery). saga fails fast otherwise.
+- **The connection and destination dataset must be in the same GCP project** (a BigQuery Omni rule) — S3 data can only be landed into that project's datasets.
+- **60 GiB cross-cloud cap.** Each cross-cloud transfer (the CTAS into the transfer table) must stay under BigQuery's 60 GiB result limit. saga auto-splits chunks by cumulative file size (`load_batch_bytes`, default a conservative 5 GiB of compressed input) in addition to the `load_batch_size` count cap.
+
+Partitioning and clustering on the target work normally — the target is created/appended in-region from the transfer table, so it is not subject to the cross-cloud clustered-write restriction.
 
 ---
 
@@ -100,11 +139,23 @@ Discovery mode is implied: set both `filename_date_regex` and `filename_date_for
 | Field | Default | Description |
 |---|---|---|
 | `load_batch_size` | `5000` | Maximum URIs per SQL job. |
+| `load_batch_bytes` | `5 GiB` | Cross-cloud (`s3://`) only: also split a chunk once cumulative listed file size crosses this, keeping each cross-cloud transfer under BigQuery's 60 GiB result cap. The cap is on uncompressed result bytes (unknowable from a listing), so the default errs low. Ignored for `gs://`/`abfss://`. |
 | `max_bad_records` | `0` | BigQuery only: tolerated malformed rows per job. |
 | `ignore_unknown_values` | `false` | BigQuery only: ignore extra JSON keys not in schema. |
 | `autodetect_schema` | `true` | Let the destination infer column types from the files. |
 | `include_file_metadata` | `true` | Inject `_dlt_source_file_name` and (when `filename_date_regex` is set) `_dlt_source_file_date`. |
-| `staging_dataset` | `<target_dataset>_staging` | BigQuery only: dataset for transient external tables. |
+| `staging_dataset` | `<target_dataset>_staging` (`_omni_staging` for `s3://`) | BigQuery only: dataset for transient external tables. For `s3://` it is created in the Omni region. |
+
+### Amazon S3 (BigQuery Omni)
+
+Required when `source_uri` is `s3://` (BigQuery). See [Amazon S3 via BigQuery Omni](#amazon-s3-via-bigquery-omni) for the end-to-end setup.
+
+| Field | Default | Description |
+|---|---|---|
+| `source_connection` | — | BigQuery Omni connection: short `<omni-region>.<id>` (e.g. `aws-eu-west-1.my-conn`) or full `projects/<p>/locations/<region>/connections/<id>`. Required for `s3://`. |
+| `aws_access_key_id` | — | AWS key for S3 listing only (BigQuery reads data via `source_connection`). Plain value or secret URI. Required for `s3://`. |
+| `aws_secret_access_key` | — | AWS secret paired with the key. Plain value or secret URI. Required for `s3://`. |
+| `aws_region` | derived | AWS region for the listing client. Defaults to the connection's Omni region minus the `aws-` prefix (`aws-eu-west-1` → `eu-west-1`). |
 
 ### Schema and column types
 
@@ -120,6 +171,17 @@ columns:
   order_date: {data_type: timestamp}
   amount:     {data_type: decimal}
 ```
+
+**Headerless CSV/TSV (explicit positional schema).** For headerless files where
+autodetect mis-types columns non-deterministically (e.g. Snowplow enriched TSV),
+set `autodetect_schema: false` and provide an **ordered** `columns:` block listing
+every column in file order. That order becomes the external table's positional
+schema: each column is read as STRING (so the read never parse-fails), then the
+load SELECT `SAFE_CAST`s it to the declared `data_type` (`text` columns stay
+STRING). Keep genuinely-ambiguous columns as `text` — e.g. booleans encoded as
+`0`/`1` would become NULL under a `BOOL` cast; land them as text and cast in dbt.
+CSV with `autodetect_schema: false` and no `columns:` is rejected at config
+validation.
 
 ### Row filters
 
