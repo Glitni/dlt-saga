@@ -216,6 +216,16 @@ class TestTargetConfigColumnValidation:
         config = self._make(cluster_columns=None)
         assert config.cluster_columns is None
 
+    @pytest.mark.parametrize("dest", ["bigquery", "databricks", "duckdb"])
+    def test_supported_destination_types_accepted(self, dest):
+        # All three destinations are implemented; validation must not reject
+        # the two non-BigQuery ones (regression: list was ["bigquery"] only).
+        assert self._make(destination_type=dest).destination_type == dest
+
+    def test_unknown_destination_type_rejected(self):
+        with pytest.raises(ValueError, match="destination_type must be one of"):
+            self._make(destination_type="snowflake")
+
 
 @pytest.mark.unit
 class TestTargetConfigInsertApiValidation:

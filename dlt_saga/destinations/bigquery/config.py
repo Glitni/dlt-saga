@@ -117,7 +117,7 @@ class BigQueryDestinationConfig(DestinationConfig):
         """
         return cls(
             destination_type="bigquery",
-            project_id=data["project_id"],
+            project_id=data.get("project_id"),
             billing_project_id=data.get("billing_project_id"),
             location=data.get("location", "EU"),
             dataset_name=data.get("dataset_name"),

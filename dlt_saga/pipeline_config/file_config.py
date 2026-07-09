@@ -613,7 +613,8 @@ class FilePipelineConfig(ConfigSource):
             return result_list
 
         elif isinstance(parent_value, dict) and isinstance(child_value, dict):
-            # For dicts: merge recursively
+            # For dicts: shallow (one-level) merge — child keys override parent
+            # keys; a nested dict on an overridden key replaces it wholesale.
             result_dict = parent_value.copy()
             result_dict.update(child_value)
             return result_dict

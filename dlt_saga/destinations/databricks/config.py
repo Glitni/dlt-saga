@@ -173,8 +173,8 @@ class DatabricksDestinationConfig(DestinationConfig):
         """
         return cls(
             destination_type="databricks",
-            server_hostname=data["server_hostname"],
-            http_path=data["http_path"],
+            server_hostname=data.get("server_hostname", ""),
+            http_path=data.get("http_path", ""),
             catalog=data.get("catalog") or data.get("database", ""),
             schema_name=data.get("schema_name"),
             schema_access=data.get("schema_access") or data.get("dataset_access"),

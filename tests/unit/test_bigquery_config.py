@@ -36,6 +36,22 @@ class TestInsertLoadInfoDml:
 
 
 @pytest.mark.unit
+class TestFromDict:
+    """from_dict routes missing required keys through friendly validation."""
+
+    def test_missing_project_id_raises_value_error(self):
+        # A bare KeyError leaked implementation detail; __post_init__ gives a
+        # friendly, actionable message instead.
+        with pytest.raises(ValueError, match="project_id is required"):
+            BigQueryDestinationConfig.from_dict({})
+
+    def test_valid_dict_builds_config(self):
+        config = BigQueryDestinationConfig.from_dict({"project_id": "proj"})
+        assert config.project_id == "proj"
+        assert config.location == "EU"
+
+
+@pytest.mark.unit
 class TestBigQueryClientPool:
     """The pool reuses clients per (thread, project, location)."""
 

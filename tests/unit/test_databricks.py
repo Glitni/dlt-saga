@@ -131,6 +131,19 @@ class TestDatabricksDestinationConfig:
         )
         assert cfg.catalog == "catalog_value"
 
+    def test_from_dict_missing_server_hostname_raises_value_error(self):
+        # Bare KeyError replaced by the friendly __post_init__ message.
+        with pytest.raises(ValueError, match="server_hostname is required"):
+            DatabricksDestinationConfig.from_dict(
+                {"http_path": "/sql/1.0/warehouses/abc", "catalog": "c"}
+            )
+
+    def test_from_dict_missing_http_path_raises_value_error(self):
+        with pytest.raises(ValueError, match="http_path is required"):
+            DatabricksDestinationConfig.from_dict(
+                {"server_hostname": "adb-1234.azuredatabricks.net", "catalog": "c"}
+            )
+
 
 # ---------------------------------------------------------------------------
 # DatabricksDestination — SQL dialect

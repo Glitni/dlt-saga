@@ -71,6 +71,24 @@ class TestPipelineSelector:
             for t, count in expected_counts.items():
                 assert len(result[t]) == count
 
+    def test_zero_match_selector_warns(self, sample_configs, caplog):
+        """A selector matching nothing must warn, not fail silently."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dlt_saga.utility.cli.selectors"):
+            PipelineSelector(sample_configs).select(["tag:nonexistent"])
+        assert any(
+            "tag:nonexistent" in r.message and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
+
+    def test_matching_selector_does_not_warn(self, sample_configs, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dlt_saga.utility.cli.selectors"):
+            PipelineSelector(sample_configs).select(["group:google_sheets"])
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
     def test_union_space_separated(self, sample_configs):
         """Space-separated = UNION (OR)."""
         result = PipelineSelector(sample_configs).select(["tag:daily group:filesystem"])

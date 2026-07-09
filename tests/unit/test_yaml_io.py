@@ -31,3 +31,29 @@ class TestLoadYaml:
         path = tmp_path / "config.yml"
         path.write_bytes(b"a: 1\nb: [x, y]\n")
         assert load_yaml(path) == {"a": 1, "b": ["x", "y"]}
+
+    def test_duplicate_key_raises(self, tmp_path):
+        """Duplicate mapping keys are a typo, not last-wins — fail loudly."""
+        path = tmp_path / "dupe.yml"
+        path.write_bytes(b"write_disposition: append\nwrite_disposition: replace\n")
+        with pytest.raises(ValueError, match="duplicate key"):
+            load_yaml(path)
+
+    def test_top_level_list_raises(self, tmp_path):
+        """A top-level non-mapping would crash deep in the config merge."""
+        path = tmp_path / "list.yml"
+        path.write_bytes(b"- a\n- b\n")
+        with pytest.raises(ValueError, match="mapping at the top level"):
+            load_yaml(path)
+
+    def test_top_level_scalar_raises(self, tmp_path):
+        path = tmp_path / "scalar.yml"
+        path.write_bytes(b"just a string\n")
+        with pytest.raises(ValueError, match="mapping at the top level"):
+            load_yaml(path)
+
+    def test_syntax_error_names_path(self, tmp_path):
+        path = tmp_path / "bad.yml"
+        path.write_bytes(b"a: [unclosed\n")
+        with pytest.raises(ValueError, match="bad.yml"):
+            load_yaml(path)
