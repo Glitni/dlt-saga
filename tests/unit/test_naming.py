@@ -140,6 +140,21 @@ class TestFileConfigSchemaName:
 
         assert default_generate_schema_name([], "prod", "dlt_dev") == "dlt_default"
 
+    @pytest.mark.parametrize(
+        "segments, expected",
+        [
+            # Group segment is normalized through dlt's snake_case convention so
+            # the schema matches dlt's actual (case-sensitive) dataset name.
+            (["MyGroup", "x"], "dlt_my_group"),
+            (["My-API", "x"], "dlt_my_api"),
+            (["Sales Data", "x"], "dlt_sales_data"),
+        ],
+    )
+    def test_prod_schema_normalizes_group_segment(self, segments, expected):
+        from dlt_saga.pipeline_config.naming import default_generate_schema_name
+
+        assert default_generate_schema_name(segments, "prod", "dlt_dev") == expected
+
     def test_custom_naming_module(self):
         """Custom naming module is delegated to when configured."""
         from dlt_saga.pipeline_config.file_config import FilePipelineConfig
@@ -715,34 +730,6 @@ class TestPipelineName:
 
 
 @pytest.mark.unit
-class TestSanitizeSegment:
-    def test_lowercase(self):
-        from dlt_saga.pipeline_config.naming import _sanitize_segment
-
-        assert _sanitize_segment("Google") == "google"
-
-    def test_hyphen_to_underscore(self):
-        from dlt_saga.pipeline_config.naming import _sanitize_segment
-
-        assert _sanitize_segment("my-segment") == "my_segment"
-
-    def test_space_to_underscore(self):
-        from dlt_saga.pipeline_config.naming import _sanitize_segment
-
-        assert _sanitize_segment("my segment") == "my_segment"
-
-    def test_combined(self):
-        from dlt_saga.pipeline_config.naming import _sanitize_segment
-
-        assert _sanitize_segment("My-Segment Name") == "my_segment_name"
-
-    def test_no_change_already_clean(self):
-        from dlt_saga.pipeline_config.naming import _sanitize_segment
-
-        assert _sanitize_segment("my_segment") == "my_segment"
-
-
-@pytest.mark.unit
 class TestSingleSegmentTableName:
     """len(segments) == 1 is a distinct code path in default_generate_table_name."""
 
@@ -764,6 +751,14 @@ class TestSingleSegmentTableName:
         from dlt_saga.pipeline_config.naming import default_generate_table_name
 
         assert default_generate_table_name(["my-group"], "prod") == "my_group"
+
+    def test_dev_prefix_normalizes_group_segment(self):
+        """The dev table prefix (segments[0]) is normalized like every segment."""
+        from dlt_saga.pipeline_config.naming import default_generate_table_name
+
+        assert (
+            default_generate_table_name(["My-API", "stats"], "dev") == "my_api__stats"
+        )
 
 
 @pytest.mark.unit

@@ -55,6 +55,8 @@ import inspect
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from dlt_saga.utility.naming import normalize_identifier
+
 logger = logging.getLogger(__name__)
 
 # Cached custom naming module (None = not loaded, False = no custom module)
@@ -132,11 +134,6 @@ def call_hook(func: Callable, /, *args: Any, **kwargs: Any) -> Any:
     return func(*args, **filtered)
 
 
-def _sanitize_segment(s: str) -> str:
-    """Lowercase and replace common SQL-unsafe separators with underscores."""
-    return s.lower().replace("-", "_").replace(" ", "_")
-
-
 def default_generate_schema_name(
     segments: List[str],
     environment: str,
@@ -146,7 +143,9 @@ def default_generate_schema_name(
 ) -> str:
     """Default schema name generation from config identifier segments.
 
-    Prod: ``dlt_{segments[0]}`` (e.g. ``dlt_google_sheets``).
+    Prod: ``dlt_{segments[0]}`` (e.g. ``dlt_google_sheets``), with the group
+    segment run through dlt's snake_case normalization so the schema matches
+    dlt's actual dataset (``configs/MyAPI/…`` → ``dlt_my_api``).
     Dev: ``default_schema`` (from profile or ``SAGA_SCHEMA_NAME``).
 
     The default ignores ``layer``: ingest and historize share one dataset.
@@ -162,7 +161,9 @@ def default_generate_schema_name(
     """
     del layer  # default behavior is layer-agnostic
     if environment == "prod":
-        first_segment = segments[0] if segments else "default"
+        # Normalize the group through dlt's snake_case convention so the schema
+        # matches dlt's actual (case-sensitive) dataset: dlt_MyAPI → dlt_my_api.
+        first_segment = normalize_identifier(segments[0]) if segments else "default"
         return f"dlt_{first_segment}"
     return default_schema
 
@@ -176,8 +177,9 @@ def default_generate_table_name(
     only one segment), e.g. ``"asm__salgsmal"``.
     Dev: ``"{segments[0]}__{prod_name}"``, e.g. ``"google_sheets__asm__salgsmal"``.
 
-    Inner segments are lowercased and have ``-`` / spaces replaced with ``_``
-    so they're safe to use as SQL identifiers.
+    Every segment (group and inner) is run through dlt's snake_case
+    normalization so the names are safe SQL identifiers and match what dlt
+    creates (e.g. ``My-API`` / ``MyAPI`` → ``my_api``).
 
     The default ignores ``layer``: the historized table's name is derived
     by ``HistorizeConfig.output_table_suffix`` (or ``placement: schema_suffix``)
@@ -195,14 +197,14 @@ def default_generate_table_name(
     if not segments:
         return "default_data"
 
-    first_segment = segments[0]
+    first_segment = normalize_identifier(segments[0])
 
     if len(segments) == 1:
-        base_name = _sanitize_segment(segments[0])
+        base_name = normalize_identifier(segments[0])
     elif len(segments) == 2:
-        base_name = _sanitize_segment(segments[1])
+        base_name = normalize_identifier(segments[1])
     else:
-        base_name = "__".join(_sanitize_segment(s) for s in segments[1:])
+        base_name = "__".join(normalize_identifier(s) for s in segments[1:])
 
     if environment == "prod":
         return base_name
