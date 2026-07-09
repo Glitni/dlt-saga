@@ -457,10 +457,16 @@ class TestLogTableOrdering:
         latest = log_after[-1]
         assert latest["status"] == "completed"
 
-    def test_log_unchanged_on_failure(self, duckdb_destination):
-        """If partial refresh fails, log table is not modified."""
+    def test_failure_records_marker_without_corrupting_baseline(
+        self, duckdb_destination
+    ):
+        """A failed run records a status='failed' marker (so it's visible in
+        `saga report`) but must not disturb the existing completed baseline: the
+        marker has a NULL snapshot, so `get_pipeline_state` never treats it as
+        the baseline and the next run still resumes from the right point."""
         run_historize(duckdb_destination, [SNAPSHOT_1, SNAPSHOT_2, SNAPSHOT_3])
         log_before = query_log(duckdb_destination)
+        completed_before = [e for e in log_before if e["status"] == "completed"]
 
         seed_raw_table(duckdb_destination, [SNAPSHOT_4])
         runner = make_historize_runner(duckdb_destination, partial_refresh=True)
@@ -480,8 +486,18 @@ class TestLogTableOrdering:
         assert result["status"] == "failed"
 
         log_after = query_log(duckdb_destination)
-        assert len(log_after) == len(log_before)
-        assert log_after[0]["snapshot_value"] == log_before[0]["snapshot_value"]
+        # The failure is recorded as a status='failed' marker with a NULL snapshot.
+        failed_entries = [e for e in log_after if e["status"] == "failed"]
+        assert len(failed_entries) == 1
+        assert failed_entries[0]["snapshot_value"] is None
+        # The completed baseline is untouched — same completed entries, same
+        # snapshot value — so the failure didn't poison state.
+        completed_after = [e for e in log_after if e["status"] == "completed"]
+        assert len(completed_after) == len(completed_before)
+        assert (
+            completed_after[0]["snapshot_value"]
+            == completed_before[0]["snapshot_value"]
+        )
 
 
 class TestPartialRefreshEquivalence:

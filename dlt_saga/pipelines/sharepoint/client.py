@@ -19,6 +19,7 @@ import csv
 import io
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from itertools import zip_longest
 from typing import Any, Dict, List, Optional
@@ -38,6 +39,23 @@ logger = logging.getLogger(__name__)
 _TOKEN_ENDPOINT = (
     "https://accounts.accesscontrol.windows.net/{tenant_id}/tokens/OAuth/2"
 )
+
+# SharePoint Online throttles aggressively (429) and returns transient 5xx; both
+# are worth retrying, honoring the Retry-After header when present.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+_MAX_REQUEST_RETRIES = 4
+_RETRY_BACKOFF_BASE = 2.0
+
+
+def _retry_after_seconds(response: requests.Response) -> Optional[float]:
+    """Parse a numeric ``Retry-After`` header (seconds); ignore HTTP-date form."""
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 class SharePointClient(BaseClient):
@@ -60,6 +78,67 @@ class SharePointClient(BaseClient):
         logger.info("SharePoint token acquired — connection OK")
 
     # ------------------------------------------------------------------
+    # Internal HTTP
+    # ------------------------------------------------------------------
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        """Issue an HTTP request with retry on throttling / transient 5xx.
+
+        Retries ``429`` and ``5xx`` up to ``_MAX_REQUEST_RETRIES`` times,
+        honoring ``Retry-After`` when present, and retries connection/timeout
+        errors. On a non-retryable (or final) error status, raises with the
+        response body included — ``raise_for_status`` alone discards the body,
+        which is where SharePoint puts the actual reason (e.g. access denied,
+        file not found).
+        """
+        kwargs.setdefault("timeout", 30)
+        for attempt in range(1, _MAX_REQUEST_RETRIES + 1):
+            last_attempt = attempt == _MAX_REQUEST_RETRIES
+            try:
+                response = requests.request(method, url, **kwargs)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if last_attempt:
+                    raise
+                delay = _RETRY_BACKOFF_BASE**attempt
+                logger.warning(
+                    "SharePoint %s request failed (%s); retry %d/%d in %.1fs",
+                    method,
+                    exc,
+                    attempt,
+                    _MAX_REQUEST_RETRIES,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+
+            if response.status_code in _RETRYABLE_STATUS and not last_attempt:
+                delay = _retry_after_seconds(response) or _RETRY_BACKOFF_BASE**attempt
+                logger.warning(
+                    "SharePoint %s %s returned HTTP %d; retry %d/%d in %.1fs",
+                    method,
+                    url,
+                    response.status_code,
+                    attempt,
+                    _MAX_REQUEST_RETRIES,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+
+            if not response.ok:
+                body = (response.text or "").strip()
+                snippet = f": {body[:500]}" if body else ""
+                raise requests.HTTPError(
+                    f"SharePoint {method} {url} failed with HTTP "
+                    f"{response.status_code} {response.reason}{snippet}",
+                    response=response,
+                )
+            return response
+
+        # Unreachable: the final attempt always returns or raises above.
+        raise RuntimeError("SharePoint request retry loop exited unexpectedly")
+
+    # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
 
@@ -74,7 +153,8 @@ class SharePointClient(BaseClient):
             f"_api/web/GetFileByServerRelativeUrl('{encoded_path}')"
             f"?$select=TimeLastModified"
         )
-        response = requests.get(
+        response = self._request(
+            "GET",
             url,
             headers={
                 "Authorization": f"Bearer {self._token}",
@@ -82,7 +162,6 @@ class SharePointClient(BaseClient):
             },
             timeout=30,
         )
-        response.raise_for_status()
         raw = response.json().get("TimeLastModified")
         if not raw:
             raise ValueError(
@@ -103,12 +182,12 @@ class SharePointClient(BaseClient):
             f"_api/web/GetFileByServerRelativeUrl('{encoded_path}')/$value"
         )
         logger.debug("Downloading SharePoint file: %s", url)
-        response = requests.get(
+        response = self._request(
+            "GET",
             url,
             headers={"Authorization": f"Bearer {self._token}"},
             timeout=120,
         )
-        response.raise_for_status()
         logger.info("Downloaded %s bytes from SharePoint", f"{len(response.content):,}")
         return response.content
 
@@ -269,13 +348,13 @@ class SharePointClient(BaseClient):
         """Acquire a token via the legacy Azure ACS app-only flow (deprecated)."""
         oauth_body = resolve_secret(self.config.token_request_body)
         url = _TOKEN_ENDPOINT.format(tenant_id=resolve_secret(self.config.tenant_id))
-        response = requests.post(
+        response = self._request(
+            "POST",
             url,
             data=oauth_body,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=30,
         )
-        response.raise_for_status()
         data = response.json()
         token = data.get("access_token")
         if not token:

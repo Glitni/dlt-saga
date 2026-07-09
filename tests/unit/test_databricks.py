@@ -601,8 +601,10 @@ class TestDatabricksAuthProvider:
     def test_supports_impersonation_is_false(self):
         assert DatabricksAuthProvider().supports_impersonation() is False
 
-    def test_impersonate_raises_not_implemented(self):
-        with pytest.raises(NotImplementedError, match="impersonation"):
+    def test_impersonate_raises_authentication_error(self):
+        # A config problem (run_as on a non-impersonating provider), surfaced as
+        # AuthenticationError so the CLI shows it cleanly (no raw traceback).
+        with pytest.raises(AuthenticationError, match="run_as"):
             with DatabricksAuthProvider().impersonate("user@example.com"):
                 pass
 

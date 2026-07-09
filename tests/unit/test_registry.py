@@ -76,6 +76,53 @@ class TestClassAutoDiscovery:
 
 
 @pytest.mark.unit
+class TestTryImportErrorSurfacing:
+    """A missing transitive dependency must not look like a typo'd adapter."""
+
+    def test_missing_module_returns_none(self):
+        from dlt_saga.pipelines.registry import _try_import
+
+        # Genuinely absent target module → resolution miss, try the next strategy.
+        assert _try_import("dlt_saga.pipelines.does_not_exist.pipeline", "t") is None
+
+    def test_transitive_missing_dependency_is_surfaced(self, tmp_path, monkeypatch):
+        import sys
+
+        from dlt_saga.pipelines.registry import _try_import
+
+        pkg = tmp_path / "brokenadapterpkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "pipeline.py").write_text("import totally_missing_dependency_xyz\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        sys.modules.pop("brokenadapterpkg", None)
+        sys.modules.pop("brokenadapterpkg.pipeline", None)
+
+        with pytest.raises(ImportError) as exc:
+            _try_import("brokenadapterpkg.pipeline", "t")
+        # The real cause (the missing dependency) is named, not hidden behind a
+        # generic "adapter could not be resolved".
+        assert "totally_missing_dependency_xyz" in str(exc.value)
+
+    def test_module_without_pipeline_class_returns_none(self, tmp_path, monkeypatch):
+        import sys
+
+        from dlt_saga.pipelines.registry import _try_import
+
+        pkg = tmp_path / "noclassadapterpkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "pipeline.py").write_text("x = 1\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        sys.modules.pop("noclassadapterpkg", None)
+        sys.modules.pop("noclassadapterpkg.pipeline", None)
+
+        # Imports fine but has no BasePipeline subclass → not a valid adapter
+        # module; caller falls through to the next strategy (returns None).
+        assert _try_import("noclassadapterpkg.pipeline", "t") is None
+
+
+@pytest.mark.unit
 class TestDiscoverImplementations:
     def test_discovers_all_builtin(self):
         """discover_implementations finds all built-in pipeline modules."""

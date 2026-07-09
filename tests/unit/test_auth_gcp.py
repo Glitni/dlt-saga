@@ -83,3 +83,20 @@ class TestGcpAuthProviderImpersonation:
                 ):
                     pass  # pragma: no cover — body never enters
             manager.teardown_impersonation.assert_called_once()
+
+
+@pytest.mark.unit
+class TestNoopAuthProvider:
+    def test_supports_impersonation_is_false(self):
+        from dlt_saga.utility.auth.providers import NoopAuthProvider
+
+        assert NoopAuthProvider().supports_impersonation() is False
+
+    def test_impersonate_raises_authentication_error(self):
+        # run_as on the no-op provider is a config error, surfaced cleanly (no
+        # raw NotImplementedError traceback) so the CLI can display it.
+        from dlt_saga.utility.auth.providers import NoopAuthProvider
+
+        with pytest.raises(AuthenticationError, match="run_as"):
+            with NoopAuthProvider().impersonate("sa@project.iam.gserviceaccount.com"):
+                pass

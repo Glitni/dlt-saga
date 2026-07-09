@@ -57,8 +57,8 @@ class AuthProvider(ABC):
                 email for GCP, role ARN for AWS).
 
         Raises:
-            AuthenticationError: If impersonation setup fails.
-            NotImplementedError: If impersonation is not supported.
+            AuthenticationError: If impersonation setup fails, or if the
+                provider does not support impersonation at all.
 
         Yields:
             Nothing. Impersonation is active for the duration of the block.
@@ -82,10 +82,14 @@ class NoopAuthProvider(AuthProvider):
 
     @contextmanager
     def impersonate(self, identity: str) -> Generator[None, None, None]:
-        raise NotImplementedError(
-            "NoopAuthProvider does not support impersonation. "
-            "Set auth_provider in profiles.yml (e.g., auth_provider: gcp) "
-            "to use service account impersonation."
+        # A configuration problem (run_as set on a provider that can't
+        # impersonate), not a bug — raise AuthenticationError so the CLI shows a
+        # clean, actionable message instead of a raw NotImplementedError traceback.
+        raise AuthenticationError(
+            "run_as (identity impersonation) is configured, but the active auth "
+            "provider does not support it. Set auth_provider in profiles.yml "
+            "(e.g., auth_provider: gcp) to use service account impersonation, or "
+            "remove run_as from the target."
         )
         yield  # pragma: no cover
 

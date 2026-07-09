@@ -17,6 +17,40 @@ logger = logging.getLogger(__name__)
 # can be substituted in (mirrors the API source's placeholder contract).
 _INCREMENTAL_VALUE_PLACEHOLDER = "{incremental_value}"
 
+# Substrings that identify a *permanent* database error — one that retrying with
+# backoff cannot fix (bad SQL, bad credentials, missing object). ConnectorX
+# surfaces engine errors as opaque exceptions whose message carries the driver
+# text, so this is a message heuristic. Anything not matched is treated as
+# potentially transient and retried. Matched case-insensitively.
+_PERMANENT_DB_ERROR_MARKERS = (
+    "syntax error",
+    "authentication failed",
+    "password authentication failed",
+    "login failed",
+    "access denied",
+    "permission denied",
+    "does not exist",  # relation/column/database does not exist
+    "no such table",
+    "no such column",
+    "unknown column",
+    "unknown database",
+    "invalid object name",  # SQL Server: table/view not found
+    "column not found",
+    "table or view does not exist",  # Oracle
+)
+
+
+def _is_permanent_db_error(exc: Exception) -> bool:
+    """Whether *exc* is a permanent error not worth retrying with backoff.
+
+    Conservative: only errors whose message clearly signals a bad query,
+    credential, or missing object are treated as permanent. Everything else
+    (connection resets, timeouts, unclassified errors) stays retryable so a
+    genuinely transient failure is still given its retries.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in _PERMANENT_DB_ERROR_MARKERS)
+
 
 class DatabaseClient:
     """Client for connecting to databases using ConnectorX.
@@ -326,6 +360,12 @@ class DatabaseClient:
                 logger.info(f"Fetched {len(data)} rows from database")
                 return data
             except Exception as e:
+                # Don't burn the retry budget (and the delay) on errors backoff
+                # can't fix — bad SQL, bad credentials, missing objects. Fail
+                # fast so the user sees the real error immediately.
+                if _is_permanent_db_error(e):
+                    logger.debug("Permanent database error, not retrying: %s", e)
+                    raise
                 if attempt < max_retries:
                     wait_seconds = backoff_base ** (attempt + 1)
                     logger.warning(
