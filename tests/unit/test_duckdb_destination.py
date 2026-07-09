@@ -140,3 +140,69 @@ class TestDuckDBQuoteIdentifier:
             assert rows[0][0] == 1
         finally:
             dest.close()
+
+
+@pytest.mark.unit
+class TestDuckDBExecuteSqlSearchPath:
+    """execute_sql(schema_name=...) sets search_path for the call but must
+    restore it — otherwise the persistent connection keeps the last schema and
+    unqualified names in later calls resolve to the wrong schema."""
+
+    def test_search_path_restored_after_call(self):
+        from dlt_saga.testing import make_destination
+
+        dest = make_destination()
+        try:
+            conn = dest.connection
+            before = conn.execute("SELECT current_setting('search_path')").fetchone()[0]
+            dest.execute_sql("SELECT 1", schema_name="scratch")
+            after = conn.execute("SELECT current_setting('search_path')").fetchone()[0]
+            assert after == before
+        finally:
+            dest.close()
+
+    def test_search_path_restored_even_on_error(self):
+        from dlt_saga.testing import make_destination
+
+        dest = make_destination()
+        try:
+            conn = dest.connection
+            before = conn.execute("SELECT current_setting('search_path')").fetchone()[0]
+            with pytest.raises(Exception):
+                dest.execute_sql("SELECT * FROM does_not_exist", schema_name="scratch")
+            after = conn.execute("SELECT current_setting('search_path')").fetchone()[0]
+            assert after == before
+        finally:
+            dest.close()
+
+
+@pytest.mark.unit
+class TestDuckDBSaveLoadInfo:
+    def test_does_not_mutate_caller_records(self):
+        """save_load_info stamps _dlt ids and serializes datetimes — it must do so
+        on copies, not the caller's dicts (reused for other destinations)."""
+        import copy
+        from datetime import datetime
+
+        from dlt_saga.testing import make_destination
+
+        dest = make_destination()
+        try:
+            dest.connection.execute('CREATE SCHEMA IF NOT EXISTS "test"')
+            records = [
+                {
+                    "pipeline_name": "p",
+                    "table_name": "t",
+                    "row_count": 3,
+                    "started_at": datetime(2026, 1, 1, 12, 0, 0),
+                }
+            ]
+            snapshot = copy.deepcopy(records)
+            dest.save_load_info("test", records)
+            assert records == snapshot
+            # No system ids leaked into the caller's dict; datetime left intact.
+            assert "_dlt_load_id" not in records[0]
+            assert "_dlt_id" not in records[0]
+            assert isinstance(records[0]["started_at"], datetime)
+        finally:
+            dest.close()

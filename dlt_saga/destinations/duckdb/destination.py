@@ -19,6 +19,30 @@ from dlt_saga.utility.sql import looks_like_missing_table
 logger = logging.getLogger(__name__)
 
 
+class _Row:
+    """Query row supporting both attribute and index access, for parity with the
+    BigQuery client's result rows."""
+
+    __slots__ = ("_columns", "_values")
+
+    def __init__(self, cols, vals):
+        object.__setattr__(self, "_columns", cols)
+        object.__setattr__(self, "_values", vals)
+
+    def __getattr__(self, name):
+        try:
+            idx = self._columns.index(name)
+            return self._values[idx]
+        except ValueError:
+            raise AttributeError(f"No column named '{name}'")
+
+    def __getitem__(self, idx):
+        return self._values[idx]
+
+    def __len__(self):
+        return len(self._values)
+
+
 class DuckDBDestination(Destination):
     """DuckDB destination implementation.
 
@@ -129,7 +153,11 @@ class DuckDBDestination(Destination):
         """)
 
         load_id = str(uuid.uuid4())
-        for record in records:
+        for original in records:
+            # Copy before mutating: these records belong to the caller (reused for
+            # other destinations / logging), so stamping ids and serializing
+            # datetimes in place would corrupt them.
+            record = dict(original)
             record["_dlt_load_id"] = load_id
             record["_dlt_id"] = str(uuid.uuid4())
 
@@ -204,51 +232,43 @@ class DuckDBDestination(Destination):
 
         conn = self.connection
 
+        prior_search_path = None
         if schema_name:
             conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"')
+            # Capture the current search_path first: the SET below is scoped to
+            # this call and restored in the finally. Left unrestored it leaks onto
+            # the persistent connection and silently changes unqualified-name
+            # resolution for every subsequent execute_sql.
+            prior_search_path = conn.execute(
+                "SELECT current_setting('search_path')"
+            ).fetchone()[0]
             conn.execute(f'SET search_path TO "{schema_name}"')
 
-        logger.debug(f"Executing SQL ({len(sql)} chars) in schema={schema_name}")
-
-        # Split multi-statement scripts and execute individually
-        statements = split_sql_statements(sql)
-        result = None
-        for stmt in statements:
-            result = conn.execute(stmt)
-
-        # Return rows that support attribute access for compatibility with BigQuery
-        if result is None:
-            return []
-
         try:
-            columns = [desc[0] for desc in result.description]
-            rows = result.fetchall()
-        except Exception:
-            return []
+            logger.debug(f"Executing SQL ({len(sql)} chars) in schema={schema_name}")
 
-        class Row:
-            """Row object supporting both attribute and index access."""
+            # Split multi-statement scripts and execute individually
+            statements = split_sql_statements(sql)
+            result = None
+            for stmt in statements:
+                result = conn.execute(stmt)
 
-            __slots__ = ("_columns", "_values")
+            # Return rows that support attribute access for compatibility with BigQuery
+            if result is None:
+                return []
 
-            def __init__(self, cols, vals):
-                object.__setattr__(self, "_columns", cols)
-                object.__setattr__(self, "_values", vals)
+            try:
+                columns = [desc[0] for desc in result.description]
+                rows = result.fetchall()
+            except Exception:
+                return []
 
-            def __getattr__(self, name):
-                try:
-                    idx = self._columns.index(name)
-                    return self._values[idx]
-                except ValueError:
-                    raise AttributeError(f"No column named '{name}'")
-
-            def __getitem__(self, idx):
-                return self._values[idx]
-
-            def __len__(self):
-                return len(self._values)
-
-        return [Row(columns, row) for row in rows]
+            return [_Row(columns, row) for row in rows]
+        finally:
+            if prior_search_path is not None:
+                conn.execute(
+                    f"SET search_path TO '{self.escape_string_literal(prior_search_path)}'"
+                )
 
     def reset_destination_state(self, pipeline_name: str, table_name: str) -> None:
         """Reset destination state by dropping tables and metadata."""

@@ -973,8 +973,17 @@ class DatabricksDestination(Destination):
         if "field_delimiter" in opts:
             delim = self.escape_string_literal(opts["field_delimiter"])
             parts.append(f"'delimiter' = '{delim}'")
-        if opts.get("skip_leading_rows", 0):
+        # skip_leading_rows is a count. Databricks 'header' = 'true' only skips a
+        # single header row, so it's correct only for 1; for N>1 use 'skipRows'
+        # (skips N rows from the start of each file).
+        try:
+            skip_rows = int(opts.get("skip_leading_rows", 0) or 0)
+        except (TypeError, ValueError):
+            skip_rows = 0
+        if skip_rows == 1:
             parts.append("'header' = 'true'")
+        elif skip_rows > 1:
+            parts.append(f"'skipRows' = '{skip_rows}'")
         if "encoding" in opts:
             enc = self.escape_string_literal(opts["encoding"])
             parts.append(f"'encoding' = '{enc}'")

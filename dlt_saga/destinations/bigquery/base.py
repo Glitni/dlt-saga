@@ -409,7 +409,11 @@ class BigQueryBaseDestination(Destination):
         Returns:
             Filtered list (only OWNER/WRITER for staging), or original list for non-staging
         """
-        if "_staging" in dataset_name:
+        # Staging datasets are named with a "_staging" suffix (e.g.
+        # "<dataset>_staging", "<dataset>_omni_staging"). Match the suffix, not a
+        # substring — a real dataset like "sales_staging_data" must not be
+        # mistaken for staging and stripped of its READER grants.
+        if dataset_name.endswith("_staging"):
             return [
                 entry for entry in access_entries if entry.role in ("OWNER", "WRITER")
             ]

@@ -1009,6 +1009,41 @@ class TestDatabricksCopyIntoForce:
         assert "'mergeSchema' = 'true'" in sql
 
 
+@pytest.mark.unit
+class TestDatabricksCopyFormatOptions:
+    """skip_leading_rows is a row count. 'header'='true' only skips one row, so
+    it's correct only for 1; N>1 must use 'skipRows'."""
+
+    def _opts(self, **format_options):
+        from types import SimpleNamespace
+
+        dest = _make_destination()
+        return dest._format_databricks_copy_options(
+            SimpleNamespace(format_options=format_options)
+        )
+
+    def test_one_leading_row_maps_to_header(self):
+        out = self._opts(skip_leading_rows=1)
+        assert "'header' = 'true'" in out
+        assert "skipRows" not in out
+
+    def test_multiple_leading_rows_use_skiprows(self):
+        out = self._opts(skip_leading_rows=3)
+        assert "'skipRows' = '3'" in out
+        assert "'header' = 'true'" not in out
+
+    def test_zero_leading_rows_emits_neither(self):
+        out = self._opts(skip_leading_rows=0)
+        assert "header" not in out
+        assert "skipRows" not in out
+
+    def test_absent_leading_rows_emits_neither(self):
+        out = self._opts(field_delimiter=";")
+        assert "header" not in out
+        assert "skipRows" not in out
+        assert "'delimiter' = ';'" in out
+
+
 # ---------------------------------------------------------------------------
 # DatabricksDestination — connection lifecycle
 # ---------------------------------------------------------------------------
