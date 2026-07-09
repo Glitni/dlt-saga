@@ -141,14 +141,13 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+# Coverage is opt-in, not a default: instrumentation adds ~50% overhead to
+# every run (local dev and all CI matrix jobs). CI enables it only on the
+# single combination that uploads a report. For a local coverage run:
+#   uv run pytest --cov=dlt_saga --cov-report=term-missing --cov-report=html
 addopts = [
-    "-v",
     "--tb=short",
     "--strict-markers",
-    "--cov=dlt_saga",
-    "--cov-report=term-missing",
-    "--cov-report=html",
-    "--cov-report=xml"
 ]
 markers = [
     "unit: Unit tests that don't require external dependencies",
