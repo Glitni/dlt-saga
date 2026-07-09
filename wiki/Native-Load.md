@@ -38,7 +38,8 @@ BigQuery reads S3 through a [BigQuery Omni](https://cloud.google.com/bigquery/do
 
 1. An AWS IAM role that trusts the BigQuery connection (`AssumeRoleWithWebIdentity`) and can read the bucket. Its **maximum session duration must be 12 hours** (BigQuery Omni requests a 12h session).
 2. A BigQuery connection of type AWS in an Omni region, e.g. `bq mk --connection --connection_type=AWS --location=aws-eu-west-1 …`. Paste the connection's Google identity back into the role's trust policy.
-3. An AWS access key (with `s3:ListBucket` on the source prefixes) for saga's listing, stored as a secret.
+3. Grant the identity that runs saga (`bigquery.connections.delegate` on the connection — i.e. **`roles/bigquery.connectionAdmin`**, not `connectionUser`). saga *creates* a BigLake external table that references the connection, which needs `delegate`; `connectionUser` only grants `use`/`get` (enough to query an existing external table, not to create one). A run whose identity has only `connectionUser` fails with `Access Denied: … does not have bigquery.connections.delegate permission`. Scope the grant to the connection resource.
+4. An AWS access key (with `s3:ListBucket` on the source prefixes) for saga's listing, stored as a secret.
 
 ### Config
 
@@ -391,7 +392,9 @@ Replace the entire ADF pipeline with one YAML file and `saga ingest`.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `NotImplementedError: S3 listing not supported` | `source_uri: s3://...` on Databricks | S3 listing is not yet implemented. Open an issue if you need it. |
-| `URI scheme gs:// not supported by this destination` | BigQuery config with `s3://` or `abfss://` | BigQuery only supports `gs://`. |
+| `Access Denied: … does not have bigquery.connections.delegate permission` | The running identity has `connectionUser` (not `connectionAdmin`) on the Omni connection | Grant `roles/bigquery.connectionAdmin` (which includes `delegate`) on the connection — creating the BigLake external table requires it (see Prerequisites). |
+| `… failed assuming into your AWS IAM role because the session duration … is smaller than the requested` | AWS role max session duration < 12h | Set the IAM role's maximum session duration to 12 hours. |
+| `Source URI scheme '…' is not supported by destination` | Using a scheme the destination doesn't handle (e.g. `abfss://` on BigQuery) | BigQuery supports `gs://` and `s3://` (S3 via BigQuery Omni); Databricks supports `gs://` and `abfss://`. |
 | BigQuery external table quota errors | Too many tables in staging dataset | Reduce `load_batch_size` to create fewer concurrent tables. |
 | `COPY INTO` fails with permission error | UC external location not granted | Verify `GRANT READ FILES` on the external location (see setup above). |
 | Full-refresh PURGE fails | Storage credential missing DELETE permission | Grant DELETE on the external location, or use `--full-refresh` with manual file cleanup. |
