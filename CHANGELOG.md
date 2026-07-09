@@ -1,3 +1,22 @@
+## 0.21.0 — 2026-07-09
+
+### Breaking Changes
+- Normalize the group segment in schema and table names (#327)
+
+
+### Added
+- Redact resolved secrets from logs and table descriptions (#319)
+
+
+### Fixed
+- Surface silently-swallowed failures across adapters, auth, report, and historize (#331)
+- Native_load first run in partition mode skips all history (#329)
+- CLI/report polish & config-loading robustness (#325)
+- Destination hygiene (DuckDB record mutation + search_path leak, BigQuery staging suffix, Databricks skip_leading_rows) (#323)
+- Harden source-adapter parsing (headers, BOM, end_date, API body/cap, database probe) (#321)
+- Correct destination/table-format schema and harden config validation UX (#312)
+- Report Duration column unsortable and Executions tab missing sort/column controls (#314)
+
 ## 0.20.0 — 2026-07-08
 
 ### Added
