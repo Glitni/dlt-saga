@@ -190,3 +190,42 @@ class TestGenerateReport:
         embedded = json.loads(html[start:end])
         assert embedded["project"] == "my-project"
         assert embedded["pipelines"][0]["pipeline_name"] == "filesystem__sample"
+
+
+@pytest.mark.unit
+class TestScriptInjectionEscaping:
+    """A "</script>" in report data (e.g. an error message) must not break out
+    of the <script> block — it's escaped as \\u003c while the payload stays
+    parseable."""
+
+    def test_closing_script_tag_in_data_is_escaped(self, tmp_path):
+        data = _empty_report()
+        payload = "boom </script><script>alert(1)</script>"
+        data.orchestration_runs.append(
+            OrchestrationRun(
+                execution_id="e",
+                task_index=0,
+                pipeline_group="g",
+                pipeline_name="p",
+                table_name="t",
+                status="failed",
+                log_timestamp=None,
+                started_at=None,
+                completed_at=None,
+                error_message=payload,
+            )
+        )
+        out = tmp_path / "r.html"
+        generate_report(data, str(out))
+        html = out.read_text(encoding="utf-8")
+
+        # Only the template's own closing tag survives; the injected ones are escaped.
+        assert html.count("</script>") == 1
+        assert "\\u003c/script\\u003e" in html
+
+        # The payload is preserved once the embedded JSON is decoded.
+        marker = "const REPORT_DATA = "
+        start = html.index(marker) + len(marker)
+        end = html.index(";\n", start)
+        embedded = json.loads(html[start:end])
+        assert embedded["orchestration_runs"][0]["error_message"] == payload

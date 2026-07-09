@@ -152,3 +152,23 @@ class TestWorkerCommandDispatch:
             cli.run_worker_mode()
         mocks["_execute_worker_historize"].assert_called_once()
         mocks["_execute_worker_ingest"].assert_not_called()
+
+
+@pytest.mark.unit
+class TestWorkersIgnoredWarning:
+    """--workers has no effect in worker mode (concurrency comes from the plan);
+    a non-default value should warn rather than be silently dropped."""
+
+    def test_non_default_workers_warns(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            cli._warn_workers_ignored_in_worker_mode(8)
+        assert "no effect in worker mode" in caplog.text
+
+    def test_default_workers_is_silent(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            cli._warn_workers_ignored_in_worker_mode(cli._CLI_DEFAULT_WORKERS)
+        assert caplog.records == []
