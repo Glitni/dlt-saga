@@ -20,6 +20,8 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from dlt_saga.utility.secrets.redaction import register_secret
+
 if TYPE_CHECKING:
     from dlt_saga.utility.secrets.providers import SecretsProvider
 
@@ -187,6 +189,11 @@ class SecretResolver:
                     name=secret_name,
                     project_or_scope=project_or_scope,
                 )
+
+                # Register for log/metadata redaction: this is the single point
+                # where a provider-backed secret becomes plaintext, so masking
+                # is centralized here rather than per adapter.
+                register_secret(resolved)
 
                 # Cache the resolved value
                 _secret_cache[value] = resolved

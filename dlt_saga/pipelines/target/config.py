@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.utility.column_docs import compose_description
+from dlt_saga.utility.secrets.redaction import redact
 
 
 @dataclass
@@ -536,7 +537,12 @@ class TargetConfig:
             human,
             {"classification": self.classification} if self.classification else None,
         )
-        return composed or None
+        # Safety net: if a resolved secret was folded into the generated
+        # description (e.g. an adapter composing a credential into base_url /
+        # endpoint), mask it so a mistake degrades to a redacted description
+        # rather than a secret persisted permanently in warehouse metadata.
+        # Applied to both create-time hint and reconcile, so idempotency holds.
+        return redact(composed) or None
 
     def get_column_description_map(self) -> Dict[str, str]:
         """Return {column: composed description} for columns that carry docs.

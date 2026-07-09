@@ -186,7 +186,14 @@ def configure_cli_logging() -> None:
     global _console_handler
     log_format = "%(asctime)s - %(levelname)s - %(message)s"
 
+    from dlt_saga.utility.secrets.redaction import SecretRedactingFilter
+
     noise_filters = [_OAuth2ClientFilter(), _DatabricksSqlFilter()]
+    # Defense-in-depth: mask any provider-resolved secret that reaches a log
+    # record (e.g. a secret folded into a request URL, or a re-raised request
+    # exception). Attached per handler so it covers every logger, saga's and
+    # third-party alike — a logger-level filter would miss propagated records.
+    redaction_filter = SecretRedactingFilter()
 
     root = logging.getLogger()
     # Clear any handlers that a prior call (e.g. in tests) installed so this
@@ -204,6 +211,7 @@ def configure_cli_logging() -> None:
     console.setLevel(logging.INFO)
     for f in noise_filters:
         console.addFilter(f)
+    console.addFilter(redaction_filter)
 
     root.addHandler(console)
     _console_handler = console
@@ -215,6 +223,7 @@ def configure_cli_logging() -> None:
         if file_handler is not None:
             for f in noise_filters:
                 file_handler.addFilter(f)
+            file_handler.addFilter(redaction_filter)
             root.addHandler(file_handler)
             _cleanup_old_log_files(log_dir, _resolve_retention())
 
