@@ -49,6 +49,16 @@ class ApiConfig(BaseConfig):
         metadata={"description": "Query parameters to send with the request"},
     )
 
+    # Request body (JSON payload for POST/PUT/PATCH)
+    body: Optional[Dict[str, Any]] = field(
+        default=None,
+        metadata={
+            "description": "JSON request body sent as the payload (typically with "
+            "method POST/PUT/PATCH). Serialized to JSON with Content-Type "
+            "application/json."
+        },
+    )
+
     # Authentication (flat structure)
     auth_type: Optional[str] = field(
         default="none",

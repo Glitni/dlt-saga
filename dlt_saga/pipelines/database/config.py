@@ -155,12 +155,15 @@ class DatabaseConfig(BaseConfig):
                     )
             elif self.database_type.lower() in ("sqlite",):
                 if not self.source_database:
-                    raise ValueError("For SQLite, must provide 'database' (file path)")
+                    raise ValueError(
+                        "For SQLite, must provide 'source_database' (file path)"
+                    )
             else:
-                # All other databases require host and database
+                # All other databases require host and source_database
                 if not all([self.host, self.source_database]):
                     raise ValueError(
-                        f"For {self.database_type}, must provide 'host' and 'database'"
+                        f"For {self.database_type}, must provide 'host' and "
+                        "'source_database'"
                     )
 
         # Must have either query or source_table

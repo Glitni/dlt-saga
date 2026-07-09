@@ -56,7 +56,9 @@ class FilesystemConfig(BaseConfig):
     encoding: Optional[str] = field(
         default=None,
         metadata={
-            "description": "File encoding (default: utf-8, common: iso-8859-1, windows-1252)"
+            "description": "File encoding (default: utf-8-sig, which strips a "
+            "leading byte-order mark from BOM-prefixed exports and reads plain "
+            "UTF-8 unchanged; common overrides: iso-8859-1, windows-1252)"
         },
     )
 

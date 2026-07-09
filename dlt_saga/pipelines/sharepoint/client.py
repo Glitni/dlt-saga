@@ -20,6 +20,7 @@ import io
 import json
 import logging
 from datetime import datetime, timezone
+from itertools import zip_longest
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlparse
 
@@ -28,6 +29,7 @@ import requests
 from dlt_saga.pipelines.base_client import BaseClient
 from dlt_saga.utility.optional_deps import require_optional
 from dlt_saga.utility.secrets.resolver import resolve_secret
+from dlt_saga.utility.tabular import dedupe_headers
 
 from .config import SharePointConfig
 
@@ -151,10 +153,13 @@ class SharePointClient(BaseClient):
             return []
 
         header_idx = self.config.header_row - 1
-        headers = [
-            str(cell) if cell is not None else f"col_{i}"
-            for i, cell in enumerate(rows[header_idx])
-        ]
+        headers = dedupe_headers(
+            [
+                str(cell) if cell is not None else f"col_{i}"
+                for i, cell in enumerate(rows[header_idx])
+            ],
+            source="SharePoint Excel",
+        )
 
         records: List[Dict[str, Any]] = []
         for row in rows[header_idx + 1 :]:
@@ -167,8 +172,15 @@ class SharePointClient(BaseClient):
     def read_csv(self, file_bytes: bytes) -> List[Dict[str, Any]]:
         """Parse a CSV file and return rows as a list of dicts."""
         text = file_bytes.decode(self.config.encoding)
-        reader = csv.DictReader(io.StringIO(text), delimiter=self.config.csv_separator)
-        return [dict(row) for row in reader]
+        rows = list(csv.reader(io.StringIO(text), delimiter=self.config.csv_separator))
+        if not rows:
+            return []
+        # Dedupe the header row ourselves rather than csv.DictReader, which keeps
+        # only the last value for duplicate column names. zip_longest fills short
+        # rows with None (DictReader's restval default) and keeps values that
+        # outrun the header under a None key (its restkey default).
+        headers = dedupe_headers(rows[0], source="SharePoint CSV")
+        return [dict(zip_longest(headers, row, fillvalue=None)) for row in rows[1:]]
 
     def read_json(self, file_bytes: bytes) -> List[Dict[str, Any]]:
         """Parse a JSON file (array at root) and return rows as a list of dicts."""

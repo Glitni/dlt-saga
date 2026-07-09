@@ -201,14 +201,21 @@ class BaseApiPipeline(BasePipeline):
                 f"(attempt {attempt + 1}/{max_retries + 1})"
             )
 
+            request_kwargs: Dict[str, Any] = {
+                "method": self.api_config.method,
+                "url": url,
+                "params": query_params,
+                "headers": headers,
+                "timeout": self.api_config.timeout,
+            }
+            # Send a JSON body when configured (POST/PUT/PATCH). requests
+            # serializes it and the Content-Type: application/json header is
+            # already set above.
+            if self.api_config.body is not None:
+                request_kwargs["json"] = self.api_config.body
+
             try:
-                response = requests.request(
-                    method=self.api_config.method,
-                    url=url,
-                    params=query_params,
-                    headers=headers,
-                    timeout=self.api_config.timeout,
-                )
+                response = requests.request(**request_kwargs)
 
                 # Success case
                 if 200 <= response.status_code <= 299:
@@ -366,6 +373,8 @@ class BaseApiPipeline(BasePipeline):
 
             if page_delay:
                 time.sleep(page_delay)
+        else:
+            self._warn_page_cap_reached(max_pages)
 
     def _paginate_page(
         self, cfg: dict, max_pages: int, page_delay: float
@@ -401,6 +410,8 @@ class BaseApiPipeline(BasePipeline):
             page += 1
             if page_delay:
                 time.sleep(page_delay)
+        else:
+            self._warn_page_cap_reached(max_pages)
 
     def _paginate_cursor(
         self, cfg: dict, max_pages: int, page_delay: float
@@ -432,6 +443,8 @@ class BaseApiPipeline(BasePipeline):
                 break
             if page_delay:
                 time.sleep(page_delay)
+        else:
+            self._warn_page_cap_reached(max_pages)
 
     def _paginate_next_url(
         self, cfg: dict, max_pages: int, page_delay: float
@@ -455,6 +468,22 @@ class BaseApiPipeline(BasePipeline):
                 break
             if page_delay:
                 time.sleep(page_delay)
+        else:
+            self._warn_page_cap_reached(max_pages)
+
+    def _warn_page_cap_reached(self, max_pages: int) -> None:
+        """Warn that pagination stopped at the ``max_pages`` cap.
+
+        Reaching the cap means the natural stop condition (empty page, exhausted
+        cursor, reported total) never fired, so the result is very likely
+        truncated. Surface it instead of silently returning a partial dataset;
+        raise ``pagination.max_pages`` if the source legitimately has more pages.
+        """
+        self.logger.warning(
+            f"Pagination stopped at the max_pages cap ({max_pages}) without "
+            "reaching a natural end — results are likely truncated. Increase "
+            "pagination.max_pages if the source has more pages."
+        )
 
     def fetch_data(self) -> list:
         """Fetch data from API endpoint.

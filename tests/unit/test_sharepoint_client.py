@@ -1,6 +1,7 @@
 """Unit tests for SharePoint token acquisition and auth-method routing."""
 
 import base64
+import io
 import logging
 import sys
 import types
@@ -153,6 +154,46 @@ class TestLegacyAcsAuth:
         config = _cert_config(token_request_body=_BODY)
         client = SharePointClient(config)
         assert client._acquire_token() == "entra-token"
+
+
+class TestCsvParsing:
+    def test_duplicate_headers_deduped_not_collapsed(self):
+        # A repeated "id" column must survive as id / id_2 instead of the second
+        # silently overwriting the first (csv.DictReader's behaviour).
+        client = SharePointClient(_cert_config(file_type="csv"))
+        rows = client.read_csv(b"id,name,id\n1,alice,2\n")
+        assert rows == [{"id": "1", "name": "alice", "id_2": "2"}]
+
+    def test_utf8_bom_stripped_from_first_header(self):
+        # BOM-prefixed export (e.g. Excel "CSV UTF-8"): the leading BOM must not
+        # end up glued to the first column name.
+        client = SharePointClient(_cert_config(file_type="csv"))
+        rows = client.read_csv("id,name\n1,alice\n".encode("utf-8-sig"))
+        assert rows == [{"id": "1", "name": "alice"}]
+
+    def test_short_row_filled_with_none(self):
+        client = SharePointClient(_cert_config(file_type="csv"))
+        rows = client.read_csv(b"a,b,c\n1,2\n")
+        assert rows == [{"a": "1", "b": "2", "c": None}]
+
+    def test_empty_file_yields_no_rows(self):
+        client = SharePointClient(_cert_config(file_type="csv"))
+        assert client.read_csv(b"") == []
+
+
+class TestExcelParsing:
+    def test_duplicate_headers_deduped_not_collapsed(self):
+        openpyxl = pytest.importorskip("openpyxl")
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["id", "name", "id"])
+        ws.append([1, "alice", 2])
+        buf = io.BytesIO()
+        wb.save(buf)
+
+        client = SharePointClient(_cert_config(file_type="xlsx"))
+        rows = client.read_excel(buf.getvalue())
+        assert rows == [{"id": 1, "name": "alice", "id_2": 2}]
 
 
 class TestScopeDerivation:

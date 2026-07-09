@@ -3,6 +3,7 @@ from itertools import zip_longest
 from typing import Any, Dict, Iterator, Optional
 
 from dlt_saga.pipelines.google_sheets.config import GSheetsConfig
+from dlt_saga.utility.tabular import dedupe_headers
 
 # OAuth scopes needed for Sheets and Drive API access
 # Must be tuple to match client_pool type hints
@@ -142,6 +143,6 @@ class GSheetsClient:
         if not values:
             return
 
-        headers = values[0]
+        headers = dedupe_headers(values[0], source=f"sheet '{sheet_name}'")
         for row in values[1:]:
             yield dict(zip_longest(headers, row, fillvalue=""))

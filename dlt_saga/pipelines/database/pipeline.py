@@ -56,14 +56,16 @@ class DatabasePipeline(BasePipeline):
             incremental_column = self.config_dict.get("incremental_column")
             initial_value = self.config_dict.get("initial_value")
 
-            # Query target table for max value, fall back to initial_value
+            # Query target table for max value, fall back to initial_value.
+            # Use an explicit None check: a legitimate watermark of 0 (or "" /
+            # other falsy values) must not be treated as "no previous load".
             table_id = f"{self.destination_database}.{self.pipeline.dataset_name}.{self.table_name}"
-            incremental_value = (
-                self.destination.get_max_column_value(table_id, incremental_column)
-                or initial_value
+            max_value = self.destination.get_max_column_value(
+                table_id, incremental_column
             )
+            incremental_value = max_value if max_value is not None else initial_value
 
-            if incremental_value:
+            if incremental_value is not None:
                 self.logger.info(
                     f"Incremental loading from {incremental_column} > {incremental_value}"
                 )

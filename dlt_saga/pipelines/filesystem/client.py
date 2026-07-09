@@ -192,7 +192,10 @@ class FilesystemClient:
                 # Wrap binary stream with TextIOWrapper for text mode
                 text_stream = io.TextIOWrapper(
                     binary_stream,
-                    encoding=self.config.encoding or "utf-8",
+                    # utf-8-sig strips a leading BOM (Excel-exported CSVs) so the
+                    # first header isn't read as "﻿col"; reads plain UTF-8
+                    # unchanged.
+                    encoding=self.config.encoding or "utf-8-sig",
                     newline="",  # Let csv module handle newlines
                 )
                 reader = csv.reader(
@@ -353,8 +356,16 @@ class FilesystemClient:
         """Apply incremental hints to filesystem resource based on date range."""
         logger.info(f"Using filesystem-level incremental ({incremental_column})")
 
-        if initial_datetime and end_datetime:
-            logger.info(f"Starting backfill from {initial_datetime} to {end_datetime}")
+        if end_datetime:
+            # An upper bound is honored whether or not initial_value is set — a
+            # bare end_date caps the load at that date (initial_value=None means
+            # "from the beginning"), rather than being silently dropped.
+            if initial_datetime:
+                logger.info(
+                    f"Starting backfill from {initial_datetime} to {end_datetime}"
+                )
+            else:
+                logger.info(f"Loading up to end_date {end_datetime}")
             return fs.apply_hints(
                 incremental=dlt.sources.incremental(
                     incremental_column,
@@ -599,6 +610,8 @@ class FilesystemClient:
         from dlt.common.storages.fsspec_filesystem import FileItemDict
         from dlt.common.typing import TDataItems
 
+        encoding = self.config.encoding or "utf-8-sig"
+
         @dlt.transformer(name="read_jsonl_with_metadata")
         def read_jsonl_with_metadata(
             items: Iterator[FileItemDict],
@@ -612,7 +625,7 @@ class FilesystemClient:
                 with file_obj.open() as f:
                     content = f.read()
                     if isinstance(content, bytes):
-                        content = content.decode("utf-8")
+                        content = content.decode(encoding)
 
                     for line in content.splitlines():
                         line = line.strip()
@@ -735,7 +748,9 @@ class FilesystemClient:
 
         # Capture config values for use in transformer
         csv_separator = self.config.csv_separator or ","
-        encoding = self.config.encoding or "utf-8"
+        # utf-8-sig strips a leading BOM (Excel-exported CSVs); plain UTF-8 reads
+        # unchanged.
+        encoding = self.config.encoding or "utf-8-sig"
 
         @dlt.transformer(name="read_csv_with_metadata")
         def read_csv_with_metadata(
@@ -762,6 +777,8 @@ class FilesystemClient:
         from dlt.common.storages.fsspec_filesystem import FileItemDict
         from dlt.common.typing import TDataItems
 
+        encoding = self.config.encoding or "utf-8-sig"
+
         @dlt.transformer(name="read_geojson")
         def parse_geojson(items: Iterator[FileItemDict]) -> Iterator[TDataItems]:
             """Parse GeoJSON files and yield filename + JSON string content."""
@@ -777,7 +794,7 @@ class FilesystemClient:
                 with file_obj.open() as f:
                     content = f.read()
                     if isinstance(content, bytes):
-                        content = content.decode("utf-8")
+                        content = content.decode(encoding)
 
                     yield {
                         "name": base_name,
