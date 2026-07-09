@@ -427,16 +427,20 @@ class TestLoadProjectConfig:
 
     def test_valid(self):
         mock_config = {"pipelines": {"tags": ["default"]}}
-        with patch("builtins.open", create=True):
-            with patch("yaml.safe_load", return_value=mock_config):
-                with patch("pathlib.Path.exists", return_value=True):
-                    assert FilePipelineConfig().project_config == mock_config
+        with patch(
+            "dlt_saga.pipeline_config.file_config.load_yaml",
+            return_value=mock_config,
+        ):
+            with patch("pathlib.Path.exists", return_value=True):
+                assert FilePipelineConfig().project_config == mock_config
 
     def test_invalid_yaml(self):
-        with patch("builtins.open", create=True):
-            with patch("yaml.safe_load", side_effect=Exception("Invalid YAML")):
-                with patch("pathlib.Path.exists", return_value=True):
-                    assert FilePipelineConfig().project_config == {}
+        with patch(
+            "dlt_saga.pipeline_config.file_config.load_yaml",
+            side_effect=ValueError("Invalid YAML"),
+        ):
+            with patch("pathlib.Path.exists", return_value=True):
+                assert FilePipelineConfig().project_config == {}
 
 
 @pytest.mark.unit
