@@ -139,8 +139,12 @@ class SharePointConfig(BaseConfig):
         metadata={"description": "CSV separator character (default: comma)"},
     )
     encoding: str = field(
-        default="utf-8",
-        metadata={"description": "File encoding (default: utf-8)"},
+        default="utf-8-sig",
+        metadata={
+            "description": "File encoding (default: utf-8-sig, which strips a "
+            "leading byte-order mark from BOM-prefixed exports, e.g. Excel CSV, "
+            "and reads plain UTF-8 unchanged)"
+        },
     )
 
     def __post_init__(self):

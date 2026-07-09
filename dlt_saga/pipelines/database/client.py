@@ -471,10 +471,19 @@ class DatabaseClient:
         Returns:
             True if connection successful, False otherwise
         """
+        probe = "SELECT 1 as test_column"
         try:
-            conn_str = self.get_connection_string()
-            # Execute a simple query to test connection
-            cx.read_sql(conn_str, "SELECT 1 as test_column", return_type="arrow")
+            # Mirror fetch_data's routing so the probe uses the same backend the
+            # real fetch will: BigQuery-with-ADC and DuckDB don't go through
+            # ConnectorX, so probing them with cx.read_sql would fail spuriously.
+            dbtype = (self.config.database_type or "").lower()
+            if dbtype == "bigquery" and not self._has_bigquery_credentials():
+                self._fetch_from_bigquery(probe, "arrow")
+            elif dbtype == "duckdb":
+                self._fetch_from_duckdb(probe, "arrow")
+            else:
+                conn_str = self.get_connection_string()
+                cx.read_sql(conn_str, probe, return_type="arrow")
             logger.info("Database connection test successful")
             return True
         except Exception as e:

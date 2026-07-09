@@ -801,3 +801,71 @@ class TestMaxPagesSafety:
         records = list(pipeline._fetch_all_pages())
         assert len(records) == 3
         assert pipeline._call_count == 3
+
+    def test_hitting_cap_warns_of_truncation(self, caplog):
+        # Reaching max_pages without a natural stop means the result is likely
+        # truncated — that must be surfaced, not silent.
+        infinite_responses = [
+            {"data": [{"id": i}], "meta": {"next": "keep_going"}} for i in range(10)
+        ]
+        pipeline = FakeApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/items",
+                "pagination": {
+                    "type": "cursor",
+                    "cursor_path": "meta.next",
+                    "max_pages": 2,
+                },
+            },
+            infinite_responses,
+        )
+        pipeline.api_config.response_path = "data"
+
+        with caplog.at_level(logging.WARNING):
+            list(pipeline._fetch_all_pages())
+        assert "max_pages cap (2)" in caplog.text
+        assert "truncated" in caplog.text
+
+    def test_natural_stop_does_not_warn(self, caplog):
+        pipeline = FakeApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/items",
+                "pagination": {
+                    "type": "cursor",
+                    "cursor_path": "meta.next",
+                    "max_pages": 100,
+                },
+            },
+            [{"data": [{"id": 1}], "meta": {"next": None}}],
+        )
+        pipeline.api_config.response_path = "data"
+
+        with caplog.at_level(logging.WARNING):
+            list(pipeline._fetch_all_pages())
+        assert "max_pages" not in caplog.text
+
+
+@pytest.mark.unit
+class TestRequestBody:
+    def test_body_sent_as_json_payload(self):
+        pipeline = RetryApiPipeline(method="POST", body={"query": "select 1"})
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"data": []}
+        with patch(
+            "dlt_saga.pipelines.api.base.requests.request", return_value=ok
+        ) as req:
+            pipeline._make_request()
+        assert req.call_args.kwargs["json"] == {"query": "select 1"}
+        assert req.call_args.kwargs["method"] == "POST"
+
+    def test_no_body_omits_json_kwarg(self):
+        pipeline = RetryApiPipeline()
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"data": []}
+        with patch(
+            "dlt_saga.pipelines.api.base.requests.request", return_value=ok
+        ) as req:
+            pipeline._make_request()
+        assert "json" not in req.call_args.kwargs

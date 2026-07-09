@@ -53,3 +53,36 @@ class TestGSheetsServiceCaching:
             client.get_drive_service()
 
         assert mock_pool.get_client.call_count == 2
+
+
+def _service_returning(values):
+    """Build a fake Sheets service whose values().get().execute() yields values."""
+    service = MagicMock()
+    service.spreadsheets.return_value.values.return_value.get.return_value.execute.return_value = {  # noqa: E501
+        "values": values
+    }
+    return service
+
+
+@pytest.mark.unit
+class TestGetSheetData:
+    def test_duplicate_headers_deduped_not_collapsed(self):
+        client = _client()
+        service = _service_returning([["id", "name", "id"], ["1", "alice", "2"]])
+        with patch.object(client, "get_service", return_value=service):
+            rows = list(client.get_sheet_data("sheet-1", "Sheet1"))
+        assert rows == [{"id": "1", "name": "alice", "id_2": "2"}]
+
+    def test_short_row_padded_with_empty_string(self):
+        client = _client()
+        service = _service_returning([["a", "b", "c"], ["1", "2"]])
+        with patch.object(client, "get_service", return_value=service):
+            rows = list(client.get_sheet_data("sheet-1", "Sheet1"))
+        assert rows == [{"a": "1", "b": "2", "c": ""}]
+
+    def test_empty_sheet_yields_nothing(self):
+        client = _client()
+        service = _service_returning([])
+        with patch.object(client, "get_service", return_value=service):
+            rows = list(client.get_sheet_data("sheet-1", "Sheet1"))
+        assert rows == []
