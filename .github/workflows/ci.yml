@@ -55,6 +55,12 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
         dlt-version: ["latest", "min"]
+    env:
+      # Measure coverage only on the combination we upload; the other three
+      # matrix jobs skip the ~50% coverage-instrumentation overhead. --cov-append
+      # accumulates unit + integration into one report (a plain re-run would
+      # overwrite unit coverage with integration-only).
+      COV: ${{ (matrix.python-version == '3.12' && matrix.dlt-version == 'latest') && '--cov=dlt_saga --cov-report=xml --cov-append' || '' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -74,10 +80,10 @@ jobs:
         run: uv pip install --force-reinstall "dlt[duckdb,filesystem,parquet,sftp]==1.18.0"
 
       - name: Run unit tests
-        run: uv run pytest -m unit --tb=short
+        run: uv run pytest -m unit --tb=short $COV
 
       - name: Run integration tests
-        run: uv run pytest -m integration --tb=short
+        run: uv run pytest -m integration --tb=short $COV
 
       - name: Upload coverage report
         if: matrix.python-version == '3.12' && matrix.dlt-version == 'latest'
