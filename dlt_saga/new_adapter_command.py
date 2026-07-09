@@ -387,6 +387,11 @@ class {class_name}Pipeline(BaseApiPipeline):
     # (pagination + dlt.resource + description). Overriding it means
     # reimplementing pagination yourself.
     #
+    # Secrets in the URL: if the upstream expects a credential in the URL path or
+    # query, do NOT fold it into base_url/endpoint — those flow into the table
+    # description that gets persisted to warehouse metadata. Build the secret URL
+    # at request time and pass it in: self._make_request(url=secret_url).
+    #
     # def fetch_data(self) -> list:
     #     from dlt_saga.utility.secrets import resolve_secret
     #     token = resolve_secret(self.api_config.auth_token)

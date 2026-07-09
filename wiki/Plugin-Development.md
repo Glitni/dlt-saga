@@ -226,6 +226,17 @@ from dlt_saga.utility.secrets import resolve_secret
 token = resolve_secret(self.config.api_token)   # handles plain values and secret URIs
 ```
 
+**Secrets in a request URL.** Some upstreams put a credential in the URL path or
+query string. Never compose it into `base_url` / `endpoint` — those are folded
+into the generated table description, which is persisted to warehouse metadata.
+Build the secret URL at request time and pass it in explicitly
+(`self._make_request(url=secret_url)`). As a backstop, every value resolved from
+a secret provider is registered for redaction: it is masked in log output
+(via a filter on the log handlers) and in the persisted table description, so a
+slip degrades to `***` rather than a leaked secret. Redaction only covers
+provider-resolved values, so keep secrets in `SecretStr` / secret URIs rather
+than plain config.
+
 ### Standard config vocabulary
 
 Reuse the inherited field names instead of inventing new ones — configs stay

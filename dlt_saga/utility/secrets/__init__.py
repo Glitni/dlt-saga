@@ -14,6 +14,11 @@ from dlt_saga.utility.secrets.providers import (
     GcpSecretsProvider,
     SecretsProvider,
 )
+from dlt_saga.utility.secrets.redaction import (
+    SecretRedactingFilter,
+    redact,
+    register_secret,
+)
 from dlt_saga.utility.secrets.resolver import SecretResolver, resolve_secret
 from dlt_saga.utility.secrets.secret_str import SecretStr, coerce_secret
 
@@ -25,4 +30,7 @@ __all__ = [
     "SecretsProvider",
     "GcpSecretsProvider",
     "EnvVarSecretsProvider",
+    "SecretRedactingFilter",
+    "redact",
+    "register_secret",
 ]
