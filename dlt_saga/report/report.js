@@ -193,10 +193,18 @@
     }));
 
   // Failed tasks whose failing phase is historize → synthesized failed historize runs.
-  // (_saga_historize_log only records completed runs, so these are the sole
-  // source of historize failures in the report.)
+  // The historize runner now writes a status='failed' row to _saga_historize_log,
+  // so those failures already arrive via D.historize_runs. Skip synthesizing a
+  // duplicate for any pipeline that already has a logged failure — the synthesized
+  // entry is only a backstop for hard crashes that never reached the log write.
+  const loggedHistorizeFailures = new Set(
+    (D.historize_runs || [])
+      .filter(r => r.status === 'failed')
+      .map(r => r.pipeline_name)
+  );
   const failedOrchHistorize = failedOrch
     .filter(r => failurePhase(r) === 'historize')
+    .filter(r => !loggedHistorizeFailures.has(r.pipeline_name))
     .map(r => ({
       pipeline_name: r.pipeline_name,
       source_table: r.table_name,

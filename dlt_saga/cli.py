@@ -1869,41 +1869,44 @@ def report(
         from dlt_saga.utility.naming import get_execution_plan_schema
 
         destination.connect()
-        logger.info(
-            "Collecting report data (%d days of history, %d pipeline(s))",
-            days,
-            sum(len(v) for v in selected_configs.values()),
-        )
-        report_data = collect_report_data(
-            configs=selected_configs,
-            destination=destination,
-            schema=first_config.schema_name,
-            days=days,
-            environment=environment,
-            project=project,
-            orchestration_schema=get_execution_plan_schema(),
-        )
+        try:
+            logger.info(
+                "Collecting report data (%d days of history, %d pipeline(s))",
+                days,
+                sum(len(v) for v in selected_configs.values()),
+            )
+            report_data = collect_report_data(
+                configs=selected_configs,
+                destination=destination,
+                schema=first_config.schema_name,
+                days=days,
+                environment=environment,
+                project=project,
+                orchestration_schema=get_execution_plan_schema(),
+            )
 
-        if remote:
-            with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
-                tmp_path = tmp.name
-            try:
-                generate_report(report_data, tmp_path)
-                uri = upload_report(tmp_path, output)
-            finally:
-                os.unlink(tmp_path)
-        else:
-            abs_path = generate_report(report_data, output)
-            logger.info("Report generated: %s", abs_path)
-            if open_browser:
-                import webbrowser
+            if remote:
+                with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
+                    tmp_path = tmp.name
+                try:
+                    generate_report(report_data, tmp_path)
+                    uri = upload_report(tmp_path, output)
+                finally:
+                    os.unlink(tmp_path)
+            else:
+                abs_path = generate_report(report_data, output)
+                logger.info("Report generated: %s", abs_path)
+                if open_browser:
+                    import webbrowser
 
-                # Path.as_uri() builds a valid file:// URI on every OS — an
-                # f-string produces a malformed one on Windows (backslashes, drive
-                # letter: "file://C:\reports\r.html").
-                webbrowser.open(Path(abs_path).as_uri())
-
-        destination.close()
+                    # Path.as_uri() builds a valid file:// URI on every OS — an
+                    # f-string produces a malformed one on Windows (backslashes,
+                    # drive letter: "file://C:\reports\r.html").
+                    webbrowser.open(Path(abs_path).as_uri())
+        finally:
+            # Always release the destination connection, even if collection or
+            # generation raises — otherwise the connection leaks on failure.
+            destination.close()
 
     execute_with_impersonation(profile_target, _generate)
     if remote:

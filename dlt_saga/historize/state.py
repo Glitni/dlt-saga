@@ -21,7 +21,7 @@ class HistorizeLogEntry:
     pipeline_name: str
     source_table: str
     target_table: str
-    snapshot_value: str
+    snapshot_value: Optional[str]  # NULL for a failed run (no baseline established)
     new_or_changed_rows: int
     deleted_rows: int
     config_fingerprint: str  # base64-encoded JSON of config affecting historization

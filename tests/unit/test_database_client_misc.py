@@ -30,6 +30,59 @@ class TestConfigErrorMessages:
             DatabaseConfig(database_type="postgres", source_table="t")
 
 
+class TestPermanentErrorFastFail:
+    """fetch_data retries transient errors but fails fast on permanent ones
+    (bad SQL, bad credentials, missing objects) — no wasted backoff."""
+
+    def _client(self):
+        return DatabaseClient(
+            DatabaseConfig(
+                connection_string="postgresql://u:p@h/d",
+                database_type="postgres",
+                source_table="t",
+                max_retries=3,
+                retry_backoff_base=2,
+            )
+        )
+
+    def test_permanent_error_not_retried(self):
+        client = self._client()
+        err = Exception('syntax error at or near "SELCT"')
+        with (
+            patch(
+                "dlt_saga.pipelines.database.client.cx.read_sql", side_effect=err
+            ) as cx_read,
+            patch("dlt_saga.pipelines.database.client.time.sleep") as sleep,
+        ):
+            with pytest.raises(Exception, match="syntax error"):
+                client.fetch_data()
+        cx_read.assert_called_once()  # no retry
+        sleep.assert_not_called()
+
+    def test_transient_error_is_retried(self):
+        client = self._client()
+        err = Exception("connection reset by peer")
+        with (
+            patch(
+                "dlt_saga.pipelines.database.client.cx.read_sql", side_effect=err
+            ) as cx_read,
+            patch("dlt_saga.pipelines.database.client.time.sleep"),
+        ):
+            with pytest.raises(Exception, match="connection reset"):
+                client.fetch_data()
+        # 1 initial + 3 retries.
+        assert cx_read.call_count == 4
+
+    def test_is_permanent_db_error_classifier(self):
+        from dlt_saga.pipelines.database.client import _is_permanent_db_error
+
+        assert _is_permanent_db_error(
+            Exception("FATAL: password authentication failed")
+        )
+        assert _is_permanent_db_error(Exception('relation "foo" does not exist'))
+        assert not _is_permanent_db_error(Exception("connection timed out"))
+
+
 class TestConnectionRouting:
     """test_connection must probe via the same backend fetch_data would use —
     ConnectorX can't reach DuckDB or BigQuery-with-ADC."""

@@ -123,25 +123,27 @@ class TestEntraIdAuth:
 
 class TestLegacyAcsAuth:
     def test_acs_path_posts_to_acs_endpoint(self, monkeypatch):
-        post = MagicMock()
-        post.return_value = MagicMock(
-            json=lambda: {"access_token": "acs-token", "expires_in": 3600}
+        resp = MagicMock(ok=True, status_code=200)
+        resp.json.return_value = {"access_token": "acs-token", "expires_in": 3600}
+        request = MagicMock(return_value=resp)
+        monkeypatch.setattr(
+            "dlt_saga.pipelines.sharepoint.client.requests.request", request
         )
-        monkeypatch.setattr("dlt_saga.pipelines.sharepoint.client.requests.post", post)
 
         client = SharePointClient(_acs_config())
         token = client._acquire_token()
 
         assert token == "acs-token"
-        url = post.call_args.args[0]
-        assert "accesscontrol.windows.net" in url
+        # requests.request(method, url, ...) → method then url positionally.
+        assert request.call_args.args[0] == "POST"
+        assert "accesscontrol.windows.net" in request.call_args.args[1]
 
     def test_acs_path_emits_deprecation_warning(self, monkeypatch, caplog):
+        resp = MagicMock(ok=True, status_code=200)
+        resp.json.return_value = {"access_token": "acs-token"}
         monkeypatch.setattr(
-            "dlt_saga.pipelines.sharepoint.client.requests.post",
-            MagicMock(
-                return_value=MagicMock(json=lambda: {"access_token": "acs-token"})
-            ),
+            "dlt_saga.pipelines.sharepoint.client.requests.request",
+            MagicMock(return_value=resp),
         )
         client = SharePointClient(_acs_config())
         with caplog.at_level(logging.WARNING):
@@ -154,6 +156,61 @@ class TestLegacyAcsAuth:
         config = _cert_config(token_request_body=_BODY)
         client = SharePointClient(config)
         assert client._acquire_token() == "entra-token"
+
+
+class TestRequestRetryAndErrors:
+    """_request retries throttling/5xx and surfaces the response body on error."""
+
+    def _client(self):
+        client = SharePointClient(_cert_config())
+        client._token = "tok"
+        return client
+
+    def test_retries_on_429_then_succeeds(self, monkeypatch):
+        throttled = MagicMock(ok=False, status_code=429)
+        throttled.headers = {"Retry-After": "0"}
+        ok = MagicMock(ok=True, status_code=200)
+        request = MagicMock(side_effect=[throttled, ok])
+        monkeypatch.setattr(
+            "dlt_saga.pipelines.sharepoint.client.requests.request", request
+        )
+        monkeypatch.setattr(
+            "dlt_saga.pipelines.sharepoint.client.time.sleep", lambda *_: None
+        )
+
+        result = self._client()._request("GET", "https://x/y")
+        assert result is ok
+        assert request.call_count == 2
+
+    def test_honors_retry_after_header(self, monkeypatch):
+        throttled = MagicMock(ok=False, status_code=503)
+        throttled.headers = {"Retry-After": "7"}
+        ok = MagicMock(ok=True, status_code=200)
+        monkeypatch.setattr(
+            "dlt_saga.pipelines.sharepoint.client.requests.request",
+            MagicMock(side_effect=[throttled, ok]),
+        )
+        slept = []
+        monkeypatch.setattr(
+            "dlt_saga.pipelines.sharepoint.client.time.sleep", slept.append
+        )
+
+        self._client()._request("GET", "https://x/y")
+        assert slept == [7.0]
+
+    def test_error_body_included_in_raised_message(self, monkeypatch):
+        resp = MagicMock(ok=False, status_code=403, reason="Forbidden")
+        resp.headers = {}
+        resp.text = '{"error":{"message":"Access denied. You do not have permission."}}'
+        monkeypatch.setattr(
+            "dlt_saga.pipelines.sharepoint.client.requests.request",
+            MagicMock(return_value=resp),
+        )
+
+        import requests
+
+        with pytest.raises(requests.HTTPError, match="Access denied"):
+            self._client()._request("GET", "https://x/y")
 
 
 class TestCsvParsing:

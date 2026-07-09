@@ -268,6 +268,7 @@ class HistorizeRunner:
             self.logger.error(
                 f"Historization failed for {self.pipeline_name}: {e}", exc_info=True
             )
+            self._record_failure(started_at, e)
             return {
                 "mode": "failed",
                 "snapshots_processed": 0,
@@ -277,6 +278,42 @@ class HistorizeRunner:
                 "status": "failed",
                 "error": str(e),
             }
+
+    def _record_failure(self, started_at: datetime, error: Exception) -> None:
+        """Write a ``status='failed'`` log entry so the failure shows in reports.
+
+        Without this a genuine run failure leaves no trace in
+        ``_saga_historize_log`` — ``saga report`` only ever sees ``completed``
+        rows, so failed historize runs are invisible. ``snapshot_value`` is NULL
+        so the entry never becomes a baseline (``get_pipeline_state`` filters on
+        ``status='completed' AND snapshot_value IS NOT NULL``). Best-effort: a
+        logging failure must not mask the original error, so this never raises.
+        """
+        try:
+            self.state_manager.ensure_log_table()
+            self.state_manager.write_log_entry(
+                HistorizeLogEntry(
+                    pipeline_name=self.pipeline_name,
+                    source_table=self.source_table_name,
+                    target_table=self.target_table_name,
+                    snapshot_value=None,
+                    new_or_changed_rows=0,
+                    deleted_rows=0,
+                    config_fingerprint=self.state_manager.compute_fingerprint(
+                        self.config
+                    ),
+                    is_full_reprocess=self.full_refresh,
+                    started_at=started_at,
+                    finished_at=datetime.now(timezone.utc),
+                    status="failed",
+                )
+            )
+        except Exception as log_exc:  # noqa: BLE001 — best-effort, never mask
+            self.logger.debug(
+                "Could not record historize failure for %s in the log: %s",
+                self.pipeline_name,
+                log_exc,
+            )
 
     def _execute_run(self, started_at: datetime, run_start: float) -> Dict[str, Any]:
         """Core historization logic: state check, mode selection, execution.

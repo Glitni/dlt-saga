@@ -114,15 +114,49 @@ def _resolve_via_namespace(adapter: str) -> Optional[str]:
 
 
 def _try_import(module_path: str, label: str) -> Optional[Type]:
-    """Try to import *module_path* and auto-discover the Pipeline class."""
+    """Try to import *module_path* and auto-discover the Pipeline class.
+
+    Returns ``None`` when the module genuinely doesn't exist (a typo or a
+    not-installed adapter — the caller should try the next resolution strategy)
+    or when it exists but defines no ``BasePipeline`` subclass.
+
+    Re-raises, however, when the module exists but one of *its own* imports
+    fails: that's a real missing-dependency (or broken-module) problem the user
+    must fix, not a resolution miss. Swallowing it makes a missing dependency
+    look identical to a typo'd adapter name — the failure resurfaces later as an
+    opaque "adapter could not be resolved" with the real cause lost.
+    """
     try:
         module = importlib.import_module(module_path)
+    except ModuleNotFoundError as e:
+        # The target module itself is absent (e.name is module_path or a prefix
+        # of it) → genuine resolution miss, try the next strategy. A *different*
+        # missing module is a transitive dependency of an adapter that does
+        # exist → surface it with the cause chained.
+        if e.name and (e.name == module_path or module_path.startswith(f"{e.name}.")):
+            logger.debug(f"[Registry] {label}: {module_path} not found – {e}")
+            return None
+        raise ImportError(
+            f"adapter module '{module_path}' exists but a dependency is missing: {e}"
+        ) from e
+    except ImportError as e:
+        # An ImportError that isn't a missing module (e.g. a failed
+        # 'from x import y' inside the adapter module) is a real error in code
+        # that does exist — surface it rather than masking it as "not found".
+        raise ImportError(
+            f"adapter module '{module_path}' could not be imported: {e}"
+        ) from e
+
+    try:
         cls = _find_pipeline_class(module)
-        logger.debug(f"[Registry] {label}: found {cls.__name__} in {module_path}")
-        return cls
     except (ImportError, AttributeError) as e:
-        logger.debug(f"[Registry] {label}: {module_path} failed – {e}")
+        # Module imported fine but has no single BasePipeline subclass — not a
+        # valid adapter module; let the caller try the next resolution strategy.
+        logger.debug(f"[Registry] {label}: {module_path} has no pipeline class – {e}")
         return None
+
+    logger.debug(f"[Registry] {label}: found {cls.__name__} in {module_path}")
+    return cls
 
 
 # ---------------------------------------------------------------------------

@@ -227,9 +227,12 @@ class DatabricksAuthProvider(AuthProvider):
 
     @contextmanager
     def impersonate(self, identity: str) -> Generator[None, None, None]:
-        raise NotImplementedError(
-            "DatabricksAuthProvider does not support impersonation. "
-            "Configure a service principal via 'client_id' / 'client_secret' "
-            "in profiles.yml (auth_mode: m2m) for production automation."
+        # Configuration problem, not a bug — raise AuthenticationError so the CLI
+        # shows a clean, actionable message instead of a raw traceback.
+        raise AuthenticationError(
+            "run_as (identity impersonation) is configured, but "
+            "DatabricksAuthProvider does not support it. Configure a service "
+            "principal via 'client_id' / 'client_secret' in profiles.yml "
+            "(auth_mode: m2m) for production automation, or remove run_as."
         )
         yield  # pragma: no cover
