@@ -486,6 +486,26 @@ class TestDateModeDedupPruning:
             == "2026-07-06T11.00.00"
         )
 
+    def test_partition_first_run_no_seed_scans_full_prefix_unpruned(self):
+        # First run (no cursor, no initial_value) with a partition pattern: the
+        # walk falls back to a full-prefix listing (all history), so the scan is
+        # unrestricted and the dedup read must not be pruned to the lookback.
+        p = self._p()
+        p.native_config.partition_prefix_pattern = (
+            "year={year}/month={month}/day={day}/"
+        )
+        p.state_manager.get_last_cursor.return_value = None
+        p.native_config.initial_value = None
+        p._discover_date_mode()
+
+        # Full prefix scanned with no start_offset.
+        call = p.storage_client.list_files.call_args
+        assert call.args[0] == "gs://bucket/prefix/"
+        assert call.kwargs["start_offset"] is None
+        # Dedup read not pruned.
+        _, kwargs = p.state_manager.get_loaded_uri_generations.call_args
+        assert kwargs["cursor_min"] is None
+
 
 @pytest.mark.unit
 class TestLoadFilesChunking:
@@ -827,24 +847,18 @@ class TestResolveTargetLocation:
 class TestPartitionPrefixWalk:
     """Phase 11 — partition_prefix_pattern generates per-partition URIs."""
 
-    def test_build_partition_uris_no_cursor_returns_today(self):
-        from datetime import date
-
+    def test_build_partition_uris_no_seed_returns_full_listing(self):
         p = _make_pipeline()
         p.native_config.partition_prefix_pattern = (
             "year={year}/month={month}/day={day}/"
         )
         p.native_config.date_lookback_days = 0
         p.native_config.source_uri = "gs://bucket/prefix/"
-        # No last_cursor → starts from today only
+        p.native_config.initial_value = None
+        # No cursor and no initial_value → scan the full prefix (all history),
+        # not just today's partition.
         uris = p._build_partition_uris(None, "%Y%m%d")
-        assert len(uris) == 1
-        uri, offset = uris[0]
-        today = date.today()
-        assert f"year={today.year:04d}" in uri
-        assert f"month={today.month:02d}" in uri
-        assert f"day={today.day:02d}" in uri
-        assert offset is None
+        assert uris == [("gs://bucket/prefix/", None)]
 
     def test_build_partition_uris_with_lookback(self):
         p = _make_pipeline()
@@ -862,13 +876,17 @@ class TestPartitionPrefixWalk:
         assert any("2026/month=05/day=02" in u for u in uri_strings)
 
     def test_hour_token_expands_to_24_per_day(self):
+        from datetime import datetime, timezone
+
         p = _make_pipeline()
         p.native_config.partition_prefix_pattern = (
             "year={year}/month={month}/day={day}/hour={hour}/"
         )
         p.native_config.date_lookback_days = 0
         p.native_config.source_uri = "gs://bucket/prefix/"
-        uris = p._build_partition_uris(None, "%Y%m%d")
+        # Seed today so the walk covers exactly one day → 24 hourly partitions.
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        uris = p._build_partition_uris(today, "%Y%m%d")
         # One day, 24 hours
         assert len(uris) == 24
         hours = [u.split("hour=")[-1].rstrip("/") for u, _ in uris]
@@ -950,9 +968,9 @@ class TestInitialValueSeedsFirstRun:
         # Only 3 partitions (2 days ago, yesterday, today) — not back to 2020.
         assert len(uris) == 3
 
-    def test_no_seed_falls_back_to_today(self):
-        """When neither last_cursor nor initial_value is set, first-run behavior
-        is unchanged (today only)."""
+    def test_no_seed_scans_full_prefix(self):
+        """When neither last_cursor nor initial_value is set, the walk falls
+        back to a full-prefix listing so all history loads (not just today)."""
         p = _make_pipeline()
         p.native_config.partition_prefix_pattern = (
             "year={year}/month={month}/day={day}/"
@@ -962,7 +980,7 @@ class TestInitialValueSeedsFirstRun:
         p.native_config.initial_value = None
 
         uris = p._build_partition_uris(None, "%Y%m%d")
-        assert len(uris) == 1
+        assert uris == [("gs://bucket/prefix/", None)]
 
     def test_gcs_start_offset_uses_initial_value(self):
         """Without partition_prefix_pattern, initial_value drives the GCS

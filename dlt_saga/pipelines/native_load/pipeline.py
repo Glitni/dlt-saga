@@ -346,9 +346,13 @@ class NativeLoadPipeline(BasePipeline):
         # older than the window on every run.
         if self._incremental and self.native_config.partition_prefix_pattern:
             # Partition-pruned listing: one list_files call per date partition,
-            # bounded to [cursor - lookback, today].
+            # bounded to [cursor - lookback, today]. With no cursor and no
+            # initial_value (first run) there is no lower bound to walk from, so
+            # _build_partition_uris falls back to a full prefix listing (all
+            # history) — the scan is then unrestricted and the dedup set must
+            # not be pruned.
             uris_to_scan = self._build_partition_uris(last_cursor_str, cursor_fmt)  # type: ignore[arg-type]
-            scan_restricted = True
+            scan_restricted = bool(last_cursor_str or self.native_config.initial_value)
         elif self._incremental:
             start_offset = self._compute_gcs_start_offset(last_cursor_str, cursor_fmt)  # type: ignore[arg-type]
             uris_to_scan = [(self.native_config.source_uri, start_offset)]
@@ -452,25 +456,30 @@ class NativeLoadPipeline(BasePipeline):
         formats them through partition_prefix_pattern. Tokens: {year}, {month},
         {day}, {hour}. When {hour} is present, all 24 hours are emitted per day.
 
-        On the first run the effective cursor is ``initial_value`` (if set),
-        otherwise the start date falls back to today. Partitions that don't
-        exist in the bucket walk produce no files — extra dates are harmless,
-        just slower.
+        On the first run the effective cursor is ``initial_value`` (if set).
+        With no cursor and no ``initial_value`` there is no lower bound to walk
+        from — walking from today would silently skip every historical
+        partition, so this returns a single full-prefix listing to load all
+        history instead. Partitions that don't exist in the bucket walk produce
+        no files — extra dates are harmless, just slower.
         """
         pattern = self.native_config.partition_prefix_pattern
         source_uri = self.native_config.source_uri
         today = datetime.now(timezone.utc).date()
         seed = self._effective_first_run_cursor(last_cursor_str)
 
-        if seed:
-            try:
-                seed_dt = datetime.strptime(seed, cursor_fmt)
-                start_date = (
-                    seed_dt - timedelta(days=self.native_config.date_lookback_days)
-                ).date()
-            except Exception:
-                start_date = today
-        else:
+        if not seed:
+            # First run, no cursor and no initial_value: scan the full prefix so
+            # all history is loaded rather than only today's partition. The
+            # caller marks this scan unrestricted so the dedup set isn't pruned.
+            return [(source_uri, None)]
+
+        try:
+            seed_dt = datetime.strptime(seed, cursor_fmt)
+            start_date = (
+                seed_dt - timedelta(days=self.native_config.date_lookback_days)
+            ).date()
+        except Exception:
             start_date = today
 
         results = []
