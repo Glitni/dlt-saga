@@ -165,6 +165,17 @@ def _build_html(json_data: str, css: str, js: str, favicon_svg: str) -> str:
     import base64
 
     favicon_b64 = base64.b64encode(favicon_svg.encode("utf-8")).decode("ascii")
+
+    # Escape characters that would let a string value in the embedded JSON break
+    # out of the <script> block (e.g. an error message containing "</script>").
+    # These only occur inside JSON string literals, and \uXXXX is valid there, so
+    # the payload stays parseable while "</script>" can no longer close the tag.
+    json_data = (
+        json_data.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>

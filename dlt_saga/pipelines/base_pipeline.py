@@ -735,6 +735,12 @@ class BasePipeline:
             # Process all resources
             for resource, description in self.extract_data():
                 if not all_load_info:  # First iteration
+                    # NB: for lazy resources (generators/dlt sources) extract_data()
+                    # returns before any data is read, so this marks resource
+                    # *construction*, not the actual source read — which happens
+                    # inside _process_resource_data below and is counted as load.
+                    # "extraction_duration" is therefore a lower bound for such
+                    # sources; eager sources (e.g. Arrow tables) measure fully.
                     extraction_end = time.time()
                     load_start = extraction_end
 

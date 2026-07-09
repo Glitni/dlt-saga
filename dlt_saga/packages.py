@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+from dlt_saga.utility.project_root import find_project_root
 from dlt_saga.utility.yaml_io import load_yaml
 
 logger = logging.getLogger(__name__)
@@ -186,19 +187,9 @@ def _register_package(entry: PackageEntry, project_root: Path) -> None:
     )
 
 
-def _find_project_root() -> Path:
-    """Find the project root by walking up from CWD.
-
-    Looks for ``saga_project.yml`` or ``packages.yml`` as markers.
-    Falls back to CWD if no marker found.
-    """
-    cwd = Path.cwd()
-    for directory in [cwd, *cwd.parents]:
-        if (directory / "saga_project.yml").exists():
-            return directory
-        if (directory / "packages.yml").exists():
-            return directory
-    return cwd
+# Shared with project_config via a dependency-free leaf module (avoids an import
+# cycle). Re-exported under the historical name for existing importers.
+_find_project_root = find_project_root
 
 
 def reset() -> None:

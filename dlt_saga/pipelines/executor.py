@@ -6,7 +6,7 @@ timing, error handling, and result enrichment.
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from dlt_saga.pipeline_config import PipelineConfig
@@ -30,7 +30,9 @@ def execute_pipeline(
         List of load info dictionaries with timing metadata
 
     Raises:
-        Exception: If pipeline execution fails
+        Exception: Propagates any error raised by pipeline construction or
+            ``pipeline.run()`` — this function adds timing but does not catch or
+            translate failures.
     """
     pipeline_class = get_pipeline_class(
         pipeline_config.pipeline_group,
@@ -44,9 +46,11 @@ def execute_pipeline(
             f"{log_prefix} Initializing {pipeline_config.pipeline_group} pipeline"
         )
 
-    # Start comprehensive timing
+    # Start comprehensive timing. Use tz-aware UTC for the wall-clock stamps so
+    # they're consistent with the timestamps recorded elsewhere (load info,
+    # historize log) rather than naive local time.
     pipeline_start_time = time.time()
-    pipeline_start_datetime = datetime.now()
+    pipeline_start_datetime = datetime.now(timezone.utc)
 
     # Prepare config dict with environment-aware fields
     config_dict = ConfigSource.prepare_for_execution(pipeline_config)
@@ -72,7 +76,7 @@ def execute_pipeline(
     for load_info in result:
         if isinstance(load_info, dict):
             load_info["pipeline_start_time"] = pipeline_start_datetime
-            load_info["pipeline_end_time"] = datetime.now()
+            load_info["pipeline_end_time"] = datetime.now(timezone.utc)
             load_info["total_pipeline_duration"] = total_duration
             load_info["initialization_duration"] = init_duration
             load_info["processing_duration"] = total_duration - init_duration

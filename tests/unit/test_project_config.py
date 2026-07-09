@@ -53,6 +53,20 @@ class TestGetProjectConfig:
         result = get_project_config()
         assert isinstance(result, SagaProjectConfig)
         assert result.config_source is None
+
+    def test_found_from_subdirectory(self, tmp_path, monkeypatch):
+        # Running saga from a subdirectory must still find the project root's
+        # saga_project.yml (walk up), not silently load empty defaults.
+        yml = tmp_path / "saga_project.yml"
+        yml.write_text("config_source:\n  type: file\n  path: configs\n")
+        subdir = tmp_path / "configs" / "api"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+
+        result = get_project_config()
+        assert result.config_source is not None
+        assert result.config_source.type == "file"
+        assert result.config_source.path == "configs"
         assert result.providers is None
         assert result.pipelines is None
 

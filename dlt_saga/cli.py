@@ -680,6 +680,26 @@ def _update_worker_status(
         )
 
 
+# Default for the CLI --workers option on ingest/historize/run. Kept here so the
+# worker-mode warning can tell an explicit override from the untouched default.
+_CLI_DEFAULT_WORKERS = 4
+
+
+def _warn_workers_ignored_in_worker_mode(workers: int) -> None:
+    """Warn when a non-default --workers is passed in worker mode.
+
+    In worker mode per-task concurrency is fixed by the execution plan
+    (``SAGA_WORKER_CONCURRENCY`` / ``saga_project.yml`` / the default), not the
+    CLI flag, so an explicit --workers would otherwise be silently ignored.
+    """
+    if workers != _CLI_DEFAULT_WORKERS:
+        logger.warning(
+            "--workers=%d has no effect in worker mode; per-task concurrency is "
+            "set by SAGA_WORKER_CONCURRENCY / saga_project.yml / the default.",
+            workers,
+        )
+
+
 def run_worker_mode(
     execution_id: Optional[str] = None,
     task_index: Optional[int] = None,
@@ -768,9 +788,9 @@ def _confirm_full_refresh(full_refresh: bool, in_cloud_run: bool, yes: bool = Fa
         """FULL REFRESH MODE
 %s
 This will permanently delete:
-"  - All destination tables (main + staging)
-"  - Pipeline state metadata
-"  - Load tracking information
+  - All destination tables (main + staging)
+  - Pipeline state metadata
+  - Load tracking information
 %s""",
         _sep,
         _sep,
@@ -1193,6 +1213,7 @@ def ingest(
             start_value_override=start_value_override,
             end_value_override=end_value_override,
         )
+        _warn_workers_ignored_in_worker_mode(workers)
         # Orchestrated runs always set SAGA_WORKER_COMMAND (authoritative); the
         # typed subcommand is the fallback for a manual `saga ingest` worker.
         run_worker_mode(worker_command=get_env("SAGA_WORKER_COMMAND") or "ingest")
@@ -1329,6 +1350,7 @@ def historize(
         # historize has no change-detection to override, so there is no `force`
         # (unlike ingest) — it keys on actual snapshot values, not a proxy mtime.
         setup_execution_context(profile_target, full_refresh=full_refresh)
+        _warn_workers_ignored_in_worker_mode(workers)
         # Orchestrated runs always set SAGA_WORKER_COMMAND (authoritative); the
         # typed subcommand is the fallback for a manual `saga historize` worker
         # (which previously fell through to ingest).
@@ -1667,6 +1689,7 @@ def run(
             start_value_override=start_value_override,
             end_value_override=end_value_override,
         )
+        _warn_workers_ignored_in_worker_mode(workers)
         # Orchestrated runs always set SAGA_WORKER_COMMAND (authoritative); the
         # typed subcommand is the fallback for a manual `saga run` worker.
         run_worker_mode(worker_command=get_env("SAGA_WORKER_COMMAND") or "run")
@@ -1767,7 +1790,11 @@ def report(
         ),
     ),
     days: int = typer.Option(
-        14, "--days", "-d", help="Number of days of run history to include"
+        14,
+        "--days",
+        "-d",
+        min=1,
+        help="Number of days of run history to include (must be >= 1)",
     ),
     open_browser: bool = typer.Option(
         True,
@@ -1871,7 +1898,10 @@ def report(
             if open_browser:
                 import webbrowser
 
-                webbrowser.open(f"file://{abs_path}")
+                # Path.as_uri() builds a valid file:// URI on every OS — an
+                # f-string produces a malformed one on Windows (backslashes, drive
+                # letter: "file://C:\reports\r.html").
+                webbrowser.open(Path(abs_path).as_uri())
 
         destination.close()
 
@@ -2171,7 +2201,8 @@ def new_adapter(
         None,
         "--kind",
         "-k",
-        help="Template: 'generic' (BasePipeline) or 'api' (BaseApiPipeline). "
+        help="Template: 'generic' (BasePipeline), 'api' (BaseApiPipeline), or "
+        "'api-date-window' (DateWindowApiPipeline). "
         "Prompted if omitted (default: generic).",
     ),
     pkg_dir: str = typer.Option(

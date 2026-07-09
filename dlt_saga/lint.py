@@ -233,11 +233,11 @@ def collect_targets(include_all: bool = False) -> List[AdapterTarget]:
     returned — built-in and installed third-party adapters can't be changed by
     the user. Pass ``include_all=True`` to lint everything.
     """
-    from dlt_saga.packages import _find_project_root
     from dlt_saga.pipelines.registry import discover_implementations
     from dlt_saga.utility.generate_schemas import config_class_for_adapter
+    from dlt_saga.utility.project_root import find_project_root
 
-    project_root = _find_project_root()
+    project_root = find_project_root()
     targets: List[AdapterTarget] = []
     for impl in discover_implementations():
         adapter = impl["adapter"]

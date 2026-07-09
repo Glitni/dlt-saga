@@ -7,9 +7,9 @@ providers configuration, and pipeline settings.
 import logging
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from dlt_saga.utility.project_root import find_project_root
 from dlt_saga.utility.yaml_io import load_yaml
 
 logger = logging.getLogger(__name__)
@@ -437,7 +437,10 @@ def get_project_config() -> SagaProjectConfig:
     if _project_config is not None:
         return _project_config
 
-    project_path = Path("saga_project.yml")
+    # Resolve saga_project.yml by walking up from the cwd (same marker search as
+    # package loading), so running saga from a subdirectory still finds the
+    # project defaults instead of silently loading empty ones.
+    project_path = find_project_root() / "saga_project.yml"
     if not project_path.exists():
         _project_config = SagaProjectConfig()
         return _project_config
