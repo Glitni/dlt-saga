@@ -531,7 +531,15 @@
       let va = getVal(a, sortCol), vb = getVal(b, sortCol);
       if (va == null) va = '';
       if (vb == null) vb = '';
-      if (typeof va === 'string') { va = va.toLowerCase(); vb = (vb || '').toLowerCase(); }
+      // Numeric columns (rows, durations) carry nulls for failed/skipped runs;
+      // compare as numbers only when both sides are numbers, and never call a
+      // string method on a number (a mixed number/'' pair used to throw and
+      // abort the whole sort — e.g. Duration).
+      if (typeof va === 'number' && typeof vb === 'number') {
+        return sortAsc ? va - vb : vb - va;
+      }
+      va = String(va).toLowerCase();
+      vb = String(vb).toLowerCase();
       return sortAsc ? (va > vb ? 1 : va < vb ? -1 : 0) : (va < vb ? 1 : va > vb ? -1 : 0);
     });
   }
@@ -1583,62 +1591,79 @@
     summarySection.appendChild(orchPaginationWrap);
     panel.appendChild(summarySection);
 
+    function execStatus(e) {
+      return e.failed > 0 ? 'failed' : e.running > 0 ? 'running' : e.pending > 0 ? 'pending' : 'completed';
+    }
+
+    const cols = [
+      { key: 'execution_id', label: 'Execution ID', fixed: true,
+        render: e => '<span class="exec-link" data-exec-id="' + escHtml(e.execution_id) +
+          '" style="color:var(--accent-light);cursor:pointer;font-weight:600"><code>' +
+          escHtml(e.execution_id.substring(0, 8)) + '</code></span>' },
+      { key: 'type', label: 'Type', render: e => {
+        const isLocal = execIsLocal(e);
+        return '<span class="badge ' + (isLocal ? 'badge-neutral' : 'badge-info') + '">' +
+          (isLocal ? 'local' : 'orchestrated') + '</span>';
+      } },
+      { key: 'time', label: 'Time', render: e => fmtDate(e.meta ? e.meta.created_at : e.timestamp) },
+      { key: 'command', label: 'Command', render: e => e.meta ? escHtml(e.meta.command) : '-' },
+      { key: 'select', label: 'Select', render: e => e.meta && e.meta.select_criteria
+        ? '<code>' + escHtml(e.meta.select_criteria) + '</code>'
+        : '<span style="color:var(--text-muted)">all</span>' },
+      { key: 'total', label: 'Tasks', render: e => String(e.total) },
+      { key: 'completed', label: 'Completed', render: e => String(e.completed) },
+      { key: 'failed', label: 'Failed', render: e => e.failed > 0
+        ? '<strong style="color:var(--danger)">' + e.failed + '</strong>' : '0' },
+      { key: 'duration', label: 'Duration', render: e => fmtDuration(e.duration) },
+      { key: 'status', label: 'Status', render: e => statusBadge(execStatus(e)) },
+    ];
+    const hidden = loadHiddenCols('saga-cols-orchestration');
+    filters.appendChild(columnMenu('saga-cols-orchestration', cols, hidden, () => drawSummary()));
+
+    let sortCol = 'time', sortAsc = false;
     let orchPage = 0;
 
-    function drawSummary() {
+    function drawSummary(clickedCol) {
+      if (clickedCol) {
+        if (sortCol === clickedCol) sortAsc = !sortAsc;
+        else { sortCol = clickedCol; sortAsc = true; }
+        orchPage = 0;
+      }
       const filter = statusSelect.value;
       const commandFilter = commandSelect.value;
       const criteriaFilter = criteriaSelect.value;
       const typeFilter = typeSelect.value;
       const dateFilter = orchDateInput.value;
-      let filtered = execList;
+      let filtered = execList.slice();
       if (filter === 'failed') filtered = filtered.filter(e => e.failed > 0);
       if (filter === 'clean') filtered = filtered.filter(e => e.failed === 0);
       if (typeFilter === 'local') filtered = filtered.filter(e => execIsLocal(e));
       if (typeFilter === 'orchestrated') filtered = filtered.filter(e => !execIsLocal(e));
-      if (commandFilter) {
-        filtered = filtered.filter(e =>
-          e.meta && e.meta.command === commandFilter
-        );
-      }
-      if (criteriaFilter) {
-        filtered = filtered.filter(e =>
-          e.meta && e.meta.select_criteria === criteriaFilter
-        );
-      }
+      if (commandFilter) filtered = filtered.filter(e => e.meta && e.meta.command === commandFilter);
+      if (criteriaFilter) filtered = filtered.filter(e => e.meta && e.meta.select_criteria === criteriaFilter);
       if (dateFilter) {
-        filtered = filtered.filter(e => {
-          const ts = e.meta ? e.meta.created_at : e.timestamp;
-          return matchesDate(ts, dateFilter);
-        });
+        filtered = filtered.filter(e => matchesDate(e.meta ? e.meta.created_at : e.timestamp, dateFilter));
       }
 
-      const cols = ['Execution ID', 'Type', 'Time', 'Command', 'Select', 'Tasks', 'Completed', 'Failed', 'Duration', 'Status'];
-      let html = '<table><tr>';
-      cols.forEach(c => { html += '<th>' + c + '</th>'; });
-      html += '</tr>';
-      if (!filtered.length) {
-        html += '<tr><td colspan="' + cols.length + '"><div class="empty-state"><h3>No executions match</h3></div></td></tr>';
-      }
-      paginateRows(filtered, orchPage).forEach(e => {
-        const shortId = e.execution_id.substring(0, 8);
-        const status = e.failed > 0 ? 'failed' : e.running > 0 ? 'running' : e.pending > 0 ? 'pending' : 'completed';
-        const m = e.meta;
-        const isLocal = execIsLocal(e);
-        html += '<tr>';
-        html += '<td><span class="exec-link" data-exec-id="' + escHtml(e.execution_id) + '" style="color:var(--accent-light);cursor:pointer;font-weight:600"><code>' + escHtml(shortId) + '</code></span></td>';
-        html += '<td><span class="badge ' + (isLocal ? 'badge-neutral' : 'badge-info') + '">' + (isLocal ? 'local' : 'orchestrated') + '</span></td>';
-        html += '<td>' + fmtDate(m ? m.created_at : e.timestamp) + '</td>';
-        html += '<td>' + (m ? escHtml(m.command) : '-') + '</td>';
-        html += '<td>' + (m && m.select_criteria ? '<code>' + escHtml(m.select_criteria) + '</code>' : '<span style="color:var(--text-muted)">all</span>') + '</td>';
-        html += '<td>' + e.total + '</td>';
-        html += '<td>' + e.completed + '</td>';
-        html += '<td>' + (e.failed > 0 ? '<strong style="color:var(--danger)">' + e.failed + '</strong>' : '0') + '</td>';
-        html += '<td>' + fmtDuration(e.duration) + '</td>';
-        html += '<td>' + statusBadge(status) + '</td></tr>';
+      genericSort(filtered, sortCol, sortAsc, (e, col) => {
+        switch (col) {
+          case 'execution_id': return e.execution_id;
+          case 'type': return execIsLocal(e) ? 'local' : 'orchestrated';
+          case 'time': return (e.meta ? e.meta.created_at : e.timestamp) || '';
+          case 'command': return e.meta ? e.meta.command : '';
+          case 'select': return e.meta ? e.meta.select_criteria : '';
+          case 'total': return e.total;
+          case 'completed': return e.completed;
+          case 'failed': return e.failed;
+          case 'duration': return e.duration;
+          case 'status': return execStatus(e);
+          default: return '';
+        }
       });
-      html += '</table>';
-      summaryTable.innerHTML = html;
+
+      summaryTable.innerHTML = buildTable(cols, hidden, paginateRows(filtered, orchPage),
+        sortCol, sortAsc, '<div class="empty-state"><h3>No executions match</h3></div>');
+      attachSortHandlers(summaryTable, drawSummary);
       renderPagination(orchPaginationWrap, orchPage, filtered.length, p => { orchPage = p; drawSummary(); });
       updateClearButton(orchClearBtn, orchFilterInputs);
     }
