@@ -105,8 +105,11 @@ class TargetConfig:
     destination_type: str = field(
         default="bigquery",
         metadata={
-            "description": "Destination type (currently only BigQuery is supported)",
-            "enum": ["bigquery"],
+            "description": (
+                "Destination type. Usually inherited from the active profile; "
+                "override per pipeline only when it differs."
+            ),
+            "enum": ["bigquery", "databricks", "duckdb"],
         },
     )
 
@@ -137,8 +140,13 @@ class TargetConfig:
     table_format: str = field(
         default="native",
         metadata={
-            "description": "Table format for BigQuery: 'native' for standard BigQuery tables, 'iceberg' for BigLake Iceberg tables",
-            "enum": ["native", "iceberg"],
+            "description": (
+                "Table format. BigQuery: 'native' (standard) or 'iceberg' "
+                "(BigLake, requires storage_path). Databricks: 'native'/'delta' "
+                "(equivalent), 'iceberg', or 'delta_uniform'. Valid values are "
+                "destination-specific."
+            ),
+            "enum": ["native", "iceberg", "delta", "delta_uniform"],
         },
     )
 
@@ -351,7 +359,8 @@ class TargetConfig:
         metadata={
             "description": (
                 "dbt-style toggle controlling whether declared table/column docs "
-                "are written to the destination. Both sub-keys default to true."
+                "are written to the destination. 'table' defaults to true; "
+                "'columns' defaults to false (per-column writes are O(columns))."
             )
         },
     )
@@ -407,7 +416,7 @@ class TargetConfig:
 
     def _validate_destination_type(self):
         """Validate destination_type is supported."""
-        valid_destinations = ["bigquery"]
+        valid_destinations = ["bigquery", "databricks", "duckdb"]
         if self.destination_type not in valid_destinations:
             raise ValueError(
                 f"destination_type must be one of {valid_destinations}, got '{self.destination_type}'"

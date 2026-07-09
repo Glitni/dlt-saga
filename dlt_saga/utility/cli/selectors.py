@@ -115,6 +115,13 @@ class PipelineSelector:
                 else:
                     matched = self._select_single(selector)
 
+                # Surface selectors that match nothing (dbt does the same) so a
+                # typo'd tag/group/name doesn't silently narrow the run to zero.
+                if not matched:
+                    logger.warning(
+                        "Selector '%s' did not match any pipelines.", selector
+                    )
+
                 # Add to dict using identifier as key for deduplication
                 for config in matched:
                     selected_dict[config.identifier] = config
