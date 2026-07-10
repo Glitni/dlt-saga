@@ -565,8 +565,8 @@ class TestGetExecutionPlanSchema:
                 with patch.dict(os.environ, env_vars, clear=True):
                     assert get_execution_plan_schema() == expected
 
-    def test_explicit_schema_overrides_default(self):
-        """orchestration.schema in saga_project.yml takes precedence."""
+    def test_explicit_schema_used_in_prod(self):
+        """orchestration.schema in saga_project.yml is honored in prod."""
         from dlt_saga.project_config import OrchestrationConfig
 
         config = OrchestrationConfig(schema="custom_orchestration")
@@ -574,9 +574,26 @@ class TestGetExecutionPlanSchema:
             "dlt_saga.project_config.get_orchestration_config",
             return_value=config,
         ):
-            # Even in dev, the explicit schema wins
-            with patch("dlt_saga.utility.naming.is_production", return_value=False):
+            with patch("dlt_saga.utility.naming.is_production", return_value=True):
                 assert get_execution_plan_schema() == "custom_orchestration"
+
+    def test_explicit_schema_ignored_in_dev(self):
+        """orchestration.* is prod-only: in dev, execution-plan tables stay in the
+        developer's schema and never adopt orchestration.schema (which would
+        collide every developer's local runs in one shared dataset)."""
+        from dlt_saga.project_config import OrchestrationConfig
+
+        config = OrchestrationConfig(schema="dlt_orchestration")
+        with patch(
+            "dlt_saga.project_config.get_orchestration_config",
+            return_value=config,
+        ):
+            with patch("dlt_saga.utility.naming.is_production", return_value=False):
+                with patch(
+                    "dlt_saga.utility.naming.get_dev_schema",
+                    return_value="dbt_grindheim",
+                ):
+                    assert get_execution_plan_schema() == "dbt_grindheim"
 
 
 @pytest.mark.unit

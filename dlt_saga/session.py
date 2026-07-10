@@ -372,7 +372,7 @@ class Session:
         """
         from dlt_saga.project_config import get_orchestration_config
         from dlt_saga.utility.cli.context import get_execution_context
-        from dlt_saga.utility.naming import get_execution_plan_schema
+        from dlt_saga.utility.naming import get_execution_plan_schema, is_production
 
         orchestration_config = get_orchestration_config()
         if not orchestration_config.schema_access:
@@ -380,6 +380,14 @@ class Session:
                 "No orchestration.schema_access configured; "
                 "skipping orchestration schema access sync"
             )
+            return
+
+        # orchestration.* is prod-only infrastructure. In dev the execution-plan
+        # tables live in the developer's own schema; applying these (prod service
+        # account) grants there would be wrong. Matches the per-pipeline access
+        # sync, which is likewise prod-only.
+        if not is_production():
+            logger.debug("orchestration.schema_access is prod-only; skipping in dev")
             return
 
         context = get_execution_context()

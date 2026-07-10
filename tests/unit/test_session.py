@@ -708,6 +708,7 @@ class TestApplyOrchestrationAccess:
                 "dlt_saga.project_config.get_orchestration_config",
                 return_value=OrchestrationConfig(schema_access=access),
             ),
+            patch("dlt_saga.utility.naming.is_production", return_value=True),
             patch("dlt_saga.utility.cli.context.get_execution_context") as mock_ctx,
             patch(
                 "dlt_saga.destinations.bigquery.base.BigQueryBaseDestination._sync_dataset_and_access_static"
@@ -719,6 +720,28 @@ class TestApplyOrchestrationAccess:
 
         mock_sync.assert_not_called()
         assert any("does not support" in r.message for r in caplog.records)
+
+    def test_skips_in_dev_even_when_configured(self, caplog):
+        """orchestration.schema_access is prod-only: in dev it never touches the
+        developer's schema, regardless of destination or config."""
+        from dlt_saga.project_config import OrchestrationConfig
+
+        access = ["READER:serviceAccount:airflow@example.iam.gserviceaccount.com"]
+        with (
+            patch(
+                "dlt_saga.project_config.get_orchestration_config",
+                return_value=OrchestrationConfig(schema_access=access),
+            ),
+            patch("dlt_saga.utility.naming.is_production", return_value=False),
+            patch("dlt_saga.utility.cli.context.get_execution_context") as mock_ctx,
+            patch(
+                "dlt_saga.destinations.bigquery.base.BigQueryBaseDestination._sync_dataset_and_access_static"
+            ) as mock_sync,
+        ):
+            mock_ctx.return_value.get_destination_type.return_value = "bigquery"
+            Session._apply_orchestration_access()
+
+        mock_sync.assert_not_called()
 
     def test_applies_access_when_set_and_destination_is_bigquery(self):
         from dlt_saga.project_config import OrchestrationConfig
@@ -732,6 +755,7 @@ class TestApplyOrchestrationAccess:
                 "dlt_saga.project_config.get_orchestration_config",
                 return_value=OrchestrationConfig(schema_access=access),
             ),
+            patch("dlt_saga.utility.naming.is_production", return_value=True),
             patch("dlt_saga.utility.cli.context.get_execution_context") as mock_ctx,
             patch(
                 "dlt_saga.utility.naming.get_execution_plan_schema",
@@ -763,6 +787,7 @@ class TestApplyOrchestrationAccess:
                 "dlt_saga.project_config.get_orchestration_config",
                 return_value=OrchestrationConfig(schema_access=access),
             ),
+            patch("dlt_saga.utility.naming.is_production", return_value=True),
             patch("dlt_saga.utility.cli.context.get_execution_context") as mock_ctx,
             patch(
                 "dlt_saga.destinations.bigquery.base.BigQueryBaseDestination._sync_dataset_and_access_static"
