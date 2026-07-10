@@ -74,8 +74,8 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
 - Scaffold new adapters with `saga new adapter <name>` (`new_adapter_command.py`) — generates a convention-following config.py + pipeline.py + starter config and registers the package in `packages.yml` (default dir `./pipelines`, namespace `local`)
 
 **Granular Timing Tracking**
-- Tracks: initialization, extraction, load, finalization phases
-- Reports timing in format: `68.3s total (init: 0.2s, extract: 25.7s, load: 32.4s, finalize: 10.0s)`
+- Tracks: setup (constructor + destination/dlt orchestration overhead), extraction, normalize, load, finalization phases
+- Reports timing in format: `68.3s total (setup: 15.2s, extract: 25.7s, normalize: 10.2s, load: 32.4s, finalize: 10.0s)`. `extract`/`normalize`/`load` are dlt trace phase timings (subsets of wall-clock); `setup` is the reconciling remainder (constructor + destination client auth, dataset creation, dlt state sync, staging) so the breakdown sums to total.
 
 ## Currently Implemented
 
