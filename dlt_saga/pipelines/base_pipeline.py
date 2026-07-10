@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import dlt
 
 from dlt_saga.destinations.factory import DestinationFactory
-from dlt_saga.pipelines.target.config import TargetConfig
+from dlt_saga.pipelines.target.config import MergeStrategy, TargetConfig
 from dlt_saga.pipelines.target.writer import TargetWriter
 from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
 
@@ -403,14 +403,17 @@ class BasePipeline:
         return extraction_ts
 
     def _inject_ingested_at(self, resource: Any) -> Any:
-        """Inject _dlt_ingested_at column for append- and replace-mode pipelines.
+        """Inject _dlt_ingested_at column for append-, replace-, and merge-mode pipelines.
 
         Adds a timestamp column to enable historization and efficient querying.
-        Injected for both ``append`` and ``replace`` (each ``replace`` run
-        overwrites the table with a single snapshot stamped at run time), but
-        not for ``merge``/``scd2`` — dlt manages its own columns there and an
-        injected timestamp would trigger false change detection. Value
-        resolution (priority order):
+        Injected for ``append`` and ``replace`` (each ``replace`` run overwrites
+        the table with a single snapshot stamped at run time), and for plain
+        ``merge`` — an upsert by key with no content comparison, so each row
+        touched this run carries the run timestamp and untouched keys keep their
+        prior value (i.e. a last-upserted-per-key stamp). Excluded only for
+        ``scd2``: it hashes row content to decide whether to open a new version,
+        so an ever-changing timestamp would spawn a spurious version every run.
+        Value resolution (priority order):
 
         1. Regex extraction from file path: When snapshot_date_regex +
            snapshot_date_format are configured, extracts date from
@@ -421,12 +424,18 @@ class BasePipeline:
 
         Auto-clusters by _dlt_ingested_at only for ``append`` when no explicit
         cluster_columns are configured. A ``replace`` table holds one snapshot
-        with a single ~constant timestamp, so clustering by it is useless.
+        with a single ~constant timestamp, and a ``merge`` table's stamps are
+        scattered per key, so clustering by it is useless for both.
         """
         base_disposition = self.target_writer.config.write_disposition.replace(
             "+historize", ""
         )
-        if base_disposition not in ("append", "replace"):
+        # scd2 versions by row-content hash, so a per-run timestamp column would
+        # open a spurious version every run — never inject there. Plain merge
+        # (bare/delete-insert/upsert/insert-only) is upsert-by-key with no content
+        # comparison, so the stamp is safe and gives last-upserted-per-key.
+        is_scd2 = self.target_writer.config.merge_strategy == MergeStrategy.SCD2
+        if base_disposition not in ("append", "replace", "merge") or is_scd2:
             return resource
 
         import re

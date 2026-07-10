@@ -3,12 +3,17 @@
 Regression guard for replace+historize: the snapshot column (_dlt_ingested_at,
 the historize default) must be stamped at ingest time for `replace` too, not
 just `append` — otherwise historization fails with "Unrecognized name:
-_dlt_ingested_at". merge/scd2 stays excluded (dlt manages its own columns).
+_dlt_ingested_at". Plain `merge` (bare/delete-insert/upsert/insert-only) is also
+stamped — upsert by key has no content comparison, so the timestamp is a safe
+last-upserted-per-key marker. Only `scd2` stays excluded: it versions by
+row-content hash, so a per-run timestamp would open a spurious version each run.
 """
 
 from unittest.mock import MagicMock
 
 import pytest
+
+from dlt_saga.pipelines.target.config import MergeStrategy
 
 
 class FakeResource:
@@ -27,7 +32,7 @@ class FakeResource:
         return row
 
 
-def _make_pipeline(write_disposition, *, supports_clustering=True):
+def _make_pipeline(write_disposition, *, merge_strategy=None, supports_clustering=True):
     """Construct a BasePipeline shell without running __init__."""
     from dlt_saga.pipelines.base_pipeline import BasePipeline
 
@@ -36,6 +41,7 @@ def _make_pipeline(write_disposition, *, supports_clustering=True):
 
     target_config = MagicMock()
     target_config.write_disposition = write_disposition
+    target_config.merge_strategy = merge_strategy
     target_config.cluster_columns = None
     pipeline.target_writer = MagicMock()
     pipeline.target_writer.config = target_config
@@ -49,9 +55,16 @@ def _make_pipeline(write_disposition, *, supports_clustering=True):
 class TestInjectIngestedAt:
     @pytest.mark.parametrize(
         "disposition",
-        ["append", "replace", "append+historize", "replace+historize"],
+        [
+            "append",
+            "replace",
+            "append+historize",
+            "replace+historize",
+            "merge",
+            "merge+historize",
+        ],
     )
-    def test_column_injected_for_append_and_replace(self, disposition):
+    def test_column_injected_for_append_replace_and_merge(self, disposition):
         pipeline = _make_pipeline(disposition)
         resource = FakeResource()
 
@@ -64,17 +77,49 @@ class TestInjectIngestedAt:
             f"{disposition!r} must stamp _dlt_ingested_at at ingest time"
         )
 
+    @pytest.mark.parametrize(
+        "strategy",
+        [
+            None,  # bare merge → dlt default (delete-insert)
+            MergeStrategy.DELETE_INSERT,
+            MergeStrategy.UPSERT,
+            MergeStrategy.INSERT_ONLY,
+        ],
+    )
+    def test_non_scd2_merge_strategies_inject(self, strategy):
+        # Every merge strategy except scd2 is upsert/insert-by-key with no content
+        # comparison, so the run timestamp is safe.
+        pipeline = _make_pipeline("merge", merge_strategy=strategy)
+        resource = FakeResource()
+
+        pipeline._inject_ingested_at(resource)
+
+        assert resource.maps, (
+            f"merge strategy {strategy!r} should stamp _dlt_ingested_at"
+        )
+        assert "_dlt_ingested_at" in resource.apply({"company_id": 1})
+
     @pytest.mark.parametrize("disposition", ["merge", "merge+historize"])
-    def test_column_not_injected_for_merge(self, disposition):
-        # merge/scd2: dlt manages its own columns; an injected timestamp would
-        # trigger false change detection.
-        pipeline = _make_pipeline(disposition)
+    def test_column_not_injected_for_scd2(self, disposition):
+        # scd2 versions by row-content hash; a per-run timestamp would open a
+        # spurious version every run.
+        pipeline = _make_pipeline(disposition, merge_strategy=MergeStrategy.SCD2)
         resource = FakeResource()
 
         result = pipeline._inject_ingested_at(resource)
 
         assert result is resource
-        assert resource.maps == [], f"{disposition!r} must not inject _dlt_ingested_at"
+        assert resource.maps == [], (
+            f"{disposition!r} scd2 must not inject _dlt_ingested_at"
+        )
+
+    @pytest.mark.parametrize("disposition", ["merge", "merge+historize"])
+    def test_merge_does_not_auto_cluster(self, disposition):
+        # A merge table's timestamps are scattered per key, not a single snapshot,
+        # so auto-clustering by _dlt_ingested_at (append-only) must not fire.
+        pipeline = _make_pipeline(disposition)
+        pipeline._inject_ingested_at(FakeResource())
+        assert pipeline.target_writer.config.cluster_columns is None
 
     def test_append_auto_clusters_by_ingested_at(self):
         pipeline = _make_pipeline("append")
