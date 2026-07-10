@@ -133,7 +133,7 @@ Methods prefixed with `_` are internal implementation details. They may
 change between versions. Key ones:
 
 - `_create_pipeline()` — creates the dlt pipeline
-- `_inject_ingested_at(resource)` — adds `_dlt_ingested_at` for append pipelines
+- `_inject_ingested_at(resource)` — adds `_dlt_ingested_at` for append, replace, and plain merge pipelines (excluded only for `scd2`)
 - `_apply_row_limit(resource)` — applies dev row limit
 - `_process_resource_data(resource, description)` — processes a single resource through the load pipeline
 - `_build_destination_hints(description)` — builds partitioning/clustering hints
