@@ -89,6 +89,19 @@ class TestPipelineSelector:
             PipelineSelector(sample_configs).select(["group:google_sheets"])
         assert not any(r.levelno == logging.WARNING for r in caplog.records)
 
+    def test_warn_on_no_match_false_suppresses_warning(self, sample_configs, caplog):
+        """The disabled-config probe passes warn_on_no_match=False: a non-match
+        against that subset is expected and must not warn (it would otherwise
+        contradict a successful enabled match)."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dlt_saga.utility.cli.selectors"):
+            result = PipelineSelector(sample_configs).select(
+                ["tag:nonexistent"], warn_on_no_match=False
+            )
+        assert result == {}
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
     def test_union_space_separated(self, sample_configs):
         """Space-separated = UNION (OR)."""
         result = PipelineSelector(sample_configs).select(["tag:daily group:filesystem"])
@@ -201,3 +214,41 @@ class TestFormatConfigList:
             ]
         }
         assert "Total: 1 enabled pipeline" in format_config_list(single)
+
+
+@pytest.mark.unit
+class TestDiscoverAndSelectNoSpuriousWarning:
+    """Regression: a selector matching an enabled pipeline (but nothing in the
+    disabled set) must not emit 'did not match any pipelines' from the disabled
+    probe — the warning previously contradicted the run that followed."""
+
+    def _cfg(self, pipeline_name, group):
+        from unittest.mock import MagicMock
+
+        cfg = MagicMock()
+        cfg.pipeline_name = pipeline_name
+        cfg.pipeline_group = group
+        cfg.table_name = pipeline_name.split("__")[-1]
+        cfg.identifier = f"configs/{group}/{pipeline_name}.yml"
+        return cfg
+
+    def test_enabled_match_disabled_nonmatch_does_not_warn(self, caplog):
+        import logging
+        from unittest.mock import MagicMock, patch
+
+        from dlt_saga.utility.cli import common
+
+        enabled = {"api": [self._cfg("api__foo__ad_exchange_revenue", "api")]}
+        disabled = {"api": [self._cfg("api__foo__something_else", "api")]}
+
+        source = MagicMock()
+        source.discover.return_value = (enabled, disabled)
+
+        with (
+            patch.object(common, "get_config_source", return_value=source),
+            caplog.at_level(logging.WARNING, logger="dlt_saga.utility.cli.selectors"),
+        ):
+            selected, _ = common.discover_and_select_configs(["*ad_exchange_revenue"])
+
+        assert "api" in selected  # the enabled pipeline was selected and will run
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)

@@ -504,8 +504,11 @@ class Session:
         enabled_selector = PipelineSelector(all_enabled)
         selected = enabled_selector.select(select)
 
+        # The disabled set is only probed to report matches that are disabled;
+        # a non-match here is expected and must not warn (it would contradict a
+        # successful enabled match).
         disabled_selector = PipelineSelector(all_disabled)
-        selected_disabled = disabled_selector.select(select)
+        selected_disabled = disabled_selector.select(select, warn_on_no_match=False)
 
         return selected, selected_disabled
 
