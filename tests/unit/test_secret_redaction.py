@@ -155,6 +155,36 @@ class TestResolverRegistersSecrets:
         assert redaction_values() == ()
 
 
+@pytest.mark.unit
+class TestSecretStrRegistersOnUnwrap:
+    """SecretStr.get_secret_value registers the value for redaction.
+
+    Covers the gap the resolver leaves: a secret held as a hand-wrapped
+    SecretStr (never routed through a provider URI) must still be masked once
+    it is unwrapped and composed into a URL/log line.
+    """
+
+    def test_get_secret_value_registers_for_redaction(self):
+        from dlt_saga.utility.secrets.secret_str import SecretStr
+
+        secret = SecretStr("wrapped-brand-key")
+        # Not registered until unwrapped — masking a still-wrapped secret is the
+        # job of __str__/__repr__.
+        assert redaction_values() == ()
+
+        assert secret.get_secret_value() == "wrapped-brand-key"
+        assert (
+            redact("GET https://host/wrapped-brand-key/stats")
+            == f"GET https://host/{REDACTION_MASK}/stats"
+        )
+
+    def test_short_wrapped_value_not_registered(self):
+        from dlt_saga.utility.secrets.secret_str import SecretStr
+
+        assert SecretStr("ab").get_secret_value() == "ab"
+        assert redaction_values() == ()
+
+
 class _StaticProvider:
     """Minimal SecretsProvider returning a fixed value, for tests."""
 

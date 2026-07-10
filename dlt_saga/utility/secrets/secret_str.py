@@ -26,7 +26,18 @@ class SecretStr:
         self._value = value
 
     def get_secret_value(self) -> str:
-        """Return the actual secret value. Explicit call required."""
+        """Return the actual secret value. Explicit call required.
+
+        Registers the value for process-wide log/metadata redaction: this is the
+        one point where a wrapped secret becomes plaintext that can be composed
+        into a request URL, error message, or table description. Mirrors the
+        registration ``SecretResolver.resolve`` does for provider-backed secrets,
+        so a secret held only as a hand-wrapped ``SecretStr`` (never routed
+        through the resolver) is still masked wherever it leaks.
+        """
+        from dlt_saga.utility.secrets.redaction import register_secret
+
+        register_secret(self._value)
         return self._value
 
     def __repr__(self) -> str:
