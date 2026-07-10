@@ -78,7 +78,6 @@ class TestGetDevSchema:
         [
             ("dlt_john", "dlt_jane", "dlt_john"),  # context wins
             (None, "dlt_jane", "dlt_jane"),  # env var fallback
-            (None, None, "dlt_dev"),  # default
         ],
     )
     def test_dev_schema_priority(self, context_schema, env_schema, expected):
@@ -97,6 +96,17 @@ class TestGetDevSchema:
             ):
                 with patch.dict(os.environ, env_vars, clear=True):
                     assert get_dev_schema() == expected
+
+    def test_dev_schema_unresolved_raises(self):
+        """No profile schema and no SAGA_SCHEMA_NAME is a config error, not a
+        silent shared ``dlt_dev`` fallback."""
+        with patch(
+            "dlt_saga.utility.cli.context.get_execution_context",
+            side_effect=ImportError,
+        ):
+            with patch.dict(os.environ, {}, clear=True):
+                with pytest.raises(ValueError, match="No dev schema configured"):
+                    get_dev_schema()
 
 
 @pytest.mark.unit
@@ -163,9 +173,15 @@ class TestFileConfigSchemaName:
         custom_module.generate_schema_name = lambda path, env, default: "custom_schema"
 
         fpc = FilePipelineConfig()
-        with patch(
-            "dlt_saga.pipeline_config.file_config.load_naming_module",
-            return_value=custom_module,
+        with (
+            patch(
+                "dlt_saga.pipeline_config.file_config.load_naming_module",
+                return_value=custom_module,
+            ),
+            patch(
+                "dlt_saga.pipeline_config.file_config.get_dev_schema",
+                return_value="dlt_dev",
+            ),
         ):
             result = fpc.resolve_schema_name("configs/google_sheets/x.yml")
             assert result == "custom_schema"
@@ -506,9 +522,15 @@ class TestFilePipelineConfigLayerForwarding:
         custom.generate_schema_name = generate_schema_name
 
         fpc = FilePipelineConfig()
-        with patch(
-            "dlt_saga.pipeline_config.file_config.load_naming_module",
-            return_value=custom,
+        with (
+            patch(
+                "dlt_saga.pipeline_config.file_config.load_naming_module",
+                return_value=custom,
+            ),
+            patch(
+                "dlt_saga.pipeline_config.file_config.get_dev_schema",
+                return_value="dlt_dev",
+            ),
         ):
             assert (
                 fpc.resolve_schema_name(
@@ -549,7 +571,6 @@ class TestGetExecutionPlanSchema:
         [
             (True, None, "dlt_orchestration"),
             (False, "dlt_john", "dlt_john"),
-            (False, None, "dlt_dev"),
         ],
     )
     def test_execution_plan_schema_defaults(self, is_prod, env_schema, expected):
@@ -564,6 +585,24 @@ class TestGetExecutionPlanSchema:
             ):
                 with patch.dict(os.environ, env_vars, clear=True):
                     assert get_execution_plan_schema() == expected
+
+    def test_dev_without_resolvable_schema_raises(self):
+        """In dev with no profile schema and no SAGA_SCHEMA_NAME, the execution
+        plan schema can't silently share ``dlt_dev`` — it errors."""
+        from dlt_saga.project_config import OrchestrationConfig
+
+        with patch("dlt_saga.utility.naming.is_production", return_value=False):
+            with patch(
+                "dlt_saga.project_config.get_orchestration_config",
+                return_value=OrchestrationConfig(),
+            ):
+                with patch(
+                    "dlt_saga.utility.cli.context.get_execution_context",
+                    side_effect=ImportError,
+                ):
+                    with patch.dict(os.environ, {}, clear=True):
+                        with pytest.raises(ValueError, match="No dev schema"):
+                            get_execution_plan_schema()
 
     def test_explicit_schema_used_in_prod(self):
         """orchestration.schema in saga_project.yml is honored in prod."""

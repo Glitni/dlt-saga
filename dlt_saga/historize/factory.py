@@ -123,7 +123,11 @@ def _apply_naming_module_historize_overrides(
 
     context = get_execution_context()
     environment = context.get_environment() or "dev"
-    default_schema = context.get_schema() or get_dev_schema()
+    # Only resolve the dev schema in dev; in prod it's derived from segments and
+    # unused here, and a dev schema is legitimately unset (get_dev_schema raises).
+    default_schema = context.get_schema() or (
+        get_dev_schema() if environment != "prod" else ""
+    )
 
     if historize_config.output_schema is None and hasattr(
         module, "generate_schema_name"
