@@ -4,7 +4,18 @@ This module provides functions for formatting and summarizing pipeline
 execution results for display.
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+
+def _setup_remainder(total: float, *phase_durations: Optional[float]) -> float:
+    """Wall-clock time not attributed to any measured phase.
+
+    The passed phase numbers are dlt trace timings (plus saga's finalize), which
+    are subsets of the wall-clock `total`. This returns the leftover so the
+    breakdown reconciles to `total`. A missing phase counts as 0; the result is
+    floored at 0 to absorb sub-second skew between trace and wall-clock stamps.
+    """
+    return max(0.0, total - sum(d or 0.0 for d in phase_durations))
 
 
 def summarize_load_info(load_info_list: List[Dict[str, Any]]) -> str:
@@ -17,7 +28,7 @@ def summarize_load_info(load_info_list: List[Dict[str, Any]]) -> str:
         Formatted string summary of the load information
 
     Example output:
-        google_sheets__data → bigquery(dlt_dev): 1,234 rows (2 tables) in 68.3s total (init: 0.2s, extract: 25.7s, load: 32.4s, finalize: 10.0s)
+        google_sheets__data → bigquery(dlt_dev): 1,234 rows (2 tables) in 68.3s total (setup: 15.2s, extract: 25.7s, normalize: 10.2s, load: 32.4s, finalize: 10.0s)
           - google_sheets__data: 1,000 rows
           - google_sheets__metadata: 234 rows
     """
@@ -51,11 +62,31 @@ def summarize_load_info(load_info_list: List[Dict[str, Any]]) -> str:
             and extraction_duration is not None
             and normalize_duration is not None
         ):
-            # New format with actual dlt phase timings: 68.3s total (init: 0.2s, extract: 25.7s, normalize: 10.2s, load: 32.4s, finalize: 10.0s)
-            timing_info = f"{total_pipeline_duration:.1f}s total (init: {init_duration:.1f}s, extract: {extraction_duration:.1f}s, normalize: {normalize_duration:.1f}s, load: {load_duration:.1f}s, finalize: {finalize_duration:.1f}s)"
+            # `extract`/`normalize`/`load` are dlt's internal trace phase timings
+            # (not wall-clock), so they + finalize don't sum to the wall-clock
+            # total. `setup` is the reconciling remainder — everything not spent in
+            # a real work phase or finalize: the constructor plus destination client
+            # auth, dataset creation, dlt state sync + schema migration, and staging
+            # setup. Floored at 0 to absorb sub-second trace/wall skew.
+            setup_duration = _setup_remainder(
+                total_pipeline_duration,
+                extraction_duration,
+                normalize_duration,
+                load_duration,
+                finalize_duration,
+            )
+            # Example: 68.3s total (setup: 15.2s, extract: 25.7s, normalize: 10.2s, load: 32.4s, finalize: 10.0s)
+            timing_info = f"{total_pipeline_duration:.1f}s total (setup: {setup_duration:.1f}s, extract: {extraction_duration:.1f}s, normalize: {normalize_duration:.1f}s, load: {load_duration:.1f}s, finalize: {finalize_duration:.1f}s)"
         elif total_pipeline_duration is not None and extraction_duration is not None:
-            # Legacy format: 68.3s total (init: 0.2s, extract: 25.7s, load: 32.4s, finalize: 10.0s)
-            timing_info = f"{total_pipeline_duration:.1f}s total (init: {init_duration:.1f}s, extract: {extraction_duration:.1f}s, load: {load_duration:.1f}s, finalize: {finalize_duration:.1f}s)"
+            # Legacy format (no normalize timing). Same reconciling `setup` bucket.
+            setup_duration = _setup_remainder(
+                total_pipeline_duration,
+                extraction_duration,
+                load_duration,
+                finalize_duration,
+            )
+            # Example: 68.3s total (setup: 15.2s, extract: 25.7s, load: 32.4s, finalize: 10.0s)
+            timing_info = f"{total_pipeline_duration:.1f}s total (setup: {setup_duration:.1f}s, extract: {extraction_duration:.1f}s, load: {load_duration:.1f}s, finalize: {finalize_duration:.1f}s)"
         elif total_pipeline_duration is not None:
             # Fallback to old format if granular breakdown not available
             started_at = load_info.get("started_at")
