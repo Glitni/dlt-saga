@@ -167,21 +167,23 @@ def get_historized_table_name(base_table_name: str, suffix: str = "_historized")
 def get_execution_plan_schema() -> str:
     """Get schema name for execution plans.
 
-    Resolution order:
-    1. ``orchestration.schema`` in ``saga_project.yml`` (explicit override)
-    2. ``dlt_orchestration`` when environment is prod
-    3. Developer-specific schema (``SAGA_SCHEMA_NAME`` or ``dlt_dev``) in dev
+    The ``orchestration.*`` config is prod-only infrastructure (how remote
+    workers coordinate). Dev runs are always local — they touch the
+    execution-plan / executions tables only to record local run telemetry — so
+    they must stay in the developer's own schema and never read
+    ``orchestration.schema`` (which would collide every developer's runs in one
+    shared dataset).
+
+    Resolution:
+    - prod: ``orchestration.schema`` (explicit override) else ``dlt_orchestration``
+    - dev: the developer's schema (:func:`get_dev_schema`)
 
     Returns:
         Schema name for execution plans
     """
-    from dlt_saga.project_config import get_orchestration_config
-
-    config = get_orchestration_config()
-    if config.schema:
-        return config.schema
-
     if is_production():
-        return "dlt_orchestration"
-    else:
-        return get_dev_schema()
+        from dlt_saga.project_config import get_orchestration_config
+
+        return get_orchestration_config().schema or "dlt_orchestration"
+
+    return get_dev_schema()
