@@ -74,13 +74,19 @@ class PipelineSelector:
             self.flat_configs.extend(configs)
 
     def select(
-        self, selectors: Optional[List[str]] = None
+        self,
+        selectors: Optional[List[str]] = None,
+        warn_on_no_match: bool = True,
     ) -> Dict[str, List[PipelineConfig]]:
         """Apply selectors to filter configs.
 
         Args:
             selectors: List of selector strings (space-separated = UNION, comma-separated = INTERSECTION)
                       None or empty list returns all configs
+            warn_on_no_match: Emit a warning for selectors that match nothing.
+                      Set False when selecting against a subset (e.g. the
+                      disabled-config probe), where a non-match is expected and
+                      the warning would contradict a successful enabled match.
 
         Returns:
             Filtered configs organized by pipeline type
@@ -117,7 +123,7 @@ class PipelineSelector:
 
                 # Surface selectors that match nothing (dbt does the same) so a
                 # typo'd tag/group/name doesn't silently narrow the run to zero.
-                if not matched:
+                if not matched and warn_on_no_match:
                     logger.warning(
                         "Selector '%s' did not match any pipelines.", selector
                     )

@@ -192,8 +192,11 @@ def discover_and_select_configs(
     enabled_selector = PipelineSelector(all_enabled_configs)
     selected_configs = enabled_selector.select(select)
 
+    # The disabled set is only probed to report matches that are disabled; a
+    # non-match here is expected and must not warn (it would contradict a
+    # successful enabled match).
     disabled_selector = PipelineSelector(all_disabled_configs)
-    selected_disabled_configs = disabled_selector.select(select)
+    selected_disabled_configs = disabled_selector.select(select, warn_on_no_match=False)
 
     return selected_configs, selected_disabled_configs
 
