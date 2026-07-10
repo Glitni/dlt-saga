@@ -1625,6 +1625,20 @@
       { key: 'duration', label: 'Duration', render: e => fmtDuration(e.duration) },
       { key: 'status', label: 'Status', render: e => statusBadge(execStatus(e)) },
     ];
+    // Backfills are the exception, not the rule — only surface the window column
+    // when at least one execution in this report actually carried an override,
+    // so the common (non-backfill) case stays uncluttered.
+    const hasBackfill = execList.some(e =>
+      e.meta && (e.meta.start_value_override || e.meta.end_value_override));
+    if (hasBackfill) {
+      const selectIdx = cols.findIndex(c => c.key === 'select');
+      cols.splice(selectIdx + 1, 0, { key: 'backfill', label: 'Backfill window', render: e => {
+        const start = e.meta && e.meta.start_value_override;
+        const end = e.meta && e.meta.end_value_override;
+        if (!start && !end) return '<span style="color:var(--text-muted)">—</span>';
+        return '<code>' + escHtml(start || '…') + ' → ' + escHtml(end || '…') + '</code>';
+      } });
+    }
     const hidden = loadHiddenCols('saga-cols-orchestration');
     filters.appendChild(columnMenu('saga-cols-orchestration', cols, hidden, () => drawSummary()));
 
@@ -1660,6 +1674,7 @@
           case 'time': return (e.meta ? e.meta.created_at : e.timestamp) || '';
           case 'command': return e.meta ? e.meta.command : '';
           case 'select': return e.meta ? e.meta.select_criteria : '';
+          case 'backfill': return e.meta ? (e.meta.start_value_override || '') : '';
           case 'total': return e.total;
           case 'completed': return e.completed;
           case 'failed': return e.failed;

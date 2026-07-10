@@ -612,3 +612,89 @@ class TestIsOrchestratedFlag:
         create_sql = " ".join(s for s in dest.sql_calls if "CREATE TABLE" in s.upper())
         # Present in both the plans and the executions table DDL.
         assert create_sql.count("is_orchestrated") >= 2
+
+
+def _executions_insert(sql_calls):
+    """Return the INSERT statement targeting the executions metadata table."""
+    return next(
+        s
+        for s in sql_calls
+        if "INSERT" in s.upper() and "select_criteria" in s and "created_at" in s
+    )
+
+
+@pytest.mark.unit
+class TestExecutionsBackfillWindow:
+    """The backfill window (start/end-value-override) is persisted on _saga_executions."""
+
+    def test_executions_ddl_includes_override_columns(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.ensure_table_exists()
+
+        exec_ddl = next(
+            s
+            for s in dest.sql_calls
+            if "CREATE TABLE" in s.upper() and "select_criteria" in s
+        )
+        assert "start_value_override" in exec_ddl
+        assert "end_value_override" in exec_ddl
+
+    def test_orchestrated_run_persists_backfill_window(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.create_execution_plan(
+            [_make_config("orders")],
+            metadata=ExecutionMetadata(
+                command="ingest",
+                start_value_override="2026-02-20",
+                end_value_override="2026-02-26",
+            ),
+        )
+
+        insert = _executions_insert(dest.sql_calls)
+        assert "start_value_override" in insert
+        assert "end_value_override" in insert
+        assert "'2026-02-20'" in insert
+        assert "'2026-02-26'" in insert
+
+    def test_local_run_persists_backfill_window(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.record_local_run(
+            [
+                {
+                    "pipeline_type": "api",
+                    "pipeline_identifier": "api/orders",
+                    "table_name": "orders",
+                    "status": "completed",
+                    "error_message": None,
+                }
+            ],
+            metadata=ExecutionMetadata(
+                command="ingest",
+                start_value_override="2026-02-20",
+                end_value_override="2026-02-26",
+            ),
+            execution_id="local-bf",
+        )
+
+        insert = _executions_insert(dest.sql_calls)
+        assert "'2026-02-20'" in insert
+        assert "'2026-02-26'" in insert
+
+    def test_no_overrides_writes_null_columns(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.create_execution_plan(
+            [_make_config("orders")], metadata=ExecutionMetadata(command="ingest")
+        )
+
+        insert = _executions_insert(dest.sql_calls)
+        # Columns are always in the insert; absent overrides serialize as NULL.
+        assert "start_value_override" in insert
+        assert "NULL" in insert

@@ -179,6 +179,44 @@ class TestRecordRunSkipsConfigErrors:
         recorded_names = {rec["pipeline_identifier"] for rec in records}
         assert recorded_names == {"configs/real.yml"}  # config-error one excluded
 
+    def test_backfill_window_forwarded_to_metadata(self):
+        """Local runs record the --start/end-value-override backfill window."""
+        session = self._session()
+        result = SessionResult(
+            pipeline_results=[
+                PipelineResult(
+                    pipeline_name="real",
+                    success=True,
+                    error=None,
+                    config=_config("real"),
+                    config_error=False,
+                )
+            ]
+        )
+        with (
+            patch(
+                "dlt_saga.destinations.factory.DestinationFactory.create_from_context"
+            ),
+            patch(
+                "dlt_saga.utility.orchestration.execution_plan.ExecutionPlanManager"
+            ) as manager,
+            patch("dlt_saga.utility.cli.context.get_execution_context") as ctx,
+            patch(
+                "dlt_saga.utility.naming.get_execution_plan_schema",
+                return_value="dlt_x",
+            ),
+        ):
+            context = MagicMock()
+            context.start_value_override = "2026-02-20"
+            context.end_value_override = "2026-02-26"
+            ctx.return_value = context
+            session._record_run("ingest", ["cookiebot*"], result)
+
+        metadata = manager.return_value.record_local_run.call_args.kwargs["metadata"]
+        assert metadata.start_value_override == "2026-02-20"
+        assert metadata.end_value_override == "2026-02-26"
+        assert metadata.select_criteria == "cookiebot*"
+
 
 @pytest.mark.unit
 class TestConfigErrorClassification:

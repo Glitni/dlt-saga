@@ -161,6 +161,8 @@ class ExecutionPlanManager:
                 environment {self._t("string")},
                 profile {self._t("string")},
                 target {self._t("string")},
+                start_value_override {self._t("string")},
+                end_value_override {self._t("string")},
                 is_orchestrated {self._t("bool")}
             )
         """
@@ -174,7 +176,10 @@ class ExecutionPlanManager:
         )
 
         self._ensure_column(get_execution_plans_table_name(), "is_orchestrated", "bool")
-        self._ensure_column(get_executions_table_name(), "is_orchestrated", "bool")
+        executions_table = get_executions_table_name()
+        self._ensure_column(executions_table, "is_orchestrated", "bool")
+        self._ensure_column(executions_table, "start_value_override", "string")
+        self._ensure_column(executions_table, "end_value_override", "string")
 
         # View for latest status per pipeline per execution
         self._ensure_view_exists()
@@ -407,7 +412,8 @@ class ExecutionPlanManager:
         meta_sql = f"""
             INSERT INTO {self.executions_table_id}
             (execution_id, created_at, command, pipeline_count, task_count,
-             select_criteria, environment, profile, target, is_orchestrated)
+             select_criteria, environment, profile, target,
+             start_value_override, end_value_override, is_orchestrated)
             VALUES (
                 {self._format_sql_value(execution_id)},
                 {now},
@@ -418,6 +424,8 @@ class ExecutionPlanManager:
                 {self._format_sql_value(meta.environment)},
                 {self._format_sql_value(meta.profile)},
                 {self._format_sql_value(meta.target)},
+                {self._format_sql_value(meta.start_value_override)},
+                {self._format_sql_value(meta.end_value_override)},
                 TRUE
             )
         """
@@ -495,7 +503,8 @@ class ExecutionPlanManager:
         meta_sql = f"""
             INSERT INTO {self.executions_table_id}
             (execution_id, created_at, command, pipeline_count, task_count,
-             select_criteria, environment, profile, target, is_orchestrated)
+             select_criteria, environment, profile, target,
+             start_value_override, end_value_override, is_orchestrated)
             VALUES (
                 {self._format_sql_value(execution_id)},
                 {now},
@@ -506,6 +515,8 @@ class ExecutionPlanManager:
                 {self._format_sql_value(meta.environment)},
                 {self._format_sql_value(meta.profile)},
                 {self._format_sql_value(meta.target)},
+                {self._format_sql_value(meta.start_value_override)},
+                {self._format_sql_value(meta.end_value_override)},
                 FALSE
             )
         """

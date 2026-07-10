@@ -608,6 +608,8 @@ class Session:
                 command=command,
                 environment=context.get_environment(),
                 target=self._profile_target.name if self._profile_target else None,
+                start_value_override=context.start_value_override,
+                end_value_override=context.end_value_override,
             )
             ExecutionPlanManager(
                 destination=destination, schema=get_execution_plan_schema()

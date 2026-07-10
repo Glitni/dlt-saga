@@ -116,6 +116,8 @@ def _serialize_report_data(data: ReportData) -> str:
                 "environment": e.environment,
                 "profile": e.profile,
                 "target": e.target,
+                "start_value_override": e.start_value_override,
+                "end_value_override": e.end_value_override,
                 "is_orchestrated": e.is_orchestrated,
             }
         )
