@@ -104,6 +104,8 @@ def _populated_report() -> ReportData:
                 environment="prod",
                 profile="default",
                 target="prod",
+                start_value_override="2026-02-20",
+                end_value_override="2026-02-26",
             )
         ],
     )
@@ -140,6 +142,8 @@ class TestSerializeReportData:
         assert parsed["orchestration_runs"][0]["execution_id"] == "exec-1"
         assert len(parsed["executions"]) == 1
         assert parsed["executions"][0]["target"] == "prod"
+        assert parsed["executions"][0]["start_value_override"] == "2026-02-20"
+        assert parsed["executions"][0]["end_value_override"] == "2026-02-26"
 
     def test_none_datetimes_serialize_as_null(self):
         data = _empty_report()

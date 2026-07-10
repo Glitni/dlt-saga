@@ -212,6 +212,8 @@ saga report [OPTIONS]
 | `--profile TEXT` | `default` | Profile name |
 | `--target TEXT` | — | Target within profile |
 
+The **Executions** tab shows one row per run recorded in `_saga_executions` (both orchestrated and local), including its command, selector, and — when the run was a backfill — the `--start-value-override` / `--end-value-override` window.
+
 ---
 
 ## saga info

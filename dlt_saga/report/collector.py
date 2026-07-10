@@ -117,6 +117,8 @@ class ExecutionInfo:
     environment: Optional[str]
     profile: Optional[str]
     target: Optional[str]
+    start_value_override: Optional[str] = None
+    end_value_override: Optional[str] = None
     is_orchestrated: bool = True
 
 
@@ -351,6 +353,8 @@ def _query_executions(destination: Any, schema: str, days: int) -> List[Executio
                     environment=getattr(row, "environment", None),
                     profile=getattr(row, "profile", None),
                     target=getattr(row, "target", None),
+                    start_value_override=getattr(row, "start_value_override", None),
+                    end_value_override=getattr(row, "end_value_override", None),
                     is_orchestrated=True if is_orch is None else bool(is_orch),
                 )
             )
