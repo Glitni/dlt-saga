@@ -2,8 +2,17 @@
 
 import pytest
 
+from dlt_saga.utility.secrets import redaction
 from dlt_saga.utility.secrets.resolver import SecretResolver, resolve_secret
 from dlt_saga.utility.secrets.secret_str import SecretStr, coerce_secret
+
+
+@pytest.fixture(autouse=True)
+def _clean_redaction_registry():
+    """Reset the redaction registry: get_secret_value() registers on unwrap."""
+    redaction._reset_for_testing()
+    yield
+    redaction._reset_for_testing()
 
 
 class TestSecretStr:
