@@ -172,7 +172,11 @@ class FilePipelineConfig(ConfigSource):
         """
         segments = self.get_naming_segments(config_path)
         environment = get_environment()
-        default_schema = get_dev_schema()
+        # The dev schema is only used in dev; in prod the schema is derived from
+        # the config segments (dlt_<group>) and default_schema is ignored. Don't
+        # resolve it in prod, where a dev schema is legitimately unset and
+        # get_dev_schema() would (correctly) raise.
+        default_schema = get_dev_schema() if environment != "prod" else ""
 
         module = load_naming_module(self.project_config)
         if module and hasattr(module, "generate_schema_name"):

@@ -1051,7 +1051,12 @@ def list_pipelines(
         _list_implementations()
         return
 
-    load_profile_config(profile, target)
+    # Set the execution context so discovery resolves schema names within the
+    # profile (notably the dev schema). Without it, dev discovery resolves
+    # outside the profile and can't see its schema.
+    profile_target = load_profile_config(profile, target)
+    if profile_target is not None:
+        setup_execution_context(profile_target)
 
     # Choose filter based on resource_type
     if resource_type == "ingest":
@@ -1098,7 +1103,11 @@ def validate_configs(
         saga validate --select "tag:daily"                  # Validate by tag
     """
     setup_logging(verbose)
-    load_profile_config(profile, target)
+    # Set the execution context so discovery resolves schema names within the
+    # profile (notably the dev schema), matching the other commands.
+    profile_target = load_profile_config(profile, target)
+    if profile_target is not None:
+        setup_execution_context(profile_target)
 
     selected_configs, _ = discover_and_select_configs(select)
     all_configs = flatten_configs(selected_configs)

@@ -78,10 +78,21 @@ def is_production() -> bool:
 
 
 def get_dev_schema() -> str:
-    """Get dev schema name from profile or environment variable.
+    """Resolve the developer's dev schema.
+
+    Resolution: profile ``dataset``/``schema`` (from the active target) →
+    ``SAGA_SCHEMA_NAME``. There is deliberately **no** shared default: an
+    unresolved dev schema is a configuration error, not a silent fallback to a
+    shared ``dlt_dev`` dataset. A shared default silently collides every
+    unconfigured developer's data, historize logs, and execution-plan tables in
+    one dataset — a misconfiguration that reads as success.
 
     Returns:
-        Dev schema name
+        The developer's dev schema name.
+
+    Raises:
+        ValueError: when neither the profile nor ``SAGA_SCHEMA_NAME`` provides a
+            schema.
     """
     try:
         from dlt_saga.utility.cli.context import get_execution_context
@@ -93,7 +104,15 @@ def get_dev_schema() -> str:
     except ImportError:
         pass
 
-    return get_env("SAGA_SCHEMA_NAME", "dlt_dev")
+    env_schema = get_env("SAGA_SCHEMA_NAME")
+    if env_schema:
+        return env_schema
+
+    raise ValueError(
+        "No dev schema configured. Set `dataset` (or `schema`) on your "
+        "profile's dev target in profiles.yml, or export "
+        "SAGA_SCHEMA_NAME=<your-schema>."
+    )
 
 
 def resolve_historized_target(

@@ -7,6 +7,14 @@ import pytest
 from dlt_saga.pipeline_config.file_config import FilePipelineConfig
 
 
+@pytest.fixture(autouse=True)
+def _dev_schema(monkeypatch):
+    """Dev discovery resolves a dev schema. Configure one (same value the old
+    silent fallback produced) so tests don't trip the hard error that now
+    replaces the unconfigured ``dlt_dev`` default."""
+    monkeypatch.setenv("SAGA_SCHEMA_NAME", "dlt_dev")
+
+
 @pytest.mark.unit
 class TestDeriveBaseTableName:
     @pytest.mark.parametrize(

@@ -156,6 +156,12 @@ class TestApplyNamingModuleHistorizeOverrides:
         yield
         _reset_cache()
 
+    @pytest.fixture(autouse=True)
+    def _dev_schema(self, monkeypatch):
+        """The dev naming path resolves a dev schema; configure one so it
+        doesn't trip the hard error on the (removed) unconfigured fallback."""
+        monkeypatch.setenv("SAGA_SCHEMA_NAME", "dlt_dev")
+
     def _install_naming_module(self, name: str, **funcs):
         mod = ModuleType(name)
         for k, v in funcs.items():
