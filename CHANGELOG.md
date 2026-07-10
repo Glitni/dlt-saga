@@ -1,3 +1,17 @@
+## 0.22.0 — 2026-07-10
+
+### Added
+- Record backfill window in _saga_executions and saga report (#338)
+- Stamp _dlt_ingested_at on plain merge pipelines (exclude only scd2) (#336)
+
+
+### Fixed
+- Hard-error on unresolved dev schema instead of silent shared dlt_dev (#346)
+- Treat orchestration.schema as prod-only so dev execution-plan tables stay per-developer (#345)
+- Reconcile timing breakdown to total with a setup bucket (#342)
+- Suppress spurious 'did not match' warning from the disabled-config probe (#340)
+- Register hand-wrapped SecretStr values for log/metadata redaction (#334)
+
 ## 0.21.0 — 2026-07-09
 
 ### Breaking Changes
