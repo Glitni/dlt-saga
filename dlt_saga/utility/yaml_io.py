@@ -20,30 +20,39 @@ import yaml
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
-    """SafeLoader that raises on duplicate keys instead of last-wins."""
+    """SafeLoader that raises on duplicate keys instead of last-wins.
 
+    Overriding ``construct_mapping`` (rather than replacing the mapping-tag
+    constructor) keeps PyYAML's native ``construct_yaml_map`` generator, which
+    handles recursive/self-referential anchors, and delegates merge resolution
+    to the stock implementation.
+    """
 
-def _construct_mapping_no_duplicates(
-    loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False
-) -> Dict[Any, Any]:
-    mapping: Dict[Any, Any] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        if key in mapping:
-            raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                f"found duplicate key {key!r}",
-                key_node.start_mark,
-            )
-        mapping[key] = loader.construct_object(value_node, deep=deep)
-    return mapping
-
-
-_UniqueKeySafeLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_mapping_no_duplicates,
-)
+    def construct_mapping(
+        self, node: yaml.MappingNode, deep: bool = False
+    ) -> Dict[Any, Any]:
+        # Reject duplicate keys among the explicitly-written entries, before
+        # merge resolution. A real typo repeats a key in the source mapping; a
+        # `<<:` merge key legitimately collides with an explicit key (the
+        # explicit one wins per YAML merge semantics) and must not be flagged,
+        # so skip merge nodes here.
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            seen.add(key)
+        # Stock construct_mapping resolves `<<:` merge keys via flatten_mapping
+        # and lets explicit keys override merged ones. Nested mappings route
+        # back through this override, so they get the duplicate check too.
+        return super().construct_mapping(node, deep=deep)
 
 
 def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
