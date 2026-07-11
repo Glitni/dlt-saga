@@ -1,3 +1,13 @@
+## 0.23.0 — 2026-07-11
+
+### Fixed
+- Saga generate-schemas requires a profile/dev schema just to link configs (#359)
+- Generated per-adapter config schema rejects +key: merge syntax (#357)
+- List/validate/plan use only the first config path in multi-path projects (#355)
+- +key: list merge crashes on dict entries (unhashable dedup) (#353)
+- Route packages.yml parsing through load_yaml chokepoint (#351)
+- Restore YAML merge key (<<: *anchor) support in load_yaml (#349)
+
 ## 0.22.0 — 2026-07-10
 
 ### Added
