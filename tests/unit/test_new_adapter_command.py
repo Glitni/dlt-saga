@@ -144,6 +144,20 @@ class TestScaffold:
         # Unregistered path falls back to the requested namespace.
         assert effective_namespace(tmp_path, "local", "other") == "local"
 
+    def test_load_packages_resolves_merge_keys(self, tmp_path):
+        # packages.yml is read via load_yaml, so it inherits merge-key support.
+        (tmp_path / "packages.yml").write_text(
+            "defaults: &d\n  path: ./pipelines\npackages:\n- <<: *d\n  namespace: bm\n"
+        )
+        entries = nac._load_packages(tmp_path)
+        assert entries == [{"path": "./pipelines", "namespace": "bm"}]
+
+    def test_load_packages_rejects_non_mapping(self, tmp_path):
+        # A malformed top-level fails loudly rather than being silently ignored.
+        (tmp_path / "packages.yml").write_text("- just\n- a list\n")
+        with pytest.raises(ValueError, match="mapping at the top level"):
+            nac._load_packages(tmp_path)
+
     def test_namespace_conflict_with_different_path_raises(self, tmp_path):
         # 'local' is taken, mapped to a different directory.
         (tmp_path / "packages.yml").write_text(
