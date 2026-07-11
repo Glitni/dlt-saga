@@ -296,7 +296,11 @@ class TestGenerateSchemasOutput:
                 f"{schema_path.name} missing partition_expiration_days "
                 f"(should be inherited from TargetConfig)"
             )
-            field = props["partition_expiration_days"]
+            # Fields are defined once under $defs and referenced, so resolve the
+            # $ref to reach the field's schema.
+            ref = props["partition_expiration_days"]["$ref"]
+            assert ref.startswith("#/$defs/")
+            field = data["$defs"][ref.split("/")[-1]]
             assert field.get("type") == "integer"
             assert field.get("minimum") == 1
             assert "BigQuery" in field.get("description", "")
@@ -328,6 +332,43 @@ class TestGenerateSchemasOutput:
             assert "dev" not in dev["properties"]
             assert "required" not in dev
             assert dev["additionalProperties"] is False
+            checked += 1
+        assert checked > 0
+
+    def test_inherit_merge_aliases_in_pipeline_schemas(self, tmp_path):
+        """Per-pipeline schemas accept the `+key:` merge form for config keys.
+
+        Regression: with `additionalProperties: false` and no `+name` aliases, a
+        leaf config using `+tags:` / `+columns:` to merge with inherited group/
+        project defaults was flagged as invalid by the YAML language server.
+        """
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        project_level = {
+            "dlt_common.json",
+            "profiles_config.json",
+            "saga_project_config.json",
+            "packages_config.json",
+        }
+        checked = 0
+        for schema_path in tmp_path.glob("*_config.json"):
+            if schema_path.name in project_level:
+                continue
+            data = json.loads(schema_path.read_text(encoding="utf-8"))
+            props = data.get("properties", {})
+            # A `+name` alias exists for each config key and mirrors its schema.
+            assert "+partition_expiration_days" in props, (
+                f"{schema_path.name} missing +partition_expiration_days merge alias"
+            )
+            assert (
+                props["+partition_expiration_days"]
+                == props["partition_expiration_days"]
+            )
+            # `dev` itself is not a mergeable field — no `+dev` alias.
+            assert "+dev" not in props
+            # The dev override block accepts the merge form too.
+            assert "+initial_value" in props["dev"]["properties"]
             checked += 1
         assert checked > 0
 
