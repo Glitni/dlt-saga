@@ -606,13 +606,14 @@ class FilePipelineConfig(ConfigSource):
 
         # Inherit mode: merge based on type
         if isinstance(parent_value, list) and isinstance(child_value, list):
-            # For lists: combine and deduplicate while preserving order
-            combined = parent_value + child_value
-            seen = set()
-            result_list = []
-            for item in combined:
-                if item not in seen:
-                    seen.add(item)
+            # For lists: combine and deduplicate while preserving order. Use a
+            # linear membership check rather than a set — merged lists may hold
+            # dicts (e.g. `+filters:` / `+columns:` entries) which are
+            # unhashable, and a set would raise TypeError. Config lists are
+            # short, so the O(n^2) scan is irrelevant.
+            result_list: List[Any] = []
+            for item in parent_value + child_value:
+                if item not in result_list:
                     result_list.append(item)
             return result_list
 

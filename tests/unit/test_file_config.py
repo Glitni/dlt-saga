@@ -145,6 +145,19 @@ class TestResolveValue:
             ([1, 2], [3, 4], [1, 2, 3, 4]),
             ([1, 2], [2, 3], [1, 2, 3]),
             (["daily"], ["hourly", "critical"], ["daily", "hourly", "critical"]),
+            # Lists of dicts (e.g. `+filters:` / `+columns:` entries) are
+            # unhashable — a set-based dedup would raise TypeError.
+            (
+                [{"field": "a"}],
+                [{"field": "b"}],
+                [{"field": "a"}, {"field": "b"}],
+            ),
+            # Identical dict entries still dedupe (by equality, order preserved).
+            (
+                [{"field": "a"}],
+                [{"field": "a"}, {"field": "b"}],
+                [{"field": "a"}, {"field": "b"}],
+            ),
         ],
     )
     def test_inherit_lists(self, parent, child, expected):
