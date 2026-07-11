@@ -16,6 +16,8 @@ from typing import List, Optional, Tuple
 import typer
 import yaml
 
+from dlt_saga.utility.yaml_io import load_yaml
+
 _VALID_KINDS = ("generic", "api", "api-date-window")
 
 
@@ -603,9 +605,11 @@ def _load_packages(target: Path) -> List[dict]:
     packages_file = target / "packages.yml"
     if not packages_file.exists():
         return []
-    loaded = yaml.safe_load(packages_file.read_text(encoding="utf-8"))
-    if not isinstance(loaded, dict):
-        return []
+    # load_yaml is the single chokepoint for reading config YAML: UTF-8,
+    # duplicate-key rejection, merge-key support, and a dict-or-raise contract
+    # (so a malformed packages.yml fails loudly instead of being silently
+    # ignored and clobbered on the next rewrite).
+    loaded = load_yaml(packages_file)
     return [e for e in (loaded.get("packages") or []) if isinstance(e, dict)]
 
 
