@@ -35,8 +35,8 @@ _config_source: Optional[ConfigSource] = None
 def get_config_source() -> ConfigSource:
     """Get or create the config source singleton.
 
-    Reads config_source.type and config_source.path from saga_project.yml.
-    Defaults to file-based config source with path="configs".
+    Reads config_source.type and config_source.paths from saga_project.yml.
+    Defaults to file-based config source with paths=["configs"].
     """
     global _config_source
     if _config_source is None:
@@ -44,8 +44,10 @@ def get_config_source() -> ConfigSource:
         source_type = config_source_settings.type
 
         if source_type == "file":
-            root_dir = config_source_settings.path
-            _config_source = FilePipelineConfig(root_dir=root_dir)
+            # Pass the full paths list (not .path, the first-path-only accessor)
+            # so list/validate/plan/orchestrate discover every configured
+            # directory — matching Session._create_config_source.
+            _config_source = FilePipelineConfig(root_dir=config_source_settings.paths)
         else:
             logger.error(
                 f"Unknown config_source type: '{source_type}'. "
