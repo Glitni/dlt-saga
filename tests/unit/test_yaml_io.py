@@ -39,6 +39,43 @@ class TestLoadYaml:
         with pytest.raises(ValueError, match="duplicate key"):
             load_yaml(path)
 
+    def test_merge_key_is_resolved(self, tmp_path):
+        """`<<: *anchor` merge keys must load (common in profiles.yml).
+
+        Regression: the custom loader replaced safe_load without calling
+        flatten_mapping, so merge nodes raised "could not determine a
+        constructor for the tag ...:merge".
+        """
+        path = tmp_path / "merge.yml"
+        path.write_bytes(
+            b"defaults: &defaults\n"
+            b"  project: my-project\n"
+            b"  location: EU\n"
+            b"outputs:\n"
+            b"  dev:\n"
+            b"    <<: *defaults\n"
+            b"    environment: dev\n"
+        )
+        data = load_yaml(path)
+        assert data["outputs"]["dev"] == {
+            "project": "my-project",
+            "location": "EU",
+            "environment": "dev",
+        }
+
+    def test_explicit_key_overrides_merged_value(self, tmp_path):
+        """An explicit key wins over a merged one — not a duplicate error."""
+        path = tmp_path / "override.yml"
+        path.write_bytes(
+            b"defaults: &defaults\n"
+            b"  environment: dev\n"
+            b"prod:\n"
+            b"  <<: *defaults\n"
+            b"  environment: prod\n"
+        )
+        data = load_yaml(path)
+        assert data["prod"]["environment"] == "prod"
+
     def test_top_level_list_raises(self, tmp_path):
         """A top-level non-mapping would crash deep in the config merge."""
         path = tmp_path / "list.yml"
