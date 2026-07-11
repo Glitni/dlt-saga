@@ -440,12 +440,36 @@ def generate_schema_for_pipeline(
     target_fields = get_target_fields_from_dataclass()
     all_properties.update(target_fields)
 
+    # Define each field once under $defs and reference it, so the four places a
+    # field appears — plain key, `+key` merge alias, and both again inside the
+    # `dev:` block — are thin $refs instead of full inline copies. Without this
+    # the aliases and the dev mirror duplicate every field schema (with its
+    # description), several times over.
+    field_defs = {
+        f"{_FIELD_DEF_PREFIX}{name}": schema_
+        for name, schema_ in all_properties.items()
+    }
+    ref_props = {
+        name: {"$ref": f"#/$defs/{_FIELD_DEF_PREFIX}{name}"} for name in all_properties
+    }
+
     # `dev:` is a load-time override block, not a dataclass field. Mirror every
     # config key so values inside it validate and autocomplete, but require
-    # nothing — a dev block overrides only a subset.
-    all_properties["dev"] = _dev_override_property(all_properties)
+    # nothing. Built from ref_props (which has no `dev` key) so it gets no
+    # `+dev` alias and reuses the same $defs.
+    dev_property = _dev_override_property(ref_props)
 
-    schema["properties"] = all_properties
+    # Accept the `+key:` merge form for every config key (mirrors the runtime
+    # merge syntax and the saga_project.yml schema): a leaf config may merge
+    # with inherited group/project defaults, e.g. `+tags:` or `+columns:`. With
+    # `additionalProperties: false`, the `+name` variants must be declared or
+    # the language server flags valid configs.
+    properties = _with_inherit_aliases(ref_props)
+    properties["dev"] = dev_property
+
+    if field_defs:
+        schema["$defs"] = field_defs
+    schema["properties"] = properties
     if all_required:
         schema["required"] = sorted(list(set(all_required)))
 
@@ -466,7 +490,9 @@ def _dev_override_property(properties: Dict[str, Any]) -> Dict[str, Any]:
             "(stripped in all environments). Any config key may be overridden; "
             "values support Jinja templating (e.g. a rolling initial_value)."
         ),
-        "properties": {k: v for k, v in properties.items() if k != "dev"},
+        "properties": _with_inherit_aliases(
+            {k: v for k, v in properties.items() if k != "dev"}
+        ),
         "additionalProperties": False,
     }
 
@@ -498,11 +524,38 @@ def _collect_config_field_union(
         if not isinstance(props, dict):
             continue
         for name, field_schema in props.items():
+            # Skip the `+name` merge aliases the per-pipeline schemas carry:
+            # this is the base field set, and the project schema re-applies the
+            # aliases downstream via _shared_props_via_defs. Including them here
+            # would create `config_field_+name` $defs and alias them again.
+            if name.startswith("+"):
+                continue
+            # Per-pipeline schemas store each field once under their own $defs and
+            # reference it. Resolve that internal ref so the union carries the full
+            # field schema (the project schema re-defines it under its own $defs).
+            # External refs (dlt_common.json#/...) and inline schemas pass through.
+            field_schema = _resolve_local_field_ref(field_schema, schema)
             if name not in union:
                 union[name] = field_schema
             elif union[name] != {} and union[name] != field_schema:
                 union[name] = {}
     return union
+
+
+def _resolve_local_field_ref(
+    field_schema: Any, containing_schema: Dict[str, Any]
+) -> Any:
+    """Resolve a ``{"$ref": "#/$defs/..."}`` against the schema's own ``$defs``.
+
+    Returns *field_schema* unchanged if it isn't a lone internal ref.
+    """
+    if isinstance(field_schema, dict) and set(field_schema) == {"$ref"}:
+        target = field_schema["$ref"]
+        if target.startswith("#/$defs/"):
+            return containing_schema.get("$defs", {}).get(
+                target.split("/")[-1], field_schema
+            )
+    return field_schema
 
 
 def _with_inherit_aliases(props: Dict[str, Any]) -> Dict[str, Any]:
