@@ -176,6 +176,26 @@ def _link_root_files(schema_dir: str, project_root: str) -> List[LinkResult]:
     return results
 
 
+def _link_mode_config_source():
+    """Build the config source used for linking: file sources skip schema-name
+    resolution so linking needs no profile/dev schema (it only reads adapters).
+
+    Non-file sources fall back to the standard source — they don't share the
+    file source's eager dev-schema resolution.
+    """
+    from dlt_saga.project_config import get_config_source_settings
+
+    settings = get_config_source_settings()
+    if settings.type == "file":
+        from dlt_saga.pipeline_config import FilePipelineConfig
+
+        return FilePipelineConfig(root_dir=settings.paths, resolve_schema_names=False)
+
+    from dlt_saga.utility.cli.common import get_config_source
+
+    return get_config_source()
+
+
 def link_config_schemas(
     schema_dir, config_source=None, project_root=None
 ) -> List[LinkResult]:
@@ -195,9 +215,7 @@ def link_config_schemas(
         One LinkResult per processed config file.
     """
     if config_source is None:
-        from dlt_saga.utility.cli.common import get_config_source
-
-        config_source = get_config_source()
+        config_source = _link_mode_config_source()
 
     schema_dir = str(schema_dir)
     enabled, disabled = config_source.discover()

@@ -71,6 +71,62 @@ class TestDiscoveryCache:
 
 
 @pytest.mark.unit
+class TestSchemaNameResolutionGate:
+    """`resolve_schema_names=False` lets linking load configs without a profile.
+
+    Linking only needs each config's adapter; resolving the dev schema would
+    otherwise require a configured profile just to write modelines.
+    """
+
+    def _write_config(self, tmp_path):
+        configs = tmp_path / "configs" / "google_sheets"
+        configs.mkdir(parents=True)
+        (configs / "data.yml").write_text(
+            "write_disposition: append\n", encoding="utf-8"
+        )
+        return str(tmp_path / "configs")
+
+    def test_default_resolves_schema_name(self, tmp_path):
+        # Default (run/ingest/report path): schema name is resolved eagerly.
+        root = self._write_config(tmp_path)
+        with patch.object(
+            FilePipelineConfig, "resolve_schema_name", return_value="dlt_custom"
+        ) as spy:
+            enabled, _ = FilePipelineConfig(root_dir=root).discover()
+        spy.assert_called()
+        assert enabled["google_sheets"][0].schema_name == "dlt_custom"
+
+    def test_link_mode_never_resolves_schema_name(self, tmp_path):
+        # Link mode must not call the resolver at all (so an unresolved dev
+        # schema can't crash it), and leaves schema_name empty.
+        root = self._write_config(tmp_path)
+        with patch.object(
+            FilePipelineConfig,
+            "resolve_schema_name",
+            side_effect=AssertionError("resolver must not be called in link mode"),
+        ):
+            enabled, _ = FilePipelineConfig(
+                root_dir=root, resolve_schema_names=False
+            ).discover()
+        assert enabled["google_sheets"][0].schema_name == ""
+
+    def test_link_mode_does_not_poison_a_normal_source(self, tmp_path):
+        # The empty schema_name is confined to the link-mode instance's own
+        # cache; a separate default source over the same configs still resolves.
+        root = self._write_config(tmp_path)
+        link_enabled, _ = FilePipelineConfig(
+            root_dir=root, resolve_schema_names=False
+        ).discover()
+        assert link_enabled["google_sheets"][0].schema_name == ""
+
+        with patch.object(
+            FilePipelineConfig, "resolve_schema_name", return_value="dlt_resolved"
+        ):
+            normal_enabled, _ = FilePipelineConfig(root_dir=root).discover()
+        assert normal_enabled["google_sheets"][0].schema_name == "dlt_resolved"
+
+
+@pytest.mark.unit
 class TestGetPipelineGroupFromPath:
     @pytest.mark.parametrize(
         "path, expected",
