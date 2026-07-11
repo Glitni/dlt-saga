@@ -53,14 +53,25 @@ class FilePipelineConfig(ConfigSource):
     - `key:` - Replace/override parent value completely
     """
 
-    def __init__(self, root_dir: Union[str, List[str]] = "configs"):
+    def __init__(
+        self,
+        root_dir: Union[str, List[str]] = "configs",
+        *,
+        resolve_schema_names: bool = True,
+    ):
         """Initialize file-based config source.
 
         Args:
             root_dir: Root directory (or list of directories) containing config
                 files. When a list is given, all directories are walked and
                 duplicate pipeline names across directories raise a ValueError.
+            resolve_schema_names: When False, skip environment-aware schema-name
+                resolution during load (``schema_name`` is left empty). Used by
+                schema linking, which only needs each config's adapter and would
+                otherwise require a profile/dev schema just to write modelines.
+                Leave True for any path that runs or reports on pipelines.
         """
+        self._resolve_schema_names = resolve_schema_names
         if isinstance(root_dir, list):
             self._root_dirs: List[str] = root_dir if root_dir else ["configs"]
         else:
@@ -393,9 +404,12 @@ class FilePipelineConfig(ConfigSource):
 
         # Resolve environment-aware names from config path
         table_name = self.resolve_table_name(config_path)
-        schema_name = resolved_config.get("schema_name") or self.resolve_schema_name(
-            config_path
-        )
+        # Schema resolution needs the active profile's dev schema; skip it when
+        # the caller only needs adapter/path metadata (schema linking), so an
+        # offline `saga generate-schemas` doesn't require a configured profile.
+        schema_name = resolved_config.get("schema_name") or ""
+        if not schema_name and self._resolve_schema_names:
+            schema_name = self.resolve_schema_name(config_path)
 
         # Normalize tags to list and parse into ScheduleTag objects
         raw_tags = resolved_config.get("tags", [])
