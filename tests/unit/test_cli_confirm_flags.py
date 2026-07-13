@@ -9,6 +9,7 @@ Introspects resolved click options / calls the confirm helpers directly rather
 than asserting on rendered help text.
 """
 
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -16,8 +17,11 @@ import typer
 from typer.main import get_command
 
 from dlt_saga.cli import (
+    _confirm_destroy,
+    _confirm_destructive,
     _confirm_full_refresh,
     _confirm_historize_full_refresh,
+    _confirm_partial_refresh,
     _confirm_run_full_refresh,
     _validate_historize_flags,
     app,
@@ -70,6 +74,75 @@ class TestYesSkipsFullRefreshPrompt:
             )
             confirm.assert_not_called()
             assert result == (True, True)
+
+
+@pytest.mark.unit
+class TestConfirmDestructiveHelper:
+    """The shared banner+prompt helper the confirm functions delegate to."""
+
+    def test_skips_prompt_with_yes(self):
+        with patch("dlt_saga.cli.typer.confirm") as confirm:
+            _confirm_destructive("T", "body", in_cloud_run=False, yes=True)
+            confirm.assert_not_called()
+
+    def test_skips_prompt_in_cloud_run(self):
+        with patch("dlt_saga.cli.typer.confirm") as confirm:
+            _confirm_destructive("T", "body", in_cloud_run=True, yes=False)
+            confirm.assert_not_called()
+
+    def test_exits_on_decline(self):
+        with patch("dlt_saga.cli.typer.confirm", return_value=False):
+            with pytest.raises(typer.Exit):
+                _confirm_destructive("T", "body", in_cloud_run=False, yes=False)
+
+    def test_proceeds_on_confirm(self):
+        with patch("dlt_saga.cli.typer.confirm", return_value=True) as confirm:
+            _confirm_destructive("T", "body", in_cloud_run=False, yes=False)
+            confirm.assert_called_once()
+
+
+@pytest.mark.unit
+class TestDelegatingConfirms:
+    """The single-prompt confirms honor --yes and still warn."""
+
+    def test_destroy_skips_prompt_with_yes(self):
+        with patch("dlt_saga.cli.typer.confirm") as confirm:
+            _confirm_destroy(
+                dry_run=False, resource_type="all", in_cloud_run=False, yes=True
+            )
+            confirm.assert_not_called()
+
+    def test_destroy_dry_run_never_prompts(self):
+        with patch("dlt_saga.cli.typer.confirm") as confirm:
+            _confirm_destroy(
+                dry_run=True, resource_type="all", in_cloud_run=False, yes=False
+            )
+            confirm.assert_not_called()
+
+    def test_partial_refresh_prompts_without_yes(self):
+        with patch("dlt_saga.cli.typer.confirm", return_value=True) as confirm:
+            _confirm_partial_refresh(
+                partial_refresh=True,
+                historize_from=None,
+                in_cloud_run=False,
+                yes=False,
+            )
+            confirm.assert_called_once()
+
+    def test_partial_refresh_with_yes_skips_prompt_but_still_warns(self, caplog):
+        # Behaviour change from the refactor: the banner is now shown under
+        # --yes (previously it returned before warning), consistent with the
+        # other destructive confirms. Assert a WARNING was emitted, not its text.
+        with patch("dlt_saga.cli.typer.confirm") as confirm:
+            with caplog.at_level(logging.WARNING, logger="dlt_saga.cli"):
+                _confirm_partial_refresh(
+                    partial_refresh=True,
+                    historize_from=None,
+                    in_cloud_run=False,
+                    yes=True,
+                )
+            confirm.assert_not_called()
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
 @pytest.mark.unit

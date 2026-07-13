@@ -778,30 +778,46 @@ def run_worker_mode(
     )
 
 
+_CONFIRM_SEP = "=" * 70
+
+# Reused across the full-refresh confirmations — the ingest and historize bodies
+# are identical whether prompted standalone or as part of ``saga run``.
+_FULL_REFRESH_BODY = (
+    "This will permanently delete:\n"
+    "  - All destination tables (main + staging)\n"
+    "  - Pipeline state metadata\n"
+    "  - Load tracking information"
+)
+_HISTORIZE_REFRESH_BODY = (
+    "This will permanently delete and rebuild:\n"
+    "  - All historized output tables\n"
+    "  - Historization log entries for selected pipelines"
+)
+
+
+def _warn_banner(title: str, body: str) -> None:
+    """Log a separator-boxed warning banner (title above, body inside the box)."""
+    logger.warning("%s\n%s\n%s\n%s", title, _CONFIRM_SEP, body, _CONFIRM_SEP)
+
+
+def _confirm_destructive(title: str, body: str, in_cloud_run: bool, yes: bool) -> None:
+    """Warn with a boxed banner, then prompt before a destructive operation.
+
+    ``--yes`` / Cloud Run skip the prompt (so CI/cron don't hang on stdin) but
+    still show the banner. Declining exits 0.
+    """
+    _warn_banner(title, body)
+    if not (in_cloud_run or yes):
+        if not typer.confirm("Are you sure you want to proceed?", default=False):
+            logger.info("Operation cancelled by user")
+            raise typer.Exit(0)
+
+
 def _confirm_full_refresh(full_refresh: bool, in_cloud_run: bool, yes: bool = False):
     """Confirm full refresh operation if specified."""
     if not full_refresh:
         return
-
-    _sep = "=" * 70
-    logger.warning(
-        """FULL REFRESH MODE
-%s
-This will permanently delete:
-  - All destination tables (main + staging)
-  - Pipeline state metadata
-  - Load tracking information
-%s""",
-        _sep,
-        _sep,
-    )
-
-    # --yes (or Cloud Run) skips the prompt so CI/cron doesn't hang on stdin.
-    if not (in_cloud_run or yes):
-        confirmation = typer.confirm("Are you sure you want to proceed?", default=False)
-        if not confirmation:
-            logger.info("Operation cancelled by user")
-            raise typer.Exit(0)
+    _confirm_destructive("FULL REFRESH MODE", _FULL_REFRESH_BODY, in_cloud_run, yes)
 
 
 def _confirm_historize_full_refresh(
@@ -810,25 +826,9 @@ def _confirm_historize_full_refresh(
     """Confirm historize full refresh operation if specified."""
     if not full_refresh:
         return
-
-    _sep = "=" * 70
-    logger.warning(
-        """HISTORIZE FULL REFRESH MODE
-%s
-This will permanently delete and rebuild:
-  - All historized output tables
-  - Historization log entries for selected pipelines
-%s""",
-        _sep,
-        _sep,
+    _confirm_destructive(
+        "HISTORIZE FULL REFRESH MODE", _HISTORIZE_REFRESH_BODY, in_cloud_run, yes
     )
-
-    # --yes (or Cloud Run) skips the prompt so CI/cron doesn't hang on stdin.
-    if not (in_cloud_run or yes):
-        confirmation = typer.confirm("Are you sure you want to proceed?", default=False)
-        if not confirmation:
-            logger.info("Operation cancelled by user")
-            raise typer.Exit(0)
 
 
 def _confirm_partial_refresh(
@@ -840,37 +840,22 @@ def _confirm_partial_refresh(
     """Confirm partial re-historization if --partial-refresh or --historize-from is set."""
     if not partial_refresh and historize_from is None:
         return
-    if in_cloud_run or yes:
-        return
 
-    _sep = "=" * 70
     if partial_refresh:
-        logger.warning(
-            """PARTIAL RE-HISTORIZATION
-%s
-This will roll back and rebuild historization starting from the earliest
-available raw snapshot. SCD2 records derived from older snapshots are preserved.
-%s""",
-            _sep,
-            _sep,
+        title = "PARTIAL RE-HISTORIZATION"
+        body = (
+            "This will roll back and rebuild historization starting from the "
+            "earliest\navailable raw snapshot. SCD2 records derived from older "
+            "snapshots are preserved."
         )
     else:
-        logger.warning(
-            """PARTIAL RE-HISTORIZATION FROM %s
-%s
-This will roll back and rebuild historization starting from %s.
-SCD2 records derived from older snapshots are preserved.
-%s""",
-            historize_from,
-            _sep,
-            historize_from,
-            _sep,
+        title = f"PARTIAL RE-HISTORIZATION FROM {historize_from}"
+        body = (
+            f"This will roll back and rebuild historization starting from "
+            f"{historize_from}.\nSCD2 records derived from older snapshots are "
+            "preserved."
         )
-
-    confirmation = typer.confirm("Are you sure you want to proceed?", default=False)
-    if not confirmation:
-        logger.info("Operation cancelled by user")
-        raise typer.Exit(0)
+    _confirm_destructive(title, body, in_cloud_run, yes)
 
 
 def _confirm_destroy(
@@ -885,28 +870,14 @@ def _confirm_destroy(
         "ingest": "ingest tables and dlt/load state",
         "historize": "historized tables and historize log entries",
     }[resource_type]
-
-    _sep = "=" * 70
-    logger.warning(
-        """DESTROY MODE
-%s
-This will permanently delete for the selected pipeline(s):
-  - %s
-It does NOT reload any data. Intended for decommissioning a pipeline
-before its config is removed or disabled. Run with --dry-run first to
-preview exactly what would be dropped.
-%s""",
-        _sep,
-        scope,
-        _sep,
+    body = (
+        "This will permanently delete for the selected pipeline(s):\n"
+        f"  - {scope}\n"
+        "It does NOT reload any data. Intended for decommissioning a pipeline\n"
+        "before its config is removed or disabled. Run with --dry-run first to\n"
+        "preview exactly what would be dropped."
     )
-
-    # --yes (or Cloud Run) skips the prompt so CI/cron doesn't hang on stdin.
-    if not (in_cloud_run or yes):
-        confirmation = typer.confirm("Are you sure you want to proceed?", default=False)
-        if not confirmation:
-            logger.info("Operation cancelled by user")
-            raise typer.Exit(0)
+    _confirm_destructive("DESTROY MODE", body, in_cloud_run, yes)
 
 
 def _validate_historize_flags(
@@ -1619,33 +1590,13 @@ def _confirm_run_full_refresh(
     if in_cloud_run or yes:
         return True, True
 
-    _sep = "=" * 70
     refresh_ingest = False
     refresh_historize = False
     if has_ingest:
-        logger.warning(
-            """INGEST FULL REFRESH MODE
-%s
-This will permanently delete:
-  - All destination tables (main + staging)
-  - Pipeline state metadata
-  - Load tracking information
-%s""",
-            _sep,
-            _sep,
-        )
+        _warn_banner("INGEST FULL REFRESH MODE", _FULL_REFRESH_BODY)
         refresh_ingest = typer.confirm("Rebuild ingested (raw) tables?", default=False)
     if has_historize:
-        logger.warning(
-            """HISTORIZE FULL REFRESH MODE
-%s
-This will permanently delete and rebuild:
-  - All historized output tables
-  - Historization log entries for selected pipelines
-%s""",
-            _sep,
-            _sep,
-        )
+        _warn_banner("HISTORIZE FULL REFRESH MODE", _HISTORIZE_REFRESH_BODY)
         refresh_historize = typer.confirm("Rebuild historized tables?", default=False)
     if not refresh_ingest and not refresh_historize:
         logger.info("Operation cancelled by user")
