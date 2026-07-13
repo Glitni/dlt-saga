@@ -130,6 +130,65 @@ class HistorizeRunner:
         )
         return self.destination.render_filter(specs) or None if specs else None
 
+    def destroy(self, dry_run: bool = False) -> Dict[str, Any]:
+        """Tear down this pipeline's historize footprint (no rebuild).
+
+        The teardown counterpart to a full refresh's drop phase. The historize
+        log is the ownership gate: the historized table is dropped only if the
+        log records a run for this ``pipeline_name``, so a coincidentally-named
+        table this pipeline never created is left untouched. The table that
+        gets dropped is the runner's freshly-resolved target (the log's stored
+        ``target_table`` is not a reliable identifier — the SQL paths persist a
+        fully-qualified id while the empty-source path persists a bare name).
+
+        Args:
+            dry_run: When True, report what would be dropped without deleting
+                anything.
+
+        Returns the facts of the teardown; the caller composes the user-facing
+        summary (one line per pipeline).
+
+        Returns:
+            Dict with ``schema``, ``table`` (bare name, None when the pipeline
+            owns no historize footprint), ``table_id`` (qualified, for logging),
+            ``dropped`` (the table existed and was/would be dropped), and
+            ``log_cleared`` (the pipeline owned a footprint, so its log entries
+            were/would be cleared).
+        """
+        owned = self.state_manager.get_historized_targets(self.pipeline_name)
+        if not owned:
+            self.logger.debug(
+                f"No historize footprint recorded for {self.pipeline_name}"
+            )
+            return {
+                "schema": self.target_schema,
+                "table": None,
+                "table_id": None,
+                "dropped": False,
+                "log_cleared": False,
+            }
+
+        table = self.target_table_name
+        table_id = self.destination.get_full_table_id(self.target_schema, table)
+        dropped = False
+        if self.destination.table_exists(self.target_schema, table):
+            if not dry_run:
+                self.destination.drop_table(self.target_schema, table)
+            dropped = True
+        else:
+            self.logger.debug(f"Historized table already gone: {table_id}")
+
+        if not dry_run:
+            self.state_manager.clear_log_entries(self.pipeline_name)
+
+        return {
+            "schema": self.target_schema,
+            "table": table,
+            "table_id": table_id,
+            "dropped": dropped,
+            "log_cleared": True,
+        }
+
     def _resolve_persist_docs(self):
         """Resolve persist_docs for the historized table.
 

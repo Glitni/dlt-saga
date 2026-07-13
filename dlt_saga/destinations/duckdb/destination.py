@@ -272,7 +272,9 @@ class DuckDBDestination(Destination):
 
     def reset_destination_state(self, pipeline_name: str, table_name: str) -> None:
         """Reset destination state by dropping tables and metadata."""
-        logger.info(f"Full refresh: Resetting destination state for {pipeline_name}")
+        # Debug, not info: callers (full-refresh / destroy) own the user-facing
+        # message.
+        logger.debug(f"Resetting destination state for {pipeline_name}")
 
         conn = self.connection
         dataset = self.config.schema_name
@@ -427,6 +429,10 @@ class DuckDBDestination(Destination):
             "LIMIT 1"
         )
         return bool(list(rows))
+
+    def drop_table(self, dataset: str, table: str) -> None:
+        """Drop a table; no-op if it does not exist."""
+        self._drop_table_safe(self.connection, dataset, table)
 
     # --- Column / table description reconciliation -------------------------
     # dlt emits no descriptions for DuckDB, so this reconcile is DuckDB's only

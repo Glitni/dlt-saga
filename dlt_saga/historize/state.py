@@ -241,6 +241,38 @@ class HistorizeStateManager:
         """
         self.destination.execute_sql(sql, self.schema)
 
+    def get_historized_targets(self, pipeline_name: str) -> List[str]:
+        """Return the distinct target tables this pipeline's historize layer wrote.
+
+        Ownership is read from the log rather than re-derived from the config's
+        naming: the log records the ``target_table`` each run actually wrote
+        under this ``pipeline_name``. ``saga destroy`` uses this so it can never
+        drop a table it doesn't own — a coincidental name match on another
+        pipeline's table is impossible, because that table was never logged
+        under this pipeline_name. It also stays correct across placement /
+        ``output_table`` renames, since the log holds the name used at write
+        time (the real orphan) rather than the current derived name. Mirrors
+        ``Destination.get_ingested_targets`` for the ingest layer.
+
+        Returns an empty list when the log table doesn't exist (nothing was
+        ever historized) or the pipeline has no entries.
+        """
+        q = self.log_table_id
+        safe_name = self.destination.escape_string_literal(pipeline_name)
+        sql = f"""
+            SELECT DISTINCT target_table
+            FROM {q}
+            WHERE pipeline_name = '{safe_name}'
+              AND target_table IS NOT NULL
+        """
+        try:
+            rows = list(self.destination.execute_sql(sql, self.schema))
+        except Exception as exc:
+            if not looks_like_missing_table(exc):
+                raise
+            return []
+        return [r.target_table for r in rows if getattr(r, "target_table", None)]
+
     def clear_log_entries(self, pipeline_name: str) -> None:
         """Delete all log entries for a pipeline (used during full refresh)."""
         q = self.log_table_id
@@ -251,7 +283,9 @@ class HistorizeStateManager:
         """
         try:
             self.destination.execute_sql(sql, self.schema)
-            self.logger.info(f"Cleared historize log entries for {pipeline_name}")
+            # Debug, not info: callers (full-refresh / destroy) own the
+            # user-facing message.
+            self.logger.debug(f"Cleared historize log entries for {pipeline_name}")
         except Exception as exc:
             # A missing log table is fine (nothing to clear on first run). But a
             # permission/transient failure must propagate: leaving stale

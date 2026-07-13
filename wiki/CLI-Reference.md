@@ -115,6 +115,46 @@ saga run [OPTIONS]
 
 ---
 
+## saga destroy
+
+Remove a pipeline's warehouse footprint (tables + state) **without reloading** — the teardown counterpart to `--full-refresh` (which drops *and* rebuilds). Run it to decommission a pipeline before deleting or disabling its config, so no stale tables or state are left behind.
+
+```bash
+saga destroy [OPTIONS]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-s, --select TEXT` | all matching | Selector expression(s) |
+| `--resource-type TEXT` | `all` | Which layer to tear down: `ingest`, `historize`, or `all` |
+| `--dry-run` | off | Show exactly what would be dropped without deleting anything |
+| `-w, --workers INT` | `4` | Number of parallel workers |
+| `-y, --yes` | off | Skip the confirmation prompt |
+| `-v, --verbose` | off | Enable debug logging |
+| `--profile TEXT` | `default` | Profile name |
+| `--target TEXT` | — | Target within profile |
+
+```bash
+saga destroy --select "group:google_sheets" --dry-run        # always preview first
+saga destroy --select "filesystem__old_report__*"            # drop ingest + historized
+saga destroy --select "tag:deprecated" --resource-type historize
+```
+
+**What gets dropped is decided by state, not by the config's current `write_disposition`.** For each selected pipeline, destroy removes only the tables saga's own state records *this* pipeline as having created:
+
+- **Ingest** — the table(s) recorded in `_saga_load_info`, dropped together with dlt's pipeline state, staging table, and load-info rows (the same teardown `--full-refresh` performs before reloading).
+- **Historize** — dropped only when `_saga_historize_log` records a run for this pipeline, along with the pipeline's log entries.
+
+Because ownership comes from state, a table sitting at a config's derived name that this pipeline never created (a coincidental name match, a manually-created table, another pipeline's output) is **never** dropped — and a disposition change is handled correctly (an `append+historize` config later narrowed to `append` still has its historize-log entry, so its now-orphaned historized table is cleaned up).
+
+Notes:
+
+- Selects **disabled** configs too (`enabled: false`) — tearing a pipeline down after disabling it is the expected path. Run destroy *before* deleting the config file, since it derives the footprint from the config.
+- Always `--dry-run` first. The confirmation prompt is shown otherwise (skipped by `-y/--yes` or in Cloud Run); `--dry-run` needs no confirmation since it deletes nothing.
+- Teardown only touches the destination — it never contacts the source, so a pipeline whose source is already gone can still be destroyed.
+
+---
+
 ## saga update-access
 
 Update destination access controls (e.g., BigQuery IAM) without running pipelines.
