@@ -69,6 +69,10 @@ class NativeLoadSpec:
     # mis-types columns. Types are typically all STRING; SAFE_CAST in the load
     # SELECT (driven by column_hints) converts to the target types.
     external_schema: Optional[list] = None
+    # The configured source_uri root (always ends with "/"). Databricks COPY
+    # INTO uses it as the FROM prefix when a chunk's files span multiple
+    # directories, so the basenames in the FILES list resolve correctly.
+    source_uri_root: Optional[str] = None
 
 
 @dataclass

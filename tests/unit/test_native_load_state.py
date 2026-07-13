@@ -70,6 +70,17 @@ class TestNativeLoadStateManager:
         mgr.ensure_table_exists()
         dest.create_or_replace_view.assert_called_once()
 
+    def test_view_body_uses_qualified_table_id(self):
+        """The companion view body must reference the log table by its fully
+        qualified id — a view stores its body and re-resolves it without the
+        caller's default schema, so a bare table name fails to resolve (silently
+        on BigQuery) when the view is later read."""
+        dest = self._make_dest()
+        mgr = NativeLoadStateManager(dest, "my_dataset")
+        mgr.ensure_table_exists()
+        _, _, view_sql = dest.create_or_replace_view.call_args[0]
+        assert "FROM `proj.my_dataset." in view_sql
+
     def test_ensure_table_view_failure_is_non_fatal(self):
         dest = self._make_dest()
         dest.create_or_replace_view.side_effect = RuntimeError("view creation failed")

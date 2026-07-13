@@ -905,8 +905,8 @@ class DatabricksDestination(Destination):
         parents = {uri.rsplit("/", 1)[0] for uri in spec.source_uris}
         if len(parents) == 1:
             source_prefix = next(iter(parents)) + "/"
-        elif hasattr(spec, "_source_uri"):
-            source_prefix = spec._source_uri  # type: ignore[attr-defined]
+        elif spec.source_uri_root:
+            source_prefix = spec.source_uri_root
         else:
             source_prefix = spec.source_uris[0].rsplit("/", 1)[0] + "/"
 

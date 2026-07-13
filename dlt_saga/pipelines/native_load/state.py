@@ -118,13 +118,18 @@ class NativeLoadStateManager:
         self._ensure_view()
 
     def _ensure_view(self) -> None:
+        # Reference the log table by its fully-qualified id: a view body is
+        # stored and re-resolved by the warehouse without the caller's default
+        # schema, so a bare table name fails to resolve (silently, on BigQuery)
+        # when the view is later read.
+        table_id = self._dest.get_full_table_id(self._dataset, self._table)
         view_sql = (
             f"SELECT * EXCEPT(rn) FROM ("
             f"  SELECT *, ROW_NUMBER() OVER ("
             f"    PARTITION BY pipeline_name, source_uri "
             f"    ORDER BY COALESCE(finished_at, started_at) DESC"
             f"  ) AS rn "
-            f"  FROM {self._table}"
+            f"  FROM {table_id}"
             f") WHERE rn = 1"
         )
         try:

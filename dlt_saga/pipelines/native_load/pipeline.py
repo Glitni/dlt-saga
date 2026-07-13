@@ -667,9 +667,10 @@ class NativeLoadPipeline(BasePipeline):
                 if self.native_config.is_s3
                 else None
             ),
+            # Fallback FROM prefix for Databricks COPY INTO when a chunk's files
+            # span multiple directories.
+            source_uri_root=self.native_config.source_uri,
         )
-        # Expose source_uri so Databricks COPY INTO can compute basenames
-        spec._source_uri = self.native_config.source_uri  # type: ignore[attr-defined]
 
         try:
             result = self.destination.native_load_chunk(spec)
