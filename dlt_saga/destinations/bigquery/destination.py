@@ -1420,7 +1420,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         )
         all_select = ", ".join(filter(None, [source_select, derived_select]))
 
-        target_id = self.get_full_table_id(spec.target_dataset, spec.target_table)
+        target_id = self.get_full_table_id(spec.target_schema, spec.target_table)
         create_clause = (
             "CREATE OR REPLACE TABLE"
             if getattr(spec, "write_disposition", "append") == "replace"
@@ -1472,7 +1472,7 @@ class BigQueryDestination(BigQueryBaseDestination):
             import uuid
 
             xfer = f"{spec.target_table}__xfer_{uuid.uuid4().hex[:8]}"
-            xfer_id = self.get_full_table_id(spec.target_dataset, xfer)
+            xfer_id = self.get_full_table_id(spec.target_schema, xfer)
             ctas = f"CREATE TABLE {xfer_id} AS SELECT {all_select} FROM {ext_id}"
             if where_sql:
                 ctas = f"{ctas} WHERE {where_sql}"
@@ -1484,7 +1484,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                 _, job_id = self.execute_sql_with_job(" ".join(parts))
             finally:
                 try:
-                    self.drop_table(spec.target_dataset, xfer)
+                    self.drop_table(spec.target_schema, xfer)
                 except Exception as exc:
                     logger.warning("Could not drop transfer table %s: %s", xfer, exc)
         else:
@@ -1516,8 +1516,8 @@ class BigQueryDestination(BigQueryBaseDestination):
         """
         from google.cloud import bigquery
 
-        target_id = self.get_full_table_id(spec.target_dataset, spec.target_table)
-        target_cols = self.list_table_columns(spec.target_dataset, spec.target_table)
+        target_id = self.get_full_table_id(spec.target_schema, spec.target_table)
+        target_cols = self.list_table_columns(spec.target_schema, spec.target_table)
         target_col_map = {n: t for n, t in target_cols}
         derived_names = {c.name for c in spec.derived_columns}
 
@@ -1525,7 +1525,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         for dc in spec.derived_columns:
             if dc.name not in target_col_map:
                 self.add_column(
-                    spec.target_dataset, spec.target_table, dc.name, dc.sql_type
+                    spec.target_schema, spec.target_table, dc.name, dc.sql_type
                 )
                 target_col_map[dc.name] = dc.sql_type
                 logger.info(
@@ -1554,7 +1554,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                     )
                 )
             else:
-                self.add_column(spec.target_dataset, spec.target_table, norm, target)
+                self.add_column(spec.target_schema, spec.target_table, norm, target)
                 target_col_map[norm] = target
                 insert_col_exprs.append(
                     (
@@ -1624,7 +1624,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         import uuid
 
         xfer = f"{spec.target_table}__xfer_{uuid.uuid4().hex[:8]}"
-        xfer_id = self.get_full_table_id(spec.target_dataset, xfer)
+        xfer_id = self.get_full_table_id(spec.target_schema, xfer)
 
         ctas = f"CREATE TABLE {xfer_id} AS SELECT {full_select} FROM {ext_id}"
         if where_sql:
@@ -1642,7 +1642,7 @@ class BigQueryDestination(BigQueryBaseDestination):
             return int(rows_loaded), job.job_id
         finally:
             try:
-                self.drop_table(spec.target_dataset, xfer)
+                self.drop_table(spec.target_schema, xfer)
             except Exception as exc:
                 logger.warning("Could not drop transfer table %s: %s", xfer, exc)
 
@@ -1689,7 +1689,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         if not at_expr:
             return {}
 
-        target_id = self.get_full_table_id(spec.target_dataset, spec.target_table)
+        target_id = self.get_full_table_id(spec.target_schema, spec.target_table)
         sql = (
             f"SELECT {self.quote_identifier(file_col)} AS uri, COUNT(*) AS cnt "
             f"FROM {target_id} "

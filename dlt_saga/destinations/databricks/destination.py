@@ -804,7 +804,7 @@ class DatabricksDestination(Destination):
         """Load one chunk via COPY INTO with mergeSchema."""
         from dlt_saga.destinations.base import NativeLoadResult
 
-        target_id = self.get_full_table_id(spec.target_dataset, spec.target_table)
+        target_id = self.get_full_table_id(spec.target_schema, spec.target_table)
 
         if not spec.target_exists:
             self._native_load_create_empty_target(spec, target_id)
@@ -812,7 +812,7 @@ class DatabricksDestination(Destination):
             self._native_load_reconcile_schema(spec, target_id)
 
         sql = self._build_copy_into(spec, target_id)
-        rows, job_id = self.execute_sql_with_job(sql, spec.target_dataset)
+        rows, job_id = self.execute_sql_with_job(sql, spec.target_schema)
         affected = self._extract_copy_into_affected_rows(rows)
         rows_by_uri = self._native_load_rowcounts(spec, target_id)
         return NativeLoadResult(
@@ -848,7 +848,7 @@ class DatabricksDestination(Destination):
             # TRUNCATE clears the current state without deleting physical files
             # (preserving Delta time travel and storage-retention requirements).
             # On first run the table doesn't exist yet, so fall through to CREATE.
-            if self.table_exists(spec.target_dataset, spec.target_table):
+            if self.table_exists(spec.target_schema, spec.target_table):
                 self.execute_sql(f"TRUNCATE TABLE {target_id}")
                 return
             create_clause = "CREATE TABLE IF NOT EXISTS"
@@ -885,13 +885,13 @@ class DatabricksDestination(Destination):
 
     def _native_load_reconcile_schema(self, spec: "Any", target_id: str) -> None:
         """Ensure framework columns exist; let COPY INTO mergeSchema handle data cols."""
-        target_cols = self.list_table_columns(spec.target_dataset, spec.target_table)
+        target_cols = self.list_table_columns(spec.target_schema, spec.target_table)
         target_col_map = {n: t for n, t in target_cols}
 
         for dc in spec.derived_columns:
             if dc.name not in target_col_map:
                 self.add_column(
-                    spec.target_dataset, spec.target_table, dc.name, dc.sql_type
+                    spec.target_schema, spec.target_table, dc.name, dc.sql_type
                 )
                 logger.info(
                     "Added framework column %r to %s", dc.name, spec.target_table
@@ -1035,7 +1035,7 @@ class DatabricksDestination(Destination):
             f"GROUP BY {self.quote_identifier(file_col)}"
         )
         try:
-            rows = self.execute_sql(sql, spec.target_dataset)
+            rows = self.execute_sql(sql, spec.target_schema)
             return {r.uri: int(r.cnt) for r in rows}
         except Exception as exc:
             logger.warning("Could not derive per-file row counts: %s", exc)

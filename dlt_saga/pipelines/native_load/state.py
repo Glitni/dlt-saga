@@ -65,9 +65,9 @@ class NativeLoadStateManager:
     clear_pipeline_state().
     """
 
-    def __init__(self, destination: "Destination", dataset: str) -> None:
+    def __init__(self, destination: "Destination", schema: str) -> None:
         self._dest = destination
-        self._dataset = dataset
+        self._schema = schema
         self._table = get_native_load_log_table_name()
         self._view = get_native_load_log_view_name()
 
@@ -85,7 +85,7 @@ class NativeLoadStateManager:
         t_int = d.type_name("int64")
         t_ts = d.type_name("timestamp")
 
-        table_id = d.get_full_table_id(self._dataset, self._table)
+        table_id = d.get_full_table_id(self._schema, self._table)
         partition_clause = d.partition_ddl("started_at", t_ts)
 
         ddl_parts = [
@@ -113,7 +113,7 @@ class NativeLoadStateManager:
         # (State log performance is not critical.)
 
         ddl = "\n".join(ddl_parts)
-        d.execute_sql(ddl, self._dataset)
+        d.execute_sql(ddl, self._schema)
 
         self._ensure_view()
 
@@ -122,7 +122,7 @@ class NativeLoadStateManager:
         # stored and re-resolved by the warehouse without the caller's default
         # schema, so a bare table name fails to resolve (silently, on BigQuery)
         # when the view is later read.
-        table_id = self._dest.get_full_table_id(self._dataset, self._table)
+        table_id = self._dest.get_full_table_id(self._schema, self._table)
         view_sql = (
             f"SELECT * EXCEPT(rn) FROM ("
             f"  SELECT *, ROW_NUMBER() OVER ("
@@ -133,7 +133,7 @@ class NativeLoadStateManager:
             f") WHERE rn = 1"
         )
         try:
-            self._dest.create_or_replace_view(self._dataset, self._view, view_sql)
+            self._dest.create_or_replace_view(self._schema, self._view, view_sql)
         except Exception as exc:
             logger.debug("Could not create companion view %s: %s", self._view, exc)
 
@@ -152,7 +152,7 @@ class NativeLoadStateManager:
         ``filename_date_format`` is validated lexicographically monotonic, so the
         string MAX matches the chronological max.
         """
-        table_id = self._dest.get_full_table_id(self._dataset, self._table)
+        table_id = self._dest.get_full_table_id(self._schema, self._table)
         pn = self._dest.escape_string_literal(pipeline_name)
         sql = (
             f"SELECT MAX(cursor_value) AS cursor_value "
@@ -161,7 +161,7 @@ class NativeLoadStateManager:
             f"AND cursor_value IS NOT NULL"
         )
         try:
-            rows = self._dest.execute_sql(sql, self._dataset)
+            rows = self._dest.execute_sql(sql, self._schema)
             if rows:
                 row = list(rows)[0] if hasattr(rows, "__iter__") else rows
                 val = (
@@ -203,7 +203,7 @@ class NativeLoadStateManager:
         and an immediate retry would skip the file, reporting a green
         "no new files" run that silently masks the failure.
         """
-        table_id = self._dest.get_full_table_id(self._dataset, self._table)
+        table_id = self._dest.get_full_table_id(self._schema, self._table)
         pn = self._dest.escape_string_literal(pipeline_name)
         stale_cutoff = self._dest.timestamp_n_days_ago(_STALE_HOURS // 24)
 
@@ -233,7 +233,7 @@ class NativeLoadStateManager:
             f")"
         )
         try:
-            rows = self._dest.execute_sql(sql, self._dataset)
+            rows = self._dest.execute_sql(sql, self._schema)
             result = set()
             for row in rows:
                 if hasattr(row, "source_uri"):
@@ -354,11 +354,11 @@ class NativeLoadStateManager:
 
     def clear_pipeline_state(self, pipeline_name: str) -> None:
         """Delete all log rows for this pipeline. Called from --full-refresh only."""
-        table_id = self._dest.get_full_table_id(self._dataset, self._table)
+        table_id = self._dest.get_full_table_id(self._schema, self._table)
         pn = self._dest.escape_string_literal(pipeline_name)
         self._dest.execute_sql(
             f"DELETE FROM {table_id} WHERE pipeline_name = '{pn}'",
-            self._dataset,
+            self._schema,
         )
         logger.debug("Cleared native_load state for pipeline %r", pipeline_name)
 
@@ -379,7 +379,7 @@ class NativeLoadStateManager:
         finished_at: Optional[str],
         error_message: Optional[str] = None,
     ) -> None:
-        table_id = self._dest.get_full_table_id(self._dataset, self._table)
+        table_id = self._dest.get_full_table_id(self._schema, self._table)
         col_list = (
             "load_id, pipeline_name, source_uri, generation, size_bytes, job_id, "
             "loaded_rows, cursor_value, status, error_message, started_at, finished_at"
@@ -420,4 +420,4 @@ class NativeLoadStateManager:
             sql = f"INSERT INTO {table_id} ({col_list}) VALUES " + ",\n".join(
                 value_rows
             )
-            self._dest.execute_sql(sql, self._dataset)
+            self._dest.execute_sql(sql, self._schema)
