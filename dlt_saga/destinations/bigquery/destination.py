@@ -877,7 +877,10 @@ class BigQueryDestination(BigQueryBaseDestination):
         """
         from google.cloud import bigquery
 
-        logger.info(f"Full refresh: Resetting destination state for {pipeline_name}")
+        # Debug, not info: callers (full-refresh / destroy) own the user-facing
+        # message. Full-refresh already logs its own "Resetting …" line before
+        # calling this, and destroy emits a per-pipeline summary.
+        logger.debug(f"Resetting destination state for {pipeline_name}")
 
         staging_dataset = f"{self.config.dataset_name}_staging"
 

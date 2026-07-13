@@ -495,9 +495,9 @@ class DatabricksDestination(Destination):
 
     def reset_destination_state(self, pipeline_name: str, table_name: str) -> None:
         """Drop tables and clean up metadata for a full refresh."""
-        logger.info(
-            "Full refresh: resetting Databricks destination state for %s", pipeline_name
-        )
+        # Debug, not info: callers (full-refresh / destroy) own the user-facing
+        # message.
+        logger.debug("Resetting Databricks destination state for %s", pipeline_name)
         schema = self.config.schema_name
         if not schema:
             return

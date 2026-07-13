@@ -364,6 +364,40 @@ class Destination(ABC):
             f"{self.__class__.__name__} does not support get_last_load_timestamp"
         )
 
+    def get_ingested_targets(self, schema_name: str, pipeline_name: str) -> list:
+        """Return the distinct tables this pipeline's ingest layer actually wrote.
+
+        Read from ``_saga_load_info`` (saga's own record of what it loaded),
+        keyed by ``pipeline_name`` — the ownership proof used by ``saga
+        destroy``. Reading the recorded ``table_name`` rather than re-deriving
+        it from the config's naming means destroy drops only a table this
+        pipeline genuinely created (never a coincidental name match on another
+        pipeline's / a pre-existing table) and stays correct across table
+        renames. Mirrors ``HistorizeStateManager.get_historized_targets`` for
+        the historize layer.
+
+        Returns an empty list when the load-info table is absent (nothing was
+        ever ingested) or the pipeline has no records.
+        """
+        from dlt_saga.project_config import get_load_info_table_name
+        from dlt_saga.utility.sql import looks_like_missing_table
+
+        table_id = self.get_full_table_id(schema_name, get_load_info_table_name())
+        safe_name = self.escape_string_literal(pipeline_name)
+        sql = f"""
+            SELECT DISTINCT table_name
+            FROM {table_id}
+            WHERE pipeline_name = '{safe_name}'
+              AND table_name IS NOT NULL
+        """
+        try:
+            rows = list(self.execute_sql(sql, schema_name))
+        except Exception as exc:
+            if not looks_like_missing_table(exc):
+                raise
+            return []
+        return [r.table_name for r in rows if getattr(r, "table_name", None)]
+
     def get_max_column_value(self, table_id: str, column: str) -> Any:
         """Get the maximum value of a column in a table.
 

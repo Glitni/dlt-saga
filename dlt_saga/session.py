@@ -314,6 +314,44 @@ class Session:
 
             return self._execute_with_auth(_run_and_record)
 
+    def destroy(
+        self,
+        select: Optional[List[str]] = None,
+        resource_type: str = "all",
+        workers: int = 4,
+        dry_run: bool = False,
+    ) -> SessionResult:
+        """Remove selected pipelines' warehouse footprint without reloading.
+
+        The teardown counterpart to ``--full-refresh`` (drop, but no rebuild) —
+        for decommissioning a pipeline before its config is deleted or disabled.
+        Drops only what state proves each pipeline created (ingest tables from
+        ``_saga_load_info``, historized tables from ``_saga_historize_log``), so
+        a coincidental name match on another pipeline is never dropped.
+
+        Unlike the run commands, this selects **disabled configs too** — the
+        natural point to tear a pipeline down is after it has been disabled.
+
+        Args:
+            select: Selector expressions. None = all matching configs.
+            resource_type: Which layer(s) to tear down: ``"ingest"``,
+                ``"historize"``, or ``"all"``.
+            workers: Number of parallel workers.
+            dry_run: When True, report what would be dropped without deleting.
+
+        Returns:
+            SessionResult with per-pipeline outcomes.
+        """
+        if resource_type not in ("all", "ingest", "historize"):
+            raise ValueError(
+                f"Invalid resource_type: '{resource_type}'. "
+                f"Must be: 'ingest', 'historize', or 'all'."
+            )
+        with execution_context_scope(self._profile_target):
+            return self._execute_with_auth(
+                lambda: self._run_destroy(select, resource_type, workers, dry_run)
+            )
+
     def update_access(
         self,
         select: Optional[List[str]] = None,
@@ -494,8 +532,18 @@ class Session:
         self,
         select: Optional[List[str]],
         filter_fn: Optional[Callable[[PipelineConfig], bool]] = None,
+        warn_on_no_match: bool = True,
     ) -> tuple:
         """Discover configs using this session's config source and apply selectors.
+
+        Args:
+            select: Selector expressions. None = all.
+            filter_fn: Optional pre-selection filter (e.g. ingest-enabled).
+            warn_on_no_match: Whether an empty enabled-set match warns. Callers
+                that also target the disabled set (``destroy``) pass ``False`` —
+                a match may live only in the disabled set, so the enabled-set
+                miss is expected and its own no-match message is reported once
+                over the union instead.
 
         Returns:
             Tuple of (selected_enabled, selected_disabled) dicts.
@@ -510,7 +558,7 @@ class Session:
             all_enabled = {k: v for k, v in all_enabled.items() if v}
 
         enabled_selector = PipelineSelector(all_enabled)
-        selected = enabled_selector.select(select)
+        selected = enabled_selector.select(select, warn_on_no_match=warn_on_no_match)
 
         # The disabled set is only probed to report matches that are disabled;
         # a non-match here is expected and must not warn (it would contradict a
@@ -1054,6 +1102,143 @@ class Session:
             all_results.extend(historize_result.pipeline_results)
 
         return SessionResult(pipeline_results=all_results)
+
+    # -------------------------------------------------------------------
+    # Internal: destroy (teardown)
+    # -------------------------------------------------------------------
+
+    def _run_destroy(
+        self,
+        select: Optional[List[str]],
+        resource_type: str,
+        workers: int,
+        dry_run: bool,
+    ) -> SessionResult:
+        """Discover matching configs (enabled + disabled) and tear them down.
+
+        Selection is by selector only — ``resource_type`` gates which layer(s)
+        get torn down per config, not which configs are selected (a config no
+        longer declaring a historize disposition can still own an orphaned
+        historized table). Disabled configs are included: tearing a pipeline
+        down after it has been disabled is the expected path.
+        """
+        # warn_on_no_match=False: destroy targets the disabled set too, so a
+        # match living only there must not trip the enabled-set "did not match"
+        # warning. The empty-union check below reports a genuine no-match once.
+        enabled, disabled = self._discover_and_select(
+            select, filter_fn=None, warn_on_no_match=False
+        )
+        all_configs = flatten_configs(enabled) + flatten_configs(disabled)
+
+        if not all_configs:
+            logger.warning("No pipelines matched the selection criteria")
+            return SessionResult()
+
+        verb = "Previewing teardown of" if dry_run else "Destroying"
+        logger.info(
+            "%s %d pipeline(s) [resource-type: %s] with %d worker(s)",
+            verb,
+            len(all_configs),
+            resource_type,
+            workers,
+        )
+
+        results: List[PipelineResult] = []
+        total = len(all_configs)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_config = {}
+            for idx, config in enumerate(all_configs, 1):
+                log_prefix = f"[{idx}/{total}]"
+                future = executor.submit(
+                    self._execute_single_destroy,
+                    config,
+                    resource_type,
+                    dry_run,
+                    log_prefix,
+                )
+                future_to_config[future] = config
+            for future in as_completed(future_to_config):
+                results.append(future.result())
+
+        result = SessionResult(pipeline_results=results)
+        logger.info(
+            "Destroy %s: %d/%d succeeded, %d failed",
+            "preview complete" if dry_run else "complete",
+            result.succeeded,
+            len(results),
+            result.failed,
+        )
+        return result
+
+    @staticmethod
+    def _execute_single_destroy(
+        config: PipelineConfig,
+        resource_type: str,
+        dry_run: bool,
+        log_prefix: str = "",
+    ) -> PipelineResult:
+        """Tear down a single pipeline's footprint, returning a structured result."""
+        from dlt_saga.destroy import (
+            destroy_historize_footprint,
+            destroy_ingest_footprint,
+        )
+
+        prefix = f"{log_prefix} " if log_prefix else ""
+        try:
+            details: Dict[str, Any] = {}
+            # Collect what each layer removes, then emit ONE summary line naming
+            # the pipeline — so parallel runs stay readable (one line per
+            # pipeline) instead of interleaved per-resource lines.
+            removed = []
+            if resource_type in ("all", "ingest"):
+                ingest = destroy_ingest_footprint(
+                    config, dry_run=dry_run, log_prefix=log_prefix
+                )
+                details["ingest"] = ingest
+                for table_id in ingest["table_ids"]:
+                    removed.append(f"ingest table {table_id} (+ dlt/load state)")
+            if resource_type in ("all", "historize"):
+                historize = destroy_historize_footprint(
+                    config, dry_run=dry_run, log_prefix=log_prefix
+                )
+                details["historize"] = historize
+                if historize:
+                    if historize["dropped"]:
+                        removed.append(f"historized table {historize['table_id']}")
+                    if historize["log_cleared"]:
+                        removed.append("historize log entries")
+
+            if removed:
+                logger.info(
+                    "%s%s — %s: %s",
+                    prefix,
+                    config.pipeline_name,
+                    "[DRY RUN] would remove" if dry_run else "removed",
+                    "; ".join(removed),
+                )
+            else:
+                logger.info("%s%s — nothing to remove", prefix, config.pipeline_name)
+
+            return PipelineResult(
+                pipeline_name=config.pipeline_name,
+                success=True,
+                load_info=details,
+                config=config,
+            )
+        except Exception as e:
+            logger.error(
+                "%sDestroy failed for %s: %s",
+                prefix,
+                config.pipeline_name,
+                e,
+                exc_info=True,
+            )
+            return PipelineResult(
+                pipeline_name=config.pipeline_name,
+                success=False,
+                error=str(e),
+                config=config,
+            )
 
     # -------------------------------------------------------------------
     # Internal: destination preparation

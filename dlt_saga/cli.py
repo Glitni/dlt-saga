@@ -873,6 +873,42 @@ SCD2 records derived from older snapshots are preserved.
         raise typer.Exit(0)
 
 
+def _confirm_destroy(
+    dry_run: bool, resource_type: str, in_cloud_run: bool, yes: bool
+) -> None:
+    """Confirm a destroy operation. No prompt in dry-run (nothing is deleted)."""
+    if dry_run:
+        return
+
+    scope = {
+        "all": "ingest tables, historized tables, and all pipeline state",
+        "ingest": "ingest tables and dlt/load state",
+        "historize": "historized tables and historize log entries",
+    }[resource_type]
+
+    _sep = "=" * 70
+    logger.warning(
+        """DESTROY MODE
+%s
+This will permanently delete for the selected pipeline(s):
+  - %s
+It does NOT reload any data. Intended for decommissioning a pipeline
+before its config is removed or disabled. Run with --dry-run first to
+preview exactly what would be dropped.
+%s""",
+        _sep,
+        scope,
+        _sep,
+    )
+
+    # --yes (or Cloud Run) skips the prompt so CI/cron doesn't hang on stdin.
+    if not (in_cloud_run or yes):
+        confirmation = typer.confirm("Are you sure you want to proceed?", default=False)
+        if not confirmation:
+            logger.info("Operation cancelled by user")
+            raise typer.Exit(0)
+
+
 def _validate_historize_flags(
     full_refresh: bool,
     partial_refresh: bool,
@@ -1419,6 +1455,80 @@ def historize(
         logger.error(str(e))
         raise typer.Exit(1)
     _exit_if_failures(result, "Historize")
+
+
+@app.command()
+def destroy(
+    select: Optional[List[str]] = typer.Option(
+        None, "--select", "-s", help=_SELECT_HELP
+    ),
+    resource_type: str = typer.Option(
+        "all",
+        "--resource-type",
+        help="Which layer to tear down: ingest, historize, or all",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show what would be dropped without deleting anything",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+    workers: int = typer.Option(
+        4, "--workers", "-w", help="Number of parallel workers"
+    ),
+    profile: Optional[str] = typer.Option(
+        None, "--profile", help="Profile to use from profiles.yml"
+    ),
+    target: Optional[str] = typer.Option(
+        None, "--target", help="Target within profile"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts"),
+):
+    """Remove a pipeline's warehouse footprint (tables + state) without reloading.
+
+    The teardown counterpart to ``--full-refresh``: drop, but no rebuild. Run it
+    to decommission a pipeline before deleting or disabling its config, so no
+    stale tables or state are left behind. Selects disabled configs too.
+
+    Ownership is authoritative — only tables saga's own state records this
+    pipeline as having created are dropped (ingest tables from _saga_load_info,
+    historized tables from _saga_historize_log), never a re-derived name — so a
+    coincidental name match on another pipeline is never touched.
+
+    Examples:
+        saga destroy --select "group:google_sheets" --dry-run   # Preview first
+        saga destroy --select "filesystem__old_report__*"       # Both layers
+        saga destroy --select "tag:deprecated" --resource-type historize
+    """
+    setup_logging(verbose)
+    in_cloud_run = check_cloud_run_environment()
+
+    if resource_type not in ("all", "ingest", "historize"):
+        logger.error(
+            "Invalid --resource-type: '%s'. Must be: ingest, historize, or all",
+            resource_type,
+        )
+        raise typer.Exit(1)
+
+    _confirm_destroy(dry_run, resource_type, in_cloud_run, yes)
+
+    profile_target = load_profile_config(profile, target)
+
+    from dlt_saga.session import Session
+
+    try:
+        result = Session(
+            profile=profile, target=target, _profile_target=profile_target
+        ).destroy(
+            select=list(select) if select else None,
+            resource_type=resource_type,
+            workers=workers,
+            dry_run=dry_run,
+        )
+    except AuthenticationError as e:
+        logger.error(str(e))
+        raise typer.Exit(1)
+    _exit_if_failures(result, "Destroy")
 
 
 @app.command("update-access")
