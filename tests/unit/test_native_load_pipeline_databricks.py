@@ -68,8 +68,8 @@ def _make_spec(
         write_disposition=write_disposition,
         table_format=table_format,
         target_location=target_location,
+        source_uri_root="gs://bucket/prefix/",
     )
-    spec._source_uri = "gs://bucket/prefix/"  # type: ignore[attr-defined]
     return spec
 
 
@@ -269,7 +269,8 @@ class TestBuildCopyInto:
                 "gs://bucket/prefix/day=02/file2.parquet",
             ]
         )
-        spec._source_uri = "gs://bucket/prefix/"  # type: ignore[attr-defined]
+        # source_uri_root is set by _make_spec; the multi-parent chunk falls
+        # back to it as the FROM prefix.
 
         sql = DatabricksDestination._build_copy_into(dest, spec, "cat.ds.tbl")
 
