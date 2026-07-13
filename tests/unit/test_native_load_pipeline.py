@@ -139,6 +139,24 @@ class TestFullRefresh:
 
 
 @pytest.mark.unit
+class TestEnsureStagingSchema:
+    def test_created_when_destination_uses_staging(self):
+        """BigQuery stages external tables in a separate schema — create it."""
+        p = _make_pipeline()
+        p.destination.native_load_uses_staging_schema.return_value = True
+        p._ensure_staging_schema()
+        p.destination.ensure_schema_exists.assert_called_once_with(p._staging_dataset)
+
+    def test_skipped_when_destination_does_not_stage(self):
+        """Databricks COPY INTO loads straight into the target — creating a
+        staging schema would just leave an unused empty schema."""
+        p = _make_pipeline()
+        p.destination.native_load_uses_staging_schema.return_value = False
+        p._ensure_staging_schema()
+        p.destination.ensure_schema_exists.assert_not_called()
+
+
+@pytest.mark.unit
 class TestSyncTargetTableOptions:
     def test_calls_destination_sync_with_dataset_and_table(self):
         p = _make_pipeline()
