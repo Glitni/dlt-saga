@@ -1,3 +1,16 @@
+## 0.25.0 — 2026-07-13
+
+### Added
+- Add saga destroy to remove a pipeline's warehouse footprint (#375)
+
+
+### Changed
+- Extract shared confirmation-banner helper for CLI destructive prompts (#377)
+
+
+### Fixed
+- Record consistent qualified table ids in _saga_historize_log failure entries (#379)
+
 ## 0.24.0 — 2026-07-13
 
 ### Breaking Changes
