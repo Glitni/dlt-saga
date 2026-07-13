@@ -106,7 +106,7 @@ def _app_callback(
     version: bool = typer.Option(
         False,
         "--version",
-        "-v",
+        "-V",
         help="Show version and exit.",
         callback=_version_callback,
         is_eager=True,
@@ -1027,7 +1027,7 @@ def list_pipelines(
     pipelines: bool = typer.Option(
         False, "--pipelines", help="List available pipeline types and implementations"
     ),
-    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="Profile to use from profiles.yml"
     ),
@@ -1084,7 +1084,7 @@ def validate_configs(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
-    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="Profile to use from profiles.yml"
     ),
@@ -1157,7 +1157,7 @@ def ingest(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
-    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     workers: int = typer.Option(
         4, "--workers", "-w", help="Number of parallel workers"
     ),
@@ -1294,7 +1294,7 @@ def historize(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
-    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     workers: int = typer.Option(
         4, "--workers", "-w", help="Number of parallel workers"
     ),
@@ -1426,7 +1426,7 @@ def update_access(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
-    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     workers: int = typer.Option(
         4, "--workers", "-w", help="Number of parallel workers"
     ),
@@ -1618,7 +1618,7 @@ def run(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
-    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     workers: int = typer.Option(
         4, "--workers", "-w", help="Number of parallel workers"
     ),
@@ -1810,7 +1810,7 @@ def report(
         "--open/--no-open",
         help="Open the report in a browser after generating (local output only)",
     ),
-    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="Profile to use from profiles.yml"
     ),
@@ -1963,7 +1963,7 @@ def plan(
             "where you need to reference the same execution across separate jobs."
         ),
     ),
-    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="Profile to use from profiles.yml"
     ),
@@ -2114,7 +2114,7 @@ def worker(
             "orchestration.worker_concurrency in saga_project.yml, then 4."
         ),
     ),
-    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="Profile to use from profiles.yml"
     ),
@@ -2460,7 +2460,7 @@ def _link_config_schemas(output_dir: Path) -> None:
 
 @app.command()
 def info(
-    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ):
     """Show runtime environment: versions, plugins, destinations, config paths."""
     import sys
@@ -2783,7 +2783,7 @@ def _doctor_check_connection(
 
 @app.command()
 def doctor(
-    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="Profile to use from profiles.yml"
     ),
