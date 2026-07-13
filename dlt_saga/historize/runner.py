@@ -353,8 +353,11 @@ class HistorizeRunner:
             self.state_manager.write_log_entry(
                 HistorizeLogEntry(
                     pipeline_name=self.pipeline_name,
-                    source_table=self.source_table_name,
-                    target_table=self.target_table_name,
+                    # Fully-qualified ids, matching the success-path log entries
+                    # (the other three write sites use *_id) so the
+                    # _saga_historize_log source/target columns are consistent.
+                    source_table=self.source_table_id,
+                    target_table=self.target_table_id,
                     snapshot_value=None,
                     new_or_changed_rows=0,
                     deleted_rows=0,

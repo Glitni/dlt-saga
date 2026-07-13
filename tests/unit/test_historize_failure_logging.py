@@ -17,6 +17,8 @@ def _runner():
     runner.pipeline_name = "grp__tbl"
     runner.source_table_name = "tbl"
     runner.target_table_name = "tbl_historized"
+    runner.source_table_id = "db.schema.tbl"
+    runner.target_table_id = "db.schema.tbl_historized"
     runner.full_refresh = False
     runner.config = MagicMock()
     runner.state_manager = MagicMock()
@@ -38,6 +40,9 @@ class TestHistorizeFailureLogging:
         # NULL snapshot → never becomes a baseline in get_pipeline_state.
         assert entry.snapshot_value is None
         assert entry.pipeline_name == "grp__tbl"
+        # Fully-qualified ids, consistent with the success-path log entries.
+        assert entry.source_table == "db.schema.tbl"
+        assert entry.target_table == "db.schema.tbl_historized"
 
     def test_config_error_does_not_write_log_entry(self):
         runner = _runner()
