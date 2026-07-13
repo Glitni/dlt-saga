@@ -969,7 +969,7 @@ class TestDatabricksCopyIntoForce:
         from dlt_saga.destinations.base import NativeLoadSpec
 
         return NativeLoadSpec(
-            target_dataset="sch",
+            target_schema="sch",
             target_table="tbl",
             source_uris=["gs://bucket/dir/file.parquet"],
             file_type="parquet",

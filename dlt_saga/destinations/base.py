@@ -34,7 +34,7 @@ class DerivedColumn:
 class NativeLoadSpec:
     """Inputs for a single native-load chunk passed to destination.native_load_chunk."""
 
-    target_dataset: str
+    target_schema: str
     target_table: str
     source_uris: list
     file_type: str

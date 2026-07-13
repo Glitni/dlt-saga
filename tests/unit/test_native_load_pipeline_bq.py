@@ -58,7 +58,7 @@ def _make_spec(
             DerivedColumn("_dlt_source_file_name", "_FILE_NAME", "STRING"),
         ]
     return NativeLoadSpec(
-        target_dataset="ds",
+        target_schema="ds",
         target_table="tbl",
         source_uris=source_uris,
         file_type=file_type,

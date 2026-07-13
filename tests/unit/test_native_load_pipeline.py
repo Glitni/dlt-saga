@@ -124,7 +124,7 @@ class TestFullRefresh:
         p = _make_pipeline()
         p.context.full_refresh = True
         p._handle_full_refresh()
-        p.destination.drop_table.assert_called_once_with(p._dataset, p.table_name)
+        p.destination.drop_table.assert_called_once_with(p._schema, p.table_name)
 
     def test_state_cleared_on_full_refresh(self):
         p = _make_pipeline()
@@ -142,7 +142,7 @@ class TestFullRefresh:
 class TestSyncTargetTableOptions:
     def test_calls_destination_sync_with_dataset_and_table(self):
         p = _make_pipeline()
-        p._dataset = "my_dataset"
+        p._schema = "my_dataset"
         p.table_name = "my_table"
         p._sync_target_table_options()
         p.destination.sync_table_options.assert_called_once_with(
@@ -152,7 +152,7 @@ class TestSyncTargetTableOptions:
     def test_swallows_errors(self):
         # A failure on the post-load sync must not fail the load.
         p = _make_pipeline()
-        p._dataset = "ds"
+        p._schema = "ds"
         p.table_name = "tbl"
         p.destination.sync_table_options.side_effect = RuntimeError("boom")
         # Should not raise.
@@ -634,7 +634,7 @@ class TestTargetLocationAndTableFormat:
         p.destination.drop_table_external = MagicMock()
         p._handle_full_refresh()
         p.destination.drop_table_external.assert_called_once_with(
-            p._dataset, p.table_name
+            p._schema, p.table_name
         )
         p.destination.drop_table.assert_not_called()
 
@@ -642,7 +642,7 @@ class TestTargetLocationAndTableFormat:
         p = _make_pipeline()
         p._target_location = None
         p._handle_full_refresh()
-        p.destination.drop_table.assert_called_once_with(p._dataset, p.table_name)
+        p.destination.drop_table.assert_called_once_with(p._schema, p.table_name)
 
 
 @pytest.mark.unit

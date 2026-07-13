@@ -95,8 +95,8 @@ class NativeLoadPipeline(BasePipeline):
             self.destination.config, "database", None
         ) or getattr(self.destination.config, "project_id", "local")
 
-        self._dataset: str = config.get("schema_name") or ""
-        if not self._dataset:
+        self._schema: str = config.get("schema_name") or ""
+        if not self._schema:
             raise ValueError("schema_name must be set in the pipeline config")
 
         # For cross-cloud S3 the staging dataset holds the S3 external table and
@@ -104,9 +104,9 @@ class NativeLoadPipeline(BasePipeline):
         # destination-region staging dataset — it is created lazily in the Omni
         # region by the destination, not here.
         default_staging = (
-            f"{self._dataset}_omni_staging"
+            f"{self._schema}_omni_staging"
             if self.native_config.is_s3
-            else f"{self._dataset}_staging"
+            else f"{self._schema}_staging"
         )
         self._staging_dataset: str = (
             self.native_config.staging_dataset or default_staging
@@ -114,7 +114,7 @@ class NativeLoadPipeline(BasePipeline):
 
         self.state_manager = NativeLoadStateManager(
             destination=self.destination,
-            dataset=self._dataset,
+            schema=self._schema,
         )
         self.storage_client = get_storage_client(
             self.native_config.source_uri,
@@ -241,7 +241,7 @@ class NativeLoadPipeline(BasePipeline):
 
     def _ensure_target_table(self) -> None:
         try:
-            if self.destination.table_exists(self._dataset, self.table_name):
+            if self.destination.table_exists(self._schema, self.table_name):
                 self._target_exists = True
                 self.logger.debug("Target table %s already exists", self.table_name)
         except Exception as exc:
@@ -256,9 +256,9 @@ class NativeLoadPipeline(BasePipeline):
             if self._target_location and hasattr(
                 self.destination, "drop_table_external"
             ):
-                self.destination.drop_table_external(self._dataset, self.table_name)
+                self.destination.drop_table_external(self._schema, self.table_name)
             else:
-                self.destination.drop_table(self._dataset, self.table_name)
+                self.destination.drop_table(self._schema, self.table_name)
         except Exception as exc:
             self.logger.debug("Could not drop target (may not exist): %s", exc)
 
@@ -640,7 +640,7 @@ class NativeLoadPipeline(BasePipeline):
 
         base_disp = "replace" if self._is_replace else "append"
         spec = NativeLoadSpec(
-            target_dataset=self._dataset,
+            target_schema=self._schema,
             target_table=self.table_name,
             source_uris=uris,
             file_type=self.native_config.file_type,
@@ -876,7 +876,7 @@ class NativeLoadPipeline(BasePipeline):
                 )
             ),
             "destination_type": self.context.get_destination_type(),
-            "dataset_name": self._dataset,
+            "dataset_name": self._schema,
             "table_name": self.table_name,
             "row_count": total_rows,
             "started_at": started,
@@ -885,7 +885,7 @@ class NativeLoadPipeline(BasePipeline):
             "saved_at": finished.isoformat(),
         }
         try:
-            self.destination.save_load_info(self._dataset, [record])
+            self.destination.save_load_info(self._schema, [record])
         except Exception as exc:
             self.logger.warning(
                 "Failed to write _saga_load_info: %s; "
@@ -904,11 +904,11 @@ class NativeLoadPipeline(BasePipeline):
         Best-effort: never fail a successful load if the post-load ALTER fails.
         """
         try:
-            self.destination.sync_table_options(self._dataset, self.table_name)
+            self.destination.sync_table_options(self._schema, self.table_name)
         except Exception as exc:
             self.logger.warning(
                 "Failed to sync destination table options for %s.%s: %s",
-                self._dataset,
+                self._schema,
                 self.table_name,
                 exc,
             )
@@ -920,7 +920,7 @@ class NativeLoadPipeline(BasePipeline):
             "destination_name": self.destination.config.__class__.__name__.lower().replace(
                 "destinationconfig", ""
             ),
-            "dataset_name": self._dataset,
+            "dataset_name": self._schema,
             "total_pipeline_duration": sum(t.values()),
             "initialization_duration": t.get("init", 0),
             "extraction_duration": t.get("discover", 0),

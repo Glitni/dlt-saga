@@ -134,7 +134,7 @@ class TestDataclasses:
 
     def test_native_load_spec_defaults(self):
         spec = NativeLoadSpec(
-            target_dataset="ds",
+            target_schema="ds",
             target_table="tbl",
             source_uris=["gs://b/f.parquet"],
             file_type="parquet",

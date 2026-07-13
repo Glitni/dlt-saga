@@ -266,7 +266,7 @@ class NativeLoadConfig(BaseConfig):
         metadata={
             "description": (
                 "BigQuery-only: staging dataset for transient external tables. "
-                "Defaults to <target_dataset>_staging."
+                "Defaults to <schema>_staging."
             )
         },
     )
