@@ -47,6 +47,7 @@ Selector combinations:
 
 import fnmatch
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -110,14 +111,26 @@ class PipelineSelector:
         selected_dict = {}
 
         for selector_group in selectors:
-            # First, split by spaces to handle UNION within a single --select argument
+            # Collapse whitespace around commas first, so a comma followed by a
+            # space reads as one intersection token rather than being torn apart
+            # by the whitespace (UNION) split below: "tag:daily, group:x" then
+            # behaves like "tag:daily,group:x" (AND), not "tag:daily," OR "group:x".
+            normalized = re.sub(r"\s*,\s*", ",", selector_group)
+
+            # Split by spaces to handle UNION within a single --select argument
             # Example: --select "tag:daily group:google_sheets" -> ["tag:daily", "group:google_sheets"]
-            space_separated = selector_group.split()
+            space_separated = normalized.split()
 
             for selector in space_separated:
-                # Handle INTERSECTION logic (comma-separated within a selector)
+                # Handle INTERSECTION logic (comma-separated within a selector).
+                # Drop empty tokens so a trailing/doubled comma doesn't intersect
+                # against an empty selector (which matches nothing) and silently
+                # narrow the whole group to zero.
                 if "," in selector:
-                    matched = self._select_intersection(selector.split(","))
+                    parts = [p for p in selector.split(",") if p]
+                    if not parts:
+                        continue
+                    matched = self._select_intersection(parts)
                 else:
                     matched = self._select_single(selector)
 

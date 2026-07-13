@@ -127,6 +127,35 @@ class TestPipelineSelector:
         result = PipelineSelector(sample_configs).select(["tag:daily,tag:api"])
         assert len(result) == 1 and len(result["api"]) == 1
 
+    def test_intersection_comma_space_equivalent_to_comma(self, sample_configs):
+        """A space after the comma reads as intersection, not union.
+
+        Previously the whitespace split ran first, so "a, b" became "a," (which
+        intersected against an empty selector → nothing) UNION "b" — silently
+        returning just "b" instead of the intended "a AND b".
+        """
+        result = PipelineSelector(sample_configs).select(
+            ["tag:daily, group:google_sheets"]
+        )
+        assert len(result) == 1
+        assert len(result["google_sheets"]) == 1
+        assert result["google_sheets"][0].has_tag("daily")
+
+    def test_trailing_comma_ignored(self, sample_configs):
+        """A trailing comma yields an empty token that must be dropped, not
+        intersected against (which would silently select nothing)."""
+        result = PipelineSelector(sample_configs).select(["tag:daily,"])
+        assert set(result.keys()) == {"google_sheets", "filesystem", "api"}
+
+    def test_doubled_and_padded_commas_tolerated(self, sample_configs):
+        """Empty tokens from doubled/padded commas are dropped; the real
+        intersection still applies."""
+        result = PipelineSelector(sample_configs).select(
+            ["tag:daily ,, group:google_sheets"]
+        )
+        assert len(result) == 1
+        assert len(result["google_sheets"]) == 1
+
     def test_complex_combination(self, sample_configs):
         """(tag:daily AND group:google_sheets) OR tag:hourly."""
         result = PipelineSelector(sample_configs).select(
