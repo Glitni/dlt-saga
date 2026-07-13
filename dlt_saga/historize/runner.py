@@ -372,6 +372,8 @@ class HistorizeRunner:
         # - full_refresh or first run → full reprocess
         # - otherwise → incremental
         needs_full = self.full_refresh or not state.has_successful_run
+        self._guard_target_exists(needs_full)
+
         timings["init"] = time.time() - t
 
         t = time.time()
@@ -392,6 +394,28 @@ class HistorizeRunner:
 
         stats["timings"] = timings
         return stats
+
+    def _guard_target_exists(self, needs_full: bool) -> None:
+        """Fail clearly if an incremental/partial run's historized target is gone.
+
+        An incremental or partial refresh assumes the historized target from the
+        prior run still exists (it MERGEs into / clones it). State is keyed on the
+        pipeline name, so renaming ``output_table`` / ``output_dataset`` still
+        finds the prior run's log entry — but the target now lives under a new
+        name, so the run would otherwise fail with a raw "table not found".
+        Surface the actual cause and the fix instead of that opaque error.
+        """
+        if needs_full:
+            return
+        if self.destination.table_exists(self.target_schema, self.target_table_name):
+            return
+        raise ValueError(
+            f"Historized table {self.target_table_id} does not exist, but a prior "
+            f"successful run is recorded for pipeline '{self.pipeline_name}'. This "
+            f"usually means the historize output table/dataset was renamed (or the "
+            f"table was dropped) since the last run. Run "
+            f"'saga historize --full-refresh' to rebuild it."
+        )
 
     def _setup_full_reprocess(
         self,

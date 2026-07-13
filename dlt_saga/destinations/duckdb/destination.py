@@ -418,6 +418,16 @@ class DuckDBDestination(Destination):
         rows = self.execute_sql(self.columns_query("", dataset, table))
         return [(r.column_name, r.data_type) for r in rows]
 
+    def table_exists(self, dataset: str, table: str) -> bool:
+        safe_schema = self.escape_string_literal(dataset)
+        safe_table = self.escape_string_literal(table)
+        rows = self.execute_sql(
+            "SELECT 1 FROM duckdb_tables() "
+            f"WHERE schema_name = '{safe_schema}' AND table_name = '{safe_table}' "
+            "LIMIT 1"
+        )
+        return bool(list(rows))
+
     # --- Column / table description reconciliation -------------------------
     # dlt emits no descriptions for DuckDB, so this reconcile is DuckDB's only
     # source of column/table comments.

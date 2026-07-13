@@ -35,3 +35,27 @@ class TestRequireOptional:
 
         # os.path is always available — the top-level "os" import should succeed
         require_optional("os.path", "os.path test")
+
+    def test_transitive_import_error_propagates(self, monkeypatch):
+        """A transitive import failure (target package installed, but one of its
+        own deps missing) must surface the real cause, not be masked as "install
+        the target package"."""
+        import builtins
+
+        from dlt_saga.utility import optional_deps
+
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "pkg_present_bad_dep":
+                err = ImportError("No module named 'some_missing_dep'")
+                err.name = "some_missing_dep"
+                raise err
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        with pytest.raises(ImportError, match="some_missing_dep") as excinfo:
+            optional_deps.require_optional("pkg_present_bad_dep", "test purpose")
+        # The real transitive error, not the friendly "requires the ... package".
+        assert "requires the 'pkg_present_bad_dep' package" not in str(excinfo.value)
