@@ -101,9 +101,24 @@ def require_optional(package: str, purpose: str) -> None:
 
         require_optional("googleapiclient", "Google Sheets pipelines")
     """
+    top_level = package.split(".")[0]
     try:
         __import__(package)
-    except ImportError:
+    except ImportError as exc:
+        # Only translate a genuinely-missing target package into the "install
+        # this extra" hint. If the failure is a *transitive* import (the target
+        # package is installed but one of its own dependencies is missing),
+        # exc.name names that other module — re-raise it untouched so the real
+        # cause is visible instead of misreporting the target as not installed.
+        failed = exc.name
+        if (
+            failed is not None
+            and failed != package
+            and failed != top_level
+            and not failed.startswith(top_level + ".")
+        ):
+            raise
+
         extra = _find_extra(package)
         if extra:
             install_hint = f'pip install "dlt-saga[{extra}]"'
