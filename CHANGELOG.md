@@ -1,3 +1,19 @@
+## 0.24.0 — 2026-07-13
+
+### Breaking Changes
+- Make -v mean --verbose consistently; move version to -V (#372)
+
+
+### Changed
+- Use schema (not BigQuery 'dataset') for the generic native_load target schema (#368)
+
+
+### Fixed
+- Native_load no longer creates an unused staging schema on Databricks (#370)
+- Surface transitive import failures and historize output_table-rename with clear errors (#366)
+- Native_load companion view fails silently on BigQuery; promote spec._source_uri to a real field (#364)
+- Comma+space selector combos silently match nothing (#362)
+
 ## 0.23.0 — 2026-07-11
 
 ### Fixed
