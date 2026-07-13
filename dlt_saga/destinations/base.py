@@ -794,6 +794,16 @@ class Destination(ABC):
         """Return the set of URI schemes supported for native_load (e.g. {'gs', 's3'})."""
         return set()
 
+    def native_load_uses_staging_schema(self) -> bool:
+        """Return True if native_load stages data through a separate schema.
+
+        BigQuery materializes external tables in a staging dataset before the
+        INSERT, so that dataset must be created up front. Databricks COPY INTO
+        loads straight into the target — no staging schema — so this defaults
+        to False.
+        """
+        return False
+
     def native_load_chunk(self, spec: "NativeLoadSpec") -> "NativeLoadResult":
         """Load one chunk of source URIs directly into the warehouse.
 

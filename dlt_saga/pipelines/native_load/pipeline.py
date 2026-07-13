@@ -556,12 +556,20 @@ class NativeLoadPipeline(BasePipeline):
     def _ensure_staging_schema(self) -> None:
         """Ensure the staging dataset exists (destination-region loads only).
 
+        Only destinations that stage native_load through a separate schema
+        (BigQuery, which materializes external tables there before the INSERT)
+        need this. Databricks COPY INTO loads straight into the target, so
+        creating a staging schema for it just leaves an unused empty schema.
+
         The Omni-region staging dataset for S3 is created lazily by the
         destination in the Omni region; creating it here would place it in the
         destination region, which is wrong for the S3 external table.
         """
-        if not self.native_config.is_s3:
-            self.destination.ensure_schema_exists(self._staging_dataset)
+        if self.native_config.is_s3:
+            return
+        if not self.destination.native_load_uses_staging_schema():
+            return
+        self.destination.ensure_schema_exists(self._staging_dataset)
 
     def _load_files(self, files_by_cursor: dict) -> int:
         flat: list = [(f, cv) for cv, files in files_by_cursor.items() for f in files]

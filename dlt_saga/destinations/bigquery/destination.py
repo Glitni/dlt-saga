@@ -998,6 +998,11 @@ class BigQueryDestination(BigQueryBaseDestination):
     def supported_native_load_uri_schemes(self) -> set:
         return {"gs", "s3"}
 
+    def native_load_uses_staging_schema(self) -> bool:
+        # BigQuery materializes external tables in the staging dataset before
+        # the INSERT, so the dataset must exist.
+        return True
+
     def native_load_file_name_expr(self) -> str:
         return "_FILE_NAME"
 
