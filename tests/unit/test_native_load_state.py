@@ -49,7 +49,10 @@ class TestNativeLoadStateManager:
         dest.escape_string_literal.side_effect = lambda v: v.replace("'", "\\'")
         dest.type_name.side_effect = lambda t: t.upper()
         dest.partition_ddl.return_value = "PARTITION BY DATE(started_at)"
-        dest.cluster_ddl.return_value = ""
+        dest.cluster_ddl.return_value = "CLUSTER BY pipeline_name, cursor_value"
+        dest.partition_cluster_ddl.return_value = (
+            "PARTITION BY DATE(started_at)\nCLUSTER BY pipeline_name, cursor_value"
+        )
         dest.get_full_table_id.side_effect = lambda d, t: f"`proj.{d}.{t}`"
         dest.execute_sql.return_value = []
         dest.create_or_replace_view.return_value = None
@@ -69,6 +72,24 @@ class TestNativeLoadStateManager:
         mgr = NativeLoadStateManager(dest, "my_dataset")
         mgr.ensure_table_exists()
         dest.create_or_replace_view.assert_called_once()
+
+    def test_log_table_clustered_on_read_predicates(self):
+        # Reads filter on pipeline_name (+ cursor_value in date mode), never on
+        # started_at, so the physical layout must cluster on those columns to
+        # keep reads pruned as the log grows. The destination reconciles the
+        # partition/cluster combination.
+        dest = self._make_dest()
+        mgr = NativeLoadStateManager(dest, "my_dataset")
+        mgr.ensure_table_exists()
+        dest.partition_cluster_ddl.assert_called_once_with(
+            "started_at", ["pipeline_name", "cursor_value"]
+        )
+        create_ddl = next(
+            c[0][0]
+            for c in dest.execute_sql.call_args_list
+            if "CREATE TABLE IF NOT EXISTS" in c[0][0]
+        )
+        assert "CLUSTER BY pipeline_name, cursor_value" in create_ddl
 
     def test_view_body_uses_qualified_table_id(self):
         """The companion view body must reference the log table by its fully
@@ -237,6 +258,7 @@ def _make_plain_dest() -> MagicMock:
     dest.type_name.side_effect = lambda t: t.upper()
     dest.partition_ddl.return_value = ""
     dest.cluster_ddl.return_value = ""
+    dest.partition_cluster_ddl.return_value = ""
     dest.get_full_table_id.side_effect = lambda d, t: f"`proj.{d}.{t}`"
     dest.execute_sql.return_value = []
     dest.create_or_replace_view.return_value = None
