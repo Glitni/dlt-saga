@@ -121,12 +121,9 @@ class TestEmptySource:
         seed_raw_table(duckdb_destination, [])
         make_historize_runner(duckdb_destination, full_refresh=True).run()
 
-        # In production each run is a fresh process; here both runs share one
-        # DuckDB connection, so drop the connection-scoped full-reprocess temp
-        # table to simulate that process boundary (it is otherwise re-used across
-        # both full reprocesses and collides — a DuckDB-test-only artifact).
-        duckdb_destination.connection.execute("DROP TABLE IF EXISTS _historize_result")
-
+        # Both runs share one DuckDB connection (in production each is a fresh
+        # process). The full-reprocess temp table is CREATE OR REPLACE, so the
+        # second reprocess re-creates it cleanly rather than colliding.
         seed_raw_table(duckdb_destination, [SNAPSHOT_1, SNAPSHOT_2, SNAPSHOT_3])
         result = make_historize_runner(duckdb_destination, full_refresh=False).run()
 
@@ -417,6 +414,145 @@ class TestMultiSnapshotIncremental:
             _dlt_is_deleted=True,
         )
         # Reappearance: Chicago, open
+        assert_row(
+            acme[3],
+            city="Chicago",
+            _dlt_valid_from=DT(2026, 1, 5),
+            _dlt_valid_to=None,
+            _dlt_is_deleted=False,
+        )
+
+
+def _crash_before_log_write(*args, **kwargs):
+    """Stand-in for write_log_entry that fails as if the process died.
+
+    Simulates a crash after the incremental SQL commits but before the watermark
+    advances: run() catches it into a failed result, no completed log entry is
+    written, so the next run re-discovers the same snapshot batch and re-runs the
+    incremental SQL in place — the scenario the rollback prefix must survive.
+    """
+    raise RuntimeError("simulated crash before log write")
+
+
+class TestIncrementalIdempotency:
+    """Incremental historization is re-entrant across a crash + retry.
+
+    Without the rollback prefix, a retry of an already-applied snapshot batch
+    duplicates every change/deletion row (the MERGE's `n.valid_from > t.valid_from`
+    is equal, not greater, for the rows the crashed run inserted, so it won't
+    re-close them, and the INSERT blindly re-inserts). Each of these asserts the
+    retried table matches the clean single-run result — no duplicated history.
+    """
+
+    def test_crash_then_retry_produces_no_duplicates(self, duckdb_destination):
+        """Crash after the incremental SQL commits → retry converges to 6 rows."""
+        # Baseline full reprocess over snapshots 1-2 (records 2026-01-02 as baseline).
+        run_historize(duckdb_destination, [SNAPSHOT_1, SNAPSHOT_2])
+
+        # New snapshot 3; run incrementally but "crash" before the watermark advances.
+        seed_raw_table(duckdb_destination, [SNAPSHOT_3])
+        crashed = make_historize_runner(duckdb_destination, full_refresh=False)
+        crashed.state_manager.write_log_entry = _crash_before_log_write
+        assert crashed.run()["status"] == "failed"
+
+        # The SQL committed: snapshot-3 rows are already in the target (same end
+        # state as a full reprocess of 1-3, i.e. 6 rows). The watermark did NOT
+        # advance, so the batch is re-discoverable.
+        assert len(query_historized(duckdb_destination)) == 6
+
+        # Retry with a fresh runner: re-discovers snapshot 3 and re-runs in place.
+        retry = make_historize_runner(duckdb_destination, full_refresh=False)
+        result = retry.run()
+        assert result["status"] == "completed"
+        assert result["mode"] == "incremental"
+        assert result["snapshots_processed"] == 1
+
+        rows = query_historized(duckdb_destination)
+        assert len(rows) == 6  # not 6 + re-inserted duplicates
+        dedup_keys = [
+            (r["company_id"], r["_dlt_valid_from"], r["_dlt_is_deleted"]) for r in rows
+        ]
+        assert len(dedup_keys) == len(set(dedup_keys)), (
+            "duplicate SCD2 rows after retry"
+        )
+
+        # Acme's SCD2 chain is intact: NY → Boston → deletion marker (open).
+        acme = get_rows_for(rows, 1)
+        assert len(acme) == 3
+        assert_row(
+            acme[0],
+            city="New York",
+            _dlt_valid_from=DT(2026, 1, 1),
+            _dlt_valid_to=DT(2026, 1, 2),
+            _dlt_is_deleted=False,
+        )
+        assert_row(
+            acme[1],
+            city="Boston",
+            _dlt_valid_from=DT(2026, 1, 2),
+            _dlt_valid_to=DT(2026, 1, 3),
+            _dlt_is_deleted=False,
+        )
+        assert_row(
+            acme[2],
+            city="Boston",
+            _dlt_valid_from=DT(2026, 1, 3),
+            _dlt_valid_to=None,
+            _dlt_is_deleted=True,
+        )
+
+    def test_clean_incremental_prefix_is_noop(self, duckdb_destination):
+        """On a clean run the prefix is a no-op — result unchanged (6 rows)."""
+        run_historize(duckdb_destination, [SNAPSHOT_1, SNAPSHOT_2])
+        seed_raw_table(duckdb_destination, [SNAPSHOT_3])
+        result = make_historize_runner(duckdb_destination, full_refresh=False).run()
+        assert result["status"] == "completed"
+        assert len(query_historized(duckdb_destination)) == 6
+
+    def test_multi_snapshot_batch_retry_is_stable(self, duckdb_destination):
+        """A disappear+reappear batch survives crash + retry without duplication."""
+        run_historize(duckdb_destination, [SNAPSHOT_1, SNAPSHOT_2])
+
+        seed_raw_table(duckdb_destination, [SNAPSHOT_3, SNAPSHOT_4, SNAPSHOT_5])
+        crashed = make_historize_runner(duckdb_destination, full_refresh=False)
+        crashed.state_manager.write_log_entry = _crash_before_log_write
+        assert crashed.run()["status"] == "failed"
+
+        retry = make_historize_runner(duckdb_destination, full_refresh=False)
+        assert retry.run()["status"] == "completed"
+
+        rows = query_historized(duckdb_destination)
+        dedup_keys = [
+            (r["company_id"], r["_dlt_valid_from"], r["_dlt_is_deleted"]) for r in rows
+        ]
+        assert len(dedup_keys) == len(set(dedup_keys)), (
+            "duplicate SCD2 rows after retry"
+        )
+
+        # Acme's full chain is identical to the clean multi-snapshot batch result.
+        acme = get_rows_for(rows, 1)
+        assert len(acme) == 4
+        assert_row(
+            acme[0],
+            city="New York",
+            _dlt_valid_from=DT(2026, 1, 1),
+            _dlt_valid_to=DT(2026, 1, 2),
+            _dlt_is_deleted=False,
+        )
+        assert_row(
+            acme[1],
+            city="Boston",
+            _dlt_valid_from=DT(2026, 1, 2),
+            _dlt_valid_to=DT(2026, 1, 3),
+            _dlt_is_deleted=False,
+        )
+        assert_row(
+            acme[2],
+            city="Boston",
+            _dlt_valid_from=DT(2026, 1, 3),
+            _dlt_valid_to=DT(2026, 1, 5),
+            _dlt_is_deleted=True,
+        )
         assert_row(
             acme[3],
             city="Chicago",

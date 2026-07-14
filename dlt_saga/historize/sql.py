@@ -400,7 +400,7 @@ INNER JOIN deduped del_src ON {pk_join_del}
 -- Full Reprocess Historization
 -- Transforms all raw snapshot data into SCD2 format
 
-CREATE TEMP TABLE _historize_result AS
+CREATE OR REPLACE TEMP TABLE _historize_result AS
 WITH
 -- All unique snapshot dates (per merge_key group when configured).
 all_snapshots AS (
@@ -546,6 +546,7 @@ disappearances AS (
         value_columns: List[str],
         new_snapshots: List[str],
         last_historized_snapshot: Optional[str] = None,
+        rollback_prefix: bool = False,
     ) -> str:
         """Build SQL for incremental historization.
 
@@ -555,6 +556,15 @@ disappearances AS (
         3. Detect changes via LAG() comparison (reference provides baseline)
         4. Detect deletions
         5. MERGE existing active records, INSERT new changes
+
+        Args:
+            rollback_prefix: When True, prepend a re-entrancy rollback (DELETE +
+                reopen scoped to the batch's snapshot boundary) so a crashed-then-
+                retried run converges to a single clean run rather than duplicating
+                history. Only the in-place incremental path passes True; the
+                partial-refresh staging path leaves it False because it already
+                rolls back via ``build_rollback_sql`` against a clone (adding the
+                prefix there would run an unscoped rollback over unaffected keys).
         """
         pk_cols = self._pk_cols_sql()
         snapshot_col = self.config.snapshot_column
@@ -611,11 +621,39 @@ disappearances AS (
         all_columns_sql = self._all_columns_sql(value_columns)
         pk_join_t_n = self._pk_join("t", "n")
 
+        # Re-entrancy rollback prefix. The incremental write (CREATE TEMP TABLE →
+        # MERGE → INSERT) and the subsequent log write are not one atomic unit, so a
+        # crash in between (or mid-script — BigQuery scripts aren't atomic across
+        # statements) leaves the watermark un-advanced; the next run re-discovers the
+        # same snapshots and re-runs this SQL in place, duplicating every inserted row
+        # (the MERGE's `n.valid_from > t.valid_from` is equal, not greater, for the
+        # already-inserted rows, so it won't re-close them). Undoing anything a prior
+        # attempt at this exact batch wrote makes the whole operation idempotent.
+        #
+        # The batch's snapshot boundary alone scopes this correctly, with no
+        # affected-keys table (unlike build_rollback_sql): new snapshots are strictly
+        # after the last historized snapshot, which bounds every legit target
+        # valid_from/valid_to, so nothing legitimate is >= min_new. On a clean first
+        # run both statements are no-ops. The DELETE and UPDATE target disjoint row
+        # sets, so they're order-independent and each is itself re-entrant.
+        rollback_prefix_sql = ""
+        if rollback_prefix and new_snapshots:
+            min_new = self.destination.escape_string_literal(new_snapshots[0])
+            rollback_prefix_sql = f"""-- Re-entrancy rollback: undo a prior crashed attempt at this snapshot batch.
+DELETE FROM {tgt}
+WHERE {self.valid_from} >= TIMESTAMP '{min_new}';
+
+UPDATE {tgt}
+SET {self.valid_to} = NULL
+WHERE {self.valid_to} >= TIMESTAMP '{min_new}';
+
+"""
+
         return f"""
 -- Incremental Historization
 -- Processes new snapshots and merges into historized table
 
-CREATE TEMP TABLE _historize_incremental AS
+{rollback_prefix_sql}CREATE OR REPLACE TEMP TABLE _historize_incremental AS
 WITH
 -- New-snapshot rows from the source unioned with the change-detection baseline
 -- (the reference snapshot) taken from the historized target's open rows. The
