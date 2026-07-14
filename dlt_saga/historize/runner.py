@@ -732,11 +732,15 @@ class HistorizeRunner:
         # Use last historized snapshot from pre-fetched state as reference for LAG
         last_historized = state.last_snapshot_value
 
-        # Build and execute incremental SQL
+        # Build and execute incremental SQL. rollback_prefix=True makes the in-place
+        # write re-entrant: a crash between this SQL and the log write leaves the
+        # watermark un-advanced, so the next run re-runs the same batch — the prefix
+        # undoes the prior attempt first, preventing duplicated history.
         sql = self.sql_builder.build_incremental_sql(
             value_columns=value_columns,
             new_snapshots=new_snapshots,
             last_historized_snapshot=last_historized,
+            rollback_prefix=True,
         )
         self.logger.debug(f"Incremental SQL ({len(sql)} chars)")
 
@@ -904,10 +908,15 @@ class HistorizeRunner:
                 staging_builder, effective_from_date, run_id, target_schema
             )
 
+            # No rollback_prefix here: the staging path already rolled back via
+            # _rollback_staging (build_rollback_sql) against the clone, and gets
+            # crash-safety from clone-and-swap. The prefix's boundary-only rollback
+            # would wrongly touch unaffected keys' history on the clone.
             incremental_sql = staging_builder.build_incremental_sql(
                 value_columns=value_columns,
                 new_snapshots=snapshots_to_reprocess,
                 last_historized_snapshot=lag_reference,
+                rollback_prefix=False,
             )
             self.destination.execute_sql(incremental_sql, target_schema)
             self.logger.debug("Incremental re-run on staging complete")
