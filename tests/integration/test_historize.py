@@ -582,6 +582,11 @@ class TestConfigChanges:
 
         assert result["status"] == "failed"
         assert "config changed" in result["error"].lower()
+        # The suggested rebuild is scoped to this pipeline (a bare --full-refresh
+        # with no selector would reprocess every historized table).
+        assert (
+            'saga historize -s "test__raw_companies" --full-refresh' in result["error"]
+        )
 
     def test_column_rename_requires_full_refresh(self, duckdb_destination):
         """Renaming an SCD2 output column without --full-refresh is caught by the

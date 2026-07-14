@@ -1,5 +1,6 @@
 """Tests for the Session programmatic API."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -105,6 +106,76 @@ def _config(pipeline_name="p"):
     cfg.identifier = f"configs/{pipeline_name}.yml"
     cfg.table_name = "tbl"
     return cfg
+
+
+@pytest.mark.unit
+class TestFailureDisplaySingleSourced:
+    """Per-pipeline failures are displayed once, by the CLI end-of-run summary
+    (`_exit_if_failures`). The session workers no longer re-log the same error
+    inline — that printed it twice (once inline, once in the summary). Genuine
+    failures still get a single inline traceback for real-time debugging; config
+    errors get no inline log, since the summary already surfaces them cleanly."""
+
+    def _cfg(self, name="grp__p"):
+        cfg = _config(name)
+        cfg.pipeline_name = name
+        return cfg
+
+    def _session_errors(self, caplog):
+        return [r for r in caplog.records if r.name == "dlt_saga.session"]
+
+    def test_ingest_config_error_not_logged_inline(self, caplog):
+        cfg = self._cfg()
+        with (
+            patch(
+                "dlt_saga.session.execute_pipeline",
+                side_effect=ValueError("bad config"),
+            ),
+            caplog.at_level(logging.ERROR, logger="dlt_saga.session"),
+        ):
+            result = Session._execute_single_ingest(cfg, "")
+        assert result.success is False
+        assert result.config_error is True
+        assert self._session_errors(caplog) == []
+
+    def test_ingest_genuine_error_logged_once_with_traceback(self, caplog):
+        cfg = self._cfg()
+        with (
+            patch(
+                "dlt_saga.session.execute_pipeline",
+                side_effect=RuntimeError("boom"),
+            ),
+            caplog.at_level(logging.ERROR, logger="dlt_saga.session"),
+        ):
+            result = Session._execute_single_ingest(cfg, "")
+        assert result.success is False
+        assert result.config_error is False
+        errors = self._session_errors(caplog)
+        assert len(errors) == 1
+        assert errors[0].exc_info is not None  # inline traceback for debugging
+
+    def test_historize_failure_not_logged_inline(self, caplog):
+        cfg = self._cfg()
+        runner = MagicMock()
+        runner.run.return_value = {
+            "status": "failed",
+            "error": "Historization config changed: track_deletions",
+            "config_error": True,
+        }
+        with (
+            patch(
+                "dlt_saga.historize.factory.build_historize_runner",
+                return_value=runner,
+            ),
+            caplog.at_level(logging.ERROR, logger="dlt_saga.session"),
+        ):
+            result = Session._execute_single_historize(cfg, full_refresh=False)
+        assert result.success is False
+        assert result.config_error is True
+        assert "config changed" in result.error
+        # The runner owns the genuine-failure traceback; the summary shows every
+        # failure — so the historize worker logs nothing inline.
+        assert self._session_errors(caplog) == []
 
 
 @pytest.mark.unit
@@ -895,7 +966,37 @@ class TestExitIfFailures:
 
         err = capsys.readouterr().err
         assert "Run failed: 1/2 pipeline(s) failed" in err
-        assert "broken: PERMISSION_DENIED: no MANAGE on table" in err
+        assert "broken:" in err
+        assert "PERMISSION_DENIED: no MANAGE on table" in err
+
+    def test_each_failure_block_indented_under_its_name(self, capsys):
+        """Multiple failures — each error (multi-line included) is indented under
+        its own pipeline name so they stay visually distinct."""
+        import typer
+
+        import dlt_saga.cli as cli
+
+        result = SessionResult(
+            pipeline_results=[
+                PipelineResult(
+                    pipeline_name="p1",
+                    success=False,
+                    error="Historization config changed:\n  track_deletions: False → True",
+                ),
+                PipelineResult(
+                    pipeline_name="p2", success=False, error="connection reset"
+                ),
+            ]
+        )
+        with pytest.raises(typer.Exit):
+            cli._exit_if_failures(result, "Historize")
+
+        err = capsys.readouterr().err
+        # Each failure's whole block sits under its own indented name.
+        assert (
+            "  p1:\n      Historization config changed:\n        track_deletions" in err
+        )
+        assert "  p2:\n      connection reset" in err
 
     def test_no_output_when_all_succeed(self, capsys):
         import dlt_saga.cli as cli
