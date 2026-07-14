@@ -846,7 +846,19 @@ class Session:
             # must not be recorded as a run outcome. Any other exception is a
             # genuine run failure (recorded).
             config_error = isinstance(e, ValueError)
-            logger.error("%sPipeline %s failed: %s", prefix, config.pipeline_name, e)
+            # Failure display is single-sourced through the CLI end-of-run summary
+            # (_exit_if_failures), which lists every failure on stderr. Genuine
+            # failures also get one inline traceback here for real-time debugging;
+            # config errors are clean developer feedback, so their display is left
+            # to the summary alone (logging them here too would print them twice).
+            if not config_error:
+                logger.error(
+                    "%sPipeline %s failed: %s",
+                    prefix,
+                    config.pipeline_name,
+                    e,
+                    exc_info=True,
+                )
             registry.fire(
                 ON_PIPELINE_ERROR,
                 HookContext(
@@ -1002,8 +1014,12 @@ class Session:
                     config=config,
                 )
             else:
+                # No inline logging here: the runner already logged a traceback for
+                # genuine failures, and the CLI end-of-run summary (_exit_if_failures)
+                # surfaces every failure — including config errors — so this branch
+                # just returns the structured result. Logging again would duplicate
+                # the message the summary already prints.
                 error = run_result.get("error", "Unknown error")
-                logger.error("%s%s: %s", prefix, config.pipeline_name, error)
                 registry.fire(
                     ON_PIPELINE_ERROR,
                     HookContext(

@@ -32,8 +32,11 @@ def _make_runner(table_exists: bool) -> tuple:
 class TestGuardTargetExists:
     def test_missing_target_on_incremental_raises_friendly_error(self):
         runner, dest = _make_runner(table_exists=False)
-        with pytest.raises(ValueError, match="full-refresh"):
+        with pytest.raises(ValueError) as excinfo:
             runner._guard_target_exists(needs_full=False)
+        # The suggested rebuild is scoped to this pipeline — a bare --full-refresh
+        # with no selector would reprocess every historized table.
+        assert 'saga historize -s "grp__tbl" --full-refresh' in str(excinfo.value)
         dest.table_exists.assert_called_once_with("schema", "tbl_historized")
 
     def test_existing_target_on_incremental_passes(self):

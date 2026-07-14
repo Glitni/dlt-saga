@@ -476,7 +476,7 @@ class HistorizeRunner:
             f"successful run is recorded for pipeline '{self.pipeline_name}'. This "
             f"usually means the historize output table/dataset was renamed (or the "
             f"table was dropped) since the last run. Run "
-            f"'saga historize --full-refresh' to rebuild it."
+            f"'saga historize -s \"{self.pipeline_name}\" --full-refresh' to rebuild."
         )
 
     def _setup_full_reprocess(
@@ -543,17 +543,19 @@ class HistorizeRunner:
             if key in previous and previous[key] != current[key]:
                 changes.append(f"  {key}: {previous[key]} → {current[key]}")
         diff = "\n".join(changes)
+        # Scope the suggested rebuild to THIS pipeline — a bare
+        # `saga historize --full-refresh` (no selector) would reprocess every
+        # historized table, not just the one whose config changed.
+        rebuild_cmd = f"Run 'saga historize -s \"{self.pipeline_name}\" --full-refresh' to rebuild."
         is_partial = self.partial_refresh or self.historize_from is not None
         if is_partial:
             suffix = (
                 "Note: --partial-refresh and --historize-from are not substitutes "
                 "for semantic config changes (PK, track_columns, ignore_columns).\n"
-                "Run 'saga historize --full-refresh' to rebuild the historized table."
+                + rebuild_cmd
             )
         else:
-            suffix = (
-                "Run 'saga historize --full-refresh' to rebuild the historized table."
-            )
+            suffix = rebuild_cmd
         raise ValueError(f"Historization config changed:\n{diff}\n{suffix}")
 
     def _discover_value_columns(self) -> List[str]:

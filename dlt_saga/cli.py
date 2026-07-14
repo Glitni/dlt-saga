@@ -6,6 +6,7 @@
 import json
 import logging
 import os
+import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -946,10 +947,13 @@ def _exit_if_failures(result: "SessionResult", command_name: str) -> None:
         err=True,
     )
     for failure in result.failures:
-        typer.echo(
-            f"  {failure.pipeline_name}: {failure.error or '(no error message)'}",
-            err=True,
-        )
+        error = failure.error or "(no error message)"
+        # Put each failure's (possibly multi-line) error in its own block, indented
+        # under the pipeline name and preceded by a blank line, so several failures
+        # stay visually distinct instead of running together — and each keeps its
+        # own issue-specific message and remediation.
+        typer.echo(f"\n  {failure.pipeline_name}:", err=True)
+        typer.echo(textwrap.indent(error, "      "), err=True)
     raise typer.Exit(1)
 
 
