@@ -14,7 +14,7 @@ from typing import Optional
 
 from dlt_saga.pipelines.base_pipeline import BasePipeline
 from dlt_saga.pipelines.native_load.config import NativeLoadConfig
-from dlt_saga.pipelines.native_load.state import NativeLoadStateManager
+from dlt_saga.pipelines.native_load.state import NativeLoadStateManager, make_load_id
 from dlt_saga.pipelines.native_load.storage import get_storage_client
 from dlt_saga.utility.cli.logging import PrefixedLoggerAdapter
 from dlt_saga.utility.naming import normalize_identifier
@@ -312,9 +312,18 @@ class NativeLoadPipeline(BasePipeline):
         return self._discover_flat_mode()
 
     def _discover_flat_mode(self) -> dict:
-        """Full prefix listing, deduped against state log when incremental."""
+        """Full prefix listing, deduped against state log when incremental.
+
+        Flat mode has no cursor to bound the dedup set on, so the *entire* load
+        history for the pipeline is held in memory each run (and the full prefix
+        is re-listed from storage). The dedup set uses compact ``load_id`` hashes
+        rather than full source URIs to keep that footprint down, but it still
+        grows with total history: for very large, ever-growing sources prefer
+        date mode (``filename_date_regex``), whose cursor window bounds both the
+        listing and the dedup set.
+        """
         if self._incremental:
-            loaded = self.state_manager.get_loaded_uri_generations(self.pipeline_name)
+            loaded = self.state_manager.get_loaded_load_ids(self.pipeline_name)
         else:
             loaded = set()
         new_files = []
@@ -322,7 +331,8 @@ class NativeLoadPipeline(BasePipeline):
             self.native_config.source_uri,
             self.native_config.file_pattern,
         ):
-            if (obj.full_uri, obj.generation) not in loaded:
+            load_id = make_load_id(self.pipeline_name, obj.full_uri, obj.generation)
+            if load_id not in loaded:
                 new_files.append(obj)
         return {None: new_files}
 

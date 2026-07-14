@@ -10,7 +10,7 @@ import pytest
 
 from dlt_saga.destinations.duckdb.config import DuckDBDestinationConfig
 from dlt_saga.destinations.duckdb.destination import DuckDBDestination
-from dlt_saga.pipelines.native_load.state import NativeLoadStateManager
+from dlt_saga.pipelines.native_load.state import NativeLoadStateManager, make_load_id
 
 _DS = "nl_state"
 
@@ -79,3 +79,30 @@ class TestFailedFileShadowing:
         loaded = state_manager.get_loaded_uri_generations("p")
         assert (uri, 1) in loaded
         assert (uri, 2) not in loaded
+
+
+@pytest.mark.integration
+class TestGetLoadedLoadIds:
+    def test_load_ids_agree_with_uri_generations(self, state_manager):
+        # get_loaded_load_ids must apply the same latest-event-wins filter as
+        # get_loaded_uri_generations and project the deterministic load_id, so
+        # flat-mode's recomputed ids line up 1:1 with the loaded tuples.
+        loaded = [("gs://b/ok.parquet", "20240101", 1)]
+        failed = [("gs://b/bad.parquet", "20240102", 1)]
+        ids_ok, s_ok = state_manager.record_loads_started_bulk("p", loaded)
+        state_manager.record_loads_success_bulk(
+            "p", loaded, ids_ok, "job", {}, {}, s_ok
+        )
+        ids_bad, s_bad = state_manager.record_loads_started_bulk("p", failed)
+        state_manager.record_loads_failed_bulk(
+            "p", failed, ids_bad, error="boom", started_at=s_bad
+        )
+
+        load_ids = state_manager.get_loaded_load_ids("p")
+        expected = {
+            make_load_id("p", uri, gen)
+            for uri, gen in state_manager.get_loaded_uri_generations("p")
+        }
+        assert load_ids == expected
+        assert make_load_id("p", "gs://b/ok.parquet", 1) in load_ids
+        assert make_load_id("p", "gs://b/bad.parquet", 1) not in load_ids

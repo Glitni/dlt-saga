@@ -397,6 +397,70 @@ class TestGetLoadedUris:
 
 
 @pytest.mark.unit
+class TestGetLoadedLoadIds:
+    def test_returns_empty_set_on_no_rows(self):
+        dest = _make_plain_dest()
+        mgr = NativeLoadStateManager(dest, "ds")
+        assert mgr.get_loaded_load_ids("pipeline") == set()
+
+    def test_projects_load_id(self):
+        dest = _make_plain_dest()
+        dest.execute_sql.return_value = []
+        mgr = NativeLoadStateManager(dest, "ds")
+        mgr.get_loaded_load_ids("pipeline")
+        sql = dest.execute_sql.call_args[0][0]
+        assert sql.startswith("SELECT load_id FROM (")
+
+    def test_returns_ids_from_tuple_rows(self):
+        dest = _make_plain_dest()
+        dest.execute_sql.return_value = [("a" * 32,), ("b" * 32,)]
+        mgr = NativeLoadStateManager(dest, "ds")
+        assert mgr.get_loaded_load_ids("pipeline") == {"a" * 32, "b" * 32}
+
+    def test_returns_ids_from_attribute_rows(self):
+        dest = _make_plain_dest()
+
+        class _AttrRow:
+            def __init__(self, load_id):
+                self.load_id = load_id
+
+        dest.execute_sql.return_value = [_AttrRow("c" * 32)]
+        mgr = NativeLoadStateManager(dest, "ds")
+        assert mgr.get_loaded_load_ids("pipeline") == {"c" * 32}
+
+    def test_id_matches_make_load_id(self):
+        # The projected load_id must equal what a caller recomputes for the same
+        # (pipeline, uri, generation) — that equivalence is what lets flat-mode
+        # dedup by id instead of by the (uri, generation) tuple.
+        dest = _make_plain_dest()
+        expected = make_load_id("pipeline", "gs://b/f1.parquet", 1)
+        dest.execute_sql.return_value = [(expected,)]
+        mgr = NativeLoadStateManager(dest, "ds")
+        assert expected in mgr.get_loaded_load_ids("pipeline")
+
+    def test_cursor_min_included_in_sql(self):
+        dest = _make_plain_dest()
+        mgr = NativeLoadStateManager(dest, "ds")
+        mgr.get_loaded_load_ids("pipeline", cursor_min="2024-01-01")
+        sql = dest.execute_sql.call_args[0][0]
+        assert "cursor_value" in sql
+        assert "2024-01-01" in sql
+
+    def test_returns_empty_on_missing_table(self):
+        dest = _make_plain_dest()
+        dest.execute_sql.side_effect = RuntimeError("Table with name x does not exist")
+        mgr = NativeLoadStateManager(dest, "ds")
+        assert mgr.get_loaded_load_ids("pipeline") == set()
+
+    def test_raises_on_other_error(self):
+        dest = _make_plain_dest()
+        dest.execute_sql.side_effect = RuntimeError("connection reset")
+        mgr = NativeLoadStateManager(dest, "ds")
+        with pytest.raises(RuntimeError, match="connection reset"):
+            mgr.get_loaded_load_ids("pipeline")
+
+
+@pytest.mark.unit
 class TestRecordLoadStart:
     def test_returns_load_id_and_started_at(self):
         dest = _make_plain_dest()

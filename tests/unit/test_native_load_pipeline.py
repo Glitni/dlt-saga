@@ -6,6 +6,7 @@ import pytest
 
 from dlt_saga.pipelines.native_load.config import NativeLoadConfig
 from dlt_saga.pipelines.native_load.pipeline import NativeLoadPipeline
+from dlt_saga.pipelines.native_load.state import make_load_id
 from dlt_saga.pipelines.native_load.storage.base import StorageObject
 
 
@@ -376,8 +377,8 @@ class TestDateModeProperty:
 class TestFlatModeDiscovery:
     def test_deduplicates_already_loaded(self):
         p = _make_pipeline(incremental=True)
-        p.state_manager.get_loaded_uri_generations.return_value = {
-            ("gs://bucket/prefix/file1.parquet", 100)
+        p.state_manager.get_loaded_load_ids.return_value = {
+            make_load_id(p.pipeline_name, "gs://bucket/prefix/file1.parquet", 100)
         }
         p.storage_client.list_files.return_value = [
             StorageObject(
@@ -402,8 +403,10 @@ class TestFlatModeDiscovery:
 
     def test_same_uri_new_generation_is_included(self):
         p = _make_pipeline(incremental=True)
-        p.state_manager.get_loaded_uri_generations.return_value = {
-            ("gs://bucket/prefix/file1.parquet", 100)
+        # Only generation 100 is loaded; a new generation hashes to a different
+        # load_id, so the file is treated as new.
+        p.state_manager.get_loaded_load_ids.return_value = {
+            make_load_id(p.pipeline_name, "gs://bucket/prefix/file1.parquet", 100)
         }
         p.storage_client.list_files.return_value = [
             StorageObject(
@@ -1121,16 +1124,19 @@ class TestIncrementalDiscovery:
         result = p._discover_flat_mode()
 
         # State manager not queried
-        p.state_manager.get_loaded_uri_generations.assert_not_called()
+        p.state_manager.get_loaded_load_ids.assert_not_called()
         assert len(result[None]) == 2
 
     def test_incremental_list_mode_deduplicates(self):
-        """When incremental=True, already-loaded files are skipped."""
-        from dlt_saga.pipelines.native_load.storage.base import StorageObject
+        """When incremental=True, already-loaded files are skipped.
 
+        Flat-mode dedup is keyed on the compact ``load_id`` hash, not the raw
+        (uri, generation) tuple, so the loaded set holds ids and each listed
+        file is matched by its recomputed id.
+        """
         p = _make_pipeline(incremental=True)
-        p.state_manager.get_loaded_uri_generations.return_value = {
-            ("gs://bucket/f1.parquet", 1)
+        p.state_manager.get_loaded_load_ids.return_value = {
+            make_load_id(p.pipeline_name, "gs://bucket/f1.parquet", 1)
         }
         p.storage_client.list_files.return_value = [
             StorageObject("f1.parquet", "gs://bucket/f1.parquet", 1000, 1, None),
