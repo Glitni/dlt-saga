@@ -179,29 +179,33 @@ class NativeLoadStateManager:
             raise
         return None
 
-    def get_loaded_uri_generations(
-        self,
-        pipeline_name: str,
-        cursor_min: Optional[str] = None,
-    ) -> set:
-        """Return the set of (uri, generation) pairs already loaded or in-progress.
+    # Loaded/in-progress semantics shared by both projections below.
+    #
+    # Only the *latest* event per (source_uri, generation) counts — a file is
+    # loaded/in-progress based on its most recent row, not on any older one:
+    #
+    # - latest 'success'                          → loaded;
+    # - latest 'started' younger than STALE_HOURS  → in-progress (assumed a
+    #   concurrent run), not re-attempted;
+    # - latest 'started' older than STALE_HOURS    → orphaned, excluded so the
+    #   next run retries it;
+    # - latest 'failed'                            → excluded, so a retry picks
+    #   the file back up.
+    #
+    # The last point is why latest-event-wins matters: a failed chunk leaves
+    # both a 'started' and a trailing 'failed' row for the same file. Without
+    # latest-event-wins the fresh 'started' row would shadow the 'failed' one
+    # and an immediate retry would skip the file, reporting a green
+    # "no new files" run that silently masks the failure.
 
-        Only the *latest* event per (source_uri, generation) counts — a file is
-        loaded/in-progress based on its most recent row, not on any older one:
+    def _loaded_filtered_sql(
+        self, pipeline_name: str, cursor_min: Optional[str], projection: str
+    ) -> str:
+        """Build the loaded/in-progress query, projecting the given columns.
 
-        - latest 'success'                          → loaded;
-        - latest 'started' younger than STALE_HOURS  → in-progress (assumed a
-          concurrent run), not re-attempted;
-        - latest 'started' older than STALE_HOURS    → orphaned, excluded so the
-          next run retries it;
-        - latest 'failed'                            → excluded, so a retry picks
-          the file back up.
-
-        The last point is why latest-event-wins matters: a failed chunk leaves
-        both a 'started' and a trailing 'failed' row for the same file. Without
-        latest-event-wins the fresh 'started' row would shadow the 'failed' one
-        and an immediate retry would skip the file, reporting a green
-        "no new files" run that silently masks the failure.
+        ``load_id`` is deterministic from (pipeline, uri, generation) and thus
+        constant within each (source_uri, generation) partition, so it can be
+        projected alongside the tuple columns without changing the windowing.
         """
         table_id = self._dest.get_full_table_id(self._schema, self._table)
         pn = self._dest.escape_string_literal(pipeline_name)
@@ -212,9 +216,9 @@ class NativeLoadStateManager:
             cm = self._dest.escape_string_literal(cursor_min)
             cursor_filter = f"AND (cursor_value IS NULL OR cursor_value >= '{cm}')"
 
-        sql = (
-            f"SELECT source_uri, generation FROM ("
-            f"  SELECT source_uri, generation, status, started_at, "
+        return (
+            f"SELECT {projection} FROM ("
+            f"  SELECT load_id, source_uri, generation, status, started_at, "
             f"    ROW_NUMBER() OVER ("
             f"      PARTITION BY source_uri, generation "
             f"      ORDER BY COALESCE(finished_at, started_at) DESC, "
@@ -232,6 +236,19 @@ class NativeLoadStateManager:
             f"  OR (status = 'started' AND started_at >= {stale_cutoff})"
             f")"
         )
+
+    def get_loaded_uri_generations(
+        self,
+        pipeline_name: str,
+        cursor_min: Optional[str] = None,
+    ) -> set:
+        """Return the set of (uri, generation) pairs already loaded or in-progress.
+
+        See the class-level note above for the latest-event-wins semantics.
+        """
+        sql = self._loaded_filtered_sql(
+            pipeline_name, cursor_min, "source_uri, generation"
+        )
         try:
             rows = self._dest.execute_sql(sql, self._schema)
             result = set()
@@ -246,6 +263,40 @@ class NativeLoadStateManager:
             # Any other error MUST propagate: an empty dedup set on a real failure
             # makes every file look new, re-loading the entire source (mass
             # duplicates). This read must abort rather than silently return {}.
+            if looks_like_missing_table(exc):
+                return set()
+            raise
+
+    def get_loaded_load_ids(
+        self,
+        pipeline_name: str,
+        cursor_min: Optional[str] = None,
+    ) -> set:
+        """Return the set of ``load_id`` hashes already loaded or in-progress.
+
+        Same latest-event-wins semantics as ``get_loaded_uri_generations`` (see
+        the class-level note above), but projects the compact 32-char ``load_id``
+        instead of the full (uri, generation) tuple. Callers recompute a file's
+        id via ``make_load_id(pipeline, uri, generation)`` and test membership —
+        equivalent to the tuple check, because ``load_id`` is that triple hashed.
+
+        Used by flat-mode discovery, whose dedup set is unbounded (no cursor
+        window to prune on): holding fixed-width hashes instead of full source
+        URIs keeps the in-memory footprint far smaller for large sources.
+        """
+        sql = self._loaded_filtered_sql(pipeline_name, cursor_min, "load_id")
+        try:
+            rows = self._dest.execute_sql(sql, self._schema)
+            result = set()
+            for row in rows:
+                if hasattr(row, "load_id"):
+                    result.add(row.load_id)
+                else:
+                    result.add(row[0])
+            return result
+        except Exception as exc:
+            # Same rationale as get_loaded_uri_generations: only a missing table
+            # (first run) is benign; every other error must propagate.
             if looks_like_missing_table(exc):
                 return set()
             raise
