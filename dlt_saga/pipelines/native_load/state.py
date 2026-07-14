@@ -86,7 +86,6 @@ class NativeLoadStateManager:
         t_ts = d.type_name("timestamp")
 
         table_id = d.get_full_table_id(self._schema, self._table)
-        partition_clause = d.partition_ddl("started_at", t_ts)
 
         ddl_parts = [
             f"CREATE TABLE IF NOT EXISTS {table_id} (",
@@ -104,13 +103,19 @@ class NativeLoadStateManager:
             f"  finished_at    {t_ts}",
             ")",
         ]
-        if partition_clause:
-            ddl_parts.append(partition_clause)
 
-        # Databricks: CLUSTER BY and PARTITIONED BY conflict — only add cluster
-        # when there's no partition clause (or if the destination ignores it).
-        # Safely skip cluster on the state log table to keep DDL portable.
-        # (State log performance is not critical.)
+        # Physical layout is destination-specific. Every read filters on
+        # pipeline_name (and, in date mode, a cursor_value range), never on
+        # started_at, so cluster on those columns to keep reads pruned as the
+        # log grows. partition_cluster_ddl reconciles per destination:
+        # BigQuery keeps the started_at partition and adds CLUSTER BY;
+        # Databricks uses liquid CLUSTER BY only (it can't combine the two);
+        # DuckDB emits neither.
+        physical = d.partition_cluster_ddl(
+            "started_at", ["pipeline_name", "cursor_value"]
+        )
+        if physical:
+            ddl_parts.append(physical)
 
         ddl = "\n".join(ddl_parts)
         d.execute_sql(ddl, self._schema)
