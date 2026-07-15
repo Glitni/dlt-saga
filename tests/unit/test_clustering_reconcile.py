@@ -285,124 +285,150 @@ class TestReconcileInternalClustering:
 
 
 @pytest.mark.unit
-class TestScanClustering:
-    """The doctor read-only scan classifies each table on a connected destination."""
+class TestRunMaintenance:
+    """The shared entry point behind `saga maintenance` and `Session.maintenance`.
 
-    def test_classifies_each_table(self):
-        from dlt_saga.maintenance import scan_clustering
-
-        dest = MagicMock()
-        dest.get_clustering_columns.side_effect = [None, ["pipeline_name"], []]
-        tables = [_table(), _table(), _table()]
-        results = scan_clustering(dest, tables)
-        assert [state for _, state in results] == ["absent", "ok", "drift"]
-
-    def test_does_not_manage_connection(self):
-        from dlt_saga.maintenance import scan_clustering
-
-        dest = MagicMock()
-        dest.get_clustering_columns.return_value = []
-        scan_clustering(dest, [_table()])
-        dest.connect.assert_not_called()
-        dest.close.assert_not_called()
-
-
-@pytest.mark.unit
-class TestRunClusteringMaintenance:
-    """The shared entry point behind `saga maintenance` and `Session.maintenance`."""
+    Runs both passes (clustering reconcile + log compaction) on one connection
+    and returns per-pass counts.
+    """
 
     def _configs(self):
         cfg = MagicMock()
         cfg.schema_name = "dlt_api"
         return {"api": [cfg]}
 
-    def test_unsupported_destination_returns_zero_without_connecting(self):
-        from dlt_saga.maintenance import run_clustering_maintenance
+    def test_clustering_unsupported_still_compacts_on_one_connection(self):
+        # DuckDB can't reconcile clustering but can compact logs, so maintenance
+        # must still connect and run the compaction pass (no early return).
+        from dlt_saga.maintenance import run_maintenance
 
         dest = MagicMock()
         dest.supports_clustering_reconcile.return_value = False
+        dest.supports_log_compaction.return_value = True
         ctx = MagicMock()
         ctx.get_destination_type.return_value = "duckdb"
-        with patch(
-            "dlt_saga.utility.cli.common.build_destination_from_configs",
-            return_value=dest,
-        ):
-            counts = run_clustering_maintenance(ctx, self._configs(), dry_run=False)
-        assert counts == {"absent": 0, "unchanged": 0, "reconciled": 0}
-        dest.connect.assert_not_called()
-
-    def test_supported_connects_reconciles_and_closes(self):
-        from dlt_saga.maintenance import run_clustering_maintenance
-
-        dest = MagicMock()
-        dest.supports_clustering_reconcile.return_value = True
-        dest.reconcile_clustering.return_value = "reconciled"
-        ctx = MagicMock()
-        ctx.get_destination_type.return_value = "bigquery"
-        with patch(
-            "dlt_saga.utility.cli.common.build_destination_from_configs",
-            return_value=dest,
-        ):
-            counts = run_clustering_maintenance(ctx, self._configs(), dry_run=False)
-        dest.connect.assert_called_once()
-        dest.close.assert_called_once()
-        # At least the native_load + historize logs of the one schema.
-        assert counts["reconciled"] >= 2
-
-
-@pytest.mark.unit
-class TestDoctorCheckDestination:
-    """doctor connects once (a single impersonation setup) for both the
-    connectivity check and the clustering scan."""
-
-    def _run(self, dest, tables, scan_result=None, scan_exc=None):
-        from dlt_saga import cli
-
-        emit = MagicMock()
         with (
             patch(
                 "dlt_saga.utility.cli.common.build_destination_from_configs",
                 return_value=dest,
             ),
             patch(
-                "dlt_saga.maintenance.resolve_internal_log_tables_for",
-                return_value=tables,
+                "dlt_saga.maintenance.run_log_compaction",
+                return_value={"absent": 0, "collapsed": 5, "orphaned": 1},
             ),
-            patch("dlt_saga.maintenance.scan_clustering") as scan,
+            patch(
+                "dlt_saga.maintenance.run_stale_task_reconcile",
+                return_value={"abandoned": 2},
+            ),
         ):
-            if scan_exc:
-                scan.side_effect = scan_exc
-            else:
-                scan.return_value = scan_result or []
+            result = run_maintenance(ctx, self._configs(), dry_run=False)
+        dest.connect.assert_called_once()
+        dest.close.assert_called_once()
+        assert result["clustering"] == {"absent": 0, "unchanged": 0, "reconciled": 0}
+        assert result["compaction"]["collapsed"] == 5
+        assert result["reconcile"] == {"abandoned": 2}
+
+    def test_nothing_supported_returns_zero_without_connecting(self):
+        from dlt_saga.maintenance import run_maintenance
+
+        dest = MagicMock()
+        dest.supports_clustering_reconcile.return_value = False
+        dest.supports_log_compaction.return_value = False
+        ctx = MagicMock()
+        ctx.get_destination_type.return_value = "unknown"
+        with patch(
+            "dlt_saga.utility.cli.common.build_destination_from_configs",
+            return_value=dest,
+        ):
+            result = run_maintenance(ctx, self._configs(), dry_run=False)
+        assert result["clustering"] == {"absent": 0, "unchanged": 0, "reconciled": 0}
+        assert result["compaction"] == {"absent": 0, "collapsed": 0, "orphaned": 0}
+        assert result["reconcile"] == {"abandoned": 0}
+        dest.connect.assert_not_called()
+
+    def test_supported_connects_reconciles_and_closes(self):
+        from dlt_saga.maintenance import run_maintenance
+
+        dest = MagicMock()
+        dest.supports_clustering_reconcile.return_value = True
+        dest.supports_log_compaction.return_value = True
+        dest.reconcile_clustering.return_value = "reconciled"
+        ctx = MagicMock()
+        ctx.get_destination_type.return_value = "bigquery"
+        with (
+            patch(
+                "dlt_saga.utility.cli.common.build_destination_from_configs",
+                return_value=dest,
+            ),
+            patch(
+                "dlt_saga.maintenance.run_log_compaction",
+                return_value={"absent": 0, "collapsed": 0, "orphaned": 0},
+            ),
+            patch(
+                "dlt_saga.maintenance.run_stale_task_reconcile",
+                return_value={"abandoned": 0},
+            ),
+        ):
+            result = run_maintenance(ctx, self._configs(), dry_run=False)
+        dest.connect.assert_called_once()
+        dest.close.assert_called_once()
+        # At least the native_load + historize logs of the one schema.
+        assert result["clustering"]["reconciled"] >= 2
+
+
+@pytest.mark.unit
+class TestDoctorCheckDestination:
+    """doctor proves connectivity and points at `saga maintenance --dry-run`;
+    it does not scan internal tables (both dimensions are deferred to the
+    maintenance preview)."""
+
+    def _run(self, dest, selected_configs=None):
+        from dlt_saga import cli
+
+        emit = MagicMock()
+        with patch(
+            "dlt_saga.utility.cli.common.build_destination_from_configs",
+            return_value=dest,
+        ):
             # profile_target=None → execute_with_impersonation runs the probe
             # directly, with no impersonation setup.
             ok = cli._doctor_check_destination(
-                "bigquery", MagicMock(), {"g": []}, None, False, emit
+                "bigquery",
+                MagicMock(),
+                {"g": []} if selected_configs is None else selected_configs,
+                None,
+                False,
+                emit,
             )
         return ok, emit
 
-    def test_single_connection_for_both_checks(self):
+    def test_connects_and_closes_without_scanning(self):
         dest = MagicMock()
-        dest.supports_clustering_reconcile.return_value = True
-        ok, _ = self._run(dest, [_table()], scan_result=[(_table(), "ok")])
+        ok, _ = self._run(dest)
         assert ok is True
         dest.connect.assert_called_once()
         dest.close.assert_called_once()
+        # No internal-table scan is performed.
+        dest.get_clustering_columns.assert_not_called()
 
-    def test_scan_error_does_not_fail_connection(self):
+    def test_emits_maintenance_pointer_when_configs_selected(self):
         dest = MagicMock()
-        dest.supports_clustering_reconcile.return_value = True
-        ok, emit = self._run(dest, [_table()], scan_exc=RuntimeError("denied"))
-        assert ok is True  # connection is still OK
-        dest.close.assert_called_once()
-        symbols = [c.args[0] for c in emit.call_args_list]
-        assert "!" in symbols  # clustering degraded to an advisory note
+        _, emit = self._run(dest)
+        details = " ".join(
+            str(c.args[2]) for c in emit.call_args_list if len(c.args) > 2
+        )
+        assert "saga maintenance --dry-run" in details
+
+    def test_no_pointer_without_selected_configs(self):
+        dest = MagicMock()
+        _, emit = self._run(dest, selected_configs={})
+        labels = [c.args[1] for c in emit.call_args_list if len(c.args) > 1]
+        assert "Internal-table maintenance" not in labels
 
     def test_connect_failure_returns_false(self):
         dest = MagicMock()
-        dest.supports_clustering_reconcile.return_value = True
         dest.connect.side_effect = RuntimeError("no auth")
-        ok, _ = self._run(dest, [_table()])
+        ok, _ = self._run(dest)
         assert ok is False
 
     def test_unsupported_destination_still_checks_connectivity(self):

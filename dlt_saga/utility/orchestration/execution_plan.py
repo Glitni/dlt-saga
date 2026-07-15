@@ -22,6 +22,32 @@ logger = logging.getLogger(__name__)
 # log_timestamp partition.
 PLANS_CLUSTER_COLUMNS = ["execution_id", "task_index"]
 
+# Compaction metadata for ``saga maintenance`` — single source of truth shared
+# with the log compactor (``dlt_saga/maintenance.py``). Every read goes through
+# the latest-per-key view (``_ensure_view_exists``), so a superseded non-terminal
+# row (``pending``/``running`` with a later row for the same key) is never
+# observed and collapses losslessly to the newest row. ``{a}`` in the order
+# expression is the row alias, filled in by the compactor.
+PLANS_KEY_COLUMNS = ["execution_id", "task_index", "pipeline_identifier"]
+PLANS_TERMINAL_STATUSES = ["completed", "failed", "abandoned"]
+PLANS_ORDER_EXPR = "{a}.log_timestamp"
+PLANS_STATUS_COLUMN = "status"
+
+# Stale-task reconciliation metadata. A crashed worker (``running``) or a task no
+# worker ever picked up (``pending``) leaves a dangling non-terminal row that is
+# the latest for its key — collapse can't touch it (nothing supersedes it), so
+# ``saga maintenance`` relabels it to a terminal ``abandoned`` status once it is
+# older than the stale cutoff. ``failed`` is intentionally *not* used: it is
+# reserved for genuine, worker-reported failures. Reasons are keyed by the
+# original status (``{hours}`` placeholder); the reconciler prefixes them.
+PLANS_NONTERMINAL_STATUSES = ["pending", "running"]
+PLANS_ABANDONED_STATUS = "abandoned"
+PLANS_STALE_HOURS = 24
+PLANS_STALE_REASONS = {
+    "running": "no terminal status recorded within {hours}h; worker presumed crashed",
+    "pending": "never started; no worker picked it up within {hours}h",
+}
+
 
 def _group_into_task_units(
     pipeline_configs: List[PipelineConfig],
@@ -758,6 +784,7 @@ class ExecutionPlanManager:
             "running": 0,
             "completed": 0,
             "failed": 0,
+            "abandoned": 0,
         }
 
         for row in results:

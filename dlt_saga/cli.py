@@ -2811,16 +2811,17 @@ def _doctor_check_destination(
     verbose: bool,
     emit: Callable[..., None],
 ) -> bool:
-    """Verify destination connectivity and report internal-table clustering drift.
+    """Verify destination connectivity, then point at internal-table maintenance.
 
-    Both run on a single connection inside one impersonation setup: connecting
-    proves connectivity, and the read-only clustering scan reuses that session.
-    Returns the connection result; clustering drift is advisory (rendered with
-    ``!``) and never changes it.
+    Connects (inside any impersonation setup) to prove connectivity, then emits a
+    static pointer to ``saga maintenance --dry-run``. Internal-table state
+    (clustering drift, log growth) is deliberately *not* probed here: clustering
+    rarely drifts (only after an upgrade) and measuring reclaimable rows is a
+    costly self-join, so both are deferred to the maintenance preview to keep
+    doctor a fast health check.
     """
     import traceback
 
-    from dlt_saga.maintenance import resolve_internal_log_tables_for, scan_clustering
     from dlt_saga.utility.cli.common import build_destination_from_configs
 
     try:
@@ -2833,30 +2834,12 @@ def _doctor_check_destination(
             typer.echo(traceback.format_exc())
         return False
 
-    scan_tables = (
-        resolve_internal_log_tables_for(selected_configs)
-        if selected_configs and destination.supports_clustering_reconcile()
-        else []
-    )
-
-    def _probe() -> tuple:
-        # One connection serves both the connectivity check and the clustering
-        # scan. A scan failure (e.g. missing permission) is captured rather than
-        # raised, so it degrades to an advisory note without failing the
-        # connection check.
+    def _probe() -> None:
         destination.connect()
-        try:
-            if not scan_tables:
-                return ("skipped", None)
-            try:
-                return ("ok", scan_clustering(destination, scan_tables))
-            except Exception as exc:
-                return ("error", exc)
-        finally:
-            destination.close()
+        destination.close()
 
     try:
-        status, payload = execute_with_impersonation(profile_target, _probe)
+        execute_with_impersonation(profile_target, _probe)
     except Exception as e:
         emit("\u2717", f"Connection ({dest_type})", _doctor_error_detail(e, verbose))
         if verbose:
@@ -2864,56 +2847,19 @@ def _doctor_check_destination(
         return False
 
     emit("\u2713", f"Connection ({dest_type})")
-    _doctor_emit_clustering(status, payload, verbose, emit)
+    if selected_configs:
+        emit(
+            "\u2192",
+            "Internal-table maintenance",
+            "run `saga maintenance --dry-run` to preview clustering + "
+            "log-growth cleanup",
+        )
     return True
 
 
 def _doctor_error_detail(exc: Exception, verbose: bool) -> str:
     """Full message in verbose mode, first line otherwise."""
     return str(exc) if verbose else str(exc).splitlines()[0]
-
-
-def _doctor_emit_clustering(
-    status: str, payload: Any, verbose: bool, emit: Callable[..., None]
-) -> None:
-    """Render the internal-table clustering advisory from a scan result.
-
-    ``status`` is ``skipped`` (nothing to check), ``error`` (scan failed —
-    ``payload`` is the exception), or ``ok`` (``payload`` is ``[(table, state)]``).
-    Drift is advisory and never fails doctor.
-    """
-    import traceback
-
-    if status == "skipped":
-        return
-    if status == "error":
-        exc = payload
-        emit(
-            "!",
-            "Internal table clustering",
-            f"check skipped: {str(exc).splitlines()[0]}",
-        )
-        if verbose and isinstance(exc, BaseException):
-            typer.echo("".join(traceback.format_exception(exc)))
-        return
-
-    results = payload or []
-    present = [(t, state) for t, state in results if state != "absent"]
-    drifted = [(t, state) for t, state in present if state == "drift"]
-
-    if not present:
-        emit("✓", "Internal table clustering", "no internal log tables yet")
-    elif not drifted:
-        emit("✓", "Internal table clustering", f"{len(present)} table(s) clustered")
-    else:
-        emit(
-            "!",
-            "Internal table clustering",
-            f"{len(drifted)} of {len(present)} table(s) need reconcile "
-            f"→ run `saga maintenance`",
-        )
-        for t, _ in drifted:
-            typer.echo(f"        {t.schema}.{t.table} ({t.label})")
 
 
 @app.command()
@@ -3034,24 +2980,33 @@ def maintenance(
         help="Report what would change without writing anything.",
     ),
 ):
-    """Reconcile the physical layout of saga's internal bookkeeping tables.
+    """Reconcile and compact saga's internal bookkeeping tables.
 
-    Internal log tables created by older versions of saga were never clustered,
-    so reads over a large log scan more than they need to. This command applies
-    the current clustering to those tables across the project's schemas — a
-    one-time migration that becomes a no-op once every table is up to date.
+    Runs three passes across the project's schemas:
 
-    It only updates table metadata (no data is rewritten); the warehouse
-    reclusters in the background, so it is safe to run against live tables.
+    - **Clustering reconcile** — internal log tables created by older versions of
+      saga were never clustered, so reads over a large log scan more than they
+      need to. This applies the current clustering (metadata-only; the warehouse
+      reclusters in the background, so it is safe on live tables).
+    - **Log compaction** — the status logs (native_load, execution-plan)
+      accumulate superseded rows. This collapses each to the latest row per key,
+      deleting only strictly-superseded earlier rows plus dangling stale
+      ``started`` rows. Lossless: reads already collapse to the latest row per
+      key.
+    - **Stale-task reconcile** — a crashed or never-scheduled orchestration task
+      leaves a dangling ``running``/``pending`` execution-plan row forever. This
+      relabels ones older than the stale cutoff to ``abandoned`` (``failed`` is
+      reserved for genuine worker-reported failures).
 
-    Run ``saga doctor`` first to see which tables have drifted.
+    All are one-time-style migrations that become cheap no-ops once tables are
+    up to date.
 
     Examples:
         saga maintenance --dry-run                 # Preview
         saga maintenance                           # Apply across all schemas
         saga maintenance --select "group:filesystem"
     """
-    from dlt_saga.maintenance import run_clustering_maintenance
+    from dlt_saga.maintenance import run_maintenance
 
     setup_logging(verbose)
 
@@ -3067,7 +3022,7 @@ def maintenance(
 
     execute_with_impersonation(
         profile_target,
-        lambda: run_clustering_maintenance(context, selected_configs, dry_run),
+        lambda: run_maintenance(context, selected_configs, dry_run),
     )
 
 

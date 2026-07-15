@@ -31,6 +31,26 @@ _BULK_INSERT_CHUNK = 1000
 # started_at partition, so cluster on those to keep reads pruned as the log grows.
 LOG_CLUSTER_COLUMNS = ["pipeline_name", "cursor_value"]
 
+# Compaction metadata for ``saga maintenance`` — single source of truth shared
+# with the log compactor (``dlt_saga/maintenance.py``), kept here beside the
+# writers so the log's semantics stay in one place. The compaction is lossless:
+# every read collapses to the latest event per key (see the companion view and
+# ``_loaded_filtered_sql``), so a superseded *earlier* row is never observed.
+#   - LOG_KEY_COLUMNS: identifies one logical load. A file overwritten in place
+#     (new ``generation``) is a distinct key.
+#   - LOG_TERMINAL_STATUSES: a row that records an outcome; never deleted.
+#   - LOG_ORDER_EXPR: higher value == later event (matches the read ordering).
+#     ``{a}`` is the row alias, filled in by the compactor.
+# The orphan constants drive the separate, age-gated cleanup of dangling
+# ``started`` rows whose run crashed before writing a terminal row.
+LOG_KEY_COLUMNS = ["pipeline_name", "source_uri", "generation"]
+LOG_TERMINAL_STATUSES = ["success", "failed"]
+LOG_ORDER_EXPR = "COALESCE({a}.finished_at, {a}.started_at)"
+LOG_STATUS_COLUMN = "status"
+LOG_ORPHAN_STATUS = "started"
+LOG_ORPHAN_TIMESTAMP_COLUMN = "started_at"
+LOG_ORPHAN_STALE_HOURS = _STALE_HOURS
+
 
 def make_load_id(pipeline_name: str, uri: str, generation: Optional[int]) -> str:
     """Create a deterministic load ID from (pipeline, uri, generation).

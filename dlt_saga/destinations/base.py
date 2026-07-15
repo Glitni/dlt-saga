@@ -1012,6 +1012,17 @@ class Destination(ABC):
         """Whether this destination can read and reconcile table clustering."""
         return False
 
+    def supports_log_compaction(self) -> bool:
+        """Whether ``saga maintenance`` can compact this destination's logs.
+
+        Log compaction is plain ``DELETE ... WHERE EXISTS`` against the internal
+        status logs — standard SQL that every SQL destination with
+        ``execute_sql`` supports (BigQuery, Databricks, DuckDB), so it defaults
+        to ``True``. Override to ``False`` for a destination without correlated
+        DELETE support.
+        """
+        return True
+
     def get_clustering_columns(self, dataset: str, table: str) -> Optional[list]:
         """Return the table's current clustering columns.
 

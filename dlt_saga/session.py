@@ -475,15 +475,16 @@ class Session:
         self,
         select: Optional[List[str]] = None,
         dry_run: bool = False,
-    ) -> Dict[str, int]:
-        """Reconcile the physical layout of saga's internal bookkeeping tables.
+    ) -> Dict[str, Dict[str, int]]:
+        """Reconcile and compact saga's internal bookkeeping tables.
 
-        Applies the current clustering to internal log tables (native_load,
-        historize, and execution-plan logs) that predate clustering-at-CREATE — a
-        one-time migration that becomes a no-op once every table is up to date.
-        Only table metadata is updated (no data is rewritten), so it is safe to
-        run against live tables. The programmatic counterpart of
-        ``saga maintenance``.
+        Runs three passes over the internal log tables (native_load, historize,
+        and execution-plan logs): a clustering reconcile for tables that predate
+        clustering-at-CREATE, a lossless compaction of the status logs (collapse
+        superseded rows to the latest per key), and a stale-task reconcile that
+        relabels dangling ``pending``/``running`` execution-plan rows as
+        ``abandoned``. All become cheap no-ops once tables are up to date. The
+        programmatic counterpart of ``saga maintenance``.
 
         Args:
             select: Selector expressions scoping which pipeline schemas are
@@ -491,7 +492,11 @@ class Session:
             dry_run: When True, report what would change without writing.
 
         Returns:
-            Status counts keyed by ``absent`` / ``unchanged`` / ``reconciled``.
+            Per-pass status counts::
+
+                {"clustering": {"absent", "unchanged", "reconciled"},
+                 "compaction": {"absent", "collapsed", "orphaned"},
+                 "reconcile": {"abandoned"}}
         """
         with execution_context_scope(self._profile_target, dry_run=dry_run):
             return self._execute_with_auth(
@@ -500,16 +505,20 @@ class Session:
 
     def _run_maintenance(
         self, select: Optional[List[str]], dry_run: bool
-    ) -> Dict[str, int]:
-        from dlt_saga.maintenance import run_clustering_maintenance
+    ) -> Dict[str, Dict[str, int]]:
+        from dlt_saga.maintenance import run_maintenance
         from dlt_saga.utility.cli.context import get_execution_context
 
         selected, _ = self._discover_and_select(select)
         if not selected:
             logger.warning("No pipeline configs found matching selectors")
-            return {"absent": 0, "unchanged": 0, "reconciled": 0}
+            return {
+                "clustering": {"absent": 0, "unchanged": 0, "reconciled": 0},
+                "compaction": {"absent": 0, "collapsed": 0, "orphaned": 0},
+                "reconcile": {"abandoned": 0},
+            }
 
-        return run_clustering_maintenance(get_execution_context(), selected, dry_run)
+        return run_maintenance(get_execution_context(), selected, dry_run)
 
     # -------------------------------------------------------------------
     # Internal: initialization helpers
