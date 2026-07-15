@@ -60,7 +60,14 @@ class HistorizeStateManager:
         )
 
     def _create_table_ddl(self) -> str:
-        """Generate DDL to create the log table using destination type names."""
+        """Generate DDL to create the log table using destination type names.
+
+        Reads filter on ``pipeline_name`` (never ``started_at``), so the physical
+        layout clusters on it to keep reads pruned as the log grows.
+        ``partition_cluster_ddl`` reconciles per destination (BigQuery keeps the
+        ``started_at`` partition and adds ``CLUSTER BY``; Databricks uses liquid
+        clustering only; DuckDB emits neither).
+        """
         d = self.destination
         q = self.log_table_id
         return f"""
@@ -77,6 +84,7 @@ class HistorizeStateManager:
                 finished_at {d.type_name("timestamp")},
                 status {d.type_name("string")}
             )
+            {d.partition_cluster_ddl("started_at", ["pipeline_name"])}
         """
 
     def ensure_log_table(self) -> None:
