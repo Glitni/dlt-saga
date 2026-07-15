@@ -2803,7 +2803,7 @@ def _doctor_check_configs(
         return {}
 
 
-def _doctor_check_connection(
+def _doctor_check_destination(
     dest_type: str,
     context: "ExecutionContext",
     selected_configs: dict,
@@ -2811,39 +2811,109 @@ def _doctor_check_connection(
     verbose: bool,
     emit: Callable[..., None],
 ) -> bool:
-    """Test destination connection. Returns True on success."""
+    """Verify destination connectivity and report internal-table clustering drift.
+
+    Both run on a single connection inside one impersonation setup: connecting
+    proves connectivity, and the read-only clustering scan reuses that session.
+    Returns the connection result; clustering drift is advisory (rendered with
+    ``!``) and never changes it.
+    """
     import traceback
 
-    from dlt_saga.destinations.factory import DestinationFactory
+    from dlt_saga.maintenance import resolve_internal_log_tables_for, scan_clustering
+    from dlt_saga.utility.cli.common import build_destination_from_configs
 
     try:
-        flat = flatten_configs(selected_configs) if selected_configs else []
-        first_cfg = flat[0] if flat else None
-        dest_config_dict = (
-            {**first_cfg.config_dict, "schema_name": first_cfg.schema_name}
-            if first_cfg
-            else {}
+        destination = build_destination_from_configs(
+            dest_type, context, selected_configs
         )
-        destination = DestinationFactory.create_from_context(
-            dest_type, context, dest_config_dict
-        )
-
-        def _test() -> None:
-            destination.connect()
-            destination.close()
-
-        execute_with_impersonation(profile_target, _test)
-        emit("\u2713", f"Connection ({dest_type})")
-        return True
     except Exception as e:
-        emit(
-            "\u2717",
-            f"Connection ({dest_type})",
-            str(e) if verbose else str(e).splitlines()[0],
-        )
+        emit("\u2717", f"Connection ({dest_type})", _doctor_error_detail(e, verbose))
         if verbose:
             typer.echo(traceback.format_exc())
         return False
+
+    scan_tables = (
+        resolve_internal_log_tables_for(selected_configs)
+        if selected_configs and destination.supports_clustering_reconcile()
+        else []
+    )
+
+    def _probe() -> tuple:
+        # One connection serves both the connectivity check and the clustering
+        # scan. A scan failure (e.g. missing permission) is captured rather than
+        # raised, so it degrades to an advisory note without failing the
+        # connection check.
+        destination.connect()
+        try:
+            if not scan_tables:
+                return ("skipped", None)
+            try:
+                return ("ok", scan_clustering(destination, scan_tables))
+            except Exception as exc:
+                return ("error", exc)
+        finally:
+            destination.close()
+
+    try:
+        status, payload = execute_with_impersonation(profile_target, _probe)
+    except Exception as e:
+        emit("\u2717", f"Connection ({dest_type})", _doctor_error_detail(e, verbose))
+        if verbose:
+            typer.echo(traceback.format_exc())
+        return False
+
+    emit("\u2713", f"Connection ({dest_type})")
+    _doctor_emit_clustering(status, payload, verbose, emit)
+    return True
+
+
+def _doctor_error_detail(exc: Exception, verbose: bool) -> str:
+    """Full message in verbose mode, first line otherwise."""
+    return str(exc) if verbose else str(exc).splitlines()[0]
+
+
+def _doctor_emit_clustering(
+    status: str, payload: Any, verbose: bool, emit: Callable[..., None]
+) -> None:
+    """Render the internal-table clustering advisory from a scan result.
+
+    ``status`` is ``skipped`` (nothing to check), ``error`` (scan failed —
+    ``payload`` is the exception), or ``ok`` (``payload`` is ``[(table, state)]``).
+    Drift is advisory and never fails doctor.
+    """
+    import traceback
+
+    if status == "skipped":
+        return
+    if status == "error":
+        exc = payload
+        emit(
+            "!",
+            "Internal table clustering",
+            f"check skipped: {str(exc).splitlines()[0]}",
+        )
+        if verbose and isinstance(exc, BaseException):
+            typer.echo("".join(traceback.format_exception(exc)))
+        return
+
+    results = payload or []
+    present = [(t, state) for t, state in results if state != "absent"]
+    drifted = [(t, state) for t, state in present if state == "drift"]
+
+    if not present:
+        emit("✓", "Internal table clustering", "no internal log tables yet")
+    elif not drifted:
+        emit("✓", "Internal table clustering", f"{len(present)} table(s) clustered")
+    else:
+        emit(
+            "!",
+            "Internal table clustering",
+            f"{len(drifted)} of {len(present)} table(s) need reconcile "
+            f"→ run `saga maintenance`",
+        )
+        for t, _ in drifted:
+            typer.echo(f"        {t.schema}.{t.table} ({t.label})")
 
 
 @app.command()
@@ -2898,7 +2968,7 @@ def doctor(
     ok = _doctor_check_project(verbose, _emit)
     selected_configs = _doctor_check_configs(select, context, verbose, _emit)
     ok = (
-        _doctor_check_connection(
+        _doctor_check_destination(
             dest_type, context, selected_configs, profile_target, verbose, _emit
         )
         and ok
@@ -2936,6 +3006,69 @@ def doctor(
     else:
         typer.echo("One or more checks failed. Run with --verbose for details.")
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# maintenance command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def maintenance(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+    profile: Optional[str] = typer.Option(
+        None, "--profile", help="Profile to use from profiles.yml"
+    ),
+    target: Optional[str] = typer.Option(
+        None, "--target", help="Target within profile"
+    ),
+    select: Optional[List[str]] = typer.Option(
+        None,
+        "--select",
+        "-s",
+        help="Selector(s) to scope which pipeline schemas are swept.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report what would change without writing anything.",
+    ),
+):
+    """Reconcile the physical layout of saga's internal bookkeeping tables.
+
+    Internal log tables created by older versions of saga were never clustered,
+    so reads over a large log scan more than they need to. This command applies
+    the current clustering to those tables across the project's schemas — a
+    one-time migration that becomes a no-op once every table is up to date.
+
+    It only updates table metadata (no data is rewritten); the warehouse
+    reclusters in the background, so it is safe to run against live tables.
+
+    Run ``saga doctor`` first to see which tables have drifted.
+
+    Examples:
+        saga maintenance --dry-run                 # Preview
+        saga maintenance                           # Apply across all schemas
+        saga maintenance --select "group:filesystem"
+    """
+    from dlt_saga.maintenance import run_clustering_maintenance
+
+    setup_logging(verbose)
+
+    profile_target = load_profile_config(profile, target)
+    if profile_target is not None:
+        setup_execution_context(profile_target)
+    context = get_execution_context()
+
+    selected_configs, _ = discover_and_select_configs(select)
+    if not selected_configs:
+        logger.error("No pipeline configs found matching selectors")
+        raise typer.Exit(1)
+
+    execute_with_impersonation(
+        profile_target,
+        lambda: run_clustering_maintenance(context, selected_configs, dry_run),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 _STALE_HOURS = 24
 _BULK_INSERT_CHUNK = 1000
 
+# Cluster columns for the state-log table — single source of truth shared by the
+# create-time DDL (``_ensure_table``) and ``saga maintenance``'s clustering
+# reconcile, so new and reconciled tables match. Every read filters on
+# pipeline_name (plus a cursor_value range in date mode), never on the
+# started_at partition, so cluster on those to keep reads pruned as the log grows.
+LOG_CLUSTER_COLUMNS = ["pipeline_name", "cursor_value"]
+
 
 def make_load_id(pipeline_name: str, uri: str, generation: Optional[int]) -> str:
     """Create a deterministic load ID from (pipeline, uri, generation).
@@ -111,9 +118,7 @@ class NativeLoadStateManager:
         # BigQuery keeps the started_at partition and adds CLUSTER BY;
         # Databricks uses liquid CLUSTER BY only (it can't combine the two);
         # DuckDB emits neither.
-        physical = d.partition_cluster_ddl(
-            "started_at", ["pipeline_name", "cursor_value"]
-        )
+        physical = d.partition_cluster_ddl("started_at", LOG_CLUSTER_COLUMNS)
         if physical:
             ddl_parts.append(physical)
 

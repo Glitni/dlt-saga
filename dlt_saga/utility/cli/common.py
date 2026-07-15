@@ -5,9 +5,10 @@ Extracted from cli.py to avoid duplication between entry points.
 
 import logging
 import os
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
+    from dlt_saga.utility.cli.context import ExecutionContext
     from dlt_saga.utility.cli.profiles import ProfileTarget
 
 import typer
@@ -238,9 +239,27 @@ def flatten_configs(configs: Dict[str, List[PipelineConfig]]) -> List[PipelineCo
     return all_configs
 
 
+def build_destination_from_configs(
+    dest_type: str, context: "ExecutionContext", selected_configs: dict
+) -> Any:
+    """Build a destination instance from the first selected config's settings.
+
+    Used by commands that need a live destination for whole-project operations
+    (connectivity checks, maintenance) rather than a per-pipeline run.
+    """
+    flat = flatten_configs(selected_configs) if selected_configs else []
+    first_cfg = flat[0] if flat else None
+    dest_config_dict = (
+        {**first_cfg.config_dict, "schema_name": first_cfg.schema_name}
+        if first_cfg
+        else {}
+    )
+    return DestinationFactory.create_from_context(dest_type, context, dest_config_dict)
+
+
 def execute_with_impersonation(
-    profile_target: Optional["ProfileTarget"], callback: Callable[[], None]
-) -> None:
+    profile_target: Optional["ProfileTarget"], callback: Callable[[], Any]
+) -> Any:
     """Execute a callback with optional identity impersonation.
 
     Uses the AuthProvider resolved from the destination type to handle
@@ -249,6 +268,9 @@ def execute_with_impersonation(
     Args:
         profile_target: Profile target (may have run_as identity)
         callback: Function to call (no args)
+
+    Returns:
+        Whatever ``callback`` returns.
     """
     run_as = profile_target.run_as if profile_target else None
 
@@ -262,9 +284,9 @@ def execute_with_impersonation(
 
         try:
             with auth_provider.impersonate(run_as):
-                callback()
+                return callback()
         except AuthenticationError as e:
             logger.error(str(e))
             raise typer.Exit(1)
     else:
-        callback()
+        return callback()

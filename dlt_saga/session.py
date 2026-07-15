@@ -18,7 +18,7 @@ Example::
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from dlt_saga.pipeline_config import ConfigSource, PipelineConfig
 from dlt_saga.pipeline_config.file_config import FilePipelineConfig
@@ -32,6 +32,8 @@ from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.cli.selectors import PipelineSelector
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +471,46 @@ class Session:
             schema_access=orchestration_config.schema_access,
         )
 
+    def maintenance(
+        self,
+        select: Optional[List[str]] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, int]:
+        """Reconcile the physical layout of saga's internal bookkeeping tables.
+
+        Applies the current clustering to internal log tables (native_load,
+        historize, and execution-plan logs) that predate clustering-at-CREATE — a
+        one-time migration that becomes a no-op once every table is up to date.
+        Only table metadata is updated (no data is rewritten), so it is safe to
+        run against live tables. The programmatic counterpart of
+        ``saga maintenance``.
+
+        Args:
+            select: Selector expressions scoping which pipeline schemas are
+                swept. None = all.
+            dry_run: When True, report what would change without writing.
+
+        Returns:
+            Status counts keyed by ``absent`` / ``unchanged`` / ``reconciled``.
+        """
+        with execution_context_scope(self._profile_target, dry_run=dry_run):
+            return self._execute_with_auth(
+                lambda: self._run_maintenance(select, dry_run)
+            )
+
+    def _run_maintenance(
+        self, select: Optional[List[str]], dry_run: bool
+    ) -> Dict[str, int]:
+        from dlt_saga.maintenance import run_clustering_maintenance
+        from dlt_saga.utility.cli.context import get_execution_context
+
+        selected, _ = self._discover_and_select(select)
+        if not selected:
+            logger.warning("No pipeline configs found matching selectors")
+            return {"absent": 0, "unchanged": 0, "reconciled": 0}
+
+        return run_clustering_maintenance(get_execution_context(), selected, dry_run)
+
     # -------------------------------------------------------------------
     # Internal: initialization helpers
     # -------------------------------------------------------------------
@@ -588,9 +630,7 @@ class Session:
     # Internal: auth wrapper
     # -------------------------------------------------------------------
 
-    def _execute_with_auth(
-        self, callback: Callable[[], SessionResult]
-    ) -> SessionResult:
+    def _execute_with_auth(self, callback: Callable[[], _T]) -> _T:
         """Validate credentials and run callback with impersonation if needed."""
         self._auth_provider.validate()
 

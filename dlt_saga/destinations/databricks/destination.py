@@ -727,6 +727,33 @@ class DatabricksDestination(Destination):
             f"COMMENT ON TABLE {fqn} IS '{self.escape_string_literal(description)}'"
         )
 
+    # --- Clustering reconciliation -----------------------------------------
+
+    def supports_clustering_reconcile(self) -> bool:
+        return True
+
+    def get_clustering_columns(self, dataset: str, table: str) -> Optional[list]:
+        fqn = self.get_full_table_id(dataset, table)
+        try:
+            rows = list(self.execute_sql(f"DESCRIBE DETAIL {fqn}"))
+        except Exception as exc:
+            if looks_like_missing_table(exc):
+                return None
+            raise
+        if not rows:
+            return None
+        cols = rows[0].clusteringColumns
+        return list(cols) if cols else []
+
+    def set_clustering_columns(
+        self, dataset: str, table: str, cluster_columns: list
+    ) -> None:
+        # ALTER ... CLUSTER BY switches the table to Liquid Clustering; a
+        # metadata change, existing data reclusters lazily on subsequent writes.
+        fqn = self.get_full_table_id(dataset, table)
+        cols = ", ".join(self.quote_identifier(c) for c in cluster_columns)
+        self.execute_sql(f"ALTER TABLE {fqn} CLUSTER BY ({cols})")
+
     # -------------------------------------------------------------------------
     # Native-load contract
     # -------------------------------------------------------------------------
