@@ -274,7 +274,7 @@ saga info [OPTIONS]
 
 Validate configuration and diagnose the environment (read-only) — similar to `dbt debug`. Checks the active dlt-saga build, profiles, project config, pipeline discovery (with resolved schema), destination connectivity, and that registered pipeline plugins are importable. Exits with code 1 if a check fails.
 
-Also reports **clustering drift** on saga's internal log tables: tables created by older versions of saga were never clustered and stay that way until reconciled. Drift is advisory (it never fails `doctor`) and points you to `saga maintenance`.
+When scoped with `--select`, it also points you at `saga maintenance --dry-run` for internal-table upkeep (clustering + log-growth cleanup). `doctor` itself does **not** scan those tables — measuring clustering drift and reclaimable rows is deferred to the maintenance preview, so `doctor` stays a fast connectivity/config health check.
 
 ```bash
 saga doctor [OPTIONS]
@@ -291,11 +291,13 @@ saga doctor [OPTIONS]
 
 ## saga maintenance
 
-Reconcile the physical layout of saga's internal bookkeeping tables (the native_load log, historize log, and execution-plan log). Internal log tables created by older versions of saga were never clustered, so reads over a large log scan more than they need to — this command applies the current clustering to those tables across the project's schemas. It is a one-time migration that becomes a no-op once every table is up to date.
+Reconcile and compact saga's internal bookkeeping tables (the native_load log, historize log, and execution-plan log). Runs three passes across the project's schemas, all by default:
 
-It only updates table metadata (no data is rewritten); the warehouse reclusters in the background, so it is safe to run against live tables. DuckDB has nothing to reconcile.
+- **Clustering reconcile** — internal log tables created by older versions of saga were never clustered, so reads over a large log scan more than they need to. This applies the current clustering to those tables. It only updates table metadata (no data is rewritten); the warehouse reclusters in the background, so it is safe on live tables. DuckDB has nothing to reconcile.
+- **Log compaction** — the status logs (native_load, execution-plan) accumulate superseded rows. This collapses each log to the latest row per key, deleting only strictly-superseded *earlier* rows plus dangling stale `started` rows (native_load orphans). It is lossless: every read of these logs already collapses to the latest row per key, so no observable state changes. The historize log is not compacted (it only ever writes terminal rows).
+- **Stale-task reconcile** — a crashed or never-scheduled orchestration task leaves a dangling `running`/`pending` row in the execution-plan log forever. This relabels ones older than the stale cutoff to a terminal `abandoned` status (`failed` stays reserved for genuine worker-reported failures). It's an in-place status update, not a delete.
 
-Run `saga doctor` first to see which tables have drifted.
+All three passes are one-time-style migrations that become cheap no-ops once tables are up to date.
 
 ```bash
 saga maintenance [OPTIONS]
@@ -421,11 +423,14 @@ if result.has_failures:
         print(f"{failure.pipeline_name}: {failure.error}")
     raise RuntimeError(f"{result.failed} pipeline(s) failed")
 
-# Reconcile internal-table clustering (equivalent of `saga maintenance`)
-counts = session.maintenance(dry_run=True)   # {"absent": …, "unchanged": …, "reconciled": …}
+# Reconcile + compact internal tables (equivalent of `saga maintenance`)
+counts = session.maintenance(dry_run=True)
+# {"clustering": {"absent": …, "unchanged": …, "reconciled": …},
+#  "compaction": {"absent": …, "collapsed": …, "orphaned": …},
+#  "reconcile":  {"abandoned": …}}
 ```
 
-`session.maintenance()` returns a status-count dict (not a `SessionResult`), since it operates on internal tables rather than pipelines. `session.update_access(...)` mirrors `saga update-access`.
+`session.maintenance()` returns per-pass status-count dicts (not a `SessionResult`), since it operates on internal tables rather than pipelines. `session.update_access(...)` mirrors `saga update-access`.
 
 **`SessionResult` attributes:**
 
