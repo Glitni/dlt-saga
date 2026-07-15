@@ -127,6 +127,57 @@ class TestSchemaNameResolutionGate:
 
 
 @pytest.mark.unit
+class TestEnvironmentParametricResolution:
+    """`environment=` pins name resolution to a specific env (prod vs dev).
+
+    The collision guard uses ``environment="prod"`` so its verdict is the same
+    whether it runs in dev or prod. Uses the default naming (no naming_module).
+    """
+
+    _PATH = "configs/google_sheets/asm/salgsmal.yml"
+
+    def test_schema_name_prod_vs_dev(self):
+        source = FilePipelineConfig(root_dir="configs")
+        assert (
+            source.resolve_schema_name(self._PATH, environment="prod")
+            == "dlt_google_sheets"
+        )
+        assert source.resolve_schema_name(self._PATH, environment="dev") == "dlt_dev"
+
+    def test_table_name_prod_vs_dev(self):
+        source = FilePipelineConfig(root_dir="configs")
+        assert (
+            source.resolve_table_name(self._PATH, environment="prod") == "asm__salgsmal"
+        )
+        assert (
+            source.resolve_table_name(self._PATH, environment="dev")
+            == "google_sheets__asm__salgsmal"
+        )
+
+    def test_prod_schema_needs_no_dev_schema(self, monkeypatch):
+        # Pinned to prod, resolution must not touch the (possibly unset) dev
+        # schema — get_dev_schema() would raise if it did.
+        monkeypatch.delenv("SAGA_SCHEMA_NAME", raising=False)
+        source = FilePipelineConfig(root_dir="configs")
+        assert (
+            source.resolve_schema_name(self._PATH, environment="prod")
+            == "dlt_google_sheets"
+        )
+
+    def test_resolve_ingest_target_prod(self):
+        source = FilePipelineConfig(root_dir="configs")
+        assert source.resolve_ingest_target(self._PATH, environment="prod") == (
+            "dlt_google_sheets",
+            "asm__salgsmal",
+        )
+
+    def test_resolve_ingest_target_schema_override_wins(self):
+        source = FilePipelineConfig(root_dir="configs")
+        assert source.resolve_ingest_target(
+            self._PATH, schema_override="dlt_shared", environment="prod"
+        ) == ("dlt_shared", "asm__salgsmal")
+
+
 class TestGetPipelineGroupFromPath:
     @pytest.mark.parametrize(
         "path, expected",

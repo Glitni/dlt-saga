@@ -747,7 +747,12 @@ class Session:
 
         # Fail before touching the warehouse if two pipelines resolve to the
         # same ingest target — concurrent writers race and duplicate rows.
-        check_target_collisions(all_configs, check_ingest=True, check_historize=False)
+        check_target_collisions(
+            all_configs,
+            self._config_source,
+            check_ingest=True,
+            check_historize=False,
+        )
 
         # `_run_ingest` is also used by `update_access` — only the destination
         # access sync runs in that mode, not the actual extract/load. Pick the
@@ -954,7 +959,12 @@ class Session:
 
         # Fail before touching the warehouse if two pipelines resolve to the
         # same historized target.
-        check_target_collisions(all_configs, check_ingest=False, check_historize=True)
+        check_target_collisions(
+            all_configs,
+            self._config_source,
+            check_ingest=False,
+            check_historize=True,
+        )
 
         logger.info(
             "Historizing %d pipeline(s) with %d worker(s)", len(all_configs), workers
@@ -1142,7 +1152,12 @@ class Session:
 
         # Guard both layers up front so a collision fails the whole run before
         # the ingest phase writes anything the historize phase would build on.
-        check_target_collisions(ingest_list, check_ingest=True, check_historize=False)
+        check_target_collisions(
+            ingest_list,
+            self._config_source,
+            check_ingest=True,
+            check_historize=False,
+        )
 
         if ingest_list:
             logger.info("Running %d ingest pipeline(s)", len(ingest_list))
@@ -1160,7 +1175,10 @@ class Session:
         historize_list = flatten_configs(historize_configs)
 
         check_target_collisions(
-            historize_list, check_ingest=False, check_historize=True
+            historize_list,
+            self._config_source,
+            check_ingest=False,
+            check_historize=True,
         )
 
         # Skip historize for pipelines whose ingest failed during full refresh

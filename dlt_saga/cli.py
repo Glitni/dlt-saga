@@ -27,6 +27,7 @@ from dlt_saga.utility.cli.common import (
     discover_and_select_configs,
     execute_with_impersonation,
     flatten_configs,
+    get_config_source,
     load_profile_config,
     setup_execution_context,
     setup_logging,
@@ -399,7 +400,12 @@ def run_orchestrator_mode(
     # Fail the whole plan before any worker is triggered if two pipelines
     # resolve to the same target (both layers — the plan spans ingest+historize).
     try:
-        check_target_collisions(all_configs, check_ingest=True, check_historize=True)
+        check_target_collisions(
+            all_configs,
+            get_config_source(),
+            check_ingest=True,
+            check_historize=True,
+        )
     except TargetCollisionError as e:
         logger.error(str(e))
         raise typer.Exit(1)
@@ -2819,21 +2825,34 @@ def _doctor_check_collisions(
 ) -> bool:
     """Flag pipelines that resolve to the same destination table.
 
-    Read-only counterpart to the run-time guard: a run fails on a collision,
-    but ``saga doctor`` surfaces latent ones (including between pipelines you
-    didn't select for any single run) across the whole project. Reuses the
-    configs already discovered by :func:`_doctor_check_configs`, so it costs no
-    extra discovery.
+    Read-only counterpart to the run-time guard. Detection is project-wide
+    (:func:`collisions_for_selection`), so ``saga doctor --select <one>`` still
+    finds a collision with an unselected pipeline — the CI pattern of running
+    doctor over just the changed configs surfaces what they collide with. The
+    default (whole-project) run reports every collision. Reuses the configs
+    already discovered by :func:`_doctor_check_configs`, so it costs no extra
+    discovery.
     """
-    from dlt_saga.utility.collisions import detect_target_collisions
+    from dlt_saga.utility.collisions import collisions_for_selection
+    from dlt_saga.utility.naming import get_environment
 
     flat = flatten_configs(selected_configs) if selected_configs else []
     if not flat:
         return True
 
+    # doctor is the comprehensive audit: check the current environment and prod
+    # (deduped), so a dev run flags both dev-only collisions and latent prod
+    # ones before they ship.
+    current_env = get_environment()
+    environments = [current_env] if current_env == "prod" else [current_env, "prod"]
+
     try:
-        collisions = detect_target_collisions(
-            flat, check_ingest=True, check_historize=True
+        collisions = collisions_for_selection(
+            flat,
+            get_config_source(),
+            environments=environments,
+            check_ingest=True,
+            check_historize=True,
         )
     except Exception as e:
         # Never let the diagnosis itself crash the health check.
@@ -2855,9 +2874,10 @@ def _doctor_check_collisions(
         f"{len(collisions)} shared target(s) across {total} pipeline(s)",
     )
     for collision in collisions:
-        target = ".".join(p for p in (collision.schema, collision.table) if p)
+        target = ".".join(p for p in (collision.schema, collision.display_table) if p)
         typer.echo(
-            f"        {target} ({collision.layer}) \u2190 {', '.join(collision.pipelines)}"
+            f"        {target} ({collision.layer}, {collision.env_label}) "
+            f"\u2190 {', '.join(collision.pipelines)}"
         )
     return False
 

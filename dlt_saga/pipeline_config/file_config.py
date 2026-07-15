@@ -173,16 +173,27 @@ class FilePipelineConfig(ConfigSource):
                 break
         return parts
 
-    def resolve_schema_name(self, config_path: str, *, layer: str = "ingest") -> str:
+    def resolve_schema_name(
+        self,
+        config_path: str,
+        *,
+        layer: str = "ingest",
+        environment: Optional[str] = None,
+    ) -> str:
         """Resolve schema name for a config file.
 
         Uses the custom naming module if one is configured; otherwise falls
         back to :func:`default_generate_schema_name`. The ``layer`` keyword
         is forwarded to custom modules so they can produce distinct shapes
         per layer (``"ingest"`` vs ``"historize"``).
+
+        ``environment`` pins the resolution to a specific environment
+        (``"prod"`` / ``"dev"``); when omitted it reads the active one via
+        :func:`get_environment`. The collision guard passes ``"prod"`` so its
+        verdict is the same whether ``saga doctor`` runs in dev or prod.
         """
         segments = self.get_naming_segments(config_path)
-        environment = get_environment()
+        environment = environment or get_environment()
         # The dev schema is only used in dev; in prod the schema is derived from
         # the config segments (dlt_<group>) and default_schema is ignored. Don't
         # resolve it in prod, where a dev schema is legitimately unset and
@@ -202,16 +213,26 @@ class FilePipelineConfig(ConfigSource):
             segments, environment, default_schema, layer=layer
         )
 
-    def resolve_table_name(self, config_path: str, *, layer: str = "ingest") -> str:
+    def resolve_table_name(
+        self,
+        config_path: str,
+        *,
+        layer: str = "ingest",
+        environment: Optional[str] = None,
+    ) -> str:
         """Resolve table name for a config file.
 
         Uses the custom naming module if one is configured; otherwise falls
         back to :func:`default_generate_table_name`. The ``layer`` keyword
         is forwarded to custom modules so they can produce distinct shapes
         per layer (``"ingest"`` vs ``"historize"``).
+
+        ``environment`` pins the resolution to a specific environment
+        (``"prod"`` / ``"dev"``); when omitted it reads the active one via
+        :func:`get_environment`.
         """
         segments = self.get_naming_segments(config_path)
-        environment = get_environment()
+        environment = environment or get_environment()
 
         module = load_naming_module(self.project_config)
         if module and hasattr(module, "generate_table_name"):
@@ -219,6 +240,28 @@ class FilePipelineConfig(ConfigSource):
                 module.generate_table_name, segments, environment, layer=layer
             )
         return default_generate_table_name(segments, environment, layer=layer)
+
+    def resolve_ingest_target(
+        self,
+        config_path: str,
+        *,
+        schema_override: Optional[str] = None,
+        environment: Optional[str] = None,
+    ) -> Tuple[str, str]:
+        """Resolve a config's full ingest ``(schema, table)`` target.
+
+        Mirrors the resolution :meth:`_load_config_file` applies during
+        discovery: an explicit ``schema_name:`` override wins for the schema,
+        otherwise the schema is generated from the config path; the table name
+        is always generated. ``environment`` pins the resolution (the collision
+        guard passes ``"prod"`` for an environment-invariant verdict); when
+        omitted it reads the active environment.
+        """
+        schema = schema_override or self.resolve_schema_name(
+            config_path, environment=environment
+        )
+        table = self.resolve_table_name(config_path, environment=environment)
+        return (schema, table)
 
     # =========================================================================
     # Discovery
@@ -402,14 +445,21 @@ class FilePipelineConfig(ConfigSource):
         # Derive base table name (without pipeline group prefix)
         base_table_name = self._derive_base_table_name(config_path)
 
-        # Resolve environment-aware names from config path
-        table_name = self.resolve_table_name(config_path)
-        # Schema resolution needs the active profile's dev schema; skip it when
-        # the caller only needs adapter/path metadata (schema linking), so an
-        # offline `saga generate-schemas` doesn't require a configured profile.
-        schema_name = resolved_config.get("schema_name") or ""
-        if not schema_name and self._resolve_schema_names:
-            schema_name = self.resolve_schema_name(config_path)
+        # Resolve environment-aware names from config path (current env).
+        schema_override = resolved_config.get("schema_name") or ""
+        if self._resolve_schema_names:
+            # Single source of truth shared with the collision guard, which
+            # calls the same helper pinned to environment="prod".
+            schema_name, table_name = self.resolve_ingest_target(
+                config_path, schema_override=schema_override
+            )
+        else:
+            # Schema resolution needs the active profile's dev schema; skip it
+            # when the caller only needs adapter/path metadata (schema linking),
+            # so an offline `saga generate-schemas` doesn't require a configured
+            # profile. The table name never needs a profile, so still resolve it.
+            schema_name = schema_override
+            table_name = self.resolve_table_name(config_path)
 
         # Normalize tags to list and parse into ScheduleTag objects
         raw_tags = resolved_config.get("tags", [])

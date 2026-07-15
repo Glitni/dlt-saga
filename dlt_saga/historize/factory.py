@@ -65,11 +65,17 @@ def _segments_from_config_path(config_path: str) -> list:
     return segments
 
 
-def _env_aware_override(config_dict: Dict[str, Any], override: str) -> str:
+def _env_aware_override(
+    config_dict: Dict[str, Any],
+    override: str,
+    environment: Optional[str] = None,
+) -> str:
     """Run ``output_table`` through the project's table-name generator so it
     gets the same env-aware prefix as the source table.
 
-    Falls back to the literal override when no ``config_path`` is available.
+    ``environment`` pins the resolution (the collision guard passes ``"prod"``);
+    when omitted it reads the active environment. Falls back to the literal
+    override when no ``config_path`` is available.
     """
     from dlt_saga.pipeline_config.naming import resolve_table_name_with_leaf
     from dlt_saga.project_config import get_project_config
@@ -83,7 +89,7 @@ def _env_aware_override(config_dict: Dict[str, Any], override: str) -> str:
     return resolve_table_name_with_leaf(
         segments,
         override,
-        get_environment(),
+        environment or get_environment(),
         {"naming_module": project_config.naming_module},
     )
 
@@ -93,6 +99,7 @@ def _apply_naming_module_historize_overrides(
     config_dict: Dict[str, Any],
     source_schema: str,
     source_table: str,
+    environment: Optional[str] = None,
 ) -> None:
     """Populate ``historize_config.output_schema`` / ``output_table`` from a
     custom naming module's ``layer="historize"`` hooks, when present.
@@ -122,12 +129,15 @@ def _apply_naming_module_historize_overrides(
         return
 
     context = get_execution_context()
-    environment = context.get_environment() or "dev"
-    # Only resolve the dev schema in dev; in prod it's derived from segments and
-    # unused here, and a dev schema is legitimately unset (get_dev_schema raises).
-    default_schema = context.get_schema() or (
-        get_dev_schema() if environment != "prod" else ""
-    )
+    environment = environment or context.get_environment() or "dev"
+    # Only resolve the dev schema in dev; in prod the schema is derived from
+    # segments and default_schema is unused, and a dev schema is legitimately
+    # unset there (get_dev_schema raises). Pinning environment="prod" (the
+    # collision guard) must not read the live dev schema.
+    if environment == "prod":
+        default_schema = ""
+    else:
+        default_schema = context.get_schema() or get_dev_schema()
 
     if historize_config.output_schema is None and hasattr(
         module, "generate_schema_name"
@@ -210,18 +220,32 @@ def _resolve_historize_schema_access(
 
 def resolve_historize_target(
     pipeline_config: PipelineConfig,
+    *,
+    environment: Optional[str] = None,
+    source_schema: Optional[str] = None,
+    source_table: Optional[str] = None,
 ) -> Tuple[HistorizeConfig, str, str]:
     """Resolve the historize layer's ``(schema, table)`` target for a pipeline.
 
-    Runs the same name-resolution chain as :func:`build_historize_runner` —
-    ``HistorizeConfig`` construction, the env-aware ``output_table`` override,
-    custom naming-module layer overrides, and the placement-strategy resolution
-    — but stops short of building a destination. Shared so collision detection
-    (``utility/collisions.py``) and the runner agree on exactly one resolved
-    target for a given config.
+    Runs the historize name-resolution chain: ``HistorizeConfig`` construction,
+    the env-aware ``output_table`` override, custom naming-module layer
+    overrides, and the placement-strategy resolution. Stops short of building a
+    destination — :func:`build_historize_runner` calls this and then builds one;
+    collision detection (``utility/collisions.py``) calls it pinned to prod.
 
     Requires an active execution context (naming-module overrides and placement
     resolution read it).
+
+    Args:
+        pipeline_config: The pipeline whose historize target to resolve.
+        environment: Pins resolution to a specific environment (``"prod"`` /
+            ``"dev"``); when omitted it reads the active one. The collision
+            guard passes ``"prod"`` for an environment-invariant verdict.
+        source_schema: Override for the source (ingest) schema the historize
+            target derives from; defaults to ``pipeline_config.schema_name``.
+            The guard passes the config's *prod* ingest schema.
+        source_table: Override for the source (ingest) table; defaults to
+            ``pipeline_config.table_name``.
 
     Returns:
         ``(historize_config, target_schema, target_table)``. The returned
@@ -238,14 +262,19 @@ def resolve_historize_target(
         top_level_pk = [top_level_pk]
 
     historize_config = HistorizeConfig.from_dict(historize_dict, top_level_pk)
-    schema_name = pipeline_config.schema_name
+    schema_name = (
+        source_schema if source_schema is not None else pipeline_config.schema_name
+    )
+    table_name = (
+        source_table if source_table is not None else pipeline_config.table_name
+    )
 
     # When output_table is set, run it through the same table-name generator
     # as the source so it picks up the env prefix and any custom naming rules
     # — i.e. treat the override as a peer of the source, not a literal name.
     if historize_config.output_table:
         historize_config.output_table = _env_aware_override(
-            config_dict, historize_config.output_table
+            config_dict, historize_config.output_table, environment=environment
         )
 
     # Apply layer-aware naming-module overrides for the historize layer
@@ -257,13 +286,14 @@ def resolve_historize_target(
         historize_config,
         config_dict,
         source_schema=schema_name,
-        source_table=pipeline_config.table_name,
+        source_table=table_name,
+        environment=environment,
     )
 
     # Resolve historize schema and table using the configured placement strategy.
     target_schema, target_table = resolve_historized_target(
         source_schema=schema_name,
-        source_table=pipeline_config.table_name,
+        source_table=table_name,
         historize_config=historize_config,
     )
     return historize_config, target_schema, target_table
