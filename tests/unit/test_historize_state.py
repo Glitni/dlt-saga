@@ -40,3 +40,35 @@ class TestClearLogEntries:
         mgr = _make_manager(RuntimeError("network down"))
         with pytest.raises(RuntimeError, match="network down"):
             mgr.clear_log_entries_from("pipe", "2026-01-01")
+
+
+@pytest.mark.unit
+class TestCreateTableDdl:
+    def _make_dest(self) -> MagicMock:
+        dest = MagicMock()
+        dest.get_full_table_id.return_value = "cat.schema._saga_historize_log"
+        dest.type_name.side_effect = lambda t: t.upper()
+        dest.partition_cluster_ddl.return_value = (
+            "PARTITION BY DATE(started_at)\nCLUSTER BY pipeline_name"
+        )
+        return dest
+
+    def test_clusters_on_pipeline_name(self):
+        # Reads filter on pipeline_name, so the log must cluster on it to stay
+        # pruned as it grows. The destination reconciles partition/cluster.
+        dest = self._make_dest()
+        mgr = HistorizeStateManager(dest, "db", "schema")
+        ddl = mgr._create_table_ddl()
+        dest.partition_cluster_ddl.assert_called_once_with(
+            "started_at", ["pipeline_name"]
+        )
+        assert "CLUSTER BY pipeline_name" in ddl
+
+    def test_no_physical_clause_when_destination_emits_none(self):
+        dest = self._make_dest()
+        dest.partition_cluster_ddl.return_value = ""
+        mgr = HistorizeStateManager(dest, "db", "schema")
+        ddl = mgr._create_table_ddl()
+        assert "CREATE TABLE IF NOT EXISTS" in ddl
+        assert "CLUSTER BY" not in ddl
+        assert "PARTITION BY" not in ddl
