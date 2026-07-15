@@ -179,6 +179,29 @@ class TestDatabricksClusteringPrimitives:
         dest.execute_sql.return_value = [MagicMock(clusteringColumns=None)]
         assert cls.get_clustering_columns(dest, "ds", "t") == []
 
+    def test_get_clustering_columns_numpy_array(self):
+        # The connector returns clusteringColumns as a numpy array, whose truth
+        # value is ambiguous — the parse must not branch on the array itself.
+        import numpy as np
+
+        dest, cls = self._dest()
+        dest.execute_sql.return_value = [
+            MagicMock(clusteringColumns=np.array(["pipeline_name", "cursor_value"]))
+        ]
+        assert cls.get_clustering_columns(dest, "ds", "t") == [
+            "pipeline_name",
+            "cursor_value",
+        ]
+
+    def test_get_clustering_columns_empty_numpy_array(self):
+        import numpy as np
+
+        dest, cls = self._dest()
+        dest.execute_sql.return_value = [
+            MagicMock(clusteringColumns=np.array([], dtype=object))
+        ]
+        assert cls.get_clustering_columns(dest, "ds", "t") == []
+
     def test_get_clustering_columns_missing_table_is_none(self):
         dest, cls = self._dest()
         dest.execute_sql.side_effect = Exception("TABLE_OR_VIEW_NOT_FOUND: cat.ds.t")

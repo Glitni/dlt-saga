@@ -742,8 +742,13 @@ class DatabricksDestination(Destination):
             raise
         if not rows:
             return None
+        # DESCRIBE DETAIL returns clusteringColumns as array<string>; the
+        # connector surfaces it as a numpy array, whose truth value is ambiguous
+        # — so branch on None, never on the array itself. None/empty → [].
         cols = rows[0].clusteringColumns
-        return list(cols) if cols else []
+        if cols is None:
+            return []
+        return [str(c) for c in cols]
 
     def set_clustering_columns(
         self, dataset: str, table: str, cluster_columns: list
