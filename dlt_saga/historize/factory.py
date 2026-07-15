@@ -5,7 +5,7 @@ duplicated between cli.py and session.py.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.runner import HistorizeRunner
@@ -208,6 +208,67 @@ def _resolve_historize_schema_access(
     return base + overlay
 
 
+def resolve_historize_target(
+    pipeline_config: PipelineConfig,
+) -> Tuple[HistorizeConfig, str, str]:
+    """Resolve the historize layer's ``(schema, table)`` target for a pipeline.
+
+    Runs the same name-resolution chain as :func:`build_historize_runner` —
+    ``HistorizeConfig`` construction, the env-aware ``output_table`` override,
+    custom naming-module layer overrides, and the placement-strategy resolution
+    — but stops short of building a destination. Shared so collision detection
+    (``utility/collisions.py``) and the runner agree on exactly one resolved
+    target for a given config.
+
+    Requires an active execution context (naming-module overrides and placement
+    resolution read it).
+
+    Returns:
+        ``(historize_config, target_schema, target_table)``. The returned
+        ``historize_config`` carries the name-related mutations
+        (``output_table`` / ``output_schema``) but not the ``table_format`` /
+        ``storage_path`` resolution, which is destination-facing and left to
+        :func:`build_historize_runner`.
+    """
+    config_dict = pipeline_config.config_dict
+
+    historize_dict = config_dict.get("historize") or {}
+    top_level_pk = config_dict.get("primary_key")
+    if isinstance(top_level_pk, str):
+        top_level_pk = [top_level_pk]
+
+    historize_config = HistorizeConfig.from_dict(historize_dict, top_level_pk)
+    schema_name = pipeline_config.schema_name
+
+    # When output_table is set, run it through the same table-name generator
+    # as the source so it picks up the env prefix and any custom naming rules
+    # — i.e. treat the override as a peer of the source, not a literal name.
+    if historize_config.output_table:
+        historize_config.output_table = _env_aware_override(
+            config_dict, historize_config.output_table
+        )
+
+    # Apply layer-aware naming-module overrides for the historize layer
+    # (sets output_schema / output_table from a custom naming module when
+    # it returns a value distinct from the ingest layer). Runs before
+    # resolve_historized_target so per-pipeline output_* overrides win, while
+    # naming-module overrides supersede the placement suffix default.
+    _apply_naming_module_historize_overrides(
+        historize_config,
+        config_dict,
+        source_schema=schema_name,
+        source_table=pipeline_config.table_name,
+    )
+
+    # Resolve historize schema and table using the configured placement strategy.
+    target_schema, target_table = resolve_historized_target(
+        source_schema=schema_name,
+        source_table=pipeline_config.table_name,
+        historize_config=historize_config,
+    )
+    return historize_config, target_schema, target_table
+
+
 def build_historize_runner(
     pipeline_config: PipelineConfig,
     full_refresh: bool,
@@ -233,12 +294,12 @@ def build_historize_runner(
     config_dict = pipeline_config.config_dict
     context = get_execution_context()
 
-    historize_dict = config_dict.get("historize") or {}
-    top_level_pk = config_dict.get("primary_key")
-    if isinstance(top_level_pk, str):
-        top_level_pk = [top_level_pk]
-
-    historize_config = HistorizeConfig.from_dict(historize_dict, top_level_pk)
+    # Resolve the historize (schema, table) target — the shared name-resolution
+    # chain used by collision detection too. Returns the HistorizeConfig with
+    # its name-related mutations already applied.
+    historize_config, target_schema, target_table_name = resolve_historize_target(
+        pipeline_config
+    )
 
     destination_type = context.get_destination_type()
     schema_name = pipeline_config.schema_name
@@ -251,34 +312,6 @@ def build_historize_runner(
 
     # Set resolved table_format on the config so HistorizeSqlBuilder reads it
     historize_config.table_format = table_format
-
-    # When output_table is set, run it through the same table-name generator
-    # as the source so it picks up the env prefix and any custom naming rules
-    # — i.e. treat the override as a peer of the source, not a literal name.
-    if historize_config.output_table:
-        historize_config.output_table = _env_aware_override(
-            config_dict, historize_config.output_table
-        )
-
-    # Apply layer-aware naming-module overrides for the historize layer
-    # (sets output_schema / output_table from a custom naming module when
-    # it returns a value distinct from the ingest layer).  Runs before
-    # resolve_historized_target so per-pipeline output_* overrides set above
-    # always win, while naming-module overrides supersede the placement
-    # suffix default.
-    _apply_naming_module_historize_overrides(
-        historize_config,
-        config_dict,
-        source_schema=schema_name,
-        source_table=pipeline_config.table_name,
-    )
-
-    # Resolve historize dataset and table using the configured placement strategy.
-    target_schema, target_table_name = resolve_historized_target(
-        source_schema=schema_name,
-        source_table=pipeline_config.table_name,
-        historize_config=historize_config,
-    )
 
     # Pin resolved target_schema on historize_config so HistorizeRunner uses it
     # everywhere (state manager, partial refresh, etc.)

@@ -317,6 +317,7 @@ historize:
 - `PipelineConfig.historize_enabled` — derived from `write_disposition` (True when contains "historize")
 - `PipelineConfig.dlt_write_disposition` — strips `+historize` suffix for dlt
 - `enabled: false` disables both ingest and historize (master switch)
+- **Target-collision guard** (`utility/collisions.py`): a config must map 1:1 to a destination table. Default naming guarantees this; overrides (explicit `schema_name:`, a custom `naming_module`) can break it. `check_target_collisions()` groups selected configs by resolved `(schema_name, normalize_identifier(table_name))` — ingest layer — and by the resolved historized target (via `historize.factory.resolve_historize_target`, extracted so the runner and the guard agree) — and raises `TargetCollisionError` (a `ValueError`) before any warehouse work. Enforced at run time in `Session._run_ingest`/`_run_historize`/`_run_both` and the orchestrator `run_orchestrator_mode`; surfaced read-only over the whole project by `saga doctor` (`_doctor_check_collisions`).
 
 ### Column & Table Documentation (`persist_docs`)
 - Config surface (`pipelines/target/config.py`): table-level `description` + `classification` (list of labels), and per-column `columns.<col>.{description, classification}`. `classification` is data governance and is **distinct from top-level `tags`** (pipeline selection) — tags never reach the warehouse, classification never affects selection.

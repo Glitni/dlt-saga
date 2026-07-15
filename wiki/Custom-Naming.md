@@ -218,6 +218,14 @@ def generate_schema_name(segments, environment, default_schema, *, layer="ingest
     return default_generate_schema_name(segments, environment, default_schema, layer=layer)
 ```
 
+## Avoiding target collisions
+
+Each pipeline config must map to exactly one destination table. The default naming scheme guarantees this structurally (a per-group schema in prod, group-prefixed table names in dev), but a custom `naming_module` can break it — e.g. a `generate_table_name` that returns the same name for several configs, or an explicit `schema_name:` combined with a shared table name. When two pipelines write to one table they race on table creation and on delete/merge, and interleave each other's rows.
+
+dlt-saga guards against this: `saga ingest`, `saga historize`, and `saga run` (and the orchestrator plan) resolve every selected pipeline's target up front and **fail before touching the warehouse** if two collide, naming the offending pipelines and their shared target. The check covers both the ingest target and the resolved historized target. `saga doctor` runs the same check read-only across the whole project, so you can catch a latent collision — even between pipelines you'd never select together — without starting a run.
+
+If a run stops with "multiple pipelines resolve to the same destination table", give each pipeline a distinct target (via `schema_name` / `table_name` / your `naming_module`), or consolidate them into a single pipeline that reads from all sources.
+
 ## Backwards compatibility
 
 The `layer` keyword and the `schema`/`table` kwargs on `generate_target_location` were added in 0.4.0. Custom modules written against earlier signatures continue to work — the framework introspects the hook's signature and drops keyword arguments the function doesn't accept. You can opt in to the new keywords incrementally, one hook at a time.

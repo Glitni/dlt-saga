@@ -272,7 +272,9 @@ saga info [OPTIONS]
 
 ## saga doctor
 
-Validate configuration and diagnose the environment (read-only) — similar to `dbt debug`. Checks the active dlt-saga build, profiles, project config, pipeline discovery (with resolved schema), destination connectivity, and that registered pipeline plugins are importable. Exits with code 1 if a check fails.
+Validate configuration and diagnose the environment (read-only) — similar to `dbt debug`. Checks the active dlt-saga build, profiles, project config, pipeline discovery (with resolved schema), **target collisions** (pipelines that resolve to the same destination table), destination connectivity, and that registered pipeline plugins are importable. Exits with code 1 if a check fails.
+
+The target-collision check is the read-only counterpart to the run-time guard: `saga ingest` / `saga historize` / `saga run` (and the orchestrator plan) fail before touching the warehouse if two selected pipelines resolve to the same table, while `doctor` surfaces latent collisions across the whole project — including between pipelines you wouldn't select together for a single run. See [Custom Naming → Avoiding target collisions](Custom-Naming#avoiding-target-collisions).
 
 When scoped with `--select`, it also points you at `saga maintenance --dry-run` for internal-table upkeep (clustering + log-growth cleanup). `doctor` itself does **not** scan those tables — measuring clustering drift and reclaimable rows is deferred to the maintenance preview, so `doctor` stays a fast connectivity/config health check.
 
