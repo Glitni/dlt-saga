@@ -272,7 +272,9 @@ saga info [OPTIONS]
 
 ## saga doctor
 
-Check that all registered pipeline plugins are importable. Exits with code 1 if any fail.
+Validate configuration and diagnose the environment (read-only) — similar to `dbt debug`. Checks the active dlt-saga build, profiles, project config, pipeline discovery (with resolved schema), destination connectivity, and that registered pipeline plugins are importable. Exits with code 1 if a check fails.
+
+Also reports **clustering drift** on saga's internal log tables: tables created by older versions of saga were never clustered and stay that way until reconciled. Drift is advisory (it never fails `doctor`) and points you to `saga maintenance`.
 
 ```bash
 saga doctor [OPTIONS]
@@ -281,6 +283,37 @@ saga doctor [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `-v, --verbose` | Enable debug logging |
+| `--profile TEXT` | Profile to use from profiles.yml |
+| `--target TEXT` | Target within profile |
+| `-s, --select TEXT` | Scope the config check and print each matched pipeline's resolved `project.schema.table` |
+
+---
+
+## saga maintenance
+
+Reconcile the physical layout of saga's internal bookkeeping tables (the native_load log, historize log, and execution-plan log). Internal log tables created by older versions of saga were never clustered, so reads over a large log scan more than they need to — this command applies the current clustering to those tables across the project's schemas. It is a one-time migration that becomes a no-op once every table is up to date.
+
+It only updates table metadata (no data is rewritten); the warehouse reclusters in the background, so it is safe to run against live tables. DuckDB has nothing to reconcile.
+
+Run `saga doctor` first to see which tables have drifted.
+
+```bash
+saga maintenance [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-v, --verbose` | Enable debug logging |
+| `--profile TEXT` | Profile to use from profiles.yml |
+| `--target TEXT` | Target within profile |
+| `-s, --select TEXT` | Scope which pipeline schemas are swept |
+| `--dry-run` | Report what would change without writing anything |
+
+```bash
+saga maintenance --dry-run                     # Preview
+saga maintenance                               # Apply across all schemas
+saga maintenance --select "group:filesystem"   # Scope to one group's schema
+```
 
 ---
 
@@ -387,7 +420,12 @@ if result.has_failures:
     for failure in result.failures:
         print(f"{failure.pipeline_name}: {failure.error}")
     raise RuntimeError(f"{result.failed} pipeline(s) failed")
+
+# Reconcile internal-table clustering (equivalent of `saga maintenance`)
+counts = session.maintenance(dry_run=True)   # {"absent": …, "unchanged": …, "reconciled": …}
 ```
+
+`session.maintenance()` returns a status-count dict (not a `SessionResult`), since it operates on internal tables rather than pipelines. `session.update_access(...)` mirrors `saga update-access`.
 
 **`SessionResult` attributes:**
 

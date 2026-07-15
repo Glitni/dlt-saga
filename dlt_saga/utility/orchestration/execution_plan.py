@@ -16,6 +16,12 @@ from dlt_saga.utility.cli.logging import YELLOW, colorize
 
 logger = logging.getLogger(__name__)
 
+# Cluster columns for the execution-plan (plans) table — single source of truth
+# shared by the create-time DDL (``ensure_tables``) and ``saga maintenance``'s
+# clustering reconcile. Reads filter on (execution_id, task_index), never the
+# log_timestamp partition.
+PLANS_CLUSTER_COLUMNS = ["execution_id", "task_index"]
+
 
 def _group_into_task_units(
     pipeline_configs: List[PipelineConfig],
@@ -145,7 +151,7 @@ class ExecutionPlanManager:
                 error_message {self._t("string")},
                 is_orchestrated {self._t("bool")}
             )
-            {d.partition_cluster_ddl("log_timestamp", ["execution_id", "task_index"])}
+            {d.partition_cluster_ddl("log_timestamp", PLANS_CLUSTER_COLUMNS)}
         """
         d.execute_sql(plans_ddl, self.schema)
 

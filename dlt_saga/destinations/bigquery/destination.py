@@ -1124,6 +1124,53 @@ class BigQueryDestination(BigQueryBaseDestination):
                 ", ".join(update_fields),
             )
 
+    # --- Clustering reconciliation -----------------------------------------
+
+    def supports_clustering_reconcile(self) -> bool:
+        return True
+
+    def get_clustering_columns(self, dataset: str, table: str) -> Optional[List[str]]:
+        from google.cloud.exceptions import NotFound
+
+        client, table_ref = self._description_client_and_ref(dataset, table)
+        try:
+            tbl = client.get_table(table_ref)
+        except NotFound:
+            return None
+        return list(tbl.clustering_fields or [])
+
+    def reconcile_clustering(
+        self, dataset: str, table: str, cluster_columns: List[str]
+    ) -> str:
+        """Reconcile clustering via the API in one get and at most one update.
+
+        Spec-only: ``update_table`` rewrites the table's ``clustering_fields``
+        metadata without a data rewrite — BigQuery reclusters in the background,
+        so the benefit accrues without a costly rebuild.
+        """
+        from google.cloud.exceptions import NotFound
+
+        client, table_ref = self._description_client_and_ref(dataset, table)
+        try:
+            tbl = client.get_table(table_ref)
+        except NotFound:
+            return "absent"
+
+        current = list(tbl.clustering_fields or [])
+        if [c.lower() for c in current] == [c.lower() for c in cluster_columns]:
+            return "unchanged"
+
+        tbl.clustering_fields = list(cluster_columns)
+        client.update_table(tbl, ["clustering_fields"])
+        logger.debug(
+            "Reconciled clustering on %s.%s: %s -> %s",
+            dataset,
+            table,
+            current,
+            cluster_columns,
+        )
+        return "reconciled"
+
     def execute_sql_with_job(
         self, sql: str, schema: Optional[str] = None, location: Optional[str] = None
     ) -> tuple:

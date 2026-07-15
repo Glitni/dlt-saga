@@ -13,6 +13,12 @@ from dlt_saga.utility.sql import looks_like_missing_table
 
 logger = logging.getLogger(__name__)
 
+# Cluster columns for the historize-log table — single source of truth shared by
+# the create-time DDL (``_create_table_ddl``) and ``saga maintenance``'s
+# clustering reconcile, so new and reconciled tables match. Reads filter on
+# pipeline_name (never the started_at partition).
+LOG_CLUSTER_COLUMNS = ["pipeline_name"]
+
 
 @dataclass
 class HistorizeLogEntry:
@@ -84,7 +90,7 @@ class HistorizeStateManager:
                 finished_at {d.type_name("timestamp")},
                 status {d.type_name("string")}
             )
-            {d.partition_cluster_ddl("started_at", ["pipeline_name"])}
+            {d.partition_cluster_ddl("started_at", LOG_CLUSTER_COLUMNS)}
         """
 
     def ensure_log_table(self) -> None:

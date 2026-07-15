@@ -996,6 +996,72 @@ class Destination(ABC):
                 self.set_table_description(dataset, table, table_description)
                 logger.debug("Reconciled table description on %s.%s", dataset, table)
 
+    # =========================================================================
+    # Clustering reconciliation
+    #
+    # ``CREATE TABLE IF NOT EXISTS`` never re-clusters an existing table, so
+    # tables created before clustering-at-CREATE stay unclustered. These
+    # primitives let ``saga maintenance`` reconcile the physical clustering of
+    # saga's internal bookkeeping tables (a one-time migration; a no-op once
+    # done) and let ``saga doctor`` report drift read-only via
+    # ``get_clustering_columns``. Reconcile is spec-only where possible — no data
+    # rewrite; the warehouse re-clusters lazily in the background.
+    # =========================================================================
+
+    def supports_clustering_reconcile(self) -> bool:
+        """Whether this destination can read and reconcile table clustering."""
+        return False
+
+    def get_clustering_columns(self, dataset: str, table: str) -> Optional[list]:
+        """Return the table's current clustering columns.
+
+        Returns an empty list when the table exists but is not clustered, and
+        ``None`` when the table does not exist — so callers can distinguish
+        "not clustered" from "not created yet".
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_clustering_columns"
+        )
+
+    def set_clustering_columns(
+        self, dataset: str, table: str, cluster_columns: list
+    ) -> None:
+        """Set the table's clustering to ``cluster_columns``."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_clustering_columns"
+        )
+
+    def reconcile_clustering(
+        self, dataset: str, table: str, cluster_columns: list
+    ) -> str:
+        """Align a table's clustering with ``cluster_columns``, idempotently.
+
+        Reads current clustering and writes only when it differs, so a
+        reconciled table is a no-op on subsequent runs.
+
+        Returns one of:
+            ``"unsupported"`` — destination cannot reconcile clustering
+            ``"absent"``      — table does not exist
+            ``"unchanged"``   — clustering already matches (no write)
+            ``"reconciled"``  — clustering was changed
+        """
+        if not self.supports_clustering_reconcile():
+            return "unsupported"
+        current = self.get_clustering_columns(dataset, table)
+        if current is None:
+            return "absent"
+        if [c.lower() for c in current] == [c.lower() for c in cluster_columns]:
+            return "unchanged"
+        self.set_clustering_columns(dataset, table, cluster_columns)
+        logger.debug(
+            "Reconciled clustering on %s.%s: %s -> %s",
+            dataset,
+            table,
+            current,
+            cluster_columns,
+        )
+        return "reconciled"
+
     def execute_sql_with_job(self, sql: str, schema: Optional[str] = None) -> tuple:
         """Execute SQL and return (rows, job_id) for traceability."""
         raise NotImplementedError(

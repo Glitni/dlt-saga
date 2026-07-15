@@ -238,7 +238,7 @@ class ImpersonationManager:
         credentials, project = google.auth.default()
         # Force a token refresh to validate the impersonation chain
         credentials.refresh(google.auth.transport.requests.Request())
-        logger.info(f"Impersonation configured successfully for {service_account}")
+        logger.debug(f"Impersonation configured successfully for {service_account}")
 
     def setup_impersonation(self, service_account: str) -> None:
         """Set up service account impersonation.
@@ -255,7 +255,7 @@ class ImpersonationManager:
         Raises:
             RuntimeError: If prerequisites or verification fail.
         """
-        logger.info(
+        logger.debug(
             f"Setting up impersonation for: {colorize(service_account, YELLOW)}"
         )
 
@@ -299,7 +299,7 @@ class ImpersonationManager:
                     "Unset GOOGLE_IMPERSONATE_SERVICE_ACCOUNT environment variable"
                 )
 
-            logger.info("Impersonation torn down successfully")
+            logger.debug("Impersonation torn down successfully")
             self.active_impersonation = None
             return True
 

@@ -1056,3 +1056,56 @@ class TestExitIfFailures:
             assert foreign.disabled is True
         finally:
             foreign.disabled = False
+
+
+# ---------------------------------------------------------------------------
+# Session.maintenance tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSessionMaintenance:
+    """Session.maintenance mirrors the CLI command: discover schemas, then
+    delegate to the shared clustering reconcile under the session's auth."""
+
+    def _session(self):
+        session = Session.__new__(Session)
+        session._profile_target = None
+        session._auth_provider = MagicMock()
+        return session
+
+    def test_run_maintenance_delegates_with_selected_configs(self):
+        session = self._session()
+        configs = {"api": [MagicMock()]}
+        session._discover_and_select = MagicMock(return_value=(configs, {}))
+        with (
+            patch(
+                "dlt_saga.maintenance.run_clustering_maintenance",
+                return_value={"absent": 0, "unchanged": 0, "reconciled": 3},
+            ) as run,
+            patch(
+                "dlt_saga.utility.cli.context.get_execution_context",
+                return_value=MagicMock(),
+            ),
+        ):
+            counts = session._run_maintenance(select=["tag:x"], dry_run=True)
+        assert counts["reconciled"] == 3
+        run.assert_called_once()
+        assert run.call_args.args[1] == configs  # selected configs forwarded
+        assert run.call_args.args[2] is True  # dry_run forwarded
+
+    def test_run_maintenance_empty_selection_returns_zero(self):
+        session = self._session()
+        session._discover_and_select = MagicMock(return_value=({}, {}))
+        with patch("dlt_saga.maintenance.run_clustering_maintenance") as run:
+            counts = session._run_maintenance(select=None, dry_run=False)
+        assert counts == {"absent": 0, "unchanged": 0, "reconciled": 0}
+        run.assert_not_called()
+
+    def test_maintenance_runs_under_auth(self):
+        session = self._session()
+        session._execute_with_auth = MagicMock(return_value={"reconciled": 1})
+        with patch("dlt_saga.session.execution_context_scope"):
+            counts = session.maintenance(select=None, dry_run=False)
+        assert counts == {"reconciled": 1}
+        session._execute_with_auth.assert_called_once()
