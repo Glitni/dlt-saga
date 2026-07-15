@@ -93,6 +93,35 @@ class TestIngestCollisionGuard:
             sys.path.remove(str(tmp_path))
             sys.modules.pop("collide_naming", None)
 
+    def test_ingest_fails_when_only_one_side_selected(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # Project-wide scope: selecting just one of the colliding pipelines
+        # still fails, because the other (unselected but enabled) pipeline
+        # already claims the same table. This is the "deploy a new pipeline
+        # onto an existing table" case — caught even when run alone.
+        monkeypatch.chdir(tmp_path)
+        _scaffold_colliding_project(tmp_path)
+        sys.path.insert(0, str(tmp_path))
+        try:
+            runner = CliRunner()
+            with caplog.at_level("ERROR", logger="dlt_saga.cli"):
+                result = runner.invoke(app, ["ingest", "--select", "filesystem__alpha"])
+
+            assert result.exit_code == 1, (
+                f"expected exit 1, got {result.exit_code}:\n{result.output}"
+            )
+            assert not (tmp_path / "local.duckdb").exists()
+
+            # The unselected co-claimant is named too, so the operator sees
+            # what it collides with.
+            message = caplog.text
+            assert "filesystem__alpha" in message
+            assert "filesystem__beta" in message
+        finally:
+            sys.path.remove(str(tmp_path))
+            sys.modules.pop("collide_naming", None)
+
     def test_doctor_reports_collision(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         _scaffold_colliding_project(tmp_path)
@@ -108,3 +137,122 @@ class TestIngestCollisionGuard:
         finally:
             sys.path.remove(str(tmp_path))
             sys.modules.pop("collide_naming", None)
+
+    def test_doctor_select_one_finds_unselected_co_claimant(
+        self, tmp_path, monkeypatch
+    ):
+        # CI pattern: run doctor over just the changed pipeline. Detection is
+        # project-wide, so it still surfaces the collision with the unselected
+        # pipeline that shares the target.
+        monkeypatch.chdir(tmp_path)
+        _scaffold_colliding_project(tmp_path)
+        sys.path.insert(0, str(tmp_path))
+        try:
+            runner = CliRunner()
+            result = runner.invoke(app, ["doctor", "--select", "filesystem__alpha"])
+
+            assert result.exit_code == 1, result.output
+            assert "Target collisions" in result.output
+            assert "filesystem__alpha" in result.output
+            assert "filesystem__beta" in result.output  # unselected co-claimant
+        finally:
+            sys.path.remove(str(tmp_path))
+            sys.modules.pop("collide_naming", None)
+
+
+class TestEnvironmentConsistentDetection:
+    """The guard's verdict is environment-invariant: a collision real in prod is
+    flagged even when ``saga doctor`` runs in dev (the default target).
+    """
+
+    def _scaffold_prod_only_collision(self, tmp_path):
+        """Two configs in different groups that collide **only in prod**.
+
+        prod: both resolve to ``dlt_filesystem.x__report`` (the api config pins
+        ``schema_name: dlt_filesystem``). dev: ``filesystem__x__report`` vs
+        ``api__x__report`` — no textual collision, yet it's a real prod clash.
+        """
+        run_init(no_input=True)
+        (tmp_path / "configs" / "filesystem" / "sample.yml").unlink()
+
+        fs_dir = tmp_path / "configs" / "filesystem" / "x"
+        fs_dir.mkdir(parents=True)
+        (fs_dir / "report.yml").write_text(
+            textwrap.dedent(
+                """
+                tags: [daily]
+                write_disposition: append
+                filesystem_type: file
+                bucket_name: data
+                file_glob: "*.csv"
+                file_type: csv
+                """
+            )
+        )
+
+        api_dir = tmp_path / "configs" / "api" / "x"
+        api_dir.mkdir(parents=True)
+        (api_dir / "report.yml").write_text(
+            textwrap.dedent(
+                """
+                tags: [daily]
+                write_disposition: append
+                schema_name: dlt_filesystem
+                base_url: https://example.test
+                """
+            )
+        )
+
+    def test_doctor_in_dev_flags_prod_only_collision(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._scaffold_prod_only_collision(tmp_path)
+
+        runner = CliRunner()
+        # Default target is dev; the guard still resolves as-of-prod.
+        result = runner.invoke(app, ["doctor"])
+
+        assert result.exit_code == 1, result.output
+        assert "Target collisions" in result.output
+        # Prod-only collision (dev names are group-prefixed and distinct), so
+        # the report pins it to prod.
+        assert "dlt_filesystem.x__report (ingest, prod)" in result.output
+        assert "api__x__report" in result.output
+        assert "filesystem__x__report" in result.output
+
+
+class TestHistorizeOnlyCollisionGuard:
+    """Two ``write_disposition: historize`` configs with the same explicit
+    historize output target collide — caught only by the historize layer (they
+    have no ingest target).
+    """
+
+    def _scaffold_historize_only_collision(self, tmp_path):
+        run_init(no_input=True)
+        (tmp_path / "configs" / "filesystem" / "sample.yml").unlink()
+
+        for group, name in (("filesystem", "orders_a"), ("api", "orders_b")):
+            cfg_dir = tmp_path / "configs" / group
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            (cfg_dir / f"{name}.yml").write_text(
+                textwrap.dedent(
+                    """
+                    tags: [daily]
+                    write_disposition: historize
+                    primary_key: [id]
+                    historize:
+                      output_schema: archive
+                      output_table: customer_orders
+                    """
+                )
+            )
+
+    def test_doctor_reports_historize_only_collision(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._scaffold_historize_only_collision(tmp_path)
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["doctor"])
+
+        assert result.exit_code == 1, result.output
+        assert "Target collisions" in result.output
+        assert "archive.customer_orders (historize, prod)" in result.output

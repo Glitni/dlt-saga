@@ -129,14 +129,40 @@ class TestDoctorCheckConfigs:
 
 
 def _collision_cfg(name, schema="dlt_dev", table=None):
+    table = table if table is not None else name
     return SimpleNamespace(
         pipeline_name=name,
         schema_name=schema,
-        table_name=table if table is not None else name,
+        table_name=table,
         ingest_enabled=True,
         historize_enabled=False,
-        config_dict={},
+        config_dict={"config_path": f"configs/{name}.yml", "_prod": (schema, table)},
     )
+
+
+def _fake_source_for(selected):
+    """A fake ConfigSource resolving each config's target and discovering them.
+
+    The collision guard resolves targets through the source and discovers the
+    project-wide set, so doctor tests must inject one; the configs carry their
+    intended target.
+    """
+    all_configs = [c for configs in selected.values() for c in configs]
+    targets = {
+        c.config_dict["config_path"]: c.config_dict["_prod"] for c in all_configs
+    }
+
+    class _FakeSource:
+        def resolve_ingest_target(
+            self, config_path, *, schema_override=None, environment=None
+        ):
+            schema, table = targets[config_path]
+            return (schema_override or schema, table)
+
+        def discover(self):
+            return ({"g": list(all_configs)}, {})
+
+    return _FakeSource()
 
 
 @pytest.mark.unit
@@ -144,7 +170,10 @@ class TestDoctorCheckCollisions:
     def test_passes_when_no_collision(self):
         selected = {"g": [_collision_cfg("g__a"), _collision_cfg("g__b")]}
         emit = _CaptureEmit()
-        ok = cli._doctor_check_collisions(selected, verbose=False, emit=emit)
+        with patch.object(
+            cli, "get_config_source", return_value=_fake_source_for(selected)
+        ):
+            ok = cli._doctor_check_collisions(selected, verbose=False, emit=emit)
         assert ok is True
         symbol, label, _ = emit.calls[0]
         assert symbol == "✓"
@@ -158,13 +187,17 @@ class TestDoctorCheckCollisions:
             ]
         }
         emit = _CaptureEmit()
-        ok = cli._doctor_check_collisions(selected, verbose=False, emit=emit)
+        with patch.object(
+            cli, "get_config_source", return_value=_fake_source_for(selected)
+        ):
+            ok = cli._doctor_check_collisions(selected, verbose=False, emit=emit)
         assert ok is False
         symbol, label, _ = emit.calls[0]
         assert symbol == "✗"
         assert label == "Target collisions"
         out = capsys.readouterr().out
-        assert "dlt_dev.brands (ingest)" in out
+        # Doctor checks dev ∪ prod; this env-agnostic fake collides in both.
+        assert "dlt_dev.brands (ingest, dev+prod)" in out
         assert "g__a, g__b" in out
 
     def test_empty_selection_passes(self):

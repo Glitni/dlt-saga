@@ -1,7 +1,7 @@
 """Unit tests for historize factory helpers."""
 
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,6 +12,7 @@ from dlt_saga.historize.factory import (
     _resolve_historize_schema_access,
     _resolve_historize_storage_path,
     _resolve_historize_table_format,
+    resolve_historize_target,
 )
 
 
@@ -295,3 +296,46 @@ class TestApplyNamingModuleHistorizeOverrides:
             source_table="asm__salgsmal",
         )
         assert cfg.output_schema == "explicit_archive"
+
+
+@pytest.mark.unit
+class TestResolveHistorizeTargetAsOfProd:
+    """`resolve_historize_target` pins to prod source names when asked.
+
+    The collision guard resolves the historized target from the config's *prod*
+    ingest target (threaded in as source_schema/source_table), so the verdict is
+    environment-invariant. Default placement (table_suffix) appends
+    ``_historized`` to the prod source table, in the source schema.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_caches(self, monkeypatch):
+        import dlt_saga.pipeline_config.naming as naming_mod
+        from dlt_saga.project_config import _reset_cache
+
+        naming_mod._naming_module = None
+        _reset_cache()
+        yield
+        naming_mod._naming_module = None
+        _reset_cache()
+
+    def test_prod_source_names_drive_historized_target(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)  # no saga_project.yml → default placement
+        pipeline_config = SimpleNamespace(
+            pipeline_name="google_sheets__asm__salgsmal",
+            schema_name="dlt_dev",  # current-env values — must NOT be used
+            table_name="google_sheets__asm__salgsmal",
+            config_dict={
+                "config_path": "configs/google_sheets/asm/salgsmal.yml",
+                "historize": {},
+                "primary_key": ["id"],
+            },
+        )
+
+        _, schema, table = resolve_historize_target(
+            pipeline_config,
+            environment="prod",
+            source_schema="dlt_google_sheets",
+            source_table="asm__salgsmal",
+        )
+        assert (schema, table) == ("dlt_google_sheets", "asm__salgsmal_historized")
