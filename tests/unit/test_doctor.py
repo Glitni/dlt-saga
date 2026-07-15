@@ -128,6 +128,50 @@ class TestDoctorCheckConfigs:
         assert "g__p24" in out
 
 
+def _collision_cfg(name, schema="dlt_dev", table=None):
+    return SimpleNamespace(
+        pipeline_name=name,
+        schema_name=schema,
+        table_name=table if table is not None else name,
+        ingest_enabled=True,
+        historize_enabled=False,
+        config_dict={},
+    )
+
+
+@pytest.mark.unit
+class TestDoctorCheckCollisions:
+    def test_passes_when_no_collision(self):
+        selected = {"g": [_collision_cfg("g__a"), _collision_cfg("g__b")]}
+        emit = _CaptureEmit()
+        ok = cli._doctor_check_collisions(selected, verbose=False, emit=emit)
+        assert ok is True
+        symbol, label, _ = emit.calls[0]
+        assert symbol == "✓"
+        assert label == "Target collisions"
+
+    def test_fails_and_lists_collision(self, capsys):
+        selected = {
+            "g": [
+                _collision_cfg("g__a", table="brands"),
+                _collision_cfg("g__b", table="brands"),
+            ]
+        }
+        emit = _CaptureEmit()
+        ok = cli._doctor_check_collisions(selected, verbose=False, emit=emit)
+        assert ok is False
+        symbol, label, _ = emit.calls[0]
+        assert symbol == "✗"
+        assert label == "Target collisions"
+        out = capsys.readouterr().out
+        assert "dlt_dev.brands (ingest)" in out
+        assert "g__a, g__b" in out
+
+    def test_empty_selection_passes(self):
+        emit = _CaptureEmit()
+        assert cli._doctor_check_collisions({}, verbose=False, emit=emit) is True
+
+
 @pytest.mark.unit
 class TestDoctorEmitVersion:
     def test_marks_editable_vs_installed(self):

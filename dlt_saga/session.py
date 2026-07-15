@@ -30,6 +30,7 @@ from dlt_saga.utility.cli.context import execution_context_scope
 from dlt_saga.utility.cli.profiles import ProfileTarget, get_profiles_config
 from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.cli.selectors import PipelineSelector
+from dlt_saga.utility.collisions import check_target_collisions
 
 logger = logging.getLogger(__name__)
 
@@ -744,6 +745,10 @@ class Session:
             logger.info("No ingest-enabled pipelines matched the selection criteria")
             return SessionResult()
 
+        # Fail before touching the warehouse if two pipelines resolve to the
+        # same ingest target — concurrent writers race and duplicate rows.
+        check_target_collisions(all_configs, check_ingest=True, check_historize=False)
+
         # `_run_ingest` is also used by `update_access` — only the destination
         # access sync runs in that mode, not the actual extract/load. Pick the
         # log wording to match so an operator running `saga update-access`
@@ -947,6 +952,10 @@ class Session:
             logger.info("No historize-enabled pipelines matched the selection criteria")
             return SessionResult()
 
+        # Fail before touching the warehouse if two pipelines resolve to the
+        # same historized target.
+        check_target_collisions(all_configs, check_ingest=False, check_historize=True)
+
         logger.info(
             "Historizing %d pipeline(s) with %d worker(s)", len(all_configs), workers
         )
@@ -1131,6 +1140,10 @@ class Session:
         )
         ingest_list = flatten_configs(ingest_configs)
 
+        # Guard both layers up front so a collision fails the whole run before
+        # the ingest phase writes anything the historize phase would build on.
+        check_target_collisions(ingest_list, check_ingest=True, check_historize=False)
+
         if ingest_list:
             logger.info("Running %d ingest pipeline(s)", len(ingest_list))
             self._prepare_destinations(ingest_configs)
@@ -1145,6 +1158,10 @@ class Session:
             select, filter_fn=lambda c: c.historize_enabled
         )
         historize_list = flatten_configs(historize_configs)
+
+        check_target_collisions(
+            historize_list, check_ingest=False, check_historize=True
+        )
 
         # Skip historize for pipelines whose ingest failed during full refresh
         if full_refresh and failed_names:

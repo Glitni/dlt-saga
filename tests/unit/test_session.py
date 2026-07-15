@@ -629,6 +629,9 @@ class TestSessionIngest:
         config = MagicMock()
         config.pipeline_name = "test_pipeline"
         config.ingest_enabled = True
+        config.historize_enabled = False
+        config.schema_name = "dlt_dev"
+        config.table_name = "group__test_pipeline"
         config.config_dict = {}
 
         mock_execute.return_value = [{"rows": 10}]
@@ -646,6 +649,9 @@ class TestSessionIngest:
         config = MagicMock()
         config.pipeline_name = "failing_pipeline"
         config.ingest_enabled = True
+        config.historize_enabled = False
+        config.schema_name = "dlt_dev"
+        config.table_name = "group__failing_pipeline"
         config.config_dict = {}
 
         mock_execute.side_effect = RuntimeError("connection timeout")
@@ -717,6 +723,9 @@ class TestSessionUpdateAccess:
         config = MagicMock()
         config.pipeline_name = "test_pipeline"
         config.ingest_enabled = True
+        config.historize_enabled = False
+        config.schema_name = "dlt_dev"
+        config.table_name = "group__test_pipeline"
         config.config_dict = {}
 
         mock_execute.return_value = {"operation": "update_access"}

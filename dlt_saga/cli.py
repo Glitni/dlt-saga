@@ -36,6 +36,7 @@ from dlt_saga.utility.cli.context import get_execution_context
 from dlt_saga.utility.cli.logging import configure_cli_logging, reenable_saga_loggers
 from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.cli.selectors import format_config_list
+from dlt_saga.utility.collisions import TargetCollisionError, check_target_collisions
 from dlt_saga.utility.env import get_env
 from dlt_saga.utility.naming import get_environment
 
@@ -393,6 +394,14 @@ def run_orchestrator_mode(
 
     if not all_configs:
         logger.error("No pipelines to execute")
+        raise typer.Exit(1)
+
+    # Fail the whole plan before any worker is triggered if two pipelines
+    # resolve to the same target (both layers — the plan spans ingest+historize).
+    try:
+        check_target_collisions(all_configs, check_ingest=True, check_historize=True)
+    except TargetCollisionError as e:
+        logger.error(str(e))
         raise typer.Exit(1)
 
     logger.info(
@@ -1294,7 +1303,7 @@ def ingest(
             start_value_override=start_value_override,
             end_value_override=end_value_override,
         )
-    except AuthenticationError as e:
+    except (AuthenticationError, TargetCollisionError) as e:
         logger.error(str(e))
         raise typer.Exit(1)
     _exit_if_failures(result, "Ingest")
@@ -1426,7 +1435,7 @@ def historize(
             partial_refresh=partial_refresh,
             historize_from=historize_from,
         )
-    except AuthenticationError as e:
+    except (AuthenticationError, TargetCollisionError) as e:
         logger.error(str(e))
         raise typer.Exit(1)
     _exit_if_failures(result, "Historize")
@@ -1841,7 +1850,7 @@ def run(
                 historize_from=historize_from,
             )
             all_results.extend(r.pipeline_results)
-    except AuthenticationError as e:
+    except (AuthenticationError, TargetCollisionError) as e:
         logger.error(str(e))
         raise typer.Exit(1)
 
@@ -2803,6 +2812,56 @@ def _doctor_check_configs(
         return {}
 
 
+def _doctor_check_collisions(
+    selected_configs: dict,
+    verbose: bool,
+    emit: Callable[..., None],
+) -> bool:
+    """Flag pipelines that resolve to the same destination table.
+
+    Read-only counterpart to the run-time guard: a run fails on a collision,
+    but ``saga doctor`` surfaces latent ones (including between pipelines you
+    didn't select for any single run) across the whole project. Reuses the
+    configs already discovered by :func:`_doctor_check_configs`, so it costs no
+    extra discovery.
+    """
+    from dlt_saga.utility.collisions import detect_target_collisions
+
+    flat = flatten_configs(selected_configs) if selected_configs else []
+    if not flat:
+        return True
+
+    try:
+        collisions = detect_target_collisions(
+            flat, check_ingest=True, check_historize=True
+        )
+    except Exception as e:
+        # Never let the diagnosis itself crash the health check.
+        emit("!", "Target collisions", f"could not check: {e}")
+        return True
+
+    if not collisions:
+        emit(
+            "\u2713",
+            "Target collisions",
+            "none \u2014 each pipeline maps to its own table",
+        )
+        return True
+
+    total = sum(len(c.pipelines) for c in collisions)
+    emit(
+        "\u2717",
+        "Target collisions",
+        f"{len(collisions)} shared target(s) across {total} pipeline(s)",
+    )
+    for collision in collisions:
+        target = ".".join(p for p in (collision.schema, collision.table) if p)
+        typer.echo(
+            f"        {target} ({collision.layer}) \u2190 {', '.join(collision.pipelines)}"
+        )
+    return False
+
+
 def _doctor_check_destination(
     dest_type: str,
     context: "ExecutionContext",
@@ -2913,6 +2972,7 @@ def doctor(
     )
     ok = _doctor_check_project(verbose, _emit)
     selected_configs = _doctor_check_configs(select, context, verbose, _emit)
+    ok = _doctor_check_collisions(selected_configs, verbose, _emit) and ok
     ok = (
         _doctor_check_destination(
             dest_type, context, selected_configs, profile_target, verbose, _emit
