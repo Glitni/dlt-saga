@@ -1,3 +1,25 @@
+## 0.26.0 — 2026-07-16
+
+### Breaking Changes
+- Unify placement config vocabulary across ingest and historize (#404)
+
+
+### Added
+- Saga doctor advises on deprecated config-key aliases (#406)
+- Fail runs when multiple pipelines resolve to the same destination table (#398)
+- Compact internal logs and reconcile stale tasks in saga maintenance (#396)
+- Reconcile internal-log-table clustering via saga maintenance (#394)
+
+
+### Fixed
+- Compose schema_name per environment (stop the dev-schema leak) (#403)
+- Make target-collision guard project-wide and environment-aware (#401)
+- Cluster historize state log on pipeline_name (#391)
+- Cluster native_load state log on its read predicates (#389)
+- Shrink native_load flat-mode incremental dedup memory footprint (#387)
+- Dedupe and clarify historize failure reporting (#385)
+- Make incremental historize re-entrant across crash/retry (#382)
+
 ## 0.25.0 — 2026-07-13
 
 ### Added
