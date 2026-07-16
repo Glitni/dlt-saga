@@ -306,13 +306,13 @@ def _make_config(
 @pytest.mark.unit
 class TestCalculateTaskCount:
     def test_ungrouped_only(self):
-        from dlt_saga.cli import _calculate_task_count
+        from dlt_saga.utility.cli.run_modes import _calculate_task_count
 
         configs = [_make_config("a"), _make_config("b"), _make_config("c")]
         assert _calculate_task_count(configs) == 3
 
     def test_grouped_only(self):
-        from dlt_saga.cli import _calculate_task_count
+        from dlt_saga.utility.cli.run_modes import _calculate_task_count
 
         configs = [
             _make_config("a", task_group="g1"),
@@ -322,7 +322,7 @@ class TestCalculateTaskCount:
         assert _calculate_task_count(configs) == 2
 
     def test_mixed(self):
-        from dlt_saga.cli import _calculate_task_count
+        from dlt_saga.utility.cli.run_modes import _calculate_task_count
 
         configs = [
             _make_config("a", task_group="g1"),
@@ -333,7 +333,7 @@ class TestCalculateTaskCount:
         assert _calculate_task_count(configs) == 3  # 1 group + 2 individual
 
     def test_empty(self):
-        from dlt_saga.cli import _calculate_task_count
+        from dlt_saga.utility.cli.run_modes import _calculate_task_count
 
         assert _calculate_task_count([]) == 0
 
@@ -341,7 +341,7 @@ class TestCalculateTaskCount:
 @pytest.mark.unit
 class TestBuildTaskAssignments:
     def test_ungrouped_pipelines(self):
-        from dlt_saga.cli import _build_task_assignments
+        from dlt_saga.utility.cli.run_modes import _build_task_assignments
 
         configs = [_make_config("a"), _make_config("b")]
         tasks = _build_task_assignments(configs)
@@ -354,7 +354,7 @@ class TestBuildTaskAssignments:
         assert "task_group" not in tasks[0]
 
     def test_grouped_pipelines(self):
-        from dlt_saga.cli import _build_task_assignments
+        from dlt_saga.utility.cli.run_modes import _build_task_assignments
 
         configs = [
             _make_config("a", task_group="analytics"),
@@ -372,13 +372,13 @@ class TestBuildTaskAssignments:
         assert tasks[1]["task_index"] == 1
 
     def test_empty(self):
-        from dlt_saga.cli import _build_task_assignments
+        from dlt_saga.utility.cli.run_modes import _build_task_assignments
 
         assert _build_task_assignments([]) == []
 
     def test_task_groups_interleave_by_schema(self):
         """Multiple groups in different schemas round-robin by schema."""
-        from dlt_saga.cli import _build_task_assignments
+        from dlt_saga.utility.cli.run_modes import _build_task_assignments
 
         configs = [
             _make_config("a", task_group="g1", schema_name="schema_A"),
@@ -396,7 +396,7 @@ class TestBuildTaskAssignments:
 
     def test_groups_and_singletons_interleave_together(self):
         """Same-schema groups get diluted by other-schema singletons (issue #85)."""
-        from dlt_saga.cli import _build_task_assignments
+        from dlt_saga.utility.cli.run_modes import _build_task_assignments
 
         configs = [
             _make_config("g1a", task_group="g1", schema_name="schema_A"),
@@ -435,7 +435,7 @@ class TestBuildTaskAssignments:
 
     def test_singletons_only_preserves_existing_interleave(self):
         """Regression: an all-singleton plan must order identically to today."""
-        from dlt_saga.cli import _build_task_assignments
+        from dlt_saga.utility.cli.run_modes import _build_task_assignments
 
         configs = [
             _make_config("a", schema_name="schema_A"),
@@ -452,7 +452,7 @@ class TestBuildTaskAssignments:
 
     def test_all_same_schema_groups_keep_stable_order(self):
         """When every group lives in one schema, fall back to declaration order."""
-        from dlt_saga.cli import _build_task_assignments
+        from dlt_saga.utility.cli.run_modes import _build_task_assignments
 
         configs = [
             _make_config("a", task_group="g1", schema_name="schema_A"),
@@ -472,16 +472,16 @@ class TestBuildTaskAssignments:
 @pytest.mark.unit
 class TestGetWorkerEnvironment:
     def test_explicit_args(self):
-        from dlt_saga.cli import _get_worker_environment
+        from dlt_saga.utility.cli.run_modes import _get_worker_environment
 
         eid, tidx = _get_worker_environment(execution_id="explicit-id", task_index=7)
         assert eid == "explicit-id"
         assert tidx == 7
 
     @patch.dict("os.environ", {"CLOUD_RUN_TASK_INDEX": "3"})
-    @patch("dlt_saga.cli.get_env", return_value="env-id")
+    @patch("dlt_saga.utility.cli.run_modes.get_env", return_value="env-id")
     def test_env_var_fallback(self, mock_get_env):
-        from dlt_saga.cli import _get_worker_environment
+        from dlt_saga.utility.cli.run_modes import _get_worker_environment
 
         eid, tidx = _get_worker_environment()
         assert eid == "env-id"
@@ -492,7 +492,7 @@ class TestGetWorkerEnvironment:
         # Remove CLOUD_RUN_TASK_INDEX if set
         import os
 
-        from dlt_saga.cli import _get_worker_environment
+        from dlt_saga.utility.cli.run_modes import _get_worker_environment
 
         os.environ.pop("CLOUD_RUN_TASK_INDEX", None)
 
@@ -500,34 +500,34 @@ class TestGetWorkerEnvironment:
         assert tidx == 5
 
     def test_explicit_overrides_env(self):
-        from dlt_saga.cli import _get_worker_environment
+        from dlt_saga.utility.cli.run_modes import _get_worker_environment
 
         with patch.dict("os.environ", {"CLOUD_RUN_TASK_INDEX": "99"}):
-            with patch("dlt_saga.cli.get_env", return_value="env-id"):
+            with patch("dlt_saga.utility.cli.run_modes.get_env", return_value="env-id"):
                 eid, tidx = _get_worker_environment(
                     execution_id="override", task_index=0
                 )
                 assert eid == "override"
                 assert tidx == 0
 
-    @patch("dlt_saga.cli.get_env", return_value=None)
+    @patch("dlt_saga.utility.cli.run_modes.get_env", return_value=None)
     def test_missing_execution_id_exits(self, mock_get_env):
         import typer
 
-        from dlt_saga.cli import _get_worker_environment
+        from dlt_saga.utility.cli.run_modes import _get_worker_environment
 
         # Newer typer versions raise typer.Exit (typer._click.exceptions.Exit)
         with pytest.raises(typer.Exit):
             _get_worker_environment()
 
-    @patch("dlt_saga.cli.get_env", return_value="id")
+    @patch("dlt_saga.utility.cli.run_modes.get_env", return_value="id")
     @patch.dict("os.environ", {}, clear=True)
     def test_missing_task_index_exits(self, mock_get_env):
         import os
 
         import typer
 
-        from dlt_saga.cli import _get_worker_environment
+        from dlt_saga.utility.cli.run_modes import _get_worker_environment
 
         os.environ.pop("CLOUD_RUN_TASK_INDEX", None)
         os.environ.pop("SAGA_TASK_INDEX", None)
@@ -557,7 +557,7 @@ class TestResolveWorkerConcurrency:
 
     @patch.dict("os.environ", {}, clear=True)
     def test_default_when_nothing_set(self, tmp_path, monkeypatch):
-        from dlt_saga.cli import (
+        from dlt_saga.utility.cli.run_modes import (
             _DEFAULT_WORKER_CONCURRENCY,
             _resolve_worker_concurrency,
         )
@@ -567,14 +567,14 @@ class TestResolveWorkerConcurrency:
 
     @patch.dict("os.environ", {"SAGA_WORKER_CONCURRENCY": "2"}, clear=True)
     def test_env_var_used(self, tmp_path, monkeypatch):
-        from dlt_saga.cli import _resolve_worker_concurrency
+        from dlt_saga.utility.cli.run_modes import _resolve_worker_concurrency
 
         monkeypatch.chdir(tmp_path)
         assert _resolve_worker_concurrency() == 2
 
     @patch.dict("os.environ", {}, clear=True)
     def test_project_config_used(self, tmp_path, monkeypatch):
-        from dlt_saga.cli import _resolve_worker_concurrency
+        from dlt_saga.utility.cli.run_modes import _resolve_worker_concurrency
 
         yml = tmp_path / "saga_project.yml"
         yml.write_text(
@@ -585,7 +585,7 @@ class TestResolveWorkerConcurrency:
 
     @patch.dict("os.environ", {"SAGA_WORKER_CONCURRENCY": "5"}, clear=True)
     def test_env_var_overrides_project_config(self, tmp_path, monkeypatch):
-        from dlt_saga.cli import _resolve_worker_concurrency
+        from dlt_saga.utility.cli.run_modes import _resolve_worker_concurrency
 
         yml = tmp_path / "saga_project.yml"
         yml.write_text(
@@ -596,7 +596,7 @@ class TestResolveWorkerConcurrency:
 
     @patch.dict("os.environ", {"SAGA_WORKER_CONCURRENCY": "5"}, clear=True)
     def test_cli_override_wins(self, tmp_path, monkeypatch):
-        from dlt_saga.cli import _resolve_worker_concurrency
+        from dlt_saga.utility.cli.run_modes import _resolve_worker_concurrency
 
         yml = tmp_path / "saga_project.yml"
         yml.write_text(
@@ -607,7 +607,7 @@ class TestResolveWorkerConcurrency:
 
     @patch.dict("os.environ", {"SAGA_WORKER_CONCURRENCY": "not-an-int"}, clear=True)
     def test_invalid_env_var_falls_through(self, tmp_path, monkeypatch):
-        from dlt_saga.cli import (
+        from dlt_saga.utility.cli.run_modes import (
             _DEFAULT_WORKER_CONCURRENCY,
             _resolve_worker_concurrency,
         )
@@ -617,7 +617,7 @@ class TestResolveWorkerConcurrency:
 
     @patch.dict("os.environ", {"SAGA_WORKER_CONCURRENCY": "0"}, clear=True)
     def test_non_positive_env_var_falls_through(self, tmp_path, monkeypatch):
-        from dlt_saga.cli import (
+        from dlt_saga.utility.cli.run_modes import (
             _DEFAULT_WORKER_CONCURRENCY,
             _resolve_worker_concurrency,
         )
@@ -637,7 +637,7 @@ class TestExecuteWorkerParallel:
         """Concurrency is capped even when there are more configs than workers."""
         import threading
 
-        from dlt_saga.cli import _execute_worker_parallel
+        from dlt_saga.utility.cli.run_modes import _execute_worker_parallel
 
         configs = [_make_config(f"t{i}") for i in range(8)]
         active_lock = threading.Lock()
@@ -670,7 +670,7 @@ class TestExecuteWorkerParallel:
 
     def test_caps_at_len_configs_when_max_workers_larger(self):
         """max_workers larger than len(configs) means len(configs) threads, no idle ones."""
-        from dlt_saga.cli import _execute_worker_parallel
+        from dlt_saga.utility.cli.run_modes import _execute_worker_parallel
 
         configs = [_make_config("a"), _make_config("b")]
         ran = []
@@ -686,7 +686,7 @@ class TestExecuteWorkerParallel:
         assert sorted(ran) == ["a", "b"]
 
     def test_empty_configs_short_circuits(self):
-        from dlt_saga.cli import _execute_worker_parallel
+        from dlt_saga.utility.cli.run_modes import _execute_worker_parallel
 
         called = []
 
@@ -706,7 +706,7 @@ class TestExecuteWorkerParallel:
 
     def test_failure_records_real_error_message(self):
         """A failing run_fn surfaces its real message per-pipeline (issue #156)."""
-        from dlt_saga.cli import _execute_worker_parallel
+        from dlt_saga.utility.cli.run_modes import _execute_worker_parallel
 
         configs = [_make_config("ok"), _make_config("bad")]
 
@@ -727,12 +727,15 @@ class TestExecuteWorkerParallel:
 @pytest.mark.unit
 class TestFormatRunError:
     def test_includes_exception_type(self):
-        from dlt_saga.cli import _format_run_error
+        from dlt_saga.utility.cli.run_modes import _format_run_error
 
         assert _format_run_error(ValueError("boom")) == "ValueError: boom"
 
     def test_truncates_pathological_messages(self):
-        from dlt_saga.cli import _MAX_ERROR_MESSAGE_LEN, _format_run_error
+        from dlt_saga.utility.cli.run_modes import (
+            _MAX_ERROR_MESSAGE_LEN,
+            _format_run_error,
+        )
 
         msg = _format_run_error(ValueError("x" * 5000))
         assert len(msg) <= _MAX_ERROR_MESSAGE_LEN
