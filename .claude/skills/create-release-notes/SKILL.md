@@ -30,6 +30,11 @@ For each `vX.Y.Z`:
 - Avoid severity framing ("trap", "collision", "silently") unless it's demonstrably true from the diff.
 - **Resolve factual questions from the repo, don't ask the user or hedge.** "Is this command/feature new, or pre-existing?" is answerable: `git log --oneline --diff-filter=A -- '*name*'` for when a file first appeared, and the PR body (`gh pr view <n> --json title,body`) usually states it outright. Check before writing "new"; never leave it as an open question in the draft or ask the user.
 
+**New contributors:** find anyone whose *first-ever* contribution landed in this release, to credit them (see the New Contributors section below).
+- Authors in this release: `git log --format='%an' vPREV..vX.Y.Z | sort -u`.
+- A contributor is "new" only if they have **no** commits before `vPREV`: `git log --format='%an' vPREV | grep -Fx "<name>"` returning nothing means new. The primary maintainer is never a new contributor.
+- Get the GitHub handle and first PR number from the PR: `gh pr view <n> --json author -q '.author.login'` (the `#<n>` is in the commit subject). If a new contributor had several PRs this release, credit the lowest-numbered one.
+
 ## 3. Strip internal context (hard rule)
 
 These notes are public. Never include:
@@ -60,6 +65,10 @@ Template:
 
 - One line for the one or two fixes a user would care about; fold the rest into a clause or leave them to the changelog. Omit if nothing stands out.
 
+### New Contributors
+
+- @handle made their first contribution in #<pr>
+
 ### Full changelog
 
 #### Breaking changes
@@ -85,6 +94,7 @@ Rules:
 - **Upgrade notes are the exception — never cut them for brevity.** Breaking changes, new config keys, and behavioral changes get whatever length clarity requires.
 - Omit any section (bold label) that has no content. Section labels are a guide, not fixed — use **New** / **Upgrade notes** / **Also fixed** or similar; skip **New** when there are no features.
 - For a trivial patch (dependency bump, docs), the lead paragraph + **Full changelog** is enough — don't manufacture substance.
+- **New Contributors** — include the `### New Contributors` section **only when** someone made their first-ever contribution in this release (see the detection steps in section 2); omit it entirely otherwise. One line per new contributor, GitHub's phrasing: `- @handle made their first contribution in #<pr>`. Credit is the only thing worth adopting from per-PR-annotated changelogs at this project's size — do not add per-PR narration or contributor names to the routine changelog lines.
 - Keep inline-code formatting for flags, config keys, identifiers, and file names (`` `--select` ``, `` `write_disposition` ``, `` `native_load` ``).
 
 ## 5. Voice
