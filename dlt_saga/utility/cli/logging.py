@@ -173,6 +173,35 @@ def _create_file_handler(log_dir: Path) -> Optional[logging.FileHandler]:
         return None
 
 
+def ensure_utf8_streams() -> None:
+    """Force the CLI's stdout/stderr to UTF-8 so Unicode output can't crash it.
+
+    Commands emit non-ASCII text (``saga doctor``'s ✓/✗/→ status glyphs, dlt's
+    own progress output). An *interactive* Windows console is already UTF-8
+    (Python 3.6+, PEP 528), so it prints fine. The trap is **redirected** output
+    — ``saga doctor > out.txt``, a pipe, or a log-capturing orchestrator — where
+    Python falls back to ``locale.getpreferredencoding()`` = the ANSI code page
+    (e.g. ``cp1252`` on Western-European Windows). That code page has no ``✓``,
+    so a bare ``typer.echo("✓")`` raises ``UnicodeEncodeError`` and aborts the
+    command. Reconfiguring to UTF-8 matches what the interactive console already
+    does; ``errors="replace"`` is a safety net for any target that genuinely
+    can't take UTF-8.
+
+    CLI-entry-point only (call from ``main_saga``); never from library code — it
+    mutates process-wide streams. Best-effort: a stream without ``reconfigure``
+    (some capture shims) is skipped, and a detached/mid-operation stream is left
+    as-is rather than failing startup.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def configure_cli_logging() -> None:
     """Configure handlers, formatters, and filters for CLI use.
 
