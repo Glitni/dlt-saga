@@ -383,7 +383,7 @@ class TestDoctorCheckDestination:
     maintenance preview)."""
 
     def _run(self, dest, selected_configs=None):
-        from dlt_saga import cli
+        from dlt_saga.utility.cli import doctor
 
         emit = MagicMock()
         with patch(
@@ -392,7 +392,7 @@ class TestDoctorCheckDestination:
         ):
             # profile_target=None → execute_with_impersonation runs the probe
             # directly, with no impersonation setup.
-            ok = cli._doctor_check_destination(
+            ok = doctor._doctor_check_destination(
                 "bigquery",
                 MagicMock(),
                 {"g": []} if selected_configs is None else selected_configs,

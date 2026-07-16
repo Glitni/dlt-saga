@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from dlt_saga import cli
+from dlt_saga.utility.cli import doctor
 
 
 def _cfg(pipeline_name, schema_name, table_name):
@@ -43,11 +44,11 @@ class TestDoctorCheckConfigs:
 
         with (
             patch.object(
-                cli, "discover_and_select_configs", return_value=({"g": configs}, {})
+                doctor, "discover_and_select_configs", return_value=({"g": configs}, {})
             ),
-            patch.object(cli, "flatten_configs", return_value=configs),
+            patch.object(doctor, "flatten_configs", return_value=configs),
         ):
-            cli._doctor_check_configs(None, context, verbose=False, emit=emit)
+            doctor._doctor_check_configs(None, context, verbose=False, emit=emit)
 
         symbol, label, detail = emit.calls[0]
         assert symbol == "✓"
@@ -63,11 +64,11 @@ class TestDoctorCheckConfigs:
 
         with (
             patch.object(
-                cli, "discover_and_select_configs", return_value=({"g": configs}, {})
+                doctor, "discover_and_select_configs", return_value=({"g": configs}, {})
             ),
-            patch.object(cli, "flatten_configs", return_value=configs),
+            patch.object(doctor, "flatten_configs", return_value=configs),
         ):
-            cli._doctor_check_configs(
+            doctor._doctor_check_configs(
                 ["database__a"], context, verbose=False, emit=emit
             )
 
@@ -83,11 +84,11 @@ class TestDoctorCheckConfigs:
 
         with (
             patch.object(
-                cli, "discover_and_select_configs", return_value=({"g": configs}, {})
+                doctor, "discover_and_select_configs", return_value=({"g": configs}, {})
             ),
-            patch.object(cli, "flatten_configs", return_value=configs),
+            patch.object(doctor, "flatten_configs", return_value=configs),
         ):
-            cli._doctor_check_configs(["fs__x"], context, verbose=False, emit=emit)
+            doctor._doctor_check_configs(["fs__x"], context, verbose=False, emit=emit)
 
         out = capsys.readouterr().out
         assert "fs__x → dlt_dev.fs__x" in out
@@ -100,11 +101,11 @@ class TestDoctorCheckConfigs:
 
         with (
             patch.object(
-                cli, "discover_and_select_configs", return_value=({"g": configs}, {})
+                doctor, "discover_and_select_configs", return_value=({"g": configs}, {})
             ),
-            patch.object(cli, "flatten_configs", return_value=configs),
+            patch.object(doctor, "flatten_configs", return_value=configs),
         ):
-            cli._doctor_check_configs(["g"], context, verbose=False, emit=emit)
+            doctor._doctor_check_configs(["g"], context, verbose=False, emit=emit)
 
         out = capsys.readouterr().out
         # 20 listed, 5 hidden — no silent truncation.
@@ -117,11 +118,11 @@ class TestDoctorCheckConfigs:
 
         with (
             patch.object(
-                cli, "discover_and_select_configs", return_value=({"g": configs}, {})
+                doctor, "discover_and_select_configs", return_value=({"g": configs}, {})
             ),
-            patch.object(cli, "flatten_configs", return_value=configs),
+            patch.object(doctor, "flatten_configs", return_value=configs),
         ):
-            cli._doctor_check_configs(None, context, verbose=True, emit=emit)
+            doctor._doctor_check_configs(None, context, verbose=True, emit=emit)
 
         out = capsys.readouterr().out
         assert "and " not in out or "more" not in out
@@ -176,9 +177,9 @@ class TestDoctorCheckCollisions:
         selected = {"g": [_collision_cfg("g__a"), _collision_cfg("g__b")]}
         emit = _CaptureEmit()
         with patch.object(
-            cli, "get_config_source", return_value=_fake_source_for(selected)
+            doctor, "get_config_source", return_value=_fake_source_for(selected)
         ):
-            ok = cli._doctor_check_collisions(selected, verbose=False, emit=emit)
+            ok = doctor._doctor_check_collisions(selected, verbose=False, emit=emit)
         assert ok is True
         symbol, label, _ = emit.calls[0]
         assert symbol == "✓"
@@ -193,9 +194,9 @@ class TestDoctorCheckCollisions:
         }
         emit = _CaptureEmit()
         with patch.object(
-            cli, "get_config_source", return_value=_fake_source_for(selected)
+            doctor, "get_config_source", return_value=_fake_source_for(selected)
         ):
-            ok = cli._doctor_check_collisions(selected, verbose=False, emit=emit)
+            ok = doctor._doctor_check_collisions(selected, verbose=False, emit=emit)
         assert ok is False
         symbol, label, _ = emit.calls[0]
         assert symbol == "✗"
@@ -207,7 +208,7 @@ class TestDoctorCheckCollisions:
 
     def test_empty_selection_passes(self):
         emit = _CaptureEmit()
-        assert cli._doctor_check_collisions({}, verbose=False, emit=emit) is True
+        assert doctor._doctor_check_collisions({}, verbose=False, emit=emit) is True
 
 
 @pytest.mark.unit
@@ -218,9 +219,9 @@ class TestDoctorCheckLegacyKeys:
         emit = _CaptureEmit()
         flat = [c for configs in selected.values() for c in configs]
         with (
-            patch.object(cli, "flatten_configs", return_value=flat),
+            patch.object(doctor, "flatten_configs", return_value=flat),
             patch.object(
-                cli,
+                doctor,
                 "get_config_source",
                 return_value=SimpleNamespace(project_config_path=project_path),
             ),
@@ -230,7 +231,7 @@ class TestDoctorCheckLegacyKeys:
                 side_effect=RuntimeError,
             ),
         ):
-            ok = cli._doctor_check_legacy_keys(selected, verbose=False, emit=emit)
+            ok = doctor._doctor_check_legacy_keys(selected, verbose=False, emit=emit)
         return ok, emit
 
     def test_clean_project_emits_ok(self, tmp_path):
@@ -264,7 +265,7 @@ class TestDoctorCheckLegacyKeys:
 class TestDoctorEmitVersion:
     def test_marks_editable_vs_installed(self):
         emit = _CaptureEmit()
-        cli._doctor_emit_version(emit)
+        doctor._doctor_emit_version(emit)
         symbol, label, detail = emit.calls[0]
         assert symbol == "✓"
         assert label.startswith("dlt-saga ")
