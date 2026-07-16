@@ -1,6 +1,7 @@
 """Tests for the Session programmatic API."""
 
 import logging
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1130,4 +1131,161 @@ class TestSessionMaintenance:
         with patch("dlt_saga.session.execution_context_scope"):
             result = session.maintenance(select=None, dry_run=False)
         assert result == sentinel
+        session._execute_with_auth.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Session.validate tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSessionValidate:
+    """Session.validate runs the offline config checks (no warehouse, no auth)
+    and returns one ValidationResult per selected config."""
+
+    def _session(self):
+        session = Session.__new__(Session)
+        session._profile_target = None
+        session._auth_provider = MagicMock()
+        return session
+
+    def test_returns_one_result_per_config(self):
+        from dlt_saga.validate import ValidationResult
+
+        session = self._session()
+        session._discover_and_select = MagicMock(
+            return_value=({"g": [MagicMock(), MagicMock()]}, {})
+        )
+        with (
+            patch(
+                "dlt_saga.validate.validate_pipeline_config",
+                side_effect=lambda c: ValidationResult(pipeline_name="p"),
+            ) as validate,
+            patch("dlt_saga.session.execution_context_scope"),
+        ):
+            results = session.validate(select=["tag:x"])
+        assert len(results) == 2
+        assert validate.call_count == 2
+
+    def test_empty_selection_returns_empty_list(self):
+        session = self._session()
+        session._discover_and_select = MagicMock(return_value=({}, {}))
+        with patch("dlt_saga.session.execution_context_scope"):
+            assert session.validate() == []
+
+    def test_does_not_require_auth(self):
+        # validate is offline — it must never go through the auth wrapper.
+        session = self._session()
+        session._discover_and_select = MagicMock(return_value=({}, {}))
+        session._execute_with_auth = MagicMock()
+        with patch("dlt_saga.session.execution_context_scope"):
+            session.validate()
+        session._execute_with_auth.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Session.report tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSessionReport:
+    """Session.report collects run history and writes/uploads an HTML report,
+    returning the resolved location — under the session's auth."""
+
+    def _session(self):
+        session = Session.__new__(Session)
+        session._profile_target = None
+        session._auth_provider = MagicMock()
+        return session
+
+    def _config(self):
+        cfg = MagicMock()
+        cfg.config_dict = {}
+        cfg.schema_name = "dlt_dev"
+        return cfg
+
+    def _enter_report_patches(
+        self, stack, dest, *, remote, generate_return=None, upload_return=None
+    ):
+        """Enter all of _run_report's collaborators (source modules, since it
+        imports them locally) and return the mocks keyed by role."""
+        p = lambda *a, **k: stack.enter_context(patch(*a, **k))  # noqa: E731
+        return {
+            "create": p(
+                "dlt_saga.destinations.factory.DestinationFactory.create_from_context",
+                return_value=dest,
+            ),
+            "collect": p(
+                "dlt_saga.report.collector.collect_report_data", return_value={}
+            ),
+            "generate": p(
+                "dlt_saga.report.generator.generate_report",
+                return_value=generate_return,
+            ),
+            "is_remote": p(
+                "dlt_saga.report.uploader.is_remote_uri", return_value=remote
+            ),
+            "upload": p(
+                "dlt_saga.report.uploader.upload_report", return_value=upload_return
+            ),
+            "ctx": p(
+                "dlt_saga.utility.cli.context.get_execution_context",
+                return_value=MagicMock(),
+            ),
+            "plan_schema": p(
+                "dlt_saga.utility.naming.get_execution_plan_schema",
+                return_value="dlt_orch",
+            ),
+        }
+
+    def test_local_returns_generated_path_and_closes_connection(self):
+        session = self._session()
+        session._discover_and_select = MagicMock(
+            return_value=({"g": [self._config()]}, {})
+        )
+        dest = MagicMock()
+        with ExitStack() as stack:
+            mocks = self._enter_report_patches(
+                stack, dest, remote=False, generate_return="/abs/report.html"
+            )
+            result = session._run_report(None, "report.html", 14)
+        assert result == "/abs/report.html"
+        mocks["generate"].assert_called_once()
+        dest.connect.assert_called_once()
+        dest.close.assert_called_once()  # released even though generation is mocked
+
+    def test_remote_uploads_and_returns_uri(self):
+        session = self._session()
+        session._discover_and_select = MagicMock(
+            return_value=({"g": [self._config()]}, {})
+        )
+        with ExitStack() as stack:
+            mocks = self._enter_report_patches(
+                stack, MagicMock(), remote=True, upload_return="gs://b/r.html"
+            )
+            result = session._run_report(None, "gs://b/r.html", 7)
+        assert result == "gs://b/r.html"
+        mocks["upload"].assert_called_once()
+
+    def test_empty_selection_raises(self):
+        session = self._session()
+        session._discover_and_select = MagicMock(return_value=({}, {}))
+        with pytest.raises(ValueError, match="No pipeline configs"):
+            session._run_report(None, "report.html", 14)
+
+    def test_rejects_days_below_one_before_auth(self):
+        session = self._session()
+        session._execute_with_auth = MagicMock()
+        with pytest.raises(ValueError, match="days must be >= 1"):
+            session.report(days=0)
+        session._execute_with_auth.assert_not_called()
+
+    def test_runs_under_auth(self):
+        session = self._session()
+        session._execute_with_auth = MagicMock(return_value="/abs/r.html")
+        with patch("dlt_saga.session.execution_context_scope"):
+            result = session.report(output="r.html", days=5)
+        assert result == "/abs/r.html"
         session._execute_with_auth.assert_called_once()
