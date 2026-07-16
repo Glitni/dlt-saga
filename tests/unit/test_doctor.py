@@ -211,6 +211,56 @@ class TestDoctorCheckCollisions:
 
 
 @pytest.mark.unit
+class TestDoctorCheckLegacyKeys:
+    """Advisory scan of raw YAML for deprecated alias keys — never fatal."""
+
+    def _run(self, selected, project_path):
+        emit = _CaptureEmit()
+        flat = [c for configs in selected.values() for c in configs]
+        with (
+            patch.object(cli, "flatten_configs", return_value=flat),
+            patch.object(
+                cli,
+                "get_config_source",
+                return_value=SimpleNamespace(project_config_path=project_path),
+            ),
+            # profiles are covered elsewhere; skip them here.
+            patch(
+                "dlt_saga.utility.cli.profiles.get_profiles_config",
+                side_effect=RuntimeError,
+            ),
+        ):
+            ok = cli._doctor_check_legacy_keys(selected, verbose=False, emit=emit)
+        return ok, emit
+
+    def test_clean_project_emits_ok(self, tmp_path):
+        cfg = tmp_path / "a.yml"
+        cfg.write_text("write_disposition: append\nschema_name: analytics\n")
+        selected = {"g": [SimpleNamespace(config_dict={"config_path": str(cfg)})]}
+        ok, emit = self._run(selected, str(tmp_path / "missing_project.yml"))
+        assert ok is True
+        symbol, label, detail = emit.calls[0]
+        assert symbol == "✓"
+        assert label == "Config keys"
+
+    def test_flags_legacy_keys_but_stays_non_fatal(self, tmp_path, capsys):
+        cfg = tmp_path / "a.yml"
+        cfg.write_text("historize:\n  output_table: orders\n")
+        proj = tmp_path / "saga_project.yml"
+        proj.write_text("pipelines:\n  dataset_access:\n    - OWNER:x\n")
+        selected = {"g": [SimpleNamespace(config_dict={"config_path": str(cfg)})]}
+        ok, emit = self._run(selected, str(proj))
+        # Advisory only — deprecated-but-working keys don't fail doctor.
+        assert ok is True
+        symbol, label, _ = emit.calls[0]
+        assert symbol == "!"
+        assert label == "Config keys"
+        out = capsys.readouterr().out
+        assert "output_table → table_name" in out
+        assert "dataset_access → schema_access" in out
+
+
+@pytest.mark.unit
 class TestDoctorEmitVersion:
     def test_marks_editable_vs_installed(self):
         emit = _CaptureEmit()
