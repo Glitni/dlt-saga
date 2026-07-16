@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import dlt_saga.cli as cli
+import dlt_saga.utility.cli.run_modes as cli
 
 _EXECUTORS = (
     "_execute_worker_ingest",
