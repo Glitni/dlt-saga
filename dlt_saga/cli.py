@@ -315,25 +315,23 @@ def validate_configs(
         saga validate --select "tag:daily"                  # Validate by tag
     """
     setup_logging(verbose)
-    # Set the execution context so discovery resolves schema names within the
-    # profile (notably the dev schema), matching the other commands.
+    from dlt_saga.session import Session
+
+    # Session.validate resolves schema names within the profile context (like
+    # the other commands) and runs the offline config checks — no warehouse
+    # connection. The CLI owns only the presentation and the exit code.
     profile_target = load_profile_config(profile, target)
-    if profile_target is not None:
-        setup_execution_context(profile_target)
+    results = Session(
+        profile=profile, target=target, _profile_target=profile_target
+    ).validate(select=list(select) if select else None)
 
-    selected_configs, _ = discover_and_select_configs(select)
-    all_configs = flatten_configs(selected_configs)
-
-    if not all_configs:
+    if not results:
         logger.error("No pipeline configs found matching selectors")
         raise typer.Exit(1)
 
-    from dlt_saga.validate import validate_pipeline_config
-
     has_errors = False
     valid_count = 0
-    for config in all_configs:
-        result = validate_pipeline_config(config)
+    for result in results:
         if result.is_valid and not result.warnings:
             valid_count += 1
             continue
@@ -350,7 +348,7 @@ def validate_configs(
         for warning in result.warnings:
             logger.warning("  - %s", warning)
 
-    total = len(all_configs)
+    total = len(results)
     invalid = total - valid_count
     if has_errors:
         logger.info(
@@ -1064,93 +1062,36 @@ def report(
         saga report --output gs://my-bucket/reports/saga.html    # Upload to GCS
         saga report --output gs://my-bucket/reports/saga.html --target prod
     """
-    import os
-    import tempfile
-
-    from dlt_saga.report.uploader import is_remote_uri, upload_report
+    from dlt_saga.report.uploader import is_remote_uri
+    from dlt_saga.session import Session
 
     setup_logging(verbose)
 
+    # Session.report owns discovery, the destination connection, collection,
+    # generation, and (for a remote URI) upload — returning the resolved
+    # location. The CLI adds only the two presentation concerns: echo the URI
+    # for a remote target, open the browser for a local one.
     profile_target = load_profile_config(profile, target)
-    setup_execution_context(profile_target)
-
-    # Discover all configs (no resource-type filter — report shows everything)
-    selected_configs, _ = discover_and_select_configs(select)
-
-    if not selected_configs:
-        logger.error("No pipeline configs found matching selectors")
+    session = Session(profile=profile, target=target, _profile_target=profile_target)
+    try:
+        location = session.report(
+            select=list(select) if select else None,
+            output=output,
+            days=days,
+        )
+    except ValueError as e:
+        logger.error(str(e))
         raise typer.Exit(1)
 
-    context = get_execution_context()
-    environment = context.get_environment() or get_environment()
-    project = context.get_database() or ""
-    destination_type = context.get_destination_type()
+    if is_remote_uri(output):
+        typer.echo(location)
+    elif open_browser:
+        import webbrowser
 
-    # Create a destination instance for querying run data.
-    # Use schema from the first pipeline config (collector queries all schemas).
-    first_config = next(iter(next(iter(selected_configs.values()))))
-    dest_config_dict = {
-        **first_config.config_dict,
-        "schema_name": first_config.schema_name,
-    }
-    from dlt_saga.destinations.factory import DestinationFactory
-
-    destination = DestinationFactory.create_from_context(
-        destination_type, context, dest_config_dict
-    )
-
-    remote = is_remote_uri(output)
-    uri = None
-
-    def _generate():
-        nonlocal uri
-        from dlt_saga.report.collector import collect_report_data
-        from dlt_saga.report.generator import generate_report
-        from dlt_saga.utility.naming import get_execution_plan_schema
-
-        destination.connect()
-        try:
-            logger.info(
-                "Collecting report data (%d days of history, %d pipeline(s))",
-                days,
-                sum(len(v) for v in selected_configs.values()),
-            )
-            report_data = collect_report_data(
-                configs=selected_configs,
-                destination=destination,
-                schema=first_config.schema_name,
-                days=days,
-                environment=environment,
-                project=project,
-                orchestration_schema=get_execution_plan_schema(),
-            )
-
-            if remote:
-                with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
-                    tmp_path = tmp.name
-                try:
-                    generate_report(report_data, tmp_path)
-                    uri = upload_report(tmp_path, output)
-                finally:
-                    os.unlink(tmp_path)
-            else:
-                abs_path = generate_report(report_data, output)
-                logger.info("Report generated: %s", abs_path)
-                if open_browser:
-                    import webbrowser
-
-                    # Path.as_uri() builds a valid file:// URI on every OS — an
-                    # f-string produces a malformed one on Windows (backslashes,
-                    # drive letter: "file://C:\reports\r.html").
-                    webbrowser.open(Path(abs_path).as_uri())
-        finally:
-            # Always release the destination connection, even if collection or
-            # generation raises — otherwise the connection leaks on failure.
-            destination.close()
-
-    execute_with_impersonation(profile_target, _generate)
-    if remote:
-        typer.echo(uri)
+        # Path.as_uri() builds a valid file:// URI on every OS — an f-string
+        # produces a malformed one on Windows (backslashes, drive letter:
+        # "file://C:\reports\r.html").
+        webbrowser.open(Path(location).as_uri())
 
 
 # ---------------------------------------------------------------------------

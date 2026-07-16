@@ -18,7 +18,7 @@ Example::
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar
 
 from dlt_saga.pipeline_config import ConfigSource, PipelineConfig
 from dlt_saga.pipeline_config.file_config import FilePipelineConfig
@@ -31,6 +31,9 @@ from dlt_saga.utility.cli.profiles import ProfileTarget, get_profiles_config
 from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.cli.selectors import PipelineSelector
 from dlt_saga.utility.collisions import check_target_collisions
+
+if TYPE_CHECKING:
+    from dlt_saga.validate import ValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -520,6 +523,129 @@ class Session:
             }
 
         return run_maintenance(get_execution_context(), selected, dry_run)
+
+    def validate(
+        self,
+        select: Optional[List[str]] = None,
+    ) -> List["ValidationResult"]:
+        """Validate selected pipeline configs without executing anything.
+
+        Checks write_disposition, adapter resolution, source config
+        instantiation, and historize config for each selected pipeline.
+        Read-only and offline — no warehouse connection or credentials are
+        required. The programmatic counterpart of ``saga validate``.
+
+        Args:
+            select: Selector expressions. None = all.
+
+        Returns:
+            One :class:`~dlt_saga.validate.ValidationResult` per selected
+            config, each carrying ``errors`` / ``warnings`` and an ``is_valid``
+            property. Empty list when no config matches the selectors.
+        """
+        from dlt_saga.validate import validate_pipeline_config
+
+        # Resolve within the profile context so schema-name resolution matches a
+        # real run (mirrors discover()); no auth — validation never connects.
+        with execution_context_scope(self._profile_target):
+            configs, _ = self._discover_and_select(select)
+            return [validate_pipeline_config(c) for c in flatten_configs(configs)]
+
+    def report(
+        self,
+        select: Optional[List[str]] = None,
+        output: str = "saga_report.html",
+        days: int = 14,
+    ) -> str:
+        """Generate a standalone HTML observability report.
+
+        Collects run history from the destination and writes a single
+        self-contained HTML file (dashboard, pipeline catalog, run history).
+        ``output`` may be a local path or a remote storage URI (``gs://``,
+        ``s3://``, ``az://``); a remote URI uploads the report. The
+        programmatic counterpart of ``saga report`` — minus the browser-open,
+        which is a CLI concern.
+
+        Args:
+            select: Selector expressions. None = all.
+            output: Local file path or remote storage URI.
+            days: Days of run history to include (must be >= 1).
+
+        Returns:
+            The resolved report location: the absolute local path, or the
+            remote URI when ``output`` is a storage URI.
+
+        Raises:
+            ValueError: If ``days`` < 1, or no config matches the selectors.
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1 (got {days})")
+        with execution_context_scope(self._profile_target):
+            return self._execute_with_auth(
+                lambda: self._run_report(select, output, days)
+            )
+
+    def _run_report(self, select: Optional[List[str]], output: str, days: int) -> str:
+        import os
+        import tempfile
+
+        from dlt_saga.destinations.factory import DestinationFactory
+        from dlt_saga.report.collector import collect_report_data
+        from dlt_saga.report.generator import generate_report
+        from dlt_saga.report.uploader import is_remote_uri, upload_report
+        from dlt_saga.utility.cli.context import get_execution_context
+        from dlt_saga.utility.naming import get_environment, get_execution_plan_schema
+
+        selected_configs, _ = self._discover_and_select(select)
+        if not selected_configs:
+            raise ValueError("No pipeline configs found matching selectors")
+
+        context = get_execution_context()
+        environment = context.get_environment() or get_environment()
+        project = context.get_database() or ""
+        destination_type = context.get_destination_type()
+
+        # The collector queries every schema; the first config only seeds the
+        # connection (its schema is passed as the query anchor).
+        first_config = next(iter(next(iter(selected_configs.values()))))
+        dest_config_dict = {
+            **first_config.config_dict,
+            "schema_name": first_config.schema_name,
+        }
+        destination = DestinationFactory.create_from_context(
+            destination_type, context, dest_config_dict
+        )
+
+        destination.connect()
+        try:
+            logger.info(
+                "Collecting report data (%d days of history, %d pipeline(s))",
+                days,
+                sum(len(v) for v in selected_configs.values()),
+            )
+            report_data = collect_report_data(
+                configs=selected_configs,
+                destination=destination,
+                schema=first_config.schema_name,
+                days=days,
+                environment=environment,
+                project=project,
+                orchestration_schema=get_execution_plan_schema(),
+            )
+            if is_remote_uri(output):
+                with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
+                    tmp_path = tmp.name
+                try:
+                    generate_report(report_data, tmp_path)
+                    return upload_report(tmp_path, output)
+                finally:
+                    os.unlink(tmp_path)
+            abs_path = generate_report(report_data, output)
+            logger.info("Report generated: %s", abs_path)
+            return abs_path
+        finally:
+            # Always release the connection, even if collection/generation raises.
+            destination.close()
 
     # -------------------------------------------------------------------
     # Internal: initialization helpers
