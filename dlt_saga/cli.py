@@ -29,7 +29,11 @@ from dlt_saga.utility.cli.common import (
     validate_credentials,
 )
 from dlt_saga.utility.cli.context import get_execution_context
-from dlt_saga.utility.cli.logging import configure_cli_logging, reenable_saga_loggers
+from dlt_saga.utility.cli.logging import (
+    configure_cli_logging,
+    ensure_utf8_streams,
+    reenable_saga_loggers,
+)
 from dlt_saga.utility.cli.prompts import (
     _confirm_destroy,
     _confirm_full_refresh,
@@ -2017,6 +2021,9 @@ def ai_setup():
 
 def main_saga():
     """Entry point for the saga CLI."""
+    # Force UTF-8 on stdout/stderr before any command runs, so redirected output
+    # on a non-UTF-8 code page (e.g. Windows cp1252) can't crash on ✓/→ glyphs.
+    ensure_utf8_streams()
     try:
         app()
     except KeyboardInterrupt:
