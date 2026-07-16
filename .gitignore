@@ -57,5 +57,8 @@ logs/
 # Claude
 .claude/settings.local.json
 
+# Release-note drafts (create-release-notes skill output; published to GitHub via gh, not committed)
+release-notes/
+
 # Windows bug
 nul
