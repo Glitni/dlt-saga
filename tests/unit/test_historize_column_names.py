@@ -257,6 +257,6 @@ class TestColumnNamesInFingerprint:
         assert self._fp() != self._fp(partition_column="snapshot_dt")
 
     def test_stable_for_unrelated_change(self):
-        # output_table is not part of the fingerprint — renaming it must not
+        # table_name is not part of the fingerprint — renaming it must not
         # trigger a full refresh.
-        assert self._fp() == self._fp(output_table="custom_name")
+        assert self._fp() == self._fp(table_name="custom_name")

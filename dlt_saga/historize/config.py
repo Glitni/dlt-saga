@@ -72,27 +72,37 @@ class HistorizeConfig:
         },
     )
 
-    output_table_suffix: str = field(
+    table_suffix: str = field(
         default="_historized",
         metadata={
             "description": (
                 "Suffix appended to the source table name to derive the historized table name. "
-                "Defaults to '_historized'."
+                "Defaults to '_historized'. (Legacy alias: output_table_suffix.)"
             )
         },
     )
 
-    output_schema: Optional[str] = field(
+    schema_name: Optional[str] = field(
         default=None,
         metadata={
-            "description": "Schema to write the historized table to. Defaults to the same schema as the source."
+            "description": (
+                "Schema to write the historized table to. Used directly in prod; "
+                "in dev it is composed with the developer sandbox "
+                "(<sandbox>_<schema_name>) so a shared config stays isolated per "
+                "developer. Defaults to the same schema as the source. "
+                "(Legacy alias: output_schema.)"
+            )
         },
     )
 
-    output_table: Optional[str] = field(
+    table_name: Optional[str] = field(
         default=None,
         metadata={
-            "description": "Explicit name for the historized output table. Overrides output_table_suffix when set."
+            "description": (
+                "Explicit name for the historized output table. Overrides "
+                "table_suffix when set; group-prefixed in dev like the ingest "
+                "table. (Legacy alias: output_table.)"
+            )
         },
     )
 
@@ -190,7 +200,7 @@ class HistorizeConfig:
             "Same schema as the top-level filters: block but applied only to "
             "the source read in the historize SQL — independent of any ingest "
             "filter. Useful for partitioning one source table into multiple "
-            "tenant-scoped histories (combine with historize.output_table). "
+            "tenant-scoped histories (combine with historize.table_name). "
             "Operators: eq (default), ne, in, not_in, is_null, is_not_null, "
             "matches. Path-based filters drill into JSON columns and compare "
             "as strings."

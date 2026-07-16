@@ -220,9 +220,13 @@ def _resolve_ingest_target(
         return None
 
     schema_override = config.config_dict.get("schema_name")
+    table_override = config.config_dict.get("table_name")
     try:
         schema, table = resolve(
-            config_path, schema_override=schema_override, environment=environment
+            config_path,
+            schema_override=schema_override,
+            table_override=table_override,
+            environment=environment,
         )
     except Exception as exc:  # best-effort — don't block the guard on a bad config
         logger.debug(

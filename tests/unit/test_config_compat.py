@@ -72,6 +72,28 @@ class TestNormalizeConfigAliases:
             "pipelines": {"other_key": "value"},
         }
 
+    def test_renames_historize_placement_keys(self):
+        # The historize placement vocabulary was unified with the ingest layer's
+        # schema_name / table_name; the output_ prefix is dropped.
+        data = {
+            "historize": {
+                "output_schema": "archive",
+                "output_table": "orders",
+                "output_table_suffix": "_scd2",
+            },
+        }
+        normalize_config_aliases(data)
+        assert data["historize"] == {
+            "schema_name": "archive",
+            "table_name": "orders",
+            "table_suffix": "_scd2",
+        }
+
+    def test_renames_plus_prefixed_historize_keys(self):
+        data = {"historize": {"+output_schema": "archive"}}
+        normalize_config_aliases(data)
+        assert data["historize"] == {"+schema_name": "archive"}
+
     def test_handles_lists_of_dicts(self):
         data = {
             "items": [

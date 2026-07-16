@@ -11,10 +11,18 @@ Current aliases
 - ``dataset_access`` → ``schema_access`` (and ``+dataset_access`` →
   ``+schema_access``). The legacy name leaked from BigQuery's REST API
   vocabulary; the framework standardised on ``schema`` for the
-  destination-agnostic concept. The alias is read-time only — projects
-  may keep ``dataset_access`` in their YAML indefinitely, and the
-  rename is silent (no deprecation warning) so upgrades don't add log
-  noise to existing setups.
+  destination-agnostic concept.
+- ``historize.output_schema`` → ``historize.schema_name``,
+  ``historize.output_table`` → ``historize.table_name``,
+  ``historize.output_table_suffix`` → ``historize.table_suffix``. The
+  historize placement keys were unified with the ingest layer's
+  ``schema_name`` / ``table_name`` vocabulary; the ``output_`` prefix is
+  dropped. (These keys only ever appear under ``historize:``, so the
+  recursive rewrite is unambiguous.)
+
+All aliases are read-time only — projects may keep the legacy names in their
+YAML indefinitely, and the rename is silent (no deprecation warning) so
+upgrades don't add log noise to existing setups.
 """
 
 import logging
@@ -31,6 +39,12 @@ logger = logging.getLogger(__name__)
 _ALIASES = (
     ("dataset_access", "schema_access"),
     ("+dataset_access", "+schema_access"),
+    ("output_schema", "schema_name"),
+    ("+output_schema", "+schema_name"),
+    ("output_table", "table_name"),
+    ("+output_table", "+table_name"),
+    ("output_table_suffix", "table_suffix"),
+    ("+output_table_suffix", "+table_suffix"),
 )
 
 

@@ -241,6 +241,7 @@ class FilePipelineConfig(ConfigSource):
         *,
         layer: str = "ingest",
         environment: Optional[str] = None,
+        custom_table_name: Optional[str] = None,
     ) -> str:
         """Resolve table name for a config file.
 
@@ -252,40 +253,62 @@ class FilePipelineConfig(ConfigSource):
         ``environment`` pins the resolution to a specific environment
         (``"prod"`` / ``"dev"``); when omitted it reads the active one via
         :func:`get_environment`.
+
+        ``custom_table_name`` is an explicit ``table_name:`` override, threaded
+        into the generator so it composes per environment (used directly in
+        prod, group-prefixed in dev). A custom naming module whose
+        ``generate_table_name`` predates this parameter keeps the legacy
+        behaviour — the override is used verbatim — until it adopts the new
+        signature.
         """
         segments = self.get_naming_segments(config_path)
         environment = environment or get_environment()
 
         module = load_naming_module(self.project_config)
         if module and hasattr(module, "generate_table_name"):
+            if custom_table_name and not hook_accepts_kwarg(
+                module.generate_table_name, "custom_table_name"
+            ):
+                return custom_table_name
             return call_hook(
-                module.generate_table_name, segments, environment, layer=layer
+                module.generate_table_name,
+                segments,
+                environment,
+                layer=layer,
+                custom_table_name=custom_table_name,
             )
-        return default_generate_table_name(segments, environment, layer=layer)
+        return default_generate_table_name(
+            segments, environment, layer=layer, custom_table_name=custom_table_name
+        )
 
     def resolve_ingest_target(
         self,
         config_path: str,
         *,
         schema_override: Optional[str] = None,
+        table_override: Optional[str] = None,
         environment: Optional[str] = None,
     ) -> Tuple[str, str]:
         """Resolve a config's full ingest ``(schema, table)`` target.
 
         Mirrors the resolution :meth:`_load_config_file` applies during
-        discovery: an explicit ``schema_name:`` override is threaded into the
-        schema generator (used directly in prod, composed with the dev sandbox
-        in dev), otherwise the schema is generated from the config path; the
-        table name is always generated. ``environment`` pins the resolution (the
-        collision guard passes ``"prod"`` for an environment-invariant verdict);
-        when omitted it reads the active environment.
+        discovery: explicit ``schema_name:`` / ``table_name:`` overrides are
+        threaded into the generators (used directly in prod, composed with the
+        dev sandbox / group prefix in dev), otherwise the names are generated
+        from the config path. ``environment`` pins the resolution (the collision
+        guard passes ``"prod"`` for an environment-invariant verdict); when
+        omitted it reads the active environment.
         """
         schema = self.resolve_schema_name(
             config_path,
             environment=environment,
             custom_schema_name=schema_override or None,
         )
-        table = self.resolve_table_name(config_path, environment=environment)
+        table = self.resolve_table_name(
+            config_path,
+            environment=environment,
+            custom_table_name=table_override or None,
+        )
         return (schema, table)
 
     # =========================================================================
@@ -472,11 +495,14 @@ class FilePipelineConfig(ConfigSource):
 
         # Resolve environment-aware names from config path (current env).
         schema_override = resolved_config.get("schema_name") or ""
+        table_override = resolved_config.get("table_name") or ""
         if self._resolve_schema_names:
             # Single source of truth shared with the collision guard, which
             # calls the same helper pinned to environment="prod".
             schema_name, table_name = self.resolve_ingest_target(
-                config_path, schema_override=schema_override
+                config_path,
+                schema_override=schema_override,
+                table_override=table_override,
             )
         else:
             # Schema resolution needs the active profile's dev schema; skip it
@@ -484,7 +510,9 @@ class FilePipelineConfig(ConfigSource):
             # so an offline `saga generate-schemas` doesn't require a configured
             # profile. The table name never needs a profile, so still resolve it.
             schema_name = schema_override
-            table_name = self.resolve_table_name(config_path)
+            table_name = self.resolve_table_name(
+                config_path, custom_table_name=table_override or None
+            )
 
         # Normalize tags to list and parse into ScheduleTag objects
         raw_tags = resolved_config.get("tags", [])

@@ -124,22 +124,24 @@ def resolve_historized_target(
 
     Resolution order:
     - historize_schema:
-        1. historize_config.output_schema (explicit per-pipeline override)
+        1. historize_config.schema_name (explicit per-pipeline override) —
+           assumed already env-composed (caller runs the override through the
+           schema generator before passing it in).
         2. if placement == schema_suffix: ``{source_schema}{schema_suffix}``
         3. source_schema (same schema as source)
     - historize_table:
-        1. historize_config.output_table (explicit per-pipeline override) —
+        1. historize_config.table_name (explicit per-pipeline override) —
            assumed already env-aware (caller is responsible for running the
            override through the project's table-name generator before
            passing it in).
         2. if placement == schema_suffix: source_table (no table-level suffix)
-        3. ``{source_table}{historize_config.output_table_suffix}``
+        3. ``{source_table}{historize_config.table_suffix}``
 
     Args:
         source_schema: Schema where the source ingested table lives.
         source_table: Table name of the source ingested table (env-prefixed in dev).
-        historize_config: HistorizeConfig for this pipeline (may carry output_schema /
-            output_table overrides).
+        historize_config: HistorizeConfig for this pipeline (may carry schema_name /
+            table_name overrides).
 
     Returns:
         Tuple of (historize_schema, historize_table).
@@ -149,22 +151,22 @@ def resolve_historized_target(
     proj = get_historize_project_config()
 
     # --- Schema resolution ---
-    if historize_config.output_schema:
-        historize_schema = historize_config.output_schema
+    if historize_config.schema_name:
+        historize_schema = historize_config.schema_name
     elif proj.placement == "schema_suffix":
         historize_schema = f"{source_schema}{proj.schema_suffix}"
     else:
         historize_schema = source_schema
 
     # --- Table resolution ---
-    if historize_config.output_table:
-        historize_table = historize_config.output_table
+    if historize_config.table_name:
+        historize_table = historize_config.table_name
     elif proj.placement == "schema_suffix":
         # No table-level suffix when using schema separation
         historize_table = source_table
     else:
         historize_table = get_historized_table_name(
-            source_table, historize_config.output_table_suffix
+            source_table, historize_config.table_suffix
         )
 
     return historize_schema, historize_table

@@ -127,6 +127,27 @@ class TestSchemaNameResolutionGate:
 
 
 @pytest.mark.unit
+class TestOverridesThreadThroughDiscovery:
+    """`schema_name` / `table_name` overrides in a config file reach the
+    resolved names on the discovered PipelineConfig (via _load_config_file).
+    Resolved in the current env (dev; SAGA_SCHEMA_NAME=dlt_dev fixture).
+    """
+
+    def test_overrides_resolved_in_dev(self, tmp_path):
+        configs = tmp_path / "configs" / "google_sheets"
+        configs.mkdir(parents=True)
+        (configs / "data.yml").write_text(
+            "write_disposition: append\nschema_name: analytics\ntable_name: orders\n",
+            encoding="utf-8",
+        )
+        enabled, _ = FilePipelineConfig(root_dir=str(tmp_path / "configs")).discover()
+        config = enabled["google_sheets"][0]
+        # dev: schema composed under the sandbox, table group-prefixed.
+        assert config.schema_name == "dlt_dev_analytics"
+        assert config.table_name == "google_sheets__orders"
+
+
+@pytest.mark.unit
 class TestEnvironmentParametricResolution:
     """`environment=` pins name resolution to a specific env (prod vs dev).
 
@@ -188,6 +209,18 @@ class TestEnvironmentParametricResolution:
         assert source.resolve_ingest_target(
             self._PATH, schema_override="analytics", environment="dev"
         ) == ("dlt_user_analytics", "google_sheets__reports__monthly")
+
+    def test_table_override_used_directly_in_prod(self):
+        source = FilePipelineConfig(root_dir="configs")
+        assert source.resolve_ingest_target(
+            self._PATH, table_override="orders", environment="prod"
+        ) == ("dlt_google_sheets", "orders")
+
+    def test_table_override_group_prefixed_in_dev(self):
+        source = FilePipelineConfig(root_dir="configs")
+        assert source.resolve_ingest_target(
+            self._PATH, table_override="orders", environment="dev"
+        ) == ("dlt_dev", "google_sheets__orders")
 
 
 class TestGetPipelineGroupFromPath:

@@ -120,7 +120,7 @@ class TestMergeKeyFingerprint:
 
     def test_stable_when_unrelated_changes(self):
         a = self._fp(merge_key=["instance"])
-        b = self._fp(merge_key=["instance"], output_table="something")
+        b = self._fp(merge_key=["instance"], table_name="something")
         assert a == b
 
 

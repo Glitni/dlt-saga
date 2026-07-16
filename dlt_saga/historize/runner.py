@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.sql import HistorizeSqlBuilder
 from dlt_saga.historize.state import HistorizeLogEntry, HistorizeStateManager
-from dlt_saga.utility.cli.logging import PrefixedLoggerAdapter
+from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
 from dlt_saga.utility.filters import and_filter, filter_where_clause
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ class HistorizeRunner:
             )
 
         # Target table in same schema (or override)
-        target_schema = self.config.output_schema or schema
+        target_schema = self.config.schema_name or schema
         self.target_schema = target_schema
         self.target_table_id = destination.get_full_table_id(
             target_schema, target_table_name
@@ -119,6 +119,15 @@ class HistorizeRunner:
             target_schema=target_schema,
             filter_sql=self._filter_sql,
         )
+
+    @property
+    def _target_display(self) -> str:
+        """Yellow, unquoted target FQN for log lines — matches the ingest
+        "Running for destination" style. (``target_table_id`` is SQL-quoted,
+        so it's for SQL, not display.)
+        """
+        fqn = f"{self.database}.{self.target_schema}.{self.target_table_name}"
+        return colorize(fqn, YELLOW)
 
     def _parse_historize_filters(self) -> Optional[str]:
         """Parse ``historize.filters`` and render to a destination SQL WHERE body."""
@@ -462,7 +471,7 @@ class HistorizeRunner:
 
         An incremental or partial refresh assumes the historized target from the
         prior run still exists (it MERGEs into / clones it). State is keyed on the
-        pipeline name, so renaming ``output_table`` / ``output_dataset`` still
+        pipeline name, so renaming ``table_name`` / ``schema_name`` still
         finds the prior run's log entry — but the target now lives under a new
         name, so the run would otherwise fail with a raw "table not found".
         Surface the actual cause and the fix instead of that opaque error.
@@ -605,7 +614,7 @@ class HistorizeRunner:
             self.destination.execute_sql(drop_sql, self.schema)
 
         # Ensure the target schema exists when it differs from the source schema
-        # (happens when placement=schema_suffix or when output_schema is set explicitly).
+        # (happens when placement=schema_suffix or when schema_name is set explicitly).
         # On destinations that expose schema-level access management (BigQuery
         # today), route through it so historize_schema_access is reconciled on
         # the historize schema.  Falls back to the destination-agnostic
@@ -630,7 +639,10 @@ class HistorizeRunner:
         self, value_columns: List[str], started_at: datetime
     ) -> Dict[str, Any]:
         """Execute full reprocess: rebuild entire historized table from all raw data."""
-        self.logger.info(f"Full reprocess historization for {self.pipeline_name}")
+        self.logger.info(
+            f"Historizing {self.pipeline_name} → {self._target_display}: "
+            "all snapshots (full reprocess)"
+        )
 
         src = self.source_table_id
         tgt = self.target_table_id
@@ -688,6 +700,10 @@ class HistorizeRunner:
         # and logging never see None (an un-coalesced NULL count crashes f"{n:,}").
         new_or_changed = (row.new_or_changed_rows if row else 0) or 0
         deleted = (row.deleted_rows if row else 0) or 0
+        self.logger.debug(
+            f"Full reprocess complete for {self.pipeline_name}: "
+            f"{new_or_changed:,} rows, {deleted:,} deletions"
+        )
 
         fingerprint = self.state_manager.compute_fingerprint(self.config)
         self.state_manager.write_log_entry(
@@ -706,11 +722,6 @@ class HistorizeRunner:
             )
         )
 
-        self.logger.info(
-            f"Full reprocess complete for {self.pipeline_name}: "
-            f"{new_or_changed:,} rows, {deleted:,} deletions"
-        )
-
         return {
             "mode": "full_reprocess",
             "snapshots_processed": "all",
@@ -727,7 +738,7 @@ class HistorizeRunner:
     ) -> Dict[str, Any]:
         """Execute incremental historization: process only new snapshots."""
         self.logger.info(
-            f"Incremental historization for {self.pipeline_name}: "
+            f"Historizing {self.pipeline_name} → {self._target_display}: "
             f"{len(new_snapshots)} new snapshot(s)"
         )
 
@@ -771,6 +782,11 @@ class HistorizeRunner:
         new_or_changed = (row.new_or_changed_rows if row else 0) or 0
         deleted = (row.deleted_rows if row else 0) or 0
         self.logger.debug(f"Stats query executed in {time.time() - t_stats:.1f}s")
+        self.logger.debug(
+            f"Incremental historization complete for {self.pipeline_name}: "
+            f"{len(new_snapshots)} snapshot(s), {new_or_changed} changes, "
+            f"{deleted} deletions"
+        )
 
         # Log with last snapshot value for state tracking
         fingerprint = self.state_manager.compute_fingerprint(self.config)
@@ -789,12 +805,6 @@ class HistorizeRunner:
                 finished_at=finished_at,
                 status="completed",
             )
-        )
-
-        self.logger.info(
-            f"Incremental historization complete for {self.pipeline_name}: "
-            f"{len(new_snapshots)} snapshot(s), {new_or_changed} changes, "
-            f"{deleted} deletions"
         )
 
         return {
@@ -818,7 +828,7 @@ class HistorizeRunner:
         import uuid
 
         run_id = uuid.uuid4().hex[:8]
-        target_schema = self.config.output_schema or self.schema
+        target_schema = self.config.schema_name or self.schema
 
         # Resolve effective boundary
         effective_from_date, clamped = self._resolve_effective_from_date()
@@ -850,8 +860,9 @@ class HistorizeRunner:
             }
 
         self.logger.info(
-            f"Partial re-historization for {self.pipeline_name} from "
-            f"{effective_from_date}: {len(snapshots_to_reprocess)} snapshot(s) to reprocess"
+            f"Historizing {self.pipeline_name} → {self._target_display} from "
+            f"{effective_from_date}: "
+            f"{len(snapshots_to_reprocess)} snapshot(s) to reprocess"
         )
 
         return self._execute_clone_and_swap(
@@ -1092,7 +1103,7 @@ class HistorizeRunner:
                 status="completed",
             )
         )
-        self.logger.info(
+        self.logger.debug(
             f"Partial re-historization complete for {self.pipeline_name}: "
             f"{len(snapshots_to_reprocess)} snapshot(s), "
             f"{new_or_changed} changes, {deleted} deletions"
@@ -1112,7 +1123,7 @@ class HistorizeRunner:
         """
         src = self.source_table_id
         snapshot_col = self.destination.quote_identifier(self.config.snapshot_column)
-        target_schema = self.config.output_schema or self.schema
+        target_schema = self.config.schema_name or self.schema
 
         sql = f"SELECT MIN({snapshot_col}) AS min_snap FROM {src}{filter_where_clause(self._filter_sql)}"
         rows = list(self.destination.execute_sql(sql, target_schema))

@@ -184,8 +184,8 @@ class TestApplyNamingModuleHistorizeOverrides:
         _apply_naming_module_historize_overrides(
             cfg, {}, source_schema="dlt_prod", source_table="orders"
         )
-        assert cfg.output_schema is None
-        assert cfg.output_table is None
+        assert cfg.schema_name is None
+        assert cfg.table_name is None
 
     def test_layer_aware_schema_override(self, tmp_path, monkeypatch):
         def generate_schema_name(segments, environment, default, *, layer="ingest"):
@@ -205,8 +205,8 @@ class TestApplyNamingModuleHistorizeOverrides:
             source_schema="dlt_google_sheets_ingest",
             source_table="asm__salgsmal",
         )
-        assert cfg.output_schema == "dlt_google_sheets_historize"
-        assert cfg.output_table is None  # no table override
+        assert cfg.schema_name == "dlt_google_sheets_historize"
+        assert cfg.table_name is None  # no table override
 
     def test_layer_aware_table_override(self, tmp_path, monkeypatch):
         def generate_table_name(segments, environment, *, layer="ingest"):
@@ -225,7 +225,7 @@ class TestApplyNamingModuleHistorizeOverrides:
             source_schema="dlt_google_sheets",
             source_table="salgsmal_ingest",
         )
-        assert cfg.output_table == "salgsmal_historize"
+        assert cfg.table_name == "salgsmal_historize"
 
     def test_layer_agnostic_module_leaves_overrides_unset(self, tmp_path, monkeypatch):
         """A module returning the same name regardless of layer must not write
@@ -247,7 +247,7 @@ class TestApplyNamingModuleHistorizeOverrides:
             source_schema="dlt_google_sheets",
             source_table="asm__salgsmal",
         )
-        assert cfg.output_schema is None
+        assert cfg.schema_name is None
 
     def test_legacy_hook_without_layer_kwarg_still_called(self, tmp_path, monkeypatch):
         """Hooks predating ``layer`` must still work — call_hook drops kwargs
@@ -273,9 +273,9 @@ class TestApplyNamingModuleHistorizeOverrides:
         )
         assert called == {"called": True}
         # Legacy hook returns "legacy_google_sheets" which != source, so it's adopted.
-        assert cfg.output_schema == "legacy_google_sheets"
+        assert cfg.schema_name == "legacy_google_sheets"
 
-    def test_explicit_output_schema_takes_precedence(self, tmp_path, monkeypatch):
+    def test_explicit_schema_name_takes_precedence(self, tmp_path, monkeypatch):
         def generate_schema_name(segments, environment, default, *, layer="ingest"):
             return f"dlt_{segments[0]}_{layer}"
 
@@ -286,7 +286,7 @@ class TestApplyNamingModuleHistorizeOverrides:
         monkeypatch.chdir(tmp_path)
 
         cfg = HistorizeConfig.from_dict(
-            {"output_schema": "explicit_archive"},
+            {"schema_name": "explicit_archive"},
             top_level_primary_key=["id"],
         )
         _apply_naming_module_historize_overrides(
@@ -295,7 +295,7 @@ class TestApplyNamingModuleHistorizeOverrides:
             source_schema="dlt_google_sheets",
             source_table="asm__salgsmal",
         )
-        assert cfg.output_schema == "explicit_archive"
+        assert cfg.schema_name == "explicit_archive"
 
 
 @pytest.mark.unit
@@ -339,3 +339,58 @@ class TestResolveHistorizeTargetAsOfProd:
             source_table="reports__monthly",
         )
         assert (schema, table) == ("dlt_google_sheets", "reports__monthly_historized")
+
+
+@pytest.mark.unit
+class TestHistorizeSchemaOverrideComposition:
+    """An explicit historize `schema_name` override composes per environment,
+    the same as the ingest side — used directly in prod, sandbox-composed in
+    dev — so a shared config doesn't leak a literal dev schema.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_caches(self):
+        import dlt_saga.pipeline_config.naming as naming_mod
+        from dlt_saga.project_config import _reset_cache
+
+        naming_mod._naming_module = None
+        _reset_cache()
+        yield
+        naming_mod._naming_module = None
+        _reset_cache()
+
+    def _config(self):
+        return SimpleNamespace(
+            pipeline_name="google_sheets__reports__monthly",
+            schema_name="dlt_dev",
+            table_name="google_sheets__reports__monthly",
+            config_dict={
+                "config_path": "configs/google_sheets/reports/monthly.yml",
+                "historize": {"schema_name": "archive"},
+                "primary_key": ["id"],
+            },
+        )
+
+    def test_prod_uses_override_directly(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _, schema, table = resolve_historize_target(
+            self._config(),
+            environment="prod",
+            source_schema="dlt_google_sheets",
+            source_table="reports__monthly",
+        )
+        assert schema == "archive"
+        assert table == "reports__monthly_historized"
+
+    def test_dev_composes_override_with_sandbox(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("SAGA_SCHEMA_NAME", "dlt_user")
+        _, schema, table = resolve_historize_target(
+            self._config(),
+            environment="dev",
+            source_schema="dlt_user",
+            source_table="google_sheets__reports__monthly",
+        )
+        # Composed, not the literal "archive" — the dev-leak fix.
+        assert schema == "dlt_user_archive"
+        assert table == "google_sheets__reports__monthly_historized"

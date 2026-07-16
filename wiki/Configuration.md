@@ -406,9 +406,9 @@ historize:
   cluster_columns: [orgnr]
   track_deletions: true                # Detect deleted rows between snapshots
   table_format: iceberg                # Override table format for this pipeline only
-  output_schema: "my_historized"       # Write to a different schema (optional)
-  output_table: "custom_table_name"    # Explicit output table name (optional)
-  output_table_suffix: "_historized"   # Suffix when output_table is not set
+  schema_name: "my_historized"         # Write to a different schema (optional)
+  table_name: "custom_table_name"      # Explicit output table name (optional)
+  table_suffix: "_historized"          # Suffix when table_name is not set
 ```
 
 | Field | Type | Default | Description |
@@ -421,9 +421,9 @@ historize:
 | `cluster_columns` | list | — | Cluster the output table |
 | `track_deletions` | bool | `false` | Detect rows deleted between snapshots |
 | `table_format` | string | inherited | Table format override for this pipeline's historized table |
-| `output_schema` | string | — | Write the historized table to a different schema |
-| `output_table` | string | — | Explicit name for the historized output table |
-| `output_table_suffix` | string | `_historized` | Suffix appended to the source table name when `output_table` is not set |
+| `schema_name` | string | — | Write the historized table to a different schema (used directly in prod, sandbox-composed in dev). Legacy alias: `output_schema` |
+| `table_name` | string | — | Explicit name for the historized output table. Legacy alias: `output_table` |
+| `table_suffix` | string | `_historized` | Suffix appended to the source table name when `table_name` is not set. Legacy alias: `output_table_suffix` |
 
 ### Historize-Only (External Data)
 
@@ -525,7 +525,7 @@ historize:
 | `table_suffix` (default) | Same schema, suffixed table name | `dlt_google_sheets.customers_historized` |
 | `schema_suffix` | Parallel schema, unchanged table name | `dlt_google_sheets_historized.customers` |
 
-Per-pipeline `historize.output_schema` and `historize.output_table` always override the project-level placement strategy when set explicitly.
+Per-pipeline `historize.schema_name` and `historize.table_name` always override the project-level placement strategy when set explicitly.
 
 ### Log Tables
 

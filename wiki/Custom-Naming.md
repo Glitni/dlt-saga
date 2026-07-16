@@ -88,10 +88,13 @@ def generate_table_name(
     environment: str,
     *,
     layer: str = "ingest",
+    custom_table_name: str | None = None,
 ) -> str: ...
 ```
 
 Returns the table name. The framework default produces dev-prefixed names (`<group>__<base>` in dev, bare `<base>` in prod). Override when your downstream layer (dbt, BI tooling) needs a different convention.
+
+- `custom_table_name` — the config's explicit `table_name:` override, or `None`. The default composes it per environment: used directly in prod, group-prefixed in dev (`<group>__<table_name>`). A hook written against the older signature (no `custom_table_name` parameter) keeps the legacy behavior — the override is used verbatim — until it adopts the parameter.
 
 When you return a layer-specific table name (e.g. appending `_historized` for `layer="historize"`), the historize factory adopts it as the historize-side override — that wins over `HistorizeProjectConfig.table_suffix`.
 
@@ -238,5 +241,5 @@ The `layer` keyword and the `schema`/`table` kwargs on `generate_target_location
 ## See also
 
 - [Profiles](Profiles) — where `storage_path` and the `historize.storage_path` override live.
-- [Historize (SCD2)](Historize) — for `historize_schema_access`, `historize.output_schema`, and the `placement` strategy that the naming hooks compose with.
+- [Historize (SCD2)](Historize) — for `historize_schema_access`, `historize.schema_name`, and the `placement` strategy that the naming hooks compose with.
 - [Configuration](Configuration) — hierarchical pipeline config and the `+key:` merge syntax.

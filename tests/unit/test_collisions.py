@@ -63,11 +63,16 @@ class _FakeSource:
         self._configs = configs
 
     def resolve_ingest_target(
-        self, config_path, *, schema_override=None, environment=None
+        self,
+        config_path,
+        *,
+        schema_override=None,
+        table_override=None,
+        environment=None,
     ):
         config = self._by_path[config_path]
         schema, table = config._env_targets.get(environment, config._default_target)
-        return (schema_override or schema, table)
+        return (schema_override or schema, table_override or table)
 
     def discover(self):
         return ({"g": list(self._configs)}, {})

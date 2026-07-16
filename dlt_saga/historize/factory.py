@@ -70,8 +70,8 @@ def _env_aware_override(
     override: str,
     environment: Optional[str] = None,
 ) -> str:
-    """Run ``output_table`` through the project's table-name generator so it
-    gets the same env-aware prefix as the source table.
+    """Run a historize ``table_name`` override through the project's table-name
+    generator so it gets the same env-aware prefix as the source table.
 
     ``environment`` pins the resolution (the collision guard passes ``"prod"``);
     when omitted it reads the active environment. Falls back to the literal
@@ -94,6 +94,65 @@ def _env_aware_override(
     )
 
 
+def _env_aware_schema_override(
+    config_dict: Dict[str, Any],
+    override: str,
+    environment: Optional[str] = None,
+) -> str:
+    """Compose a historize ``schema_name`` override per environment.
+
+    Routes the override through the schema generator the same way the ingest
+    layer does: used directly in prod, composed with the developer sandbox in
+    dev (``{sandbox}_{override}``), so a shared config stays isolated per
+    developer instead of leaking a literal dev schema. Honours a custom
+    ``naming_module`` (``layer="historize"``); a hook predating
+    ``custom_schema_name`` keeps the override verbatim. Falls back to the
+    literal override when no ``config_path`` is available.
+    """
+    from dlt_saga.pipeline_config.naming import (
+        call_hook,
+        default_generate_schema_name,
+        hook_accepts_kwarg,
+        load_naming_module,
+    )
+    from dlt_saga.project_config import get_project_config
+    from dlt_saga.utility.cli.context import get_execution_context
+    from dlt_saga.utility.naming import get_dev_schema, get_environment
+
+    segments = _segments_from_config_path(config_dict.get("config_path") or "")
+    if not segments:
+        return override
+
+    environment = environment or get_environment()
+    # Dev composition needs the sandbox; prod ignores default_schema (the
+    # override is used directly there) and a dev schema is legitimately unset.
+    if environment == "prod":
+        default_schema = ""
+    else:
+        default_schema = get_execution_context().get_schema() or get_dev_schema()
+
+    project_config = get_project_config()
+    module = load_naming_module({"naming_module": project_config.naming_module})
+    if module and hasattr(module, "generate_schema_name"):
+        if not hook_accepts_kwarg(module.generate_schema_name, "custom_schema_name"):
+            return override
+        return call_hook(
+            module.generate_schema_name,
+            segments,
+            environment,
+            default_schema,
+            layer="historize",
+            custom_schema_name=override,
+        )
+    return default_generate_schema_name(
+        segments,
+        environment,
+        default_schema,
+        layer="historize",
+        custom_schema_name=override,
+    )
+
+
 def _apply_naming_module_historize_overrides(
     historize_config: HistorizeConfig,
     config_dict: Dict[str, Any],
@@ -101,7 +160,7 @@ def _apply_naming_module_historize_overrides(
     source_table: str,
     environment: Optional[str] = None,
 ) -> None:
-    """Populate ``historize_config.output_schema`` / ``output_table`` from a
+    """Populate ``historize_config.schema_name`` / ``table_name`` from a
     custom naming module's ``layer="historize"`` hooks, when present.
 
     The naming module owns layer-aware naming: if it returns a value
@@ -139,9 +198,7 @@ def _apply_naming_module_historize_overrides(
     else:
         default_schema = context.get_schema() or get_dev_schema()
 
-    if historize_config.output_schema is None and hasattr(
-        module, "generate_schema_name"
-    ):
+    if historize_config.schema_name is None and hasattr(module, "generate_schema_name"):
         try:
             hist_schema = call_hook(
                 module.generate_schema_name,
@@ -157,9 +214,9 @@ def _apply_naming_module_historize_overrides(
             )
             hist_schema = None
         if hist_schema and hist_schema != source_schema:
-            historize_config.output_schema = hist_schema
+            historize_config.schema_name = hist_schema
 
-    if historize_config.output_table is None and hasattr(module, "generate_table_name"):
+    if historize_config.table_name is None and hasattr(module, "generate_table_name"):
         try:
             hist_table = call_hook(
                 module.generate_table_name,
@@ -174,7 +231,7 @@ def _apply_naming_module_historize_overrides(
             )
             hist_table = None
         if hist_table and hist_table != source_table:
-            historize_config.output_table = hist_table
+            historize_config.table_name = hist_table
 
 
 def _resolve_historize_storage_path(context: Any) -> Optional[str]:
@@ -228,8 +285,9 @@ def resolve_historize_target(
     """Resolve the historize layer's ``(schema, table)`` target for a pipeline.
 
     Runs the historize name-resolution chain: ``HistorizeConfig`` construction,
-    the env-aware ``output_table`` override, custom naming-module layer
-    overrides, and the placement-strategy resolution. Stops short of building a
+    the env-aware ``table_name`` / ``schema_name`` overrides, custom
+    naming-module layer overrides, and the placement-strategy resolution. Stops
+    short of building a
     destination — :func:`build_historize_runner` calls this and then builds one;
     collision detection (``utility/collisions.py``) calls it pinned to prod.
 
@@ -250,7 +308,7 @@ def resolve_historize_target(
     Returns:
         ``(historize_config, target_schema, target_table)``. The returned
         ``historize_config`` carries the name-related mutations
-        (``output_table`` / ``output_schema``) but not the ``table_format`` /
+        (``table_name`` / ``schema_name``) but not the ``table_format`` /
         ``storage_path`` resolution, which is destination-facing and left to
         :func:`build_historize_runner`.
     """
@@ -269,18 +327,26 @@ def resolve_historize_target(
         source_table if source_table is not None else pipeline_config.table_name
     )
 
-    # When output_table is set, run it through the same table-name generator
-    # as the source so it picks up the env prefix and any custom naming rules
-    # — i.e. treat the override as a peer of the source, not a literal name.
-    if historize_config.output_table:
-        historize_config.output_table = _env_aware_override(
-            config_dict, historize_config.output_table, environment=environment
+    # When table_name is set, run it through the same table-name generator as
+    # the source so it picks up the env prefix and any custom naming rules —
+    # i.e. treat the override as a peer of the source, not a literal name.
+    if historize_config.table_name:
+        historize_config.table_name = _env_aware_override(
+            config_dict, historize_config.table_name, environment=environment
+        )
+
+    # When schema_name is set, compose it per environment through the schema
+    # generator — used directly in prod, sandbox-composed in dev — the same as
+    # the ingest side, so a shared config doesn't leak a literal dev schema.
+    if historize_config.schema_name:
+        historize_config.schema_name = _env_aware_schema_override(
+            config_dict, historize_config.schema_name, environment=environment
         )
 
     # Apply layer-aware naming-module overrides for the historize layer
-    # (sets output_schema / output_table from a custom naming module when
-    # it returns a value distinct from the ingest layer). Runs before
-    # resolve_historized_target so per-pipeline output_* overrides win, while
+    # (sets schema_name / table_name from a custom naming module when it
+    # returns a value distinct from the ingest layer). Runs before
+    # resolve_historized_target so per-pipeline overrides win, while
     # naming-module overrides supersede the placement suffix default.
     _apply_naming_module_historize_overrides(
         historize_config,
@@ -345,8 +411,8 @@ def build_historize_runner(
 
     # Pin resolved target_schema on historize_config so HistorizeRunner uses it
     # everywhere (state manager, partial refresh, etc.)
-    if target_schema != schema_name and historize_config.output_schema is None:
-        historize_config.output_schema = target_schema
+    if target_schema != schema_name and historize_config.schema_name is None:
+        historize_config.schema_name = target_schema
 
     # Resolve the historize-layer schema_access overlay and warn loudly if
     # the overlay was declared but the historize schema isn't distinct from

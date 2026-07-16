@@ -345,6 +345,27 @@ class TestFileConfigTableName:
 
         assert default_generate_table_name([], "prod") == "default_data"
 
+    def test_custom_table_name_used_directly_in_prod(self):
+        from dlt_saga.pipeline_config.naming import default_generate_table_name
+
+        assert (
+            default_generate_table_name(
+                ["google_sheets", "x"], "prod", custom_table_name="orders"
+            )
+            == "orders"
+        )
+
+    def test_custom_table_name_group_prefixed_in_dev(self):
+        # In dev the override is group-prefixed to stay unique in the shared schema.
+        from dlt_saga.pipeline_config.naming import default_generate_table_name
+
+        assert (
+            default_generate_table_name(
+                ["google_sheets", "x"], "dev", custom_table_name="orders"
+            )
+            == "google_sheets__orders"
+        )
+
 
 @pytest.mark.unit
 class TestResolveTableNameWithLeaf:
@@ -942,20 +963,20 @@ class TestResolveHistorizedTarget:
 
     def test_table_suffix_custom_suffix(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        cfg = _make_hconfig(output_table_suffix="_hist")
+        cfg = _make_hconfig(table_suffix="_hist")
         ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
         assert ds == "dlt_prod"
         assert tbl == "orders_hist"
 
-    def test_table_suffix_output_table_override(self, tmp_path, monkeypatch):
+    def test_table_suffix_table_name_override(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        cfg = _make_hconfig(output_table="orders_scd2")
+        cfg = _make_hconfig(table_name="orders_scd2")
         ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
         assert tbl == "orders_scd2"
 
-    def test_table_suffix_output_schema_override(self, tmp_path, monkeypatch):
+    def test_table_suffix_schema_name_override(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        cfg = _make_hconfig(output_schema="archive")
+        cfg = _make_hconfig(schema_name="archive")
         ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
         assert ds == "archive"
         assert tbl == "orders_historized"
@@ -984,32 +1005,32 @@ class TestResolveHistorizedTarget:
         assert ds == "dlt_prod_hist"
         assert tbl == "orders"
 
-    def test_schema_suffix_output_schema_wins(self, tmp_path, monkeypatch):
+    def test_schema_suffix_schema_name_wins(self, tmp_path, monkeypatch):
         yml = tmp_path / "saga_project.yml"
         yml.write_text("historize:\n  placement: schema_suffix\n")
         monkeypatch.chdir(tmp_path)
 
-        cfg = _make_hconfig(output_schema="my_archive")
+        cfg = _make_hconfig(schema_name="my_archive")
         ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
         assert ds == "my_archive"
         assert tbl == "orders"
 
-    def test_schema_suffix_output_table_wins(self, tmp_path, monkeypatch):
+    def test_schema_suffix_table_name_wins(self, tmp_path, monkeypatch):
         yml = tmp_path / "saga_project.yml"
         yml.write_text("historize:\n  placement: schema_suffix\n")
         monkeypatch.chdir(tmp_path)
 
-        cfg = _make_hconfig(output_table="orders_v2")
+        cfg = _make_hconfig(table_name="orders_v2")
         ds, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
         assert ds == "dlt_prod_historized"
         assert tbl == "orders_v2"
 
-    def test_schema_suffix_output_table_suffix_ignored(self, tmp_path, monkeypatch):
-        """output_table_suffix is ignored when placement=schema_suffix."""
+    def test_schema_suffix_table_suffix_ignored(self, tmp_path, monkeypatch):
+        """table_suffix is ignored when placement=schema_suffix."""
         yml = tmp_path / "saga_project.yml"
         yml.write_text("historize:\n  placement: schema_suffix\n")
         monkeypatch.chdir(tmp_path)
 
-        cfg = _make_hconfig(output_table_suffix="_hist")
+        cfg = _make_hconfig(table_suffix="_hist")
         _, tbl = resolve_historized_target("dlt_prod", "orders", cfg)
         assert tbl == "orders"  # no suffix applied

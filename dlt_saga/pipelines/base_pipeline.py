@@ -147,7 +147,7 @@ class BasePipeline:
         # it for normal ingest where it's a useful progress indicator.
         if not context.update_access:
             self.logger.info(
-                "Running for destination "
+                f"Ingesting {self.pipeline_name} → "
                 + colorize(
                     f"{self.destination_database}.{self.pipeline.dataset_name}.{self.table_name}",
                     YELLOW,

@@ -1,6 +1,6 @@
 """Unit tests for the incremental/partial historize target-existence guard.
 
-State is keyed on the pipeline name, so renaming ``output_table`` /
+State is keyed on the pipeline name, so renaming ``table_name`` /
 ``output_dataset`` still finds the prior run's log entry while the target now
 lives under a new name. Without the guard the run fails with a raw "table not
 found"; the guard raises an actionable config-changed error instead.
