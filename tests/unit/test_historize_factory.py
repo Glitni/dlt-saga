@@ -322,11 +322,11 @@ class TestResolveHistorizeTargetAsOfProd:
     def test_prod_source_names_drive_historized_target(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)  # no saga_project.yml → default placement
         pipeline_config = SimpleNamespace(
-            pipeline_name="google_sheets__asm__salgsmal",
+            pipeline_name="google_sheets__reports__monthly",
             schema_name="dlt_dev",  # current-env values — must NOT be used
-            table_name="google_sheets__asm__salgsmal",
+            table_name="google_sheets__reports__monthly",
             config_dict={
-                "config_path": "configs/google_sheets/asm/salgsmal.yml",
+                "config_path": "configs/google_sheets/reports/monthly.yml",
                 "historize": {},
                 "primary_key": ["id"],
             },
@@ -336,6 +336,6 @@ class TestResolveHistorizeTargetAsOfProd:
             pipeline_config,
             environment="prod",
             source_schema="dlt_google_sheets",
-            source_table="asm__salgsmal",
+            source_table="reports__monthly",
         )
-        assert (schema, table) == ("dlt_google_sheets", "asm__salgsmal_historized")
+        assert (schema, table) == ("dlt_google_sheets", "reports__monthly_historized")

@@ -22,6 +22,7 @@ from dlt_saga.pipeline_config.naming import (
     call_hook,
     default_generate_schema_name,
     default_generate_table_name,
+    hook_accepts_kwarg,
     load_naming_module,
 )
 from dlt_saga.utility.naming import get_dev_schema, get_environment
@@ -179,6 +180,7 @@ class FilePipelineConfig(ConfigSource):
         *,
         layer: str = "ingest",
         environment: Optional[str] = None,
+        custom_schema_name: Optional[str] = None,
     ) -> str:
         """Resolve schema name for a config file.
 
@@ -191,6 +193,14 @@ class FilePipelineConfig(ConfigSource):
         (``"prod"`` / ``"dev"``); when omitted it reads the active one via
         :func:`get_environment`. The collision guard passes ``"prod"`` so its
         verdict is the same whether ``saga doctor`` runs in dev or prod.
+
+        ``custom_schema_name`` is an explicit ``schema_name:`` override. It's
+        threaded into the generator so placement composes per environment: used
+        directly in prod, composed with the developer sandbox in dev (see
+        :func:`default_generate_schema_name`). A custom naming module whose
+        ``generate_schema_name`` predates this parameter keeps the legacy
+        behaviour — the override is used verbatim in both environments — until
+        it adopts the new signature, so no existing prod placement moves.
         """
         segments = self.get_naming_segments(config_path)
         environment = environment or get_environment()
@@ -202,15 +212,27 @@ class FilePipelineConfig(ConfigSource):
 
         module = load_naming_module(self.project_config)
         if module and hasattr(module, "generate_schema_name"):
+            if custom_schema_name and not hook_accepts_kwarg(
+                module.generate_schema_name, "custom_schema_name"
+            ):
+                # Legacy custom hook: preserve pre-existing behaviour (an
+                # explicit override wins verbatim, in both environments) rather
+                # than silently dropping the override via call_hook.
+                return custom_schema_name
             return call_hook(
                 module.generate_schema_name,
                 segments,
                 environment,
                 default_schema,
                 layer=layer,
+                custom_schema_name=custom_schema_name,
             )
         return default_generate_schema_name(
-            segments, environment, default_schema, layer=layer
+            segments,
+            environment,
+            default_schema,
+            layer=layer,
+            custom_schema_name=custom_schema_name,
         )
 
     def resolve_table_name(
@@ -251,14 +273,17 @@ class FilePipelineConfig(ConfigSource):
         """Resolve a config's full ingest ``(schema, table)`` target.
 
         Mirrors the resolution :meth:`_load_config_file` applies during
-        discovery: an explicit ``schema_name:`` override wins for the schema,
-        otherwise the schema is generated from the config path; the table name
-        is always generated. ``environment`` pins the resolution (the collision
-        guard passes ``"prod"`` for an environment-invariant verdict); when
-        omitted it reads the active environment.
+        discovery: an explicit ``schema_name:`` override is threaded into the
+        schema generator (used directly in prod, composed with the dev sandbox
+        in dev), otherwise the schema is generated from the config path; the
+        table name is always generated. ``environment`` pins the resolution (the
+        collision guard passes ``"prod"`` for an environment-invariant verdict);
+        when omitted it reads the active environment.
         """
-        schema = schema_override or self.resolve_schema_name(
-            config_path, environment=environment
+        schema = self.resolve_schema_name(
+            config_path,
+            environment=environment,
+            custom_schema_name=schema_override or None,
         )
         table = self.resolve_table_name(config_path, environment=environment)
         return (schema, table)

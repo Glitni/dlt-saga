@@ -150,6 +150,35 @@ class TestFileConfigSchemaName:
 
         assert default_generate_schema_name([], "prod", "dlt_dev") == "dlt_default"
 
+    def test_custom_schema_name_used_directly_in_prod(self):
+        # An explicit schema_name override fully replaces the dlt_<group> default.
+        from dlt_saga.pipeline_config.naming import default_generate_schema_name
+
+        assert (
+            default_generate_schema_name(
+                ["google_sheets", "x"],
+                "prod",
+                "dlt_dev",
+                custom_schema_name="analytics",
+            )
+            == "analytics"
+        )
+
+    def test_custom_schema_name_composed_with_sandbox_in_dev(self):
+        # In dev the override is namespaced under the developer sandbox, so a
+        # shared config keeps each developer isolated.
+        from dlt_saga.pipeline_config.naming import default_generate_schema_name
+
+        assert (
+            default_generate_schema_name(
+                ["google_sheets", "x"],
+                "dev",
+                "dlt_user",  # a developer's sandbox schema
+                custom_schema_name="analytics",
+            )
+            == "dlt_user_analytics"
+        )
+
     @pytest.mark.parametrize(
         "segments, expected",
         [
@@ -185,6 +214,65 @@ class TestFileConfigSchemaName:
         ):
             result = fpc.resolve_schema_name("configs/google_sheets/x.yml")
             assert result == "custom_schema"
+
+    def test_custom_schema_name_threaded_to_modern_hook(self):
+        """A hook that accepts custom_schema_name receives the override."""
+        from dlt_saga.pipeline_config.file_config import FilePipelineConfig
+
+        custom_module = ModuleType("custom_naming")
+
+        def generate_schema_name(
+            segs, env, default, *, layer="ingest", custom_schema_name=None
+        ):
+            return (
+                f"custom_{custom_schema_name}"
+                if custom_schema_name
+                else "custom_default"
+            )
+
+        custom_module.generate_schema_name = generate_schema_name
+
+        fpc = FilePipelineConfig()
+        with (
+            patch(
+                "dlt_saga.pipeline_config.file_config.load_naming_module",
+                return_value=custom_module,
+            ),
+            patch(
+                "dlt_saga.pipeline_config.file_config.get_dev_schema",
+                return_value="dlt_dev",
+            ),
+        ):
+            result = fpc.resolve_schema_name(
+                "configs/google_sheets/x.yml", custom_schema_name="analytics"
+            )
+            assert result == "custom_analytics"
+
+    def test_legacy_hook_uses_override_verbatim(self):
+        """A hook predating custom_schema_name keeps the legacy behaviour: an
+        explicit override wins verbatim (both envs) rather than being dropped."""
+        from dlt_saga.pipeline_config.file_config import FilePipelineConfig
+
+        custom_module = ModuleType("custom_naming")
+        custom_module.generate_schema_name = lambda segs, env, default: "custom_schema"
+
+        fpc = FilePipelineConfig()
+        with (
+            patch(
+                "dlt_saga.pipeline_config.file_config.load_naming_module",
+                return_value=custom_module,
+            ),
+            patch(
+                "dlt_saga.pipeline_config.file_config.get_dev_schema",
+                return_value="dlt_dev",
+            ),
+        ):
+            result = fpc.resolve_schema_name(
+                "configs/google_sheets/x.yml",
+                environment="dev",
+                custom_schema_name="analytics",
+            )
+            assert result == "analytics"
 
     def test_missing_function_falls_back(self):
         """Custom module without generate_schema_name falls back to default."""
