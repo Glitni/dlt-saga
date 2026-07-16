@@ -117,9 +117,9 @@ class TestFileConfigSchemaName:
         "segments, environment, expected",
         [
             # Prod: dlt_{segments[0]}
-            (["google_sheets", "salgsmal"], "prod", "dlt_google_sheets"),
+            (["google_sheets", "monthly"], "prod", "dlt_google_sheets"),
             (["filesystem", "data"], "prod", "dlt_filesystem"),
-            (["api", "livewrapped", "stats"], "prod", "dlt_api"),
+            (["api", "partner", "stats"], "prod", "dlt_api"),
         ],
     )
     def test_prod_schema(self, segments, environment, expected):
@@ -318,21 +318,21 @@ class TestFileConfigTableName:
         "segments, environment, expected",
         [
             # Prod: base_name (no prefix)
-            (["google_sheets", "asm", "salgsmal"], "prod", "asm__salgsmal"),
+            (["google_sheets", "reports", "monthly"], "prod", "reports__monthly"),
             (["filesystem", "di_avvik_hourly"], "prod", "di_avvik_hourly"),
-            (["api", "livewrapped", "stats"], "prod", "livewrapped__stats"),
+            (["api", "partner", "stats"], "prod", "partner__stats"),
             # Dev: first_segment__base_name
             (
-                ["google_sheets", "asm", "salgsmal"],
+                ["google_sheets", "reports", "monthly"],
                 "dev",
-                "google_sheets__asm__salgsmal",
+                "google_sheets__reports__monthly",
             ),
             (
                 ["filesystem", "di_avvik_hourly"],
                 "dev",
                 "filesystem__di_avvik_hourly",
             ),
-            (["api", "livewrapped", "stats"], "dev", "api__livewrapped__stats"),
+            (["api", "partner", "stats"], "dev", "api__partner__stats"),
         ],
     )
     def test_table_name(self, segments, environment, expected):
@@ -466,14 +466,14 @@ class TestDefaultGenerateTargetLocation:
         from dlt_saga.pipeline_config import default_generate_target_location
 
         result = default_generate_target_location(
-            ["google_sheets", "asm", "salgsmal"],
+            ["google_sheets", "reports", "monthly"],
             "prod",
             "abfss://lake@a.dfs.core.windows.net/raw/",
         )
-        # group=google_sheets, table=asm__salgsmal (default_generate_table_name prod shape)
+        # group=google_sheets, table=reports__monthly (default_generate_table_name prod shape)
         assert (
             result
-            == "abfss://lake@a.dfs.core.windows.net/raw/google_sheets/asm__salgsmal/"
+            == "abfss://lake@a.dfs.core.windows.net/raw/google_sheets/reports__monthly/"
         )
 
     def test_strips_trailing_slash_on_root(self):
@@ -548,12 +548,12 @@ class TestNamingHooksLayerKwarg:
         from dlt_saga.pipeline_config.naming import default_generate_table_name
 
         ingest = default_generate_table_name(
-            ["google_sheets", "salgsmal"], "prod", layer="ingest"
+            ["google_sheets", "monthly"], "prod", layer="ingest"
         )
         historize = default_generate_table_name(
-            ["google_sheets", "salgsmal"], "prod", layer="historize"
+            ["google_sheets", "monthly"], "prod", layer="historize"
         )
-        assert ingest == historize == "salgsmal"
+        assert ingest == historize == "monthly"
 
     def test_default_target_location_accepts_layer(self):
         from dlt_saga.pipeline_config import default_generate_target_location
@@ -574,10 +574,10 @@ class TestNamingHooksLayerKwarg:
             "prod",
             "gs://bucket/lake/",
             schema="dlt_google_sheets_historized",
-            table="salgsmal",
+            table="monthly",
             layer="historize",
         )
-        assert uri == "gs://bucket/lake/dlt_google_sheets_historized/salgsmal/"
+        assert uri == "gs://bucket/lake/dlt_google_sheets_historized/monthly/"
 
 
 @pytest.mark.unit
@@ -841,20 +841,20 @@ class TestPipelineName:
     """Test the pipeline_name property preserves double underscores."""
 
     def test_single_subfolder(self):
-        """google_sheets/asm/salgsmal.yml -> google_sheets__asm__salgsmal"""
+        """google_sheets/reports/monthly.yml -> google_sheets__reports__monthly"""
         from dlt_saga.pipeline_config.base_config import PipelineConfig
 
         config = PipelineConfig(
             pipeline_group="google_sheets",
-            pipeline_name="google_sheets__asm__salgsmal",
-            table_name="google_sheets__asm__salgsmal",
-            identifier="configs/google_sheets/asm/salgsmal.yml",
-            config_dict={"base_table_name": "asm__salgsmal"},
+            pipeline_name="google_sheets__reports__monthly",
+            table_name="google_sheets__reports__monthly",
+            identifier="configs/google_sheets/reports/monthly.yml",
+            config_dict={"base_table_name": "reports__monthly"},
             enabled=True,
             tags=[],
             schema_name="dlt_google_sheets",
         )
-        assert config.pipeline_name == "google_sheets__asm__salgsmal"
+        assert config.pipeline_name == "google_sheets__reports__monthly"
 
     def test_deep_subfolders(self):
         """Preserves __ between each folder level."""

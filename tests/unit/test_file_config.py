@@ -21,8 +21,8 @@ class TestDeriveBaseTableName:
         "path, expected",
         [
             ("configs/google_sheets/data.yml", "data"),
-            ("configs/google_sheets/asm/salgsmal.yml", "asm__salgsmal"),
-            ("configs/api/livewrapped/stats.yml", "livewrapped__stats"),
+            ("configs/google_sheets/reports/monthly.yml", "reports__monthly"),
+            ("configs/api/partner/stats.yml", "partner__stats"),
             ("configs/google_sheets/region/norway/oslo.yml", "region__norway__oslo"),
             ("configs/google_sheets/My File.yml", "my_file"),
             ("configs/google_sheets/my-file.yml", "my_file"),
@@ -230,8 +230,8 @@ class TestGetPipelineGroupFromPath:
             ("configs/google_sheets/data.yml", "google_sheets"),
             ("configs/filesystem/files.yml", "filesystem"),
             ("configs/api/stats.yml", "api"),
-            ("configs/google_sheets/asm/salgsmal.yml", "google_sheets"),
-            ("configs/api/livewrapped/stats.yml", "api"),
+            ("configs/google_sheets/reports/monthly.yml", "google_sheets"),
+            ("configs/api/partner/stats.yml", "api"),
         ],
     )
     def test_extract_type(self, path, expected):
@@ -255,12 +255,12 @@ class TestGetPathSegments:
         "path, expected",
         [
             ("configs/google_sheets/data.yml", ["google_sheets"]),
-            ("configs/google_sheets/asm/salgsmal.yml", ["google_sheets", "asm"]),
+            ("configs/google_sheets/reports/monthly.yml", ["google_sheets", "reports"]),
             (
                 "configs/google_sheets/region/norway/oslo.yml",
                 ["google_sheets", "region", "norway"],
             ),
-            ("configs/api/livewrapped/stats.yml", ["api", "livewrapped"]),
+            ("configs/api/partner/stats.yml", ["api", "partner"]),
         ],
     )
     def test_path_segments(self, path, expected):
@@ -671,8 +671,8 @@ class TestGetNamingSegments:
         "path, expected",
         [
             (
-                "configs/google_sheets/asm/salgsmal.yml",
-                ["google_sheets", "asm", "salgsmal"],
+                "configs/google_sheets/reports/monthly.yml",
+                ["google_sheets", "reports", "monthly"],
             ),
             ("configs/filesystem/data.yml", ["filesystem", "data"]),
             ("configs/api/service.yaml", ["api", "service"]),
@@ -746,14 +746,14 @@ class TestFilePipelineConfigIntegration:
                 "enabled": True,
                 "google_sheets": {
                     "+tags": ["sheets"],
-                    "asm": {"+tags": ["asm"]},
+                    "reports": {"+tags": ["reports"]},
                 },
             }
         }
 
         result = config._resolve_config(
-            "configs/google_sheets/asm/data.yml", {"+tags": ["file_level"]}
+            "configs/google_sheets/reports/data.yml", {"+tags": ["file_level"]}
         )
-        for tag in ["global", "sheets", "asm", "file_level"]:
+        for tag in ["global", "sheets", "reports", "file_level"]:
             assert tag in result["tags"]
         assert result["enabled"] is True

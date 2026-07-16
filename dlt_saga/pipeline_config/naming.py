@@ -18,8 +18,8 @@ that uniquely identify a pipeline config. The contract is:
 - Anything in between adds organisational depth.
 
 For the file-based config source, segments are the relative path parts with
-the file extension stripped — e.g. ``["google_sheets", "asm", "salgsmal"]``
-for ``configs/google_sheets/asm/salgsmal.yml``. Other config sources
+the file extension stripped — e.g. ``["google_sheets", "reports", "monthly"]``
+for ``configs/google_sheets/reports/monthly.yml``. Other config sources
 (database-backed, SharePoint-backed, …) produce their own segments from
 whatever identifier shape they use; the naming functions don't care.
 

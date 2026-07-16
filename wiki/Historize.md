@@ -395,7 +395,7 @@ Historize state is recorded in `_saga_historize_log` with:
 ## Full example
 
 ```yaml
-# configs/filesystem/proffdata/companies.yml
+# configs/filesystem/vendor/companies.yml
 write_disposition: "append+historize"
 primary_key: [orgnr]
 

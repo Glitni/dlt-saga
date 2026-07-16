@@ -176,11 +176,11 @@ def get_historized_table_name(base_table_name: str, suffix: str = "_historized")
     """Get the historized table name by appending a suffix.
 
     Args:
-        base_table_name: Base table name (e.g., 'proffdata__bedriftsdata')
+        base_table_name: Base table name (e.g., 'vendor__companies')
         suffix: Suffix to append (default: '_historized')
 
     Returns:
-        Historized table name (e.g., 'proffdata__bedriftsdata_historized')
+        Historized table name (e.g., 'vendor__companies_historized')
     """
     return f"{base_table_name}{suffix}"
 

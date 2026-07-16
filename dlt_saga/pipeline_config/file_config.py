@@ -142,7 +142,7 @@ class FilePipelineConfig(ConfigSource):
             config_path: Absolute or relative path to a config file
 
         Returns:
-            Relative path string (e.g., "google_sheets/asm/salgsmal.yml")
+            Relative path string (e.g., "google_sheets/reports/monthly.yml")
         """
         relative = self._get_relative_config_path(config_path)
         if relative:
@@ -155,8 +155,8 @@ class FilePipelineConfig(ConfigSource):
         """Convert a config file path into the segment list used by naming.
 
         Returns ``[group, sub_1, ..., name]`` with the file extension stripped
-        from the leaf — e.g. ``configs/google_sheets/asm/salgsmal.yml`` becomes
-        ``["google_sheets", "asm", "salgsmal"]``. Other config sources produce
+        from the leaf — e.g. ``configs/google_sheets/reports/monthly.yml`` becomes
+        ``["google_sheets", "reports", "monthly"]``. Other config sources produce
         their own segments from whatever identifier shape they expose; the
         naming defaults in :mod:`dlt_saga.pipeline_config.naming` take only the
         segment list and don't care where it came from.
@@ -419,7 +419,7 @@ class FilePipelineConfig(ConfigSource):
         """Get a specific config by file path or pipeline name.
 
         Args:
-            identifier: File path to config file OR pipeline name (e.g., 'google_sheets__asm__salgsmal')
+            identifier: File path to config file OR pipeline name (e.g., 'google_sheets__reports__monthly')
                        Pipeline name is always {pipeline_group}__{base_table_name}, consistent across environments
 
         Returns:

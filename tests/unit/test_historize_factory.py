@@ -201,9 +201,9 @@ class TestApplyNamingModuleHistorizeOverrides:
         cfg = HistorizeConfig.from_dict({}, top_level_primary_key=["id"])
         _apply_naming_module_historize_overrides(
             cfg,
-            {"config_path": "configs/google_sheets/asm/salgsmal.yml"},
+            {"config_path": "configs/google_sheets/reports/monthly.yml"},
             source_schema="dlt_google_sheets_ingest",
-            source_table="asm__salgsmal",
+            source_table="reports__monthly",
         )
         assert cfg.schema_name == "dlt_google_sheets_historize"
         assert cfg.table_name is None  # no table override
@@ -221,11 +221,11 @@ class TestApplyNamingModuleHistorizeOverrides:
         cfg = HistorizeConfig.from_dict({}, top_level_primary_key=["id"])
         _apply_naming_module_historize_overrides(
             cfg,
-            {"config_path": "configs/google_sheets/asm/salgsmal.yml"},
+            {"config_path": "configs/google_sheets/reports/monthly.yml"},
             source_schema="dlt_google_sheets",
-            source_table="salgsmal_ingest",
+            source_table="monthly_ingest",
         )
-        assert cfg.table_name == "salgsmal_historize"
+        assert cfg.table_name == "monthly_historize"
 
     def test_layer_agnostic_module_leaves_overrides_unset(self, tmp_path, monkeypatch):
         """A module returning the same name regardless of layer must not write
@@ -243,9 +243,9 @@ class TestApplyNamingModuleHistorizeOverrides:
         cfg = HistorizeConfig.from_dict({}, top_level_primary_key=["id"])
         _apply_naming_module_historize_overrides(
             cfg,
-            {"config_path": "configs/google_sheets/asm/salgsmal.yml"},
+            {"config_path": "configs/google_sheets/reports/monthly.yml"},
             source_schema="dlt_google_sheets",
-            source_table="asm__salgsmal",
+            source_table="reports__monthly",
         )
         assert cfg.schema_name is None
 
@@ -267,9 +267,9 @@ class TestApplyNamingModuleHistorizeOverrides:
         cfg = HistorizeConfig.from_dict({}, top_level_primary_key=["id"])
         _apply_naming_module_historize_overrides(
             cfg,
-            {"config_path": "configs/google_sheets/asm/salgsmal.yml"},
+            {"config_path": "configs/google_sheets/reports/monthly.yml"},
             source_schema="dlt_google_sheets",
-            source_table="asm__salgsmal",
+            source_table="reports__monthly",
         )
         assert called == {"called": True}
         # Legacy hook returns "legacy_google_sheets" which != source, so it's adopted.
@@ -291,9 +291,9 @@ class TestApplyNamingModuleHistorizeOverrides:
         )
         _apply_naming_module_historize_overrides(
             cfg,
-            {"config_path": "configs/google_sheets/asm/salgsmal.yml"},
+            {"config_path": "configs/google_sheets/reports/monthly.yml"},
             source_schema="dlt_google_sheets",
-            source_table="asm__salgsmal",
+            source_table="reports__monthly",
         )
         assert cfg.schema_name == "explicit_archive"
 

@@ -30,8 +30,8 @@ Tests for environment-aware dataset and table naming conventions.
   - Prod: Separate dataset per pipeline type (`dlt_google_sheets`, `dlt_filesystem`)
   - Dev: Shared dataset for all types (`dlt_dev`, `dlt_john`)
 - **Table Naming**:
-  - Prod: No pipeline type prefix (`asm__salgsmal`)
-  - Dev: With pipeline type prefix (`google_sheets__asm__salgsmal`)
+  - Prod: No pipeline type prefix (`reports__monthly`)
+  - Dev: With pipeline type prefix (`google_sheets__reports__monthly`)
 - **Priority Order**: Config override > Profile > Env var > Default
 - **Execution Plan Datasets**: Prod (`dlt_orchestration`) vs Dev (shared)
 - **Integration Tests**: Naming consistency across dev and prod environments
@@ -43,7 +43,7 @@ Tests for file-based configuration discovery and hierarchical resolution.
 
 - **Base Table Name Derivation**: Extract from config paths
   - Simple: `configs/google_sheets/data.yml` → `data`
-  - Nested: `configs/google_sheets/asm/salgsmal.yml` → `asm__salgsmal`
+  - Nested: `configs/google_sheets/reports/monthly.yml` → `reports__monthly`
   - Multiple levels: `configs/api/region/norway/oslo.yml` → `region__norway__oslo`
 - **Pipeline Type Extraction**: From config file paths
 - **Path Segment Parsing**: For hierarchical config resolution

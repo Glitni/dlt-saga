@@ -32,10 +32,10 @@ def sample_configs():
         "google_sheets": [
             PipelineConfig(
                 pipeline_group="google_sheets",
-                pipeline_name="google_sheets__asm__salgsmal_nasjonal_input_2025",
-                table_name="asm__salgsmal_nasjonal_input_2025",
-                identifier="configs/google_sheets/asm/salgsmal_nasjonal_input_2025.yml",
-                config_dict={"base_table_name": "asm__salgsmal_nasjonal_input_2025"},
+                pipeline_name="google_sheets__reports__monthly_regional_2025",
+                table_name="reports__monthly_regional_2025",
+                identifier="configs/google_sheets/reports/monthly_regional_2025.yml",
+                config_dict={"base_table_name": "reports__monthly_regional_2025"},
                 enabled=True,
                 tags=[ScheduleTag("daily"), ScheduleTag("critical")],
                 source_type="file",
@@ -76,10 +76,10 @@ def sample_configs():
         "api": [
             PipelineConfig(
                 pipeline_group="api",
-                pipeline_name="api__livewrapped__stats",
-                table_name="livewrapped__stats",
-                identifier="configs/api/livewrapped/stats.yml",
-                config_dict={"base_table_name": "livewrapped__stats"},
+                pipeline_name="api__partner__stats",
+                table_name="partner__stats",
+                identifier="configs/api/partner/stats.yml",
+                config_dict={"base_table_name": "partner__stats"},
                 enabled=True,
                 tags=[ScheduleTag("daily"), ScheduleTag("api")],
                 source_type="file",
