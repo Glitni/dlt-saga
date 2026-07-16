@@ -264,7 +264,7 @@ class HistorizeStateManager:
         drop a table it doesn't own — a coincidental name match on another
         pipeline's table is impossible, because that table was never logged
         under this pipeline_name. It also stays correct across placement /
-        ``output_table`` renames, since the log holds the name used at write
+        ``table_name`` renames, since the log holds the name used at write
         time (the real orphan) rather than the current derived name. Mirrors
         ``Destination.get_ingested_targets`` for the ingest layer.
 

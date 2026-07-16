@@ -154,10 +154,15 @@ def _fake_source_for(selected):
 
     class _FakeSource:
         def resolve_ingest_target(
-            self, config_path, *, schema_override=None, environment=None
+            self,
+            config_path,
+            *,
+            schema_override=None,
+            table_override=None,
+            environment=None,
         ):
             schema, table = targets[config_path]
-            return (schema_override or schema, table)
+            return (schema_override or schema, table_override or table)
 
         def discover(self):
             return ({"g": list(all_configs)}, {})

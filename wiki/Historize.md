@@ -83,8 +83,9 @@ saga historize --select "filesystem__snapshots__companies"
 | `valid_to_column` | `historize:` | `_dlt_valid_to` | Name of the SCD2 valid-to column in the output table |
 | `is_deleted_column` | `historize:` | `_dlt_is_deleted` | Name of the soft-delete marker column in the output table |
 | `table_format` | `historize:` | inherited | Table format for the SCD2 output table. Overrides the profile-level setting. See [Table format](#table-format) |
-| `output_schema` | `historize:` | — | Write the historized table to this schema instead of the source schema |
-| `output_table` | `historize:` | — | Explicit name for the historized output table (overrides the auto-generated name) |
+| `schema_name` | `historize:` | — | Write the historized table to this schema instead of the source schema (used directly in prod, sandbox-composed in dev). Legacy alias: `output_schema` |
+| `table_name` | `historize:` | — | Explicit name for the historized output table (overrides the auto-generated name). Legacy alias: `output_table` |
+| `table_suffix` | `historize:` | `_historized` | Suffix appended to the source table name when `table_name` is not set. Legacy alias: `output_table_suffix` |
 | `filters` | `historize:` | — | Declarative row filter applied only during historize — see [Filtering the source](#filtering-the-source) |
 | `description` | `historize:` | inherited | Table description for the historized table (overrides top-level `description`) — see [Descriptions & classification](#descriptions--classification) |
 | `classification` | `historize:` | inherited | Table classification for the historized table (overrides top-level `classification`) |
@@ -211,7 +212,7 @@ source_table: stream_writes_raw
 
 historize:
   snapshot_column: event_ts
-  output_table: stream_writes_tenant_a_historized
+  table_name: stream_writes_tenant_a_historized
   track_deletions: true
   filters:
     - column: tenant_id
@@ -236,7 +237,7 @@ filters:
 
 historize:
   snapshot_column: event_ts
-  output_table: stream_writes_tenant_a_historized
+  table_name: stream_writes_tenant_a_historized
   track_deletions: true
   # Historize-stage filter: further restrict to tenant A's history
   filters:

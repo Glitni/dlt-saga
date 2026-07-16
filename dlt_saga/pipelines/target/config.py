@@ -125,9 +125,24 @@ class TargetConfig:
         default=None,
         metadata={
             "description": (
-                "Schema/dataset name override for this pipeline. Defaults to "
-                "environment-aware naming (dlt_<group> in prod, the dev schema "
-                "otherwise)."
+                "Schema/dataset name override for this pipeline. Used directly "
+                "in prod; in dev it is composed with the developer sandbox "
+                "(<sandbox>_<schema_name>) so a shared config stays isolated "
+                "per developer. Defaults to environment-aware naming "
+                "(dlt_<group> in prod, the dev schema otherwise)."
+            ),
+            "pattern": "^[a-zA-Z0-9_]+$",
+        },
+    )
+
+    table_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Table name override for this pipeline. Used directly in prod; "
+                "in dev it is group-prefixed (<group>__<table_name>) to stay "
+                "disambiguated within the shared dev schema. Defaults to "
+                "environment-aware naming derived from the config path."
             ),
             "pattern": "^[a-zA-Z0-9_]+$",
         },
@@ -377,6 +392,7 @@ class TargetConfig:
     def __post_init__(self):
         self.persist_docs = PersistDocs.from_value(self.persist_docs)
         self._validate_schema_name()
+        self._validate_table_name()
         self._validate_destination_type()
         self._validate_column_identifiers()
         self._validate_insert_api()
@@ -394,6 +410,16 @@ class TargetConfig:
         if self.schema_name and not re.match(pattern, self.schema_name):
             raise ValueError(
                 f"schema_name '{self.schema_name}' must match pattern {pattern}"
+            )
+
+    def _validate_table_name(self):
+        """Validate the table_name pattern if provided."""
+        import re
+
+        pattern = r"^[a-zA-Z0-9_]+$"
+        if self.table_name and not re.match(pattern, self.table_name):
+            raise ValueError(
+                f"table_name '{self.table_name}' must match pattern {pattern}"
             )
 
     def _validate_column_identifiers(self):

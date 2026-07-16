@@ -40,7 +40,7 @@ Users override any subset of these defaults by pointing
 module that defines one or more of:
 
 - ``generate_schema_name(segments, environment, default_schema, *, layer="ingest", custom_schema_name=None) -> str``
-- ``generate_table_name(segments, environment, *, layer="ingest") -> str``
+- ``generate_table_name(segments, environment, *, layer="ingest", custom_table_name=None) -> str``
 - ``generate_target_location(segments, environment, default_storage_root, *, layer="ingest", schema=None, table=None) -> Optional[str]``
 
 Missing functions fall back to the defaults below. Modules whose hook
@@ -210,20 +210,34 @@ def default_generate_schema_name(
 
 
 def default_generate_table_name(
-    segments: List[str], environment: str, *, layer: str = "ingest"
+    segments: List[str],
+    environment: str,
+    *,
+    layer: str = "ingest",
+    custom_table_name: Optional[str] = None,
 ) -> str:
     """Default table name generation from config identifier segments.
 
-    Prod: ``segments[1:]`` joined with ``__`` (or ``segments[0]`` when there's
-    only one segment), e.g. ``"asm__salgsmal"``.
-    Dev: ``"{segments[0]}__{prod_name}"``, e.g. ``"google_sheets__asm__salgsmal"``.
+    Without a ``custom_table_name`` override:
+
+    - Prod: ``segments[1:]`` joined with ``__`` (or ``segments[0]`` when there's
+      only one segment), e.g. ``"reports__monthly"``.
+    - Dev: ``"{segments[0]}__{prod_name}"``, e.g. ``"google_sheets__reports__monthly"``.
+
+    With a ``custom_table_name`` override (a config's ``table_name:``), the
+    override replaces the derived base name and is composed per environment,
+    mirroring ``schema_name``:
+
+    - Prod: the override is used directly (``table_name: orders`` → ``orders``).
+    - Dev: the override is group-prefixed (``google_sheets__orders``) so it
+      stays disambiguated within the shared dev schema.
 
     Every segment (group and inner) is run through dlt's snake_case
     normalization so the names are safe SQL identifiers and match what dlt
     creates (e.g. ``My-API`` / ``MyAPI`` → ``my_api``).
 
     The default ignores ``layer``: the historized table's name is derived
-    by ``HistorizeConfig.output_table_suffix`` (or ``placement: schema_suffix``)
+    by ``HistorizeConfig.table_suffix`` (or ``placement: schema_suffix``)
     rather than by re-running this hook. A custom naming module that
     returns a distinct name for ``layer="historize"`` is honoured by the
     historize factory and overrides the suffix-based default.
@@ -233,14 +247,17 @@ def default_generate_table_name(
             ``"default_data"``.
         environment: Current environment (``"prod"`` or ``"dev"``).
         layer: ``"ingest"`` (default) or ``"historize"``. Ignored here.
+        custom_table_name: Explicit ``table_name:`` override, or ``None``.
     """
     del layer  # default behavior is layer-agnostic
     if not segments:
-        return "default_data"
+        return custom_table_name or "default_data"
 
     first_segment = normalize_identifier(segments[0])
 
-    if len(segments) == 1:
+    if custom_table_name:
+        base_name = custom_table_name
+    elif len(segments) == 1:
         base_name = normalize_identifier(segments[0])
     elif len(segments) == 2:
         base_name = normalize_identifier(segments[1])

@@ -240,8 +240,8 @@ class TestHistorizeOnlyCollisionGuard:
                     write_disposition: historize
                     primary_key: [id]
                     historize:
-                      output_schema: archive
-                      output_table: customer_orders
+                      schema_name: archive
+                      table_name: customer_orders
                     """
                 )
             )
