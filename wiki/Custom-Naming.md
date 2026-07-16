@@ -69,6 +69,7 @@ def generate_schema_name(
     default_schema: str,
     *,
     layer: str = "ingest",
+    custom_schema_name: str | None = None,
 ) -> str: ...
 ```
 
@@ -77,6 +78,7 @@ Returns the schema/dataset name a pipeline writes to. Called once per layer when
 - `environment` — `"prod"` or `"dev"`. Lets you split prod/dev conventions.
 - `default_schema` — the dev-side schema the user configured (via profile or `SAGA_SCHEMA_NAME`). Useful as the dev fallback.
 - `layer` — `"ingest"` or `"historize"`.
+- `custom_schema_name` — the config's explicit `schema_name:` override, or `None`. The default composes it **per environment**: used directly in prod, and namespaced under the developer's sandbox in dev (`{default_schema}_{custom_schema_name}`) so a shared config keeps each developer isolated. Compose it differently, or ignore it, as you see fit. A hook written against the older signature (no `custom_schema_name` parameter) keeps the legacy behavior — an explicit `schema_name:` is used verbatim in both environments — until it adopts the parameter.
 
 ### `generate_table_name`
 

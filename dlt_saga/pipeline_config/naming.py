@@ -39,7 +39,7 @@ Users override any subset of these defaults by pointing
 ``naming_module: <importable.module>`` in ``saga_project.yml`` at a Python
 module that defines one or more of:
 
-- ``generate_schema_name(segments, environment, default_schema, *, layer="ingest") -> str``
+- ``generate_schema_name(segments, environment, default_schema, *, layer="ingest", custom_schema_name=None) -> str``
 - ``generate_table_name(segments, environment, *, layer="ingest") -> str``
 - ``generate_target_location(segments, environment, default_storage_root, *, layer="ingest", schema=None, table=None) -> Optional[str]``
 
@@ -134,23 +134,59 @@ def call_hook(func: Callable, /, *args: Any, **kwargs: Any) -> Any:
     return func(*args, **filtered)
 
 
+def hook_accepts_kwarg(func: Callable, name: str) -> bool:
+    """Whether a naming hook accepts keyword ``name`` (by name or via ``**kwargs``).
+
+    Used to tell a hook written against the current signature from a legacy one,
+    so a newly added keyword (e.g. ``custom_schema_name``) can be routed to hooks
+    that understand it and handled by a compatibility path for those that don't —
+    rather than being silently dropped by :func:`call_hook`. Assumes acceptance
+    when the signature can't be introspected (built-ins, C callables).
+    """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return True
+    params = sig.parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return name in params
+
+
 def default_generate_schema_name(
     segments: List[str],
     environment: str,
     default_schema: str,
     *,
     layer: str = "ingest",
+    custom_schema_name: Optional[str] = None,
 ) -> str:
     """Default schema name generation from config identifier segments.
 
-    Prod: ``dlt_{segments[0]}`` (e.g. ``dlt_google_sheets``), with the group
-    segment run through dlt's snake_case normalization so the schema matches
-    dlt's actual dataset (``configs/MyAPI/…`` → ``dlt_my_api``).
-    Dev: ``default_schema`` (from profile or ``SAGA_SCHEMA_NAME``).
+    Without a ``custom_schema_name`` override:
+
+    - Prod: ``dlt_{segments[0]}`` (e.g. ``dlt_google_sheets``), with the group
+      segment run through dlt's snake_case normalization so the schema matches
+      dlt's actual dataset (``configs/MyAPI/…`` → ``dlt_my_api``).
+    - Dev: ``default_schema`` (from profile or ``SAGA_SCHEMA_NAME``).
+
+    With a ``custom_schema_name`` override (a config's ``schema_name:``), the
+    override is composed **per environment** — the dbt ``generate_schema_name``
+    pattern:
+
+    - Prod: the override is used directly (``schema_name: analytics`` →
+      ``analytics``; it fully replaces the ``dlt_<group>`` default).
+    - Dev: the override is composed with the developer's sandbox as
+      ``{default_schema}_{custom_schema_name}`` (e.g. developer sandbox
+      ``dlt_user`` → ``dlt_user_analytics``).
+      A literal override in dev would place every developer's data in the same
+      schema — since configs are shared in git, that breaks sandbox isolation —
+      so placement is namespaced under each developer's sandbox.
 
     The default ignores ``layer``: ingest and historize share one dataset.
     Override in a custom naming module to produce distinct shapes per
-    layer (e.g. ``dlt_<group>_raw`` vs ``dlt_<group>_historized``).
+    layer (e.g. ``dlt_<group>_raw`` vs ``dlt_<group>_historized``) or to change
+    how ``custom_schema_name`` composes in dev.
 
     Args:
         segments: Ordered identifier segments. ``segments[0]`` is the group.
@@ -158,13 +194,18 @@ def default_generate_schema_name(
         environment: Current environment (``"prod"`` or ``"dev"``).
         default_schema: Dev schema name from profile/env var.
         layer: ``"ingest"`` (default) or ``"historize"``. Ignored here.
+        custom_schema_name: Explicit ``schema_name:`` override, or ``None``.
     """
     del layer  # default behavior is layer-agnostic
     if environment == "prod":
+        if custom_schema_name:
+            return custom_schema_name
         # Normalize the group through dlt's snake_case convention so the schema
         # matches dlt's actual (case-sensitive) dataset: dlt_MyAPI → dlt_my_api.
         first_segment = normalize_identifier(segments[0]) if segments else "default"
         return f"dlt_{first_segment}"
+    if custom_schema_name:
+        return f"{default_schema}_{custom_schema_name}"
     return default_schema
 
 
