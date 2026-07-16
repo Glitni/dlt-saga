@@ -163,3 +163,19 @@ class TestGoldenPath:
         parsed = _json.loads(json_lines[0])
         assert parsed["dry_run"] is True
         assert "task_count" in parsed
+
+    def test_doctor_flags_deprecated_config_key(self, tmp_path, monkeypatch):
+        """`saga doctor` advises on a legacy alias key (still-working) found in
+        the raw config, and the advisory never fails the check."""
+        monkeypatch.chdir(tmp_path)
+        run_init(no_input=True)
+
+        # Introduce a deprecated-but-aliased key in the sample config.
+        sample = tmp_path / "configs" / "filesystem" / "sample.yml"
+        sample.write_text(sample.read_text() + "\ndataset_access: []\n")
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["doctor"])
+
+        assert "Config keys" in result.output
+        assert "dataset_access → schema_access" in result.output

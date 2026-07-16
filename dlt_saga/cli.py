@@ -2882,6 +2882,87 @@ def _doctor_check_collisions(
     return False
 
 
+def _doctor_legacy_key_scan_paths(selected_configs: dict) -> List[str]:
+    """Raw YAML files to scan for deprecated keys, de-duplicated in stable order:
+    the selected config files plus ``saga_project.yml`` and ``profiles.yml``.
+    """
+    from dlt_saga.utility.cli.profiles import get_profiles_config
+
+    paths: List[str] = []
+    for config in flatten_configs(selected_configs) if selected_configs else []:
+        config_path = config.config_dict.get("config_path")
+        if config_path:
+            paths.append(config_path)
+
+    project_path = getattr(get_config_source(), "project_config_path", None)
+    if project_path:
+        paths.append(str(project_path))
+    try:
+        profiles_path = get_profiles_config().profiles_path
+        if profiles_path:
+            paths.append(str(profiles_path))
+    except Exception:
+        # Profiles are validated by their own check; a missing/broken one here
+        # isn't this advisory's concern.
+        pass
+
+    return list(dict.fromkeys(paths))
+
+
+def _doctor_scan_legacy_keys(paths: List[str]) -> dict:
+    """Map ``path -> [(legacy, canonical), ...]`` for files with deprecated keys."""
+    from dlt_saga.pipeline_config.compat import find_legacy_keys
+    from dlt_saga.utility.yaml_io import load_yaml
+
+    findings: dict = {}
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            raw = load_yaml(path)
+        except Exception:
+            continue  # a malformed file is surfaced by the config/profile checks
+        legacy = find_legacy_keys(raw)
+        if legacy:
+            findings[path] = legacy
+    return findings
+
+
+def _doctor_check_legacy_keys(
+    selected_configs: dict,
+    verbose: bool,
+    emit: Callable[..., None],
+) -> bool:
+    """Advise on deprecated config-key aliases (read-only, non-fatal).
+
+    Legacy keys still resolve at load time (see ``pipeline_config/compat.py``),
+    so this never fails the health check \u2014 it only nudges migration. Because
+    normalization happens at load, the discovered configs no longer carry the
+    legacy keys, so it scans the **raw** YAML (see
+    :func:`_doctor_legacy_key_scan_paths`).
+    """
+    findings = _doctor_scan_legacy_keys(_doctor_legacy_key_scan_paths(selected_configs))
+
+    if not findings:
+        emit("\u2713", "Config keys", "no deprecated keys")
+        return True
+
+    total = sum(len(pairs) for pairs in findings.values())
+    emit(
+        "!",
+        "Config keys",
+        f"{total} deprecated key(s) in {len(findings)} file(s) \u2014 "
+        "still work via aliases; rename when convenient",
+    )
+    for path, pairs in findings.items():
+        renames = ", ".join(
+            f"{legacy} \u2192 {canonical}" for legacy, canonical in pairs
+        )
+        typer.echo(f"        {path}: {renames}")
+    # Advisory only \u2014 deprecated-but-working keys don't fail the health check.
+    return True
+
+
 def _doctor_check_destination(
     dest_type: str,
     context: "ExecutionContext",
@@ -2993,6 +3074,8 @@ def doctor(
     ok = _doctor_check_project(verbose, _emit)
     selected_configs = _doctor_check_configs(select, context, verbose, _emit)
     ok = _doctor_check_collisions(selected_configs, verbose, _emit) and ok
+    # Advisory (never flips `ok`): nudge migration of deprecated config keys.
+    _doctor_check_legacy_keys(selected_configs, verbose, _emit)
     ok = (
         _doctor_check_destination(
             dest_type, context, selected_configs, profile_target, verbose, _emit

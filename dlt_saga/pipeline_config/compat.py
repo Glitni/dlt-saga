@@ -26,7 +26,7 @@ upgrades don't add log noise to existing setups.
 """
 
 import logging
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -83,3 +83,32 @@ def normalize_config_aliases(node: Any) -> Any:
             normalize_config_aliases(item)
 
     return node
+
+
+def find_legacy_keys(node: Any) -> List[Tuple[str, str]]:
+    """Return ``(legacy_key, canonical_key)`` pairs present in a **raw** config tree.
+
+    The mirror of :func:`normalize_config_aliases` — it walks the same way but
+    *reports* instead of rewriting. Because normalization runs at load time,
+    a loaded ``PipelineConfig`` no longer carries legacy keys; callers that want
+    to advise on deprecated keys (``saga doctor``) must scan the un-normalized
+    YAML and hand it here.
+
+    Deduplicated and sorted by the legacy key. The ``+``-prefixed inherit forms
+    are reported verbatim (e.g. ``+dataset_access`` → ``+schema_access``).
+    """
+    alias_map = dict(_ALIASES)
+    found: Dict[str, str] = {}
+
+    def _walk(n: Any) -> None:
+        if isinstance(n, dict):
+            for key, value in n.items():
+                if key in alias_map:
+                    found[key] = alias_map[key]
+                _walk(value)
+        elif isinstance(n, list):
+            for item in n:
+                _walk(item)
+
+    _walk(node)
+    return sorted(found.items())

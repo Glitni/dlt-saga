@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from dlt_saga.pipeline_config.compat import normalize_config_aliases
+from dlt_saga.pipeline_config.compat import find_legacy_keys, normalize_config_aliases
 
 
 @pytest.mark.unit
@@ -109,3 +109,39 @@ class TestNormalizeConfigAliases:
         assert normalize_config_aliases("string") == "string"
         assert normalize_config_aliases(42) == 42
         assert normalize_config_aliases(None) is None
+
+
+@pytest.mark.unit
+class TestFindLegacyKeys:
+    def test_none_when_only_canonical_keys(self):
+        assert (
+            find_legacy_keys({"schema_name": "x", "historize": {"table_name": "y"}})
+            == []
+        )
+
+    def test_finds_top_level_and_nested(self):
+        raw = {
+            "dataset_access": ["OWNER:x"],
+            "historize": {"output_schema": "archive", "output_table": "orders"},
+        }
+        assert find_legacy_keys(raw) == [
+            ("dataset_access", "schema_access"),
+            ("output_schema", "schema_name"),
+            ("output_table", "table_name"),
+        ]
+
+    def test_reports_plus_prefixed_form(self):
+        assert find_legacy_keys({"pipelines": {"+dataset_access": ["x"]}}) == [
+            ("+dataset_access", "+schema_access")
+        ]
+
+    def test_deduplicates_repeated_keys(self):
+        raw = {
+            "google_sheets": {"historize": {"output_table": "a"}},
+            "filesystem": {"historize": {"output_table": "b"}},
+        }
+        assert find_legacy_keys(raw) == [("output_table", "table_name")]
+
+    def test_walks_lists(self):
+        raw = {"items": [{"output_schema": "a"}, {"ok": 1}]}
+        assert find_legacy_keys(raw) == [("output_schema", "schema_name")]
