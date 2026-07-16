@@ -62,8 +62,8 @@ class TestStorageUriDefault:
         monkeypatch.chdir(tmp_path)
         dest = _make_iceberg_destination()
         assert (
-            dest._resolve_storage_uri("dlt_google_sheets", "salgsmal", layer="ingest")
-            == "gs://bucket/lake/dlt_google_sheets/salgsmal/"
+            dest._resolve_storage_uri("dlt_google_sheets", "monthly", layer="ingest")
+            == "gs://bucket/lake/dlt_google_sheets/monthly/"
         )
 
     def test_historize_uri_default(self, tmp_path, monkeypatch):
@@ -71,10 +71,8 @@ class TestStorageUriDefault:
         dest = _make_iceberg_destination()
         # Default impl is layer-agnostic — same shape either way.
         assert (
-            dest._resolve_storage_uri(
-                "dlt_google_sheets", "salgsmal", layer="historize"
-            )
-            == "gs://bucket/lake/dlt_google_sheets/salgsmal/"
+            dest._resolve_storage_uri("dlt_google_sheets", "monthly", layer="historize")
+            == "gs://bucket/lake/dlt_google_sheets/monthly/"
         )
 
     def test_storage_path_without_trailing_slash(self, tmp_path, monkeypatch):

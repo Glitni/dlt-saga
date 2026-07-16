@@ -105,9 +105,9 @@ These are the attributes and methods available to pipeline implementations.
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `self.config_dict` | `dict` | Raw pipeline configuration from YAML |
-| `self.base_table_name` | `str` | Table name from config path (e.g., `livewrapped__stats`) |
+| `self.base_table_name` | `str` | Table name from config path (e.g., `partner__stats`) |
 | `self.table_name` | `str` | Environment-aware table name |
-| `self.pipeline_name` | `str` | Full pipeline name (e.g., `api__livewrapped__stats`) |
+| `self.pipeline_name` | `str` | Full pipeline name (e.g., `api__partner__stats`) |
 | `self.pipeline` | `dlt.Pipeline` | The dlt pipeline instance |
 | `self.destination` | `Destination` | The destination implementation |
 | `self.target_writer` | `TargetWriter` | Handles write disposition, merge keys, dedup |

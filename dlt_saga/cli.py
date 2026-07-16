@@ -1364,7 +1364,7 @@ def historize(
 
     Examples:
         saga historize --select "tag:daily"                          # Daily pipelines
-        saga historize --select "filesystem__proffdata__*"           # Specific pipeline
+        saga historize --select "filesystem__vendor__*"           # Specific pipeline
         saga historize --full-refresh --select "..."                 # Full rebuild
         saga historize --partial-refresh --select "..."              # GDPR-safe rebuild
         saga historize --historize-from 2025-07-01 --select "..."    # From a specific date

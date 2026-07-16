@@ -28,7 +28,7 @@ Every hook receives an ordered `segments: list[str]` that identifies the pipelin
 - `segments[-1]` is the **base name** (the YAML filename without extension).
 - Anything in between adds organisational depth.
 
-For `configs/google_sheets/asm/salgsmal.yml`, segments are `["google_sheets", "asm", "salgsmal"]`. Other config sources (database-backed, SharePoint-backed, etc.) produce their own segments from whatever identifier shape they expose — the hooks don't care where segments came from.
+For `configs/google_sheets/reports/monthly.yml`, segments are `["google_sheets", "reports", "monthly"]`. Other config sources (database-backed, SharePoint-backed, etc.) produce their own segments from whatever identifier shape they expose — the hooks don't care where segments came from.
 
 ## The `layer` keyword
 
