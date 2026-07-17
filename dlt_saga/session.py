@@ -530,9 +530,10 @@ class Session:
     ) -> List["ValidationResult"]:
         """Validate selected pipeline configs without executing anything.
 
-        Checks write_disposition, adapter resolution, source config
-        instantiation, and historize config for each selected pipeline.
-        Read-only and offline — no warehouse connection or credentials are
+        Per config: checks write_disposition, adapter resolution, source config
+        instantiation, and historize config. Across the selection: flags target
+        collisions (two pipelines resolving to one table) and deprecated config
+        keys. Read-only and offline — no warehouse connection or credentials are
         required. The programmatic counterpart of ``saga validate``.
 
         Args:
@@ -541,15 +542,19 @@ class Session:
         Returns:
             One :class:`~dlt_saga.validate.ValidationResult` per selected
             config, each carrying ``errors`` / ``warnings`` and an ``is_valid``
-            property. Empty list when no config matches the selectors.
+            property, plus one synthetic result per project/profile file that
+            carries deprecated keys. Empty list when no config matches the
+            selectors.
         """
-        from dlt_saga.validate import validate_pipeline_config
+        from dlt_saga.validate import validate_pipeline_configs
 
         # Resolve within the profile context so schema-name resolution matches a
         # real run (mirrors discover()); no auth — validation never connects.
         with execution_context_scope(self._profile_target):
             configs, _ = self._discover_and_select(select)
-            return [validate_pipeline_config(c) for c in flatten_configs(configs)]
+            return validate_pipeline_configs(
+                flatten_configs(configs), self._config_source
+            )
 
     def report(
         self,

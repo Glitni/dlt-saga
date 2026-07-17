@@ -1,17 +1,18 @@
 """Health-check helpers for the ``saga doctor`` command.
 
-Each ``_doctor_*`` function performs one read-only check (profile, project
-config, pipeline discovery, target collisions, deprecated config keys,
-destination connectivity, plugin imports) and reports its result through an
+Each ``_doctor_*`` function performs one read-only check of the *environment*
+(profile, project config, pipeline discovery with resolved schema, destination
+connectivity, plugin imports) and reports its result through an
 ``emit(symbol, label, detail)`` callback so the command body stays a thin
 orchestrator. Checks never mutate state; the connectivity probe opens and
 immediately closes a connection.
 
-Extracted from ``cli.py`` (module-boundary cleanup); behavior unchanged. The
-``doctor`` command itself stays in ``cli.py`` and calls these helpers.
+Config *correctness* (write_disposition, adapters, source fields, historize
+config, target collisions, deprecated keys) is offline and lives in
+``dlt_saga.validate`` behind ``saga validate`` — doctor is the connectivity /
+environment counterpart (dbt debug to validate's dbt parse).
 """
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
 
@@ -21,7 +22,6 @@ from dlt_saga.utility.cli.common import (
     discover_and_select_configs,
     execute_with_impersonation,
     flatten_configs,
-    get_config_source,
     load_profile_config,
     setup_execution_context,
 )
@@ -179,149 +179,6 @@ def _doctor_check_configs(
         if verbose:
             typer.echo(traceback.format_exc())
         return {}
-
-
-def _doctor_check_collisions(
-    selected_configs: dict,
-    verbose: bool,
-    emit: Callable[..., None],
-) -> bool:
-    """Flag pipelines that resolve to the same destination table.
-
-    Read-only counterpart to the run-time guard. Detection is project-wide
-    (:func:`collisions_for_selection`), so ``saga doctor --select <one>`` still
-    finds a collision with an unselected pipeline — the CI pattern of running
-    doctor over just the changed configs surfaces what they collide with. The
-    default (whole-project) run reports every collision. Reuses the configs
-    already discovered by :func:`_doctor_check_configs`, so it costs no extra
-    discovery.
-    """
-    from dlt_saga.utility.collisions import collisions_for_selection
-    from dlt_saga.utility.naming import get_environment
-
-    flat = flatten_configs(selected_configs) if selected_configs else []
-    if not flat:
-        return True
-
-    # doctor is the comprehensive audit: check the current environment and prod
-    # (deduped), so a dev run flags both dev-only collisions and latent prod
-    # ones before they ship.
-    current_env = get_environment()
-    environments = [current_env] if current_env == "prod" else [current_env, "prod"]
-
-    try:
-        collisions = collisions_for_selection(
-            flat,
-            get_config_source(),
-            environments=environments,
-            check_ingest=True,
-            check_historize=True,
-        )
-    except Exception as e:
-        # Never let the diagnosis itself crash the health check.
-        emit("!", "Target collisions", f"could not check: {e}")
-        return True
-
-    if not collisions:
-        emit(
-            "✓",
-            "Target collisions",
-            "none — each pipeline maps to its own table",
-        )
-        return True
-
-    total = sum(len(c.pipelines) for c in collisions)
-    emit(
-        "✗",
-        "Target collisions",
-        f"{len(collisions)} shared target(s) across {total} pipeline(s)",
-    )
-    for collision in collisions:
-        target = ".".join(p for p in (collision.schema, collision.display_table) if p)
-        typer.echo(
-            f"        {target} ({collision.layer}, {collision.env_label}) "
-            f"← {', '.join(collision.pipelines)}"
-        )
-    return False
-
-
-def _doctor_legacy_key_scan_paths(selected_configs: dict) -> List[str]:
-    """Raw YAML files to scan for deprecated keys, de-duplicated in stable order:
-    the selected config files plus ``saga_project.yml`` and ``profiles.yml``.
-    """
-    from dlt_saga.utility.cli.profiles import get_profiles_config
-
-    paths: List[str] = []
-    for config in flatten_configs(selected_configs) if selected_configs else []:
-        config_path = config.config_dict.get("config_path")
-        if config_path:
-            paths.append(config_path)
-
-    project_path = getattr(get_config_source(), "project_config_path", None)
-    if project_path:
-        paths.append(str(project_path))
-    try:
-        profiles_path = get_profiles_config().profiles_path
-        if profiles_path:
-            paths.append(str(profiles_path))
-    except Exception:
-        # Profiles are validated by their own check; a missing/broken one here
-        # isn't this advisory's concern.
-        pass
-
-    return list(dict.fromkeys(paths))
-
-
-def _doctor_scan_legacy_keys(paths: List[str]) -> dict:
-    """Map ``path -> [(legacy, canonical), ...]`` for files with deprecated keys."""
-    from dlt_saga.pipeline_config.compat import find_legacy_keys
-    from dlt_saga.utility.yaml_io import load_yaml
-
-    findings: dict = {}
-    for path in paths:
-        if not os.path.exists(path):
-            continue
-        try:
-            raw = load_yaml(path)
-        except Exception:
-            continue  # a malformed file is surfaced by the config/profile checks
-        legacy = find_legacy_keys(raw)
-        if legacy:
-            findings[path] = legacy
-    return findings
-
-
-def _doctor_check_legacy_keys(
-    selected_configs: dict,
-    verbose: bool,
-    emit: Callable[..., None],
-) -> bool:
-    """Advise on deprecated config-key aliases (read-only, non-fatal).
-
-    Legacy keys still resolve at load time (see ``pipeline_config/compat.py``),
-    so this never fails the health check — it only nudges migration. Because
-    normalization happens at load, the discovered configs no longer carry the
-    legacy keys, so it scans the **raw** YAML (see
-    :func:`_doctor_legacy_key_scan_paths`).
-    """
-    findings = _doctor_scan_legacy_keys(_doctor_legacy_key_scan_paths(selected_configs))
-
-    if not findings:
-        emit("✓", "Config keys", "no deprecated keys")
-        return True
-
-    total = sum(len(pairs) for pairs in findings.values())
-    emit(
-        "!",
-        "Config keys",
-        f"{total} deprecated key(s) in {len(findings)} file(s) — "
-        "still work via aliases; rename when convenient",
-    )
-    for path, pairs in findings.items():
-        renames = ", ".join(f"{legacy} → {canonical}" for legacy, canonical in pairs)
-        typer.echo(f"        {path}: {renames}")
-    # Advisory only — deprecated-but-working keys don't fail the health check.
-    return True
 
 
 def _doctor_check_destination(

@@ -291,6 +291,97 @@ def list_pipelines(
     print(output)
 
 
+def _report_result_details(results: list) -> None:
+    """Print per-config errors and warnings.
+
+    Collision findings are omitted here — they're inherently cross-config and
+    shown once, grouped, by :func:`_report_project_check_status`. Synthetic
+    ``check`` results (a project-wide check that couldn't run) are likewise left
+    to the status line.
+    """
+    from dlt_saga.validate import is_collision_finding
+
+    for result in results:
+        if result.kind == "check":
+            continue
+        visible_errors = [e for e in result.errors if not is_collision_finding(e)]
+        if visible_errors:
+            logger.error("%s:", result.pipeline_name)
+            for error in visible_errors:
+                logger.error("  - %s", error)
+        elif result.warnings:
+            logger.warning("%s:", result.pipeline_name)
+        for warning in result.warnings:
+            logger.warning("  - %s", warning)
+
+
+def _report_project_check_status(results: list) -> None:
+    """Emit an affirmative status for each project-wide check.
+
+    The collision and deprecated-key checks always run, so a clean project should
+    confirm they were checked rather than showing nothing. Collisions are grouped:
+    one line per shared target (naming every participant), not one per pipeline.
+    """
+    from dlt_saga.validate import (
+        COLLISION_FINDING_PREFIX,
+        collision_check_failed,
+        collision_findings,
+        deprecated_key_count,
+    )
+
+    if collision_check_failed(results):
+        logger.warning("Target collisions: check could not run (see warnings above)")
+    else:
+        collisions = collision_findings(results)
+        if collisions:
+            logger.error("Target collisions: %d shared target(s)", len(collisions))
+            for message in collisions:
+                logger.error(
+                    "  - %s", message.removeprefix(COLLISION_FINDING_PREFIX).strip()
+                )
+        else:
+            logger.info("Target collisions: none")
+
+    deprecated = deprecated_key_count(results)
+    if deprecated:
+        logger.warning(
+            "Deprecated config keys: %d found (advisory — aliases still work)",
+            deprecated,
+        )
+    else:
+        logger.info("Deprecated config keys: none")
+
+
+def _report_validation_results(results: list) -> None:
+    """Render validation results and exit non-zero if any pipeline has errors.
+
+    Prints per-item detail, then the affirmative per-check status, then an overall
+    verdict counting only real pipeline configs (``kind == "pipeline"``).
+    """
+    _report_result_details(results)
+    _report_project_check_status(results)
+
+    pipelines = [r for r in results if r.kind == "pipeline"]
+    total = len(pipelines)
+    errored = sum(1 for r in pipelines if r.errors)
+    if errored:
+        logger.info(
+            "\nValidation complete: %d/%d valid, %d with error(s)",
+            total - errored,
+            total,
+            errored,
+        )
+        raise typer.Exit(1)
+
+    warned = sum(1 for r in pipelines if r.warnings)
+    if warned:
+        logger.info(
+            "All %d pipeline config(s) valid — %d with warning(s)", total, warned
+        )
+    else:
+        logger.info("All %d pipeline config(s) valid", total)
+
+
 @app.command("validate")
 def validate_configs(
     select: Optional[List[str]] = typer.Option(
@@ -306,8 +397,11 @@ def validate_configs(
 ):
     """Validate pipeline configs without executing anything.
 
-    Checks write_disposition, adapter resolution, source config
-    fields, and historize config for each selected pipeline.
+    Per pipeline: checks write_disposition, adapter resolution, source config
+    fields, and historize config. Across the selection: flags target collisions
+    (two pipelines resolving to one table) and deprecated config keys. Fully
+    offline — no warehouse connection or credentials. This is the config
+    correctness gate (``saga doctor`` covers environment/connectivity).
 
     Examples:
         saga validate                                       # Validate all configs
@@ -329,37 +423,7 @@ def validate_configs(
         logger.error("No pipeline configs found matching selectors")
         raise typer.Exit(1)
 
-    has_errors = False
-    valid_count = 0
-    for result in results:
-        if result.is_valid and not result.warnings:
-            valid_count += 1
-            continue
-
-        # Print pipeline header for configs with issues
-        if result.errors:
-            has_errors = True
-            logger.error("%s:", result.pipeline_name)
-            for error in result.errors:
-                logger.error("  - %s", error)
-        elif result.warnings:
-            logger.warning("%s:", result.pipeline_name)
-
-        for warning in result.warnings:
-            logger.warning("  - %s", warning)
-
-    total = len(results)
-    invalid = total - valid_count
-    if has_errors:
-        logger.info(
-            "\nValidation complete: %d/%d valid, %d with issues",
-            valid_count,
-            total,
-            invalid,
-        )
-        raise typer.Exit(1)
-
-    logger.info("All %d pipeline config(s) valid", total)
+    _report_validation_results(results)
 
 
 @app.command()
@@ -1774,11 +1838,14 @@ def doctor(
         ),
     ),
 ):
-    """Validate configuration and test destination connectivity.
+    """Check environment health and destination connectivity.
 
     Checks the active dlt-saga build, profiles, project config, pipeline
     discovery (with resolved schema), destination connection, and registered
-    pipeline plugins — similar to dbt debug.
+    pipeline plugins — similar to dbt debug: "is my environment set up so I can
+    run?". Config *correctness* (write_disposition, adapters, source fields,
+    historize config, target collisions, deprecated keys) is offline and lives
+    in ``saga validate``.
 
     Use ``--select`` to print the fully resolved ``project.schema.table`` for
     specific pipelines without running them — handy for confirming a profile's
@@ -1793,10 +1860,8 @@ def doctor(
     from dlt_saga.pipelines.registry import _NAMESPACE_REGISTRY, _ensure_packages_loaded
     from dlt_saga.utility.cli.doctor import (
         _doctor_check,
-        _doctor_check_collisions,
         _doctor_check_configs,
         _doctor_check_destination,
-        _doctor_check_legacy_keys,
         _doctor_check_profile,
         _doctor_check_project,
         _doctor_emit_version,
@@ -1816,9 +1881,6 @@ def doctor(
     )
     ok = _doctor_check_project(verbose, _emit)
     selected_configs = _doctor_check_configs(select, context, verbose, _emit)
-    ok = _doctor_check_collisions(selected_configs, verbose, _emit) and ok
-    # Advisory (never flips `ok`): nudge migration of deprecated config keys.
-    _doctor_check_legacy_keys(selected_configs, verbose, _emit)
     ok = (
         _doctor_check_destination(
             dest_type, context, selected_configs, profile_target, verbose, _emit

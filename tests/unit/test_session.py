@@ -1148,9 +1148,10 @@ class TestSessionValidate:
         session = Session.__new__(Session)
         session._profile_target = None
         session._auth_provider = MagicMock()
+        session._config_source = MagicMock()
         return session
 
-    def test_returns_one_result_per_config(self):
+    def test_delegates_to_validate_pipeline_configs(self):
         from dlt_saga.validate import ValidationResult
 
         session = self._session()
@@ -1159,14 +1160,17 @@ class TestSessionValidate:
         )
         with (
             patch(
-                "dlt_saga.validate.validate_pipeline_config",
-                side_effect=lambda c: ValidationResult(pipeline_name="p"),
+                "dlt_saga.validate.validate_pipeline_configs",
+                return_value=[ValidationResult("a"), ValidationResult("b")],
             ) as validate,
             patch("dlt_saga.session.execution_context_scope"),
         ):
             results = session.validate(select=["tag:x"])
         assert len(results) == 2
-        assert validate.call_count == 2
+        # One batch call with the flattened configs + the session's config source.
+        assert validate.call_count == 1
+        flat_arg = validate.call_args.args[0]
+        assert len(flat_arg) == 2
 
     def test_empty_selection_returns_empty_list(self):
         session = self._session()
