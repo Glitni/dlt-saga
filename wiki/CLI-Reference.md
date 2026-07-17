@@ -25,7 +25,14 @@ saga list [OPTIONS]
 
 ## saga validate
 
-Validate pipeline configs without executing anything.
+Validate pipeline configs without executing anything — the **config-correctness gate** (similar to `dbt parse`). Fully offline: no warehouse connection or credentials, so it's the right check to run in CI on every pull request. Exits with code 1 if any config has an error (or no configs match the selectors).
+
+Per pipeline it checks: `write_disposition` is a known value, the `adapter` resolves to an implementation, the source config fields instantiate, and the historize block is valid. Across the selection it also runs two **project-wide** checks:
+
+- **Target collisions** — two pipelines resolving to the same destination table (an error; a config must map to exactly one table). Detection is project-wide, so a selected pipeline colliding with a non-selected enabled one is still flagged, naming both. Resolved in the current environment **and** prod, so a dev run catches latent prod-only collisions too. See [Custom Naming → Avoiding target collisions](Custom-Naming#avoiding-target-collisions).
+- **Deprecated config keys** — an advisory scan of the raw YAML of the selected configs, `saga_project.yml`, and `profiles.yml` for legacy alias keys (e.g. `output_table` → `table_name`, `dataset_access` → `schema_access`). These still resolve via read-time aliases, so they're reported as **warnings** and **never fail** the command — just a nudge to rename. This is the one check that reads the un-normalized files, since aliases are rewritten at load time.
+
+Environment/connectivity health (does the profile resolve, can we reach the destination) is a separate concern — see [`saga doctor`](#saga-doctor).
 
 ```bash
 saga validate [OPTIONS]
@@ -272,13 +279,11 @@ saga info [OPTIONS]
 
 ## saga doctor
 
-Validate configuration and diagnose the environment (read-only) — similar to `dbt debug`. Checks the active dlt-saga build, profiles, project config, pipeline discovery (with resolved schema), **target collisions** (pipelines that resolve to the same destination table), **deprecated config keys** (an advisory — see below), destination connectivity, and that registered pipeline plugins are importable. Exits with code 1 if a check fails.
+Check environment health and destination connectivity (read-only) — similar to `dbt debug`: *"is my environment set up so I can run?"*. Checks the active dlt-saga build, profiles, project config, pipeline discovery (with resolved schema), destination connectivity, and that registered pipeline plugins are importable. Exits with code 1 if a check fails.
 
-The target-collision check is the read-only counterpart to the run-time guard, and both detect **project-wide** (a config must map to exactly one destination table across the whole project). `saga ingest` / `saga historize` / `saga run` (and the orchestrator plan) fail before touching the warehouse when a *selected* pipeline shares a target with any enabled config — naming the co-claimant even if it isn't in the run — resolving in the environment the run targets. `doctor` runs the same check across the whole project, resolving in the current environment **and** prod and labelling each collision with the environment(s) it hits, so it catches latent prod collisions from a dev run plus dev-only ones a custom `naming_module` can create. Detection stays project-wide even under `--select`. See [Custom Naming → Avoiding target collisions](Custom-Naming#avoiding-target-collisions).
+`doctor` is the **environment** counterpart to [`saga validate`](#saga-validate)'s **config-correctness** checks — the two split on whether a warehouse connection is needed. Config correctness (write_disposition, adapters, source fields, historize config, **target collisions**, **deprecated keys**) is offline and lives in `saga validate`; `doctor` requires credentials and proves you can actually reach the configured destination. Run `validate` in CI on every PR; run `doctor` when setting up an environment or when a run won't connect.
 
-The **deprecated-config-keys** check is an advisory: it scans the raw YAML of the selected configs, `saga_project.yml`, and `profiles.yml` for legacy alias keys (e.g. `output_table` → `table_name`, `dataset_access` → `schema_access`) and lists each with its current name. These keys still resolve via read-time aliases, so the advisory **never fails** `doctor` (it doesn't affect the exit code) — it's just a nudge to rename when convenient. Because aliases are rewritten at load time, this is the one check that reads the un-normalized files rather than the loaded config.
-
-When scoped with `--select`, it also points you at `saga maintenance --dry-run` for internal-table upkeep (clustering + log-growth cleanup). `doctor` itself does **not** scan those tables — measuring clustering drift and reclaimable rows is deferred to the maintenance preview, so `doctor` stays a fast connectivity/config health check.
+Use `--select` to print the fully resolved `project.schema.table` for specific pipelines without running them — handy for confirming a profile's `env_var()` schema resolved as expected, or which build is active after switching between an editable install and the pinned release. When scoped with `--select`, it also points you at `saga maintenance --dry-run` for internal-table upkeep (clustering + log-growth cleanup). `doctor` itself does **not** scan those tables — measuring clustering drift and reclaimable rows is deferred to the maintenance preview, so `doctor` stays a fast connectivity health check.
 
 ```bash
 saga doctor [OPTIONS]
