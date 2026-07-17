@@ -164,9 +164,9 @@ class TestGoldenPath:
         assert parsed["dry_run"] is True
         assert "task_count" in parsed
 
-    def test_doctor_flags_deprecated_config_key(self, tmp_path, monkeypatch):
-        """`saga doctor` advises on a legacy alias key (still-working) found in
-        the raw config, and the advisory never fails the check."""
+    def test_validate_flags_deprecated_config_key(self, tmp_path, monkeypatch, caplog):
+        """`saga validate` advises on a legacy alias key (still-working) found in
+        the raw config, and the advisory never fails validation."""
         monkeypatch.chdir(tmp_path)
         run_init(no_input=True)
 
@@ -175,7 +175,11 @@ class TestGoldenPath:
         sample.write_text(sample.read_text() + "\ndataset_access: []\n")
 
         runner = CliRunner()
-        result = runner.invoke(app, ["doctor"])
+        with caplog.at_level("WARNING", logger="dlt_saga.cli"):
+            result = runner.invoke(app, ["validate"])
 
-        assert "Config keys" in result.output
-        assert "dataset_access → schema_access" in result.output
+        # Advisory only — a deprecated-but-aliased key never fails validation.
+        assert result.exit_code == 0, result.output
+        assert "Deprecated config keys" in caplog.text
+        assert "dataset_access" in caplog.text
+        assert "schema_access" in caplog.text

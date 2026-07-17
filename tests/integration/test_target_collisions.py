@@ -122,26 +122,27 @@ class TestIngestCollisionGuard:
             sys.path.remove(str(tmp_path))
             sys.modules.pop("collide_naming", None)
 
-    def test_doctor_reports_collision(self, tmp_path, monkeypatch):
+    def test_validate_reports_collision(self, tmp_path, monkeypatch, caplog):
         monkeypatch.chdir(tmp_path)
         _scaffold_colliding_project(tmp_path)
         sys.path.insert(0, str(tmp_path))
         try:
             runner = CliRunner()
-            result = runner.invoke(app, ["doctor"])
+            with caplog.at_level("ERROR", logger="dlt_saga.cli"):
+                result = runner.invoke(app, ["validate"])
 
-            # doctor exits non-zero when a check fails.
+            # validate exits non-zero when a config has errors (a collision).
             assert result.exit_code == 1, result.output
-            assert "Target collisions" in result.output
-            assert "shared_table" in result.output
+            assert "Target collisions" in caplog.text
+            assert "shared_table" in caplog.text
         finally:
             sys.path.remove(str(tmp_path))
             sys.modules.pop("collide_naming", None)
 
-    def test_doctor_select_one_finds_unselected_co_claimant(
-        self, tmp_path, monkeypatch
+    def test_validate_select_one_finds_unselected_co_claimant(
+        self, tmp_path, monkeypatch, caplog
     ):
-        # CI pattern: run doctor over just the changed pipeline. Detection is
+        # CI pattern: run validate over just the changed pipeline. Detection is
         # project-wide, so it still surfaces the collision with the unselected
         # pipeline that shares the target.
         monkeypatch.chdir(tmp_path)
@@ -149,20 +150,23 @@ class TestIngestCollisionGuard:
         sys.path.insert(0, str(tmp_path))
         try:
             runner = CliRunner()
-            result = runner.invoke(app, ["doctor", "--select", "filesystem__alpha"])
+            with caplog.at_level("ERROR", logger="dlt_saga.cli"):
+                result = runner.invoke(
+                    app, ["validate", "--select", "filesystem__alpha"]
+                )
 
             assert result.exit_code == 1, result.output
-            assert "Target collisions" in result.output
-            assert "filesystem__alpha" in result.output
-            assert "filesystem__beta" in result.output  # unselected co-claimant
+            assert "Target collisions" in caplog.text
+            assert "filesystem__alpha" in caplog.text
+            assert "filesystem__beta" in caplog.text  # unselected co-claimant
         finally:
             sys.path.remove(str(tmp_path))
             sys.modules.pop("collide_naming", None)
 
 
 class TestEnvironmentConsistentDetection:
-    """The guard's verdict is environment-invariant: a collision real in prod is
-    flagged even when ``saga doctor`` runs in dev (the default target).
+    """The check's verdict is environment-invariant: a collision real in prod is
+    flagged even when ``saga validate`` runs in dev (the default target).
     """
 
     def _scaffold_prod_only_collision(self, tmp_path):
@@ -203,21 +207,24 @@ class TestEnvironmentConsistentDetection:
             )
         )
 
-    def test_doctor_in_dev_flags_prod_only_collision(self, tmp_path, monkeypatch):
+    def test_validate_in_dev_flags_prod_only_collision(
+        self, tmp_path, monkeypatch, caplog
+    ):
         monkeypatch.chdir(tmp_path)
         self._scaffold_prod_only_collision(tmp_path)
 
         runner = CliRunner()
-        # Default target is dev; the guard still resolves as-of-prod.
-        result = runner.invoke(app, ["doctor"])
+        # Default target is dev; the check still resolves as-of-prod.
+        with caplog.at_level("ERROR", logger="dlt_saga.cli"):
+            result = runner.invoke(app, ["validate"])
 
         assert result.exit_code == 1, result.output
-        assert "Target collisions" in result.output
+        assert "Target collisions" in caplog.text
         # Prod-only collision (dev names are group-prefixed and distinct), so
         # the report pins it to prod.
-        assert "dlt_filesystem.x__report (ingest, prod)" in result.output
-        assert "api__x__report" in result.output
-        assert "filesystem__x__report" in result.output
+        assert "dlt_filesystem.x__report (ingest, prod)" in caplog.text
+        assert "api__x__report" in caplog.text
+        assert "filesystem__x__report" in caplog.text
 
 
 class TestHistorizeOnlyCollisionGuard:
@@ -246,13 +253,16 @@ class TestHistorizeOnlyCollisionGuard:
                 )
             )
 
-    def test_doctor_reports_historize_only_collision(self, tmp_path, monkeypatch):
+    def test_validate_reports_historize_only_collision(
+        self, tmp_path, monkeypatch, caplog
+    ):
         monkeypatch.chdir(tmp_path)
         self._scaffold_historize_only_collision(tmp_path)
 
         runner = CliRunner()
-        result = runner.invoke(app, ["doctor"])
+        with caplog.at_level("ERROR", logger="dlt_saga.cli"):
+            result = runner.invoke(app, ["validate"])
 
         assert result.exit_code == 1, result.output
-        assert "Target collisions" in result.output
-        assert "archive.customer_orders (historize, prod)" in result.output
+        assert "Target collisions" in caplog.text
+        assert "archive.customer_orders (historize, prod)" in caplog.text
