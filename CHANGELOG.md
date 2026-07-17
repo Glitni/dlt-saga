@@ -1,3 +1,22 @@
+## 0.27.0 — 2026-07-17
+
+### Breaking Changes
+- Move offline correctness checks (collisions, deprecated keys) from doctor to validate (#423)
+
+
+### Added
+- Add Session.validate() and Session.report() programmatic API (#421)
+
+
+### Changed
+- Extract destructive-op confirmation prompts out of cli.py (#417)
+- Extract saga doctor health-check helpers out of cli.py (#415)
+- Extract orchestrator/worker execution modes out of cli.py (#413)
+
+
+### Fixed
+- Force UTF-8 CLI streams so redirected output can't crash on Unicode (#419)
+
 ## 0.26.0 — 2026-07-16
 
 ### Breaking Changes
