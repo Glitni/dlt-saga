@@ -364,6 +364,8 @@ you specify.
 
 Extracts data from Google Sheets using the Drive API, with change detection to avoid redundant loads.
 
+**Requires:** `pip install "dlt-saga[google-sheets]"` (also included in `dlt-saga[gcp]`)
+
 Grant Viewer access to the service account configured in `providers.google_secrets` in `saga_project.yml`.
 
 ```yaml
@@ -383,7 +385,7 @@ tags: ["daily"]
 Downloads a file from SharePoint via the SharePoint REST API, authenticating
 with Entra ID app-only (certificate) authentication.
 
-**Requires:** `pip install "dlt-saga[azure]"`
+**Requires:** `pip install "dlt-saga[sharepoint]"` (also included in `dlt-saga[azure]`)
 
 ```yaml
 # configs/sharepoint/my_report.yml

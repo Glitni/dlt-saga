@@ -749,11 +749,21 @@ gcp = [
     { name = "google-cloud-secret-manager" },
     { name = "google-cloud-storage" },
 ]
+google-sheets = [
+    { name = "google-api-python-client" },
+    { name = "google-auth-oauthlib" },
+]
+sharepoint = [
+    { name = "azure-identity" },
+    { name = "openpyxl" },
+    { name = "requests" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "adlfs", marker = "extra == 'azure'", specifier = ">=2024.7.0" },
     { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.21.0" },
+    { name = "azure-identity", marker = "extra == 'sharepoint'", specifier = ">=1.21.0" },
     { name = "azure-keyvault-secrets", marker = "extra == 'azure'", specifier = ">=4.9.0" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.34.0" },
     { name = "connectorx", specifier = ">=0.4.4" },
@@ -761,16 +771,18 @@ requires-dist = [
     { name = "dlt", extras = ["databricks"], marker = "extra == 'databricks'", specifier = ">=1.18.0,<2.0.0" },
     { name = "dlt", extras = ["duckdb", "filesystem", "parquet", "sftp"], specifier = ">=1.18.0,<2.0.0" },
     { name = "dlt-saga", extras = ["gcp", "databricks", "azure", "aws"], marker = "extra == 'dev'" },
+    { name = "dlt-saga", extras = ["google-sheets"], marker = "extra == 'gcp'" },
+    { name = "dlt-saga", extras = ["sharepoint"], marker = "extra == 'azure'" },
     { name = "gcsfs", marker = "extra == 'gcp'", specifier = ">=2026.1.0" },
-    { name = "google-api-python-client", marker = "extra == 'gcp'", specifier = ">=2.177.0" },
-    { name = "google-auth-oauthlib", marker = "extra == 'gcp'", specifier = ">=1.2.2" },
+    { name = "google-api-python-client", marker = "extra == 'google-sheets'", specifier = ">=2.177.0" },
+    { name = "google-auth-oauthlib", marker = "extra == 'google-sheets'", specifier = ">=1.2.2" },
     { name = "google-cloud-bigquery-storage", marker = "extra == 'gcp'", specifier = ">=2.32.0" },
     { name = "google-cloud-run", marker = "extra == 'gcp'", specifier = ">=0.12.0" },
     { name = "google-cloud-secret-manager", marker = "extra == 'gcp'", specifier = ">=2.24.0" },
     { name = "google-cloud-storage", marker = "extra == 'gcp'", specifier = ">=3.2.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.19.1" },
-    { name = "openpyxl", marker = "extra == 'azure'", specifier = ">=3.1.0" },
+    { name = "openpyxl", marker = "extra == 'sharepoint'", specifier = ">=3.1.0" },
     { name = "pandas", specifier = ">=2.3.1,<4" },
     { name = "polars", specifier = ">=1.37.1" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.3.0" },
@@ -779,13 +791,13 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "requests", marker = "extra == 'azure'", specifier = ">=2.32.0" },
+    { name = "requests", marker = "extra == 'sharepoint'", specifier = ">=2.32.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14.14" },
     { name = "typer", specifier = ">=0.16.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.31.0" },
 ]
-provides-extras = ["gcp", "databricks", "azure", "aws", "dev"]
+provides-extras = ["google-sheets", "sharepoint", "gcp", "databricks", "azure", "aws", "dev"]
 
 [[package]]
 name = "duckdb"
