@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from dlt_saga.pipelines.api.base import BaseApiPipeline
+from dlt_saga.pipelines.api.base import ApiRequestError, BaseApiPipeline
 from dlt_saga.pipelines.api.config import ApiConfig
 
 # ---------------------------------------------------------------------------
@@ -774,6 +774,52 @@ class TestMakeRequestRetry:
             with pytest.raises(ValueError, match="API request failed"):
                 pipeline._make_request()
         assert req.call_count == 1  # fail fast, no retry
+
+    def test_non_retryable_4xx_carries_status_code(self):
+        """A 404 raises ApiRequestError with the status code and URL attached,
+        so a caller can tell it apart from other failures without message parsing.
+        Still a ValueError, so existing handling is unaffected."""
+        pipeline = RetryApiPipeline()
+        resp = MagicMock(status_code=404, text="not found")
+        with patch(
+            "dlt_saga.pipelines.api.base.requests.request", return_value=resp
+        ) as req:
+            with pytest.raises(ApiRequestError) as exc_info:
+                pipeline._make_request()
+        assert isinstance(exc_info.value, ValueError)
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.url == "https://api.example.com/data"
+        assert req.call_count == 1  # 4xx (non-429) is not retried
+
+    def test_retries_exhausted_5xx_carries_status_code(self):
+        pipeline = RetryApiPipeline()
+        resp = MagicMock(status_code=503, reason="Service Unavailable", text="down")
+        with (
+            patch(
+                "dlt_saga.pipelines.api.base.requests.request", return_value=resp
+            ) as req,
+            patch("dlt_saga.pipelines.api.base.time.sleep"),
+        ):
+            with pytest.raises(ApiRequestError) as exc_info:
+                pipeline._make_request()
+        assert exc_info.value.status_code == 503
+        assert req.call_count == 3  # initial + 2 retries
+
+    def test_connection_error_has_no_status_code(self):
+        """Non-HTTP failures carry status_code=None — the signal that no HTTP
+        status was returned."""
+        pipeline = RetryApiPipeline()
+        with (
+            patch(
+                "dlt_saga.pipelines.api.base.requests.request",
+                side_effect=requests.ConnectionError("connection reset"),
+            ),
+            patch("dlt_saga.pipelines.api.base.time.sleep"),
+        ):
+            with pytest.raises(ApiRequestError) as exc_info:
+                pipeline._make_request()
+        assert exc_info.value.status_code is None
+        assert exc_info.value.url == "https://api.example.com/data"
 
 
 @pytest.mark.unit

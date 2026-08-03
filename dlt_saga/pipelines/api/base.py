@@ -29,6 +29,40 @@ from dlt_saga.pipelines.watermark import read_destination_watermark
 logger = logging.getLogger(__name__)
 
 
+class ApiRequestError(ValueError):
+    """Raised when an API request fails in :meth:`BaseApiPipeline._make_request`.
+
+    Subclasses ``ValueError`` so existing ``except ValueError`` handling still
+    catches it, while carrying the HTTP ``status_code`` (and request ``url``) so a
+    caller can branch on the failure kind instead of parsing the message string.
+    The motivating case is an adapter walking a parent list and fetching a
+    per-parent sub-resource, where a ``404`` means "this parent has none" and is
+    expected, while a ``401``/``429``/``5xx``/timeout must abort::
+
+        try:
+            return list(self._paginate(child_endpoint, ...))
+        except ApiRequestError as e:
+            if e.status_code == 404:
+                return []   # sub-resource genuinely absent for this parent
+            raise           # auth, rate limit, server error, timeout -> abort
+
+    ``status_code`` is ``None`` for the non-HTTP paths (timeout, connection
+    error, other transport failures), which is itself the signal that the failure
+    carried no HTTP status.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        url: Optional[str] = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.url = url
+
+
 class BaseApiPipeline(BasePipeline):
     """Base pipeline for ingesting data from REST APIs.
 
@@ -175,7 +209,10 @@ class BaseApiPipeline(BasePipeline):
             Full JSON response dictionary
 
         Raises:
-            ValueError: If API request fails after all retries
+            ApiRequestError: If the API request fails after all retries. It
+                subclasses ``ValueError`` (so ``except ValueError`` still
+                catches it) and carries ``status_code``/``url`` — ``status_code``
+                is ``None`` for timeout/connection failures.
         """
         if url is None:
             url = urljoin(self.api_config.base_url, self.api_config.endpoint)
@@ -236,14 +273,18 @@ class BaseApiPipeline(BasePipeline):
                         continue
                     else:
                         # Max retries exceeded
-                        raise ValueError(
+                        raise ApiRequestError(
                             f"API request failed after {max_retries} retries "
-                            f"(HTTP {response.status_code}): {response.text}"
+                            f"(HTTP {response.status_code}): {response.text}",
+                            status_code=response.status_code,
+                            url=url,
                         )
 
                 # Non-retryable error (4xx except 429)
-                raise ValueError(
-                    f"API request failed with status {response.status_code}: {response.text}"
+                raise ApiRequestError(
+                    f"API request failed with status {response.status_code}: {response.text}",
+                    status_code=response.status_code,
+                    url=url,
                 )
 
             except requests.Timeout as e:
@@ -256,9 +297,10 @@ class BaseApiPipeline(BasePipeline):
                     )
                     time.sleep(wait_seconds)
                     continue
-                raise ValueError(
+                raise ApiRequestError(
                     f"API request timed out after {max_retries} retries "
-                    f"(timeout: {self.api_config.timeout}s): {e}"
+                    f"(timeout: {self.api_config.timeout}s): {e}",
+                    url=url,
                 )
             except requests.ConnectionError as e:
                 # Transient network error (DNS failure, connection reset/refused).
@@ -273,14 +315,15 @@ class BaseApiPipeline(BasePipeline):
                     )
                     time.sleep(wait_seconds)
                     continue
-                raise ValueError(
+                raise ApiRequestError(
                     f"API request failed after {max_retries} retries "
-                    f"(connection error): {e}"
+                    f"(connection error): {e}",
+                    url=url,
                 )
             except requests.RequestException as e:
                 # Other request errors (invalid URL, too many redirects, etc.) are
                 # not transient — fail fast.
-                raise ValueError(f"API request failed: {e}")
+                raise ApiRequestError(f"API request failed: {e}", url=url)
 
         # Should never reach here
         raise ValueError("Unexpected: _make_request loop completed without return")
