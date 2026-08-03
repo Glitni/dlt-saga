@@ -1157,6 +1157,19 @@ class TestThriftNoiseSuppression:
         ]
         assert len(attached) == 1
 
+    def test_connection_pins_configured_catalog(self):
+        """The session must be pinned to the configured catalog so unqualified
+        identifiers (historize TEMP TABLEs) resolve there rather than against the
+        warehouse's default catalog — which Unity Catalog gates on USE CATALOG."""
+        dest = _make_destination(catalog="my_catalog")
+        with (
+            patch.object(dest, "_get_token", return_value="tok"),
+            patch("databricks.sql.connect", return_value=MagicMock()) as mock_connect,
+        ):
+            dest._get_connection()
+
+        assert mock_connect.call_args.kwargs["catalog"] == "my_catalog"
+
     def test_filter_actually_suppresses_emitted_record(self, caplog):
         """End-to-end: after install, emitting the noise via the thrift logger
         produces no record; a real error still comes through."""

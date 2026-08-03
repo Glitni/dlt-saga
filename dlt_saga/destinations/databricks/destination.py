@@ -142,15 +142,28 @@ class DatabricksDestination(Destination):
                 # (which the ingest path never calls), so install at open time.
                 _install_thrift_noise_filter()
                 token = self._get_token()
+                # Pin the session to the configured catalog. Nearly all SQL we
+                # emit is fully qualified and so is unaffected, but the historize
+                # scripts create session-scoped TEMP TABLEs with unqualified
+                # names, which Unity Catalog resolves against the session's
+                # current catalog — and checks USE CATALOG on it *before* name
+                # resolution. Without this the temp table resolves against
+                # whatever catalog the warehouse defaults to, which fails with an
+                # INSUFFICIENT_PERMISSIONS error on identities scoped to only the
+                # catalog they were configured with. Pinning the configured
+                # catalog (always accessible to the identity) resolves those
+                # identifiers where the config says they belong.
                 self._connection = databricks_sql.connect(
                     server_hostname=self.config.server_hostname,
                     http_path=self.config.http_path,
                     access_token=token,
+                    catalog=self.config.catalog,
                 )
                 logger.debug(
-                    "Opened Databricks SQL connection: host=%s, path=%s",
+                    "Opened Databricks SQL connection: host=%s, path=%s, catalog=%s",
                     self.config.server_hostname,
                     self.config.http_path,
+                    self.config.catalog,
                 )
         return self._connection
 
@@ -317,7 +330,10 @@ class DatabricksDestination(Destination):
         ``COMMENT`` or a historize-log message — or inside a comment).
         All SQL should use fully-qualified table names (catalog.schema.table);
         the ``schema_name`` parameter is accepted for interface compatibility
-        but has no effect.
+        but has no effect. The connection pins the session to the configured
+        catalog (see ``_get_connection``), so any unqualified identifier — e.g. a
+        session ``TEMP TABLE`` — resolves there rather than against the
+        warehouse's default catalog.
 
         Args:
             sql: SQL to execute.
