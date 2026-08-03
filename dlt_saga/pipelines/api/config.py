@@ -147,7 +147,11 @@ class ApiConfig(BaseConfig):
             "description": (
                 "Pagination configuration. Supported types: "
                 "offset, page, cursor, next_url. "
-                "Example: {type: offset, limit: 100, offset_param: offset, limit_param: limit}"
+                "Example: {type: offset, limit: 100, offset_param: offset, limit_param: limit}. "
+                "Optional stop_path (a dot-path to an end-of-pagination flag in the "
+                "response) stops pagination early — with stop_value it stops when the "
+                "value equals it (e.g. has_more: false), otherwise when the value is truthy "
+                "(e.g. is_last: true). Useful for APIs that return a cursor/URL past the last page."
             ),
         },
     )
@@ -222,3 +226,12 @@ def _validate_pagination(pagination: Dict[str, Any]) -> None:
         raise ValueError("pagination.cursor_path is required for type 'cursor'")
     if ptype == "next_url" and not pagination.get("next_url_path"):
         raise ValueError("pagination.next_url_path is required for type 'next_url'")
+
+    # Optional explicit end-of-pagination flag (all strategies).
+    stop_path = pagination.get("stop_path")
+    if stop_path is not None and not isinstance(stop_path, str):
+        raise ValueError(
+            "pagination.stop_path must be a string (a dot-path into the response)"
+        )
+    if "stop_value" in pagination and not stop_path:
+        raise ValueError("pagination.stop_value requires pagination.stop_path")

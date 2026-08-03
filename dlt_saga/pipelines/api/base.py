@@ -373,6 +373,11 @@ class BaseApiPipeline(BasePipeline):
           and sends it as ``cursor_param``. Stops when cursor is null/empty.
         - **next_url**: Reads the next URL from ``next_url_path``. Stops when
           the URL is null/empty.
+
+        All strategies additionally honour an optional ``stop_path`` (with
+        optional ``stop_value``) — an explicit end-of-pagination flag in the
+        response, for APIs that keep returning a cursor/URL past the last page.
+        See :meth:`_should_stop_pagination`.
         """
         cfg = self.api_config.pagination
         ptype = cfg["type"]
@@ -418,6 +423,9 @@ class BaseApiPipeline(BasePipeline):
                 f"Page {page_num + 1}: {len(records)} records (next offset={offset})"
             )
 
+            if self._should_stop_pagination(response, cfg):
+                break
+
             if total_path:
                 total = self._resolve_json_path(response, total_path)
                 if total is not None and offset >= int(total):
@@ -450,6 +458,9 @@ class BaseApiPipeline(BasePipeline):
             self.logger.debug(
                 f"Page {page_num + 1}: {len(records)} records (page={page})"
             )
+
+            if self._should_stop_pagination(response, cfg):
+                break
 
             if total_path:
                 total = self._resolve_json_path(response, total_path)
@@ -490,6 +501,8 @@ class BaseApiPipeline(BasePipeline):
                 yield from records
             self.logger.debug(f"Page {page_num + 1}: {len(records)} records")
 
+            if self._should_stop_pagination(response, cfg):
+                break
             cursor = self._resolve_json_path(response, cursor_path)
             if not cursor:
                 break
@@ -515,6 +528,8 @@ class BaseApiPipeline(BasePipeline):
                 yield from records
             self.logger.debug(f"Page {page_num + 1}: {len(records)} records")
 
+            if self._should_stop_pagination(response, cfg):
+                break
             next_url = self._resolve_json_path(response, next_url_path)
             if not next_url:
                 break
@@ -522,6 +537,31 @@ class BaseApiPipeline(BasePipeline):
                 time.sleep(page_delay)
         else:
             self._warn_page_cap_reached(max_pages)
+
+    def _should_stop_pagination(self, response: Any, cfg: dict) -> bool:
+        """Return True when the response signals the last page via ``stop_path``.
+
+        Some APIs keep returning a next cursor/URL even on the final page and
+        instead flag completion in a separate field, which would otherwise loop
+        until the ``max_pages`` cap. ``stop_path`` is a dot-path to that field;
+        pagination stops after the current page (its records are still yielded)
+        when:
+
+        - ``stop_value`` is set and the value at ``stop_path`` equals it — e.g.
+          ``has_more: false`` via ``stop_path: has_more, stop_value: false``; or
+        - ``stop_value`` is omitted and the value at ``stop_path`` is truthy —
+          e.g. ``is_last: true`` via ``stop_path: is_last``.
+
+        No ``stop_path`` configured → never stops early (returns False), so the
+        strategy's own stop condition (empty page, exhausted cursor/URL) applies.
+        """
+        stop_path = cfg.get("stop_path")
+        if not stop_path:
+            return False
+        value = self._resolve_json_path(response, stop_path)
+        if "stop_value" in cfg:
+            return value == cfg["stop_value"]
+        return bool(value)
 
     def _warn_page_cap_reached(self, max_pages: int) -> None:
         """Warn that pagination stopped at the ``max_pages`` cap.
