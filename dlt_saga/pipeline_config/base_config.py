@@ -11,6 +11,19 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
+# The ingest write dispositions (the part before any ``+historize`` suffix).
+BASE_WRITE_DISPOSITIONS = ("append", "merge", "replace")
+
+# All valid ``write_disposition`` values, derived from the base dispositions so
+# the ingest-only forms, their ``+historize`` variants, and historize-only stay
+# in lockstep and can't drift apart. Adapters may restrict this further at
+# runtime (e.g. native_load accepts only append/replace ± historize).
+VALID_WRITE_DISPOSITIONS = frozenset(
+    {*BASE_WRITE_DISPOSITIONS}
+    | {f"{base}+historize" for base in BASE_WRITE_DISPOSITIONS}
+    | {"historize"}
+)
+
 # Canonical weekday names (lowercase)
 WEEKDAY_NAMES = {
     "monday",

@@ -185,7 +185,7 @@ class TargetConfig:
     write_disposition: str = field(
         default="replace",
         metadata={
-            "description": "How to write data to the destination table. Use 'append+historize' to enable historization of appended snapshots. Use 'historize' alone for external data delivery (no ingest). 'replace+historize' is native_load-only (bulk full-replace + SCD2 layer).",
+            "description": "How to write data to the destination table. One of: append, merge, replace, append+historize, merge+historize, replace+historize, historize. The '+historize' variants also build an SCD2 history layer from the ingested snapshots. Use 'historize' alone for external data delivery (no ingest).",
             "enum": [
                 "replace",
                 "append",
