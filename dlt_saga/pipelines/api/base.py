@@ -2,6 +2,7 @@
 
 import logging
 import time
+from base64 import b64encode
 from dataclasses import fields
 from typing import (
     TYPE_CHECKING,
@@ -123,6 +124,14 @@ class BaseApiPipeline(BasePipeline):
             # Bearer token in Authorization header
             token = self._resolve_token(self.api_config.auth_token)
             headers["Authorization"] = f"Bearer {token}"
+
+        elif self.api_config.auth_type == "basic":
+            # HTTP Basic auth: base64("username:password") in the Authorization
+            # header (RFC 7617). Both halves are resolved through the secret layer.
+            username = self._resolve_token(self.api_config.auth_username)
+            password = self._resolve_token(self.api_config.auth_password)
+            credentials = b64encode(f"{username}:{password}".encode()).decode("ascii")
+            headers["Authorization"] = f"Basic {credentials}"
 
         return headers
 

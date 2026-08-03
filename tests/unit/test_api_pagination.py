@@ -915,3 +915,53 @@ class TestRequestBody:
         ) as req:
             pipeline._make_request()
         assert "json" not in req.call_args.kwargs
+
+
+@pytest.mark.unit
+class TestAuthHeaders:
+    def test_basic_auth_builds_authorization_header(self):
+        from base64 import b64encode
+
+        pipeline = RetryApiPipeline(
+            auth_type="basic", auth_username="user", auth_password="pass"
+        )
+        headers = pipeline._get_auth_headers()
+        expected = b64encode(b"user:pass").decode("ascii")
+        assert headers["Authorization"] == f"Basic {expected}"
+
+    def test_basic_auth_handles_non_ascii_credentials(self):
+        from base64 import b64encode
+
+        pipeline = RetryApiPipeline(
+            auth_type="basic", auth_username="ünïcode", auth_password="påss"
+        )
+        headers = pipeline._get_auth_headers()
+        expected = b64encode("ünïcode:påss".encode()).decode("ascii")
+        assert headers["Authorization"] == f"Basic {expected}"
+
+    def test_bearer_auth_still_works(self):
+        pipeline = RetryApiPipeline(auth_type="bearer", auth_token="tok")
+        headers = pipeline._get_auth_headers()
+        assert headers["Authorization"] == "Bearer tok"
+
+    def test_basic_auth_requires_both_credentials(self):
+        with pytest.raises(ValueError, match="requires both auth_username"):
+            ApiConfig(
+                base_url="https://api.example.com",
+                endpoint="/data",
+                auth_type="basic",
+                auth_username="user",
+            )
+
+    def test_basic_auth_credentials_coerced_to_secretstr(self):
+        from dlt_saga.utility.secrets.secret_str import SecretStr
+
+        cfg = ApiConfig(
+            base_url="https://api.example.com",
+            endpoint="/data",
+            auth_type="basic",
+            auth_username="user",
+            auth_password="pass",
+        )
+        assert isinstance(cfg.auth_username, SecretStr)
+        assert isinstance(cfg.auth_password, SecretStr)

@@ -28,6 +28,29 @@ write_disposition: "append"
 tags: ["daily"]
 ```
 
+### Authentication
+
+Set `auth_type` and the matching credential field(s). Every credential accepts a
+plain value or a secret URI (`googlesecretmanager::…`, `azurekeyvault::…`,
+`env_secret::VAR`) — prefer secret URIs.
+
+| `auth_type` | Fields | Header sent |
+|-------------|--------|-------------|
+| `none` (default) | — | none |
+| `api_key` | `auth_token`, optional `auth_header_name` (default `X-API-Key`) | `<header_name>: <token>` |
+| `bearer` | `auth_token` | `Authorization: Bearer <token>` |
+| `basic` | `auth_username`, `auth_password` | `Authorization: Basic <base64(user:pass)>` |
+
+```yaml
+# HTTP Basic authentication
+auth_type: "basic"
+auth_username: "env_secret::API_USER"
+auth_password: "azurekeyvault::https://my-vault.vault.azure.net::api-password"
+```
+
+For auth schemes not covered here, override `_get_auth_headers()` in a custom
+adapter (see [Plugin Development](Plugin-Development)).
+
 ### With pagination
 
 ```yaml
