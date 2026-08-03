@@ -51,10 +51,30 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gcp = [
-    "dlt[bigquery]>=1.18.0,<2.0.0",
+# ---------------------------------------------------------------------------
+# Source extras — the dependencies a specific SaaS source needs, decoupled from
+# any destination/platform stack. The platform extras below re-include these as
+# supersets, so installing e.g. `dlt-saga[gcp]` is unchanged; these just let you
+# install a single source without pulling a whole cloud platform.
+# ---------------------------------------------------------------------------
+google-sheets = [
+    # Google Sheets API client + OAuth flow
     "google-api-python-client>=2.177.0",
     "google-auth-oauthlib>=1.2.2",
+]
+sharepoint = [
+    # SharePoint pipeline — HTTP client, Excel parsing, certificate auth
+    "requests>=2.32.0",
+    "openpyxl>=3.1.0",
+    "azure-identity>=1.21.0",
+]
+# ---------------------------------------------------------------------------
+# Platform extras — a destination/platform stack plus the SaaS sources that
+# belong to it (kept as supersets for backward compatibility).
+# ---------------------------------------------------------------------------
+gcp = [
+    "dlt-saga[google-sheets]",
+    "dlt[bigquery]>=1.18.0,<2.0.0",
     "google-cloud-bigquery-storage>=2.32.0",
     "google-cloud-secret-manager>=2.24.0",
     "google-cloud-storage>=3.2.0",
@@ -67,14 +87,12 @@ databricks = [
     "dlt[databricks]>=1.18.0,<2.0.0",
 ]
 azure = [
+    "dlt-saga[sharepoint]",
     # Azure Blob Storage / Azure Data Lake Gen2 filesystem source
     "adlfs>=2024.7.0",
     # Azure Key Vault secret provider (azure-identity also satisfies adlfs auth)
     "azure-identity>=1.21.0",
     "azure-keyvault-secrets>=4.9.0",
-    # SharePoint pipeline — HTTP client and Excel parsing
-    "requests>=2.32.0",
-    "openpyxl>=3.1.0",
 ]
 aws = [
     # Amazon S3 listing for native_load via BigQuery Omni. Listing only —

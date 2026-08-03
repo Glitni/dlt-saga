@@ -85,8 +85,8 @@ BasePipeline
 | `api` | Generic REST API with incremental cursor support |
 | `database` | SQL databases via ConnectorX (PostgreSQL, MySQL, SQL Server, …) with Arrow-native extraction |
 | `filesystem` | GCS / SFTP / local files (CSV, JSON, JSONL, Parquet) with snapshot date extraction |
-| `google_sheets` | Google Sheets via the Drive API, with change detection |
-| `sharepoint` | SharePoint files (xlsx, csv, json, jsonl) via Entra ID app-only certificate auth; requires `dlt-saga[azure]` |
+| `google_sheets` | Google Sheets via the Drive API, with change detection; requires `dlt-saga[google-sheets]` (also included in `dlt-saga[gcp]`) |
+| `sharepoint` | SharePoint files (xlsx, csv, json, jsonl) via Entra ID app-only certificate auth; requires `dlt-saga[sharepoint]` (also included in `dlt-saga[azure]`) |
 
 **Plugin sources** are registered via:
 - `packages.yml` (local path packages, any namespace)

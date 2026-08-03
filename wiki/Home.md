@@ -7,7 +7,7 @@ Config-driven data ingestion and historization framework, built on [dlt](https:/
 [![CI](https://github.com/Glitni/dlt-saga/actions/workflows/ci.yml/badge.svg)](https://github.com/Glitni/dlt-saga/actions/workflows/ci.yml)
 
 ```bash
-pip install dlt-saga[bigquery]          # BigQuery
+pip install dlt-saga[gcp]               # BigQuery (GCP)
 pip install dlt-saga[databricks,azure]  # Databricks on Azure
 pip install dlt-saga                    # DuckDB only (no cloud dependencies)
 ```

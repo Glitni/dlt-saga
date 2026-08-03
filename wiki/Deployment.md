@@ -132,7 +132,7 @@ Workers need `dlt-saga` and any optional dependencies installed in the image:
 
 ```dockerfile
 FROM python:3.12-slim
-RUN pip install dlt-saga[bigquery]
+RUN pip install dlt-saga[gcp]
 COPY . /app
 WORKDIR /app
 CMD ["saga", "worker"]

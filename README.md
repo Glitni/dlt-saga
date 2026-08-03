@@ -30,7 +30,7 @@ config layer you are building.
 ## Installation
 
 ```bash
-pip install dlt-saga[bigquery]          # BigQuery
+pip install dlt-saga[gcp]               # BigQuery (GCP)
 pip install dlt-saga[databricks,azure]  # Databricks on Azure
 pip install dlt-saga                    # DuckDB only (no cloud dependencies)
 ```

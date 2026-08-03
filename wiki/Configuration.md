@@ -375,7 +375,7 @@ Selector reference:
 
 ### SharePoint
 
-Requires `pip install "dlt-saga[azure]"`. Set `adapter: dlt_saga.sharepoint` in the config.
+Requires `pip install "dlt-saga[sharepoint]"` (also included in `dlt-saga[azure]`). Set `adapter: dlt_saga.sharepoint` in the config.
 
 Authenticate with **either** Entra ID certificate auth (`client_id` + `certificate`, recommended) **or** the deprecated legacy Azure ACS flow (`token_request_body`). Azure ACS for SharePoint Online was retired by Microsoft on 2 April 2026 — use the certificate method.
 

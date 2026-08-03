@@ -16,7 +16,7 @@ This guide takes you from installation to a running pipeline in under 10 minutes
 Install dlt-saga with the extras matching your destination:
 
 ```bash
-pip install dlt-saga[bigquery]              # BigQuery
+pip install dlt-saga[gcp]                   # BigQuery (GCP)
 pip install dlt-saga[databricks,azure]      # Databricks on Azure
 pip install dlt-saga                        # DuckDB only (no cloud dependencies)
 ```
