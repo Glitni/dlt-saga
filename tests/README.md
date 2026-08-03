@@ -133,6 +133,7 @@ def test_something_isolated():
     """Tests that don't require external dependencies."""
     pass
 
+
 @pytest.mark.integration
 def test_something_with_gcp():
     """Tests that require GCP, databases, or network access."""
@@ -285,6 +286,7 @@ Use `unittest.mock` to avoid external dependencies in unit tests:
 
 ```python
 from unittest.mock import MagicMock, patch
+
 
 def test_with_mocked_gcp(self):
     """Test GCP interaction without actual GCP calls."""

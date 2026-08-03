@@ -152,7 +152,10 @@ from dlt_saga.pipelines.api.config import ApiConfig
 @dataclass
 class MyApiConfig(ApiConfig):
     """Configuration for my custom API."""
-    api_url: str = field(default="", metadata={"description": "API base URL", "required": True})
+
+    api_url: str = field(
+        default="", metadata={"description": "API base URL", "required": True}
+    )
     page_size: int = field(default=100)
 
     def __post_init__(self):
@@ -183,9 +186,13 @@ maximum value already loaded for the cursor column and fall back to
 def _incremental_start(self):
     if not self.source_config.incremental:
         return None
-    table_id = f"{self.destination_database}.{self.pipeline.dataset_name}.{self.table_name}"
+    table_id = (
+        f"{self.destination_database}.{self.pipeline.dataset_name}.{self.table_name}"
+    )
     return (
-        self.destination.get_max_column_value(table_id, self.source_config.incremental_column)
+        self.destination.get_max_column_value(
+            table_id, self.source_config.incremental_column
+        )
         or self.source_config.initial_value
     )
 ```
@@ -211,9 +218,12 @@ resolve them lazily at use:
 ```python
 from dlt_saga.utility.secrets.secret_str import SecretStr, coerce_secret
 
+
 @dataclass
 class MyConfig(BaseConfig):
-    api_token: Optional[SecretStr] = field(default=None, metadata={"description": "..."})
+    api_token: Optional[SecretStr] = field(
+        default=None, metadata={"description": "..."}
+    )
 
     def __post_init__(self):
         super().__post_init__()
@@ -223,7 +233,8 @@ class MyConfig(BaseConfig):
 ```python
 # in client.py, at request time:
 from dlt_saga.utility.secrets import resolve_secret
-token = resolve_secret(self.config.api_token)   # handles plain values and secret URIs
+
+token = resolve_secret(self.config.api_token)  # handles plain values and secret URIs
 ```
 
 **Secrets in a request URL.** Some upstreams put a credential in the URL path or
@@ -253,8 +264,8 @@ try:
     return list(self._paginate(child_endpoint, ...))
 except ApiRequestError as e:
     if e.status_code == 404:
-        return []   # sub-resource genuinely absent for this parent
-    raise           # auth, rate limit, server error, timeout -> abort
+        return []  # sub-resource genuinely absent for this parent
+    raise  # auth, rate limit, server error, timeout -> abort
 ```
 
 `status_code` is `None` for non-HTTP failures (timeout, connection error) — itself
@@ -287,7 +298,7 @@ renders these as clean, actionable errors — no traceback):
 
 ```python
 def __post_init__(self):
-    super().__post_init__()              # always call super first
+    super().__post_init__()  # always call super first
     self.api_token = coerce_secret(self.api_token)
     if not self.base_url:
         raise ValueError("base_url is required")
@@ -563,7 +574,9 @@ Register your destination in the factory at startup (e.g., in your package's
 ```python
 from dlt_saga.destinations.factory import DestinationFactory
 
-DestinationFactory.register("snowflake", SnowflakeDestination, SnowflakeDestinationConfig)
+DestinationFactory.register(
+    "snowflake", SnowflakeDestination, SnowflakeDestinationConfig
+)
 ```
 
 Entry point registration for destinations is not yet supported — destinations
@@ -711,7 +724,11 @@ def test_pipeline_failure_is_captured():
 
     result = run_pipeline_test(
         BrokenPipeline,
-        config_dict={"schema_name": "test", "table_name": "t", "pipeline_name": "test__t"},
+        config_dict={
+            "schema_name": "test",
+            "table_name": "t",
+            "pipeline_name": "test__t",
+        },
     )
     assert not result.success
     assert "connection refused" in result.error
