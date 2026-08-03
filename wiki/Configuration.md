@@ -205,7 +205,10 @@ The `write_disposition` field controls which operations are enabled:
 | `merge` | Yes | No | `merge` | Upsert on primary key |
 | `append+historize` | Yes | Yes | `append` | Snapshot → SCD2 |
 | `merge+historize` | Yes | Yes | `merge` | Upsert + build SCD2 history |
+| `replace+historize` | Yes | Yes | `replace` | Full-replace snapshot → SCD2 (see note) |
 | `historize` | No | Yes | — | External table → SCD2 |
+
+> **`replace+historize`** rebuilds the ingest table from a single fresh snapshot each run, stamped with the run's `_dlt_ingested_at`, and the historize layer accrues history from those snapshots going forward. A `--full-refresh` historize over a `replace` source rebuilds from only the latest snapshot. It is the standard disposition for [`native_load`](Native-Load) bulk full-replace loads, and also works for regular ingest pipelines.
 
 ### Merge Strategies (when `write_disposition: merge`)
 

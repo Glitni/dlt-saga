@@ -18,18 +18,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Type
 
 from dlt_saga.pipeline_config import ConfigSource, PipelineConfig
+from dlt_saga.pipeline_config.base_config import VALID_WRITE_DISPOSITIONS
 
 logger = logging.getLogger(__name__)
-
-# All valid write_disposition values.
-VALID_WRITE_DISPOSITIONS = {
-    "append",
-    "merge",
-    "replace",
-    "append+historize",
-    "replace+historize",
-    "historize",
-}
 
 
 @dataclass

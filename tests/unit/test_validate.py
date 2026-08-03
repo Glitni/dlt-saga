@@ -93,6 +93,30 @@ class TestValidateWriteDisposition:
         result = validate_pipeline_config(config)
         assert result.is_valid
 
+    def test_valid_merge_historize(self):
+        config = _make_config(
+            config_dict={
+                "write_disposition": "merge+historize",
+                "primary_key": ["id"],
+                "spreadsheet_id": "abc123",
+                "sheet_name": "Sheet1",
+            }
+        )
+        result = validate_pipeline_config(config)
+        assert result.is_valid
+
+    def test_valid_replace_historize(self):
+        config = _make_config(
+            config_dict={
+                "write_disposition": "replace+historize",
+                "primary_key": ["id"],
+                "spreadsheet_id": "abc123",
+                "sheet_name": "Sheet1",
+            }
+        )
+        result = validate_pipeline_config(config)
+        assert result.is_valid
+
     def test_valid_historize_only(self):
         config = _make_config(
             config_dict={
