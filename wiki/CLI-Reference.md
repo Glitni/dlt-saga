@@ -422,7 +422,7 @@ configs = session.discover(select=["tag:daily"])
 
 # Run phases individually
 ingest_result = session.ingest(select=["tag:daily"], workers=8)
-hist_result   = session.historize(select=["tag:daily"])
+hist_result = session.historize(select=["tag:daily"])
 
 # Or both at once
 result = session.run(select=["tag:daily"], workers=4)

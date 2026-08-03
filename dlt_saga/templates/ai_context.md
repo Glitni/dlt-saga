@@ -84,6 +84,7 @@ from typing import Optional
 from dlt_saga.pipelines.base_config import BaseConfig
 from dlt_saga.utility.secrets.secret_str import SecretStr, coerce_secret
 
+
 @dataclass
 class MyServiceConfig(BaseConfig):
     """Configuration for MyService API source."""
@@ -152,8 +153,8 @@ class MyServicePipeline(BasePipeline):
 
     def extract_data(self) -> List[Tuple[Any, str]]:
         """Return a list of (dlt.resource, description) tuples."""
-        start = self._incremental_start()        # see below — idempotent cursor
-        rows = self._fetch_rows(start)            # your client call
+        start = self._incremental_start()  # see below — idempotent cursor
+        rows = self._fetch_rows(start)  # your client call
         resource = dlt.resource(rows, name=self.table_name, write_disposition="auto")
         return [(resource, "MyService records")]
 
@@ -166,7 +167,9 @@ class MyServicePipeline(BasePipeline):
             return None
         table_id = f"{self.destination_database}.{self.pipeline.dataset_name}.{self.table_name}"
         return (
-            self.destination.get_max_column_value(table_id, self.source_config.incremental_column)
+            self.destination.get_max_column_value(
+                table_id, self.source_config.incremental_column
+            )
             or self.source_config.initial_value
         )
 ```
@@ -175,6 +178,7 @@ To resolve a credential at request time (handles plain values and secret URIs):
 
 ```python
 from dlt_saga.utility.secrets import resolve_secret
+
 token = resolve_secret(self.source_config.api_token)
 ```
 
@@ -189,6 +193,7 @@ If your source is a REST API, inherit from `BaseApiPipeline` instead of `BasePip
 ```python
 from dlt_saga.pipelines.api.base import BaseApiPipeline
 from dlt_saga.pipelines.api.config import ApiConfig
+
 
 class MyApiPipeline(BaseApiPipeline):
     """Pipeline for MyApi — inherits all REST API functionality."""

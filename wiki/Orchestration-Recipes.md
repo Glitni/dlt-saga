@@ -17,8 +17,8 @@ All three recipes lean on the same `Session` API:
 ```python
 import dlt_saga
 
-session = dlt_saga.Session(target="prod")          # picks up profiles.yml
-configs = session.discover(select=["tag:daily"])   # List[PipelineConfig]
+session = dlt_saga.Session(target="prod")  # picks up profiles.yml
+configs = session.discover(select=["tag:daily"])  # List[PipelineConfig]
 
 result = session.ingest(select=["sales__orders"], workers=1)
 # result.has_failures, result.failed, result.failures: List[PipelineResult]
@@ -80,6 +80,7 @@ def _assets_for_config(session: dlt_saga.Session, cfg: PipelineConfig):
     out = []
 
     if cfg.ingest_enabled:
+
         @asset(
             key=ingest_key,
             group_name=cfg.pipeline_group,

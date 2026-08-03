@@ -191,9 +191,10 @@ backfill and watermark logic; you only describe how to fetch one window:
 ```python
 from dlt_saga.pipelines.api.date_window import DateWindowApiPipeline
 
+
 class MyReportPipeline(DateWindowApiPipeline):
     def _fetch_window(self, start, end):
-        report = self.client.run_report(start, end)   # your request shape
+        report = self.client.run_report(start, end)  # your request shape
         return self._rows_from(report)
 ```
 
@@ -214,17 +215,20 @@ gets the same idempotent windowing by mixing in `DateWindowResolver` and calling
 from dlt_saga.pipelines.base_pipeline import BasePipeline
 from dlt_saga.pipelines.date_window import DateWindowConfig, DateWindowResolver
 
+
 class MySourceConfig(DateWindowConfig, MyBaseConfig): ...
+
 
 class MySourcePipeline(DateWindowResolver, BasePipeline):
     @property
     def window_config(self):
-        return self.source_config            # carries the DateWindowConfig fields
+        return self.source_config  # carries the DateWindowConfig fields
 
     def extract_data(self):
         start, end = self.resolve_window()
-        rows = [r for day in self.iter_days(start, end)
-                for r in self.client.fetch(day)]   # your client
+        rows = [
+            r for day in self.iter_days(start, end) for r in self.client.fetch(day)
+        ]  # your client
         return [(dlt.resource(rows, name=self.table_name), "…")]
 ```
 

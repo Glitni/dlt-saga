@@ -151,8 +151,13 @@ from dlt_saga.pipeline_config import default_generate_target_location
 
 
 def generate_target_location(
-    segments, environment, default_storage_root,
-    *, layer="ingest", schema=None, table=None,
+    segments,
+    environment,
+    default_storage_root,
+    *,
+    layer="ingest",
+    schema=None,
+    table=None,
 ):
     # Inject the environment as a top-level folder inside the bucket.
     if not default_storage_root:
@@ -197,8 +202,13 @@ from dlt_saga.pipeline_config import default_generate_target_location
 
 
 def generate_target_location(
-    segments, environment, default_storage_root,
-    *, layer="ingest", schema=None, table=None,
+    segments,
+    environment,
+    default_storage_root,
+    *,
+    layer="ingest",
+    schema=None,
+    table=None,
 ):
     if not default_storage_root:
         return None
@@ -220,7 +230,9 @@ def generate_schema_name(segments, environment, default_schema, *, layer="ingest
     if layer == "historize" and environment == "prod":
         group = segments[0] if segments else "default"
         return f"dlt_{group}_historized"
-    return default_generate_schema_name(segments, environment, default_schema, layer=layer)
+    return default_generate_schema_name(
+        segments, environment, default_schema, layer=layer
+    )
 ```
 
 ## Avoiding target collisions
