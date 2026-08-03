@@ -182,7 +182,7 @@ token = resolve_secret(self.source_config.api_token)
 
 If your source is a REST API, inherit from `BaseApiPipeline` instead of `BasePipeline`. It provides:
 - HTTP request handling with retries and backoff
-- Authentication (API key, bearer token)
+- Authentication (API key, bearer token, HTTP basic)
 - JSON response extraction via `response_path`
 - Pagination (offset, page, cursor, next_url)
 

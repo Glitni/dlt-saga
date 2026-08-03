@@ -64,7 +64,7 @@ class ApiConfig(BaseConfig):
         default="none",
         metadata={
             "description": "Authentication type",
-            "enum": ["none", "api_key", "bearer"],
+            "enum": ["none", "api_key", "bearer", "basic"],
         },
     )
     auth_token: Optional[SecretStr] = field(
@@ -75,6 +75,20 @@ class ApiConfig(BaseConfig):
         default=None,
         metadata={
             "description": "Custom header name for authentication (default: Authorization for bearer, X-API-Key for api_key)"
+        },
+    )
+    auth_username: Optional[SecretStr] = field(
+        default=None,
+        metadata={
+            "description": "Username for HTTP Basic authentication (auth_type: basic). "
+            "Accepts a plain value or a secret URI."
+        },
+    )
+    auth_password: Optional[SecretStr] = field(
+        default=None,
+        metadata={
+            "description": "Password for HTTP Basic authentication (auth_type: basic). "
+            "Accepts a plain value or a secret URI."
         },
     )
 
@@ -143,8 +157,8 @@ class ApiConfig(BaseConfig):
         # Call parent __post_init__ first
         super().__post_init__()
 
-        # Coerce credential fields to SecretStr
-        self.auth_token = coerce_secret(self.auth_token)
+        # Coerce credential fields to SecretStr and validate the auth block.
+        self._normalize_and_validate_auth()
 
         # Validate required fields
         if not self.base_url:
@@ -174,6 +188,20 @@ class ApiConfig(BaseConfig):
 
         if self.pagination:
             _validate_pagination(self.pagination)
+
+    def _normalize_and_validate_auth(self) -> None:
+        """Coerce credential fields to SecretStr and validate the auth block."""
+        self.auth_token = coerce_secret(self.auth_token)
+        self.auth_username = coerce_secret(self.auth_username)
+        self.auth_password = coerce_secret(self.auth_password)
+
+        # HTTP Basic auth needs both halves of the credential.
+        if self.auth_type == "basic" and not (
+            self.auth_username and self.auth_password
+        ):
+            raise ValueError(
+                "auth_type 'basic' requires both auth_username and auth_password"
+            )
 
 
 _VALID_PAGINATION_TYPES = ("offset", "page", "cursor", "next_url")
