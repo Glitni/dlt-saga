@@ -1,3 +1,17 @@
+## 0.28.0 — 2026-08-03
+
+### Added
+- Add per-source install extras for google-sheets and sharepoint (#436)
+- Add explicit stop condition (stop_path) to BaseApiPipeline pagination (#434)
+- Add HTTP basic auth support to BaseApiPipeline (#433)
+- Raise typed ApiRequestError carrying HTTP status from BaseApiPipeline (#432)
+
+
+### Fixed
+- Refresh uv.lock to clear Dependabot security alerts (#438)
+- Pin configured catalog on Databricks connection so historize temp tables resolve (#431)
+- Accept merge+historize in validate and align write-disposition docs (#430)
+
 ## 0.27.0 — 2026-07-17
 
 ### Breaking Changes
