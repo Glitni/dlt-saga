@@ -560,6 +560,21 @@ class TestGenerateSchemasOutput:
 
 
 @pytest.mark.unit
+class TestColumnHintDataType:
+    """The static dlt_common.json column_hint enum tracks dlt's logical types."""
+
+    def test_data_type_enum_matches_dlt(self, tmp_path):
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        data = json.loads((tmp_path / "dlt_common.json").read_text(encoding="utf-8"))
+        enum = set(data["$defs"]["column_hint"]["properties"]["data_type"]["enum"])
+        # 'complex' was renamed to 'json' in dlt 1.0.
+        assert "json" in enum
+        assert "complex" not in enum
+
+
+@pytest.mark.unit
 class TestSecretSupportNote:
     """Fields that resolve secret references are documented uniformly."""
 

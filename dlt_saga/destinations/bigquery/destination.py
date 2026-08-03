@@ -1849,7 +1849,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         "time": "TIME",
         "decimal": "NUMERIC",
         "binary": "BYTES",
-        "complex": "STRING",
+        "json": "JSON",
         "wei": "BIGNUMERIC",
     }
 
@@ -1888,6 +1888,9 @@ class BigQueryDestination(BigQueryBaseDestination):
                 else "text"
             )
             bq_type = self.DLT_TO_BIGQUERY_TYPE.get(dlt_type, "STRING")
+            # BigLake Iceberg has no native JSON column type; store JSON as STRING.
+            if bq_type == "JSON":
+                bq_type = "STRING"
             # Quote column names with backticks to handle reserved keywords
             quoted_col = f"`{col_name}`"
             column_defs.append(

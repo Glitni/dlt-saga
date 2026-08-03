@@ -105,8 +105,8 @@
         },
         "data_type": {
           "type": "string",
-          "enum": ["text", "bigint", "double", "bool", "timestamp", "date", "time", "decimal", "binary", "complex", "wei"],
-          "description": "Data type (text, bigint, double, bool, timestamp, date, time, decimal, binary, complex, wei)"
+          "enum": ["text", "bigint", "double", "bool", "timestamp", "date", "time", "decimal", "binary", "json", "wei"],
+          "description": "dlt logical data type (text, bigint, double, bool, timestamp, date, time, decimal, binary, json, wei). Note: 'complex' was renamed to 'json' in dlt 1.0."
         },
         "nullable": {
           "type": "boolean",
