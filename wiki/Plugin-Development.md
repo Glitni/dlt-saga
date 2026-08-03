@@ -237,6 +237,29 @@ slip degrades to `***` rather than a leaked secret. Redaction only covers
 provider-resolved values, so keep secrets in `SecretStr` / secret URIs rather
 than plain config.
 
+**Branching on request failures.** When a request fails after all retries,
+`_make_request` raises `ApiRequestError` (importable from `dlt_saga.pipelines.api`).
+It subclasses `ValueError` — so any existing `except ValueError` still catches it —
+and carries the HTTP `status_code` and request `url`, letting an adapter tell one
+failure from another without parsing the message string. The common case is an
+adapter that walks a parent list and fetches a per-parent sub-resource, where a
+`404` means "this parent has none" and is expected, while `401` / `429` / `5xx` /
+timeout must abort:
+
+```python
+from dlt_saga.pipelines.api import ApiRequestError
+
+try:
+    return list(self._paginate(child_endpoint, ...))
+except ApiRequestError as e:
+    if e.status_code == 404:
+        return []   # sub-resource genuinely absent for this parent
+    raise           # auth, rate limit, server error, timeout -> abort
+```
+
+`status_code` is `None` for non-HTTP failures (timeout, connection error) — itself
+the signal that no HTTP status was returned, so don't treat `None` as tolerable.
+
 ### Standard config vocabulary
 
 Reuse the inherited field names instead of inventing new ones — configs stay
