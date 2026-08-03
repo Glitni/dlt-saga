@@ -74,6 +74,35 @@ write_disposition: "append"
 tags: ["daily"]
 ```
 
+Every strategy stops on its natural end (empty page, exhausted cursor/URL, or a
+reported `total_path`) and is capped by `max_pages` (default 10,000) as a
+backstop — reaching the cap logs a truncation warning.
+
+**Explicit stop condition.** Some APIs keep returning a cursor or `next_url`
+even on the last page and instead signal completion in a separate field, which
+would otherwise page all the way to the `max_pages` cap. Add `stop_path` (a
+dot-path into the response) to end pagination after the current page:
+
+```yaml
+pagination:
+  type: next_url
+  next_url_path: "links.next"
+  stop_path: "meta.is_last"     # stop when this value is truthy (e.g. is_last: true)
+```
+
+If the flag is inverted (e.g. `has_more: false`), pair it with `stop_value`:
+
+```yaml
+pagination:
+  type: next_url
+  next_url_path: "links.next"
+  stop_path: "has_more"
+  stop_value: false             # stop when the value equals this
+```
+
+`stop_path` works with every pagination type; the current page's records are
+always yielded before stopping.
+
 ### Incremental loading
 
 Enable `incremental` and name the column whose high-water mark seeds the cursor.

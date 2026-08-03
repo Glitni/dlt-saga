@@ -418,6 +418,121 @@ class TestNextUrlPagination:
         assert len(records) == 1
 
 
+@pytest.mark.unit
+class TestPaginationStopCondition:
+    def test_next_url_stops_on_truthy_stop_path(self):
+        """The API keeps returning a next URL, but a truthy is_last flag stops
+        pagination after the current page."""
+        pipeline = FakeApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/items",
+                "pagination": {
+                    "type": "next_url",
+                    "next_url_path": "links.next",
+                    "stop_path": "meta.is_last",
+                },
+            },
+            [
+                {
+                    "data": [{"id": 1}],
+                    "links": {"next": "https://api.example.com/items?page=2"},
+                    "meta": {"is_last": False},
+                },
+                {
+                    "data": [{"id": 2}],
+                    # next URL is STILL present — only the flag ends pagination
+                    "links": {"next": "https://api.example.com/items?page=3"},
+                    "meta": {"is_last": True},
+                },
+            ],
+        )
+        pipeline.api_config.response_path = "data"
+
+        records = list(pipeline._fetch_all_pages())
+        assert [r["id"] for r in records] == [1, 2]
+        assert pipeline._call_count == 2  # did not fetch page 3
+
+    def test_next_url_stops_on_stop_value_match(self):
+        """has_more: false shape — stop when the value equals stop_value."""
+        pipeline = FakeApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/items",
+                "pagination": {
+                    "type": "next_url",
+                    "next_url_path": "links.next",
+                    "stop_path": "has_more",
+                    "stop_value": False,
+                },
+            },
+            [
+                {
+                    "data": [{"id": 1}],
+                    "links": {"next": "https://api.example.com/items?page=2"},
+                    "has_more": True,
+                },
+                {
+                    "data": [{"id": 2}],
+                    "links": {"next": "https://api.example.com/items?page=3"},
+                    "has_more": False,
+                },
+            ],
+        )
+        pipeline.api_config.response_path = "data"
+
+        records = list(pipeline._fetch_all_pages())
+        assert [r["id"] for r in records] == [1, 2]
+        assert pipeline._call_count == 2
+
+    def test_cursor_honours_stop_path(self):
+        pipeline = FakeApiPipeline(
+            {
+                "base_url": "https://api.example.com",
+                "endpoint": "/items",
+                "pagination": {
+                    "type": "cursor",
+                    "cursor_path": "meta.next",
+                    "stop_path": "meta.done",
+                },
+            },
+            [
+                {"data": [{"id": 1}], "meta": {"next": "c2", "done": False}},
+                # cursor still present, but done flag stops us
+                {"data": [{"id": 2}], "meta": {"next": "c3", "done": True}},
+            ],
+        )
+        pipeline.api_config.response_path = "data"
+
+        records = list(pipeline._fetch_all_pages())
+        assert [r["id"] for r in records] == [1, 2]
+        assert pipeline._call_count == 2
+
+    def test_stop_value_requires_stop_path(self):
+        with pytest.raises(ValueError, match="stop_value requires .*stop_path"):
+            ApiConfig(
+                base_url="https://api.example.com",
+                endpoint="/items",
+                pagination={
+                    "type": "next_url",
+                    "next_url_path": "links.next",
+                    "stop_value": False,
+                },
+            )
+
+    def test_stop_path_must_be_string(self):
+        with pytest.raises(ValueError, match="stop_path must be a string"):
+            ApiConfig(
+                base_url="https://api.example.com",
+                endpoint="/items",
+                pagination={
+                    "type": "next_url",
+                    "next_url_path": "links.next",
+                    "stop_path": ["not", "a", "string"],
+                },
+            )
+
+
 # ---------------------------------------------------------------------------
 # Incremental loading
 # ---------------------------------------------------------------------------
