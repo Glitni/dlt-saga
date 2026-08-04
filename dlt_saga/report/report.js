@@ -61,6 +61,12 @@
   function tagBadges(tags) {
     return tags.map(t => '<span class="tag">' + t + '</span>').join('');
   }
+  // Clickable tag badges — used only in the dashboard groups table to drill into
+  // the Catalog filtered by tag. Separate from tagBadges so every other call
+  // site (run tables, pipeline detail) keeps inert, non-clickable badges.
+  function clickableTagBadges(tags) {
+    return tags.map(t => '<span class="tag tag-link" data-tag="' + escHtml(t) + '">' + escHtml(t) + '</span>').join('');
+  }
   function escHtml(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
@@ -268,6 +274,11 @@
   let pendingIngestDateFilter = null;
   let pendingHistorizeDateFilter = null;
   let pendingOrchDateFilter = null;
+  // Dashboard groups-table drill-downs into the Catalog. Group → tree folder
+  // selection; tag → tag dropdown. Mutually exclusive entry points (a tag is
+  // cross-cutting, so it filters across all groups, never tag∩group).
+  let pendingCatalogGroupFilter = null;
+  let pendingCatalogTagFilter = null;
 
   function showTab(tabId, opts) {
     opts = opts || {};
@@ -616,11 +627,13 @@
   }
   const pipelineTree = buildPipelineTree(D.pipelines);
 
-  function createTreeFilter(onChange) {
+  function createTreeFilter(onChange, initialSelection) {
     const collapsedKey = 'saga-tree-collapsed';
     const widthKey = 'saga-tree-width';
-    let selection = { type: 'all', value: null };
+    let selection = initialSelection || { type: 'all', value: null };
     const expanded = new Set();
+    // Expand a seeded folder so its selected subtree is visible on open.
+    if (selection.type === 'folder' && selection.value) expanded.add(selection.value);
 
     const pane = h('div', { className: 'tree-pane' });
     const storedW = parseInt(localStorage.getItem(widthKey) || '', 10);
@@ -1006,10 +1019,11 @@
     let gtHTML = '<table><tr><th>Group</th><th>Pipelines</th><th>Ingest</th><th>Historize</th><th>Tags</th></tr>';
     groups.sort().forEach(g => {
       const gp = D.pipelines.filter(p => p.pipeline_group === g);
-      gtHTML += '<tr><td><strong>' + g + '</strong></td><td>' + gp.length +
+      gtHTML += '<tr><td><span class="group-link" data-group="' + escHtml(g) + '"><strong>' +
+        escHtml(g) + '</strong></span></td><td>' + gp.length +
         '</td><td>' + gp.filter(p=>p.ingest_enabled).length +
         '</td><td>' + gp.filter(p=>p.historize_enabled).length +
-        '</td><td>' + tagBadges([...new Set(gp.flatMap(p=>p.tags))]) + '</td></tr>';
+        '</td><td>' + clickableTagBadges([...new Set(gp.flatMap(p=>p.tags))]) + '</td></tr>';
     });
     gtHTML += '</table>';
     groupTable.innerHTML = gtHTML;
@@ -1262,6 +1276,22 @@
     $$('.col-menu.open').forEach(m => { if (!m.contains(e.target)) m.classList.remove('open'); });
     const link = e.target.closest('.pipeline-link');
     if (link) { e.preventDefault(); showPipelineDetail(link.dataset.pipeline); return; }
+    const groupLink = e.target.closest('.group-link');
+    if (groupLink) {
+      e.preventDefault();
+      pendingCatalogGroupFilter = groupLink.dataset.group;
+      showTab('pipelines');
+      renderPipelines();
+      return;
+    }
+    const tagLink = e.target.closest('.tag-link');
+    if (tagLink) {
+      e.preventDefault();
+      pendingCatalogTagFilter = tagLink.dataset.tag;
+      showTab('pipelines');
+      renderPipelines();
+      return;
+    }
     const execLink = e.target.closest('.exec-link');
     if (execLink) {
       e.preventDefault();
@@ -1277,7 +1307,13 @@
     panel.innerHTML = '';
     panel.appendChild(h('h2', { className: 'page-title' }, 'Pipeline Catalog'));
 
-    const tree = createTreeFilter(() => { pipelinesPage = 0; draw(); });
+    // A dashboard group drill-down seeds the tree with that folder; consume the
+    // pending value so it applies once and doesn't stick on later visits.
+    const initialTreeSel = pendingCatalogGroupFilter
+      ? { type: 'folder', value: pendingCatalogGroupFilter }
+      : null;
+    pendingCatalogGroupFilter = null;
+    const tree = createTreeFilter(() => { pipelinesPage = 0; draw(); }, initialTreeSel);
     const treeWrap = h('div', { className: 'tab-with-tree' });
     const treeMain = h('div', { className: 'tree-main' });
     treeWrap.appendChild(tree.pane);
@@ -1287,6 +1323,11 @@
     const section = h('div', { className: 'section' });
     const filters = h('div', { className: 'filters' });
     const tagSelect = addTagFilter(filters);
+    // A dashboard tag drill-down presets the tag dropdown (tree left at "all").
+    if (pendingCatalogTagFilter) {
+      tagSelect.value = pendingCatalogTagFilter;
+      pendingCatalogTagFilter = null;
+    }
     const dispSelect = addDispositionFilter(filters);
     section.appendChild(filters);
 
