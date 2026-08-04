@@ -19,9 +19,10 @@ import typer
 
 from dlt_saga.new_adapter_command import _normalize_name, _prompt_group, _prompt_name
 
-# Meta fields handled explicitly (adapter/tags) or rarely set in a per-pipeline
-# config — kept out of the introspected field listing to reduce noise.
-_SKIP_FIELDS = {"adapter", "tags", "enabled"}
+# Fields emitted explicitly elsewhere in the scaffold (adapter under Control,
+# tags/meta under Documentation) or rarely set per-pipeline (enabled) — kept out
+# of the introspected Ingest listing to reduce noise.
+_SKIP_FIELDS = {"adapter", "tags", "enabled", "meta"}
 
 
 # ---------------------------------------------------------------------------
@@ -182,38 +183,54 @@ def _classify_fields(config_class: type) -> Tuple[list, list]:
 
 
 def render_config_yaml(adapter: str, config_class: type) -> str:
-    """Render a starter config YAML for *adapter*, driven by its config class."""
+    """Render a starter config YAML for *adapter*, driven by its config class.
+
+    Keys follow the recommended property order (control → documentation → ingest
+    → historization/load → schema) so scaffolded files model the convention.
+    """
     required, optional = _classify_fields(config_class)
     lines: List[str] = [
+        "# 0. Control",
         f"adapter: {adapter}",
-        "tags: [daily]",
-        "",
         "# What runs: append = ingest only. append+historize also builds SCD2 history.",
         "write_disposition: append",
         "",
+        "# 1. Documentation & selection",
+        "tags: [daily]",
+        "# description: <one-line table description>",
+        "# classification: [confidential]   # governance labels (distinct from tags)",
+        "# meta:                             # free-form docs, git-only (mirrors dbt's meta)",
+        "#   data_owner: <owner>",
+        "",
+        "# 2. Ingest",
     ]
 
     if required:
-        lines.append("# --- Required source settings ---")
+        lines.append("# Required source settings:")
         for field in required:
             lines.append(_field_line(field, commented=False))
-        lines.append("")
-
     if optional:
-        lines.append("# --- Optional source settings (uncomment what you need) ---")
-        lines.append("# (full descriptions show on hover via the schema modeline)")
+        lines.append("# Optional source settings (uncomment what you need;")
+        lines.append("# full descriptions show on hover via the schema modeline):")
         for field in optional:
             lines.append(_field_line(field, commented=True))
-        lines.append("")
+    lines.append("")
 
-    # Curated load-behaviour options (these live on TargetConfig, merged at
-    # runtime, so they aren't on the source config class above).
+    # Load-behaviour options live on TargetConfig (merged at runtime), so they
+    # aren't on the source config class introspected above.
     lines += [
-        "# --- Common load options (uncomment as needed) ---",
+        "# 3. Historization & load",
         "# primary_key: [id]",
-        "# merge_strategy: scd2          # use with write_disposition: merge",
+        "# merge_strategy: scd2            # use with write_disposition: merge",
         "# partition_column: <date_column>",
         "# cluster_columns: [<column>]",
+        "# historize:                      # when write_disposition includes +historize",
+        "#   track_deletions: true",
+        "",
+        "# 4. Schema",
+        "# columns:",
+        "#   <column>:",
+        "#     data_type: text              # text|bigint|double|bool|timestamp|date|decimal|json",
     ]
     return "\n".join(lines) + "\n"
 

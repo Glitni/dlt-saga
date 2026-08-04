@@ -73,6 +73,16 @@ spreadsheet_id: "123ABC"
 | `filters` | list | — | Row-level filters applied during ingest — see [Row Filters](#row-filters) |
 | `meta` | dict | — | Free-form user metadata for documentation/governance — see [Custom Metadata](#custom-metadata) |
 
+### Recommended property order
+
+Key order doesn't affect behavior, but ordering keys by concern keeps configs scannable and diffs clean. The recommended top-to-bottom order (used by `saga new config`):
+
+0. **Control** — `adapter`, `enabled`, `write_disposition`
+1. **Documentation & selection** — `tags`, `description`, `classification`, `meta`, `persist_docs`
+2. **Ingest** — source connection/query fields, then incremental logic (`incremental`, `incremental_column`, `initial_value`, `dev`)
+3. **Historization & load** — keys (`primary_key`/`merge_key`), `merge_strategy`, physical-table hints (`partition_column`, `cluster_columns`), `historize`
+4. **Schema** — `columns`
+
 ### Column Hints
 
 The `columns:` map overrides dlt's inferred types and applies before loading. Each key names a column; the value is a hint object with at least `data_type`.
