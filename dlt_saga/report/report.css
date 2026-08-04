@@ -166,6 +166,24 @@ body {
 .kpi-value-sm { font-size: 19px; font-weight: 700; overflow-wrap: anywhere; }
 .kpi-sub { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
 
+/* Documentation card: compact label/value strip (not big KPI cards) */
+.doc-body { padding: 16px 18px; }
+.doc-desc {
+  font-size: 13px; color: var(--text); line-height: 1.5;
+  margin-bottom: 16px; overflow-wrap: anywhere;
+}
+.doc-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px 22px; align-items: start;
+}
+.doc-item { min-width: 0; }
+.doc-label {
+  font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 3px;
+}
+.doc-value { font-size: 13px; color: var(--text); line-height: 1.45; overflow-wrap: anywhere; }
+.doc-value.mono { font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); }
+
 /* Sections */
 .section {
   background: var(--bg-card); border: 1px solid var(--border);
