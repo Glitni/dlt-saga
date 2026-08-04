@@ -212,10 +212,14 @@ tr:last-child td { border-bottom: none; }
 tr:hover td { background: var(--bg-card-hover); }
 
 /* Clickable pipeline names */
-.pipeline-link {
+.pipeline-link, .group-link {
   color: var(--accent); cursor: pointer; text-decoration: none; font-weight: 600;
 }
-.pipeline-link:hover { text-decoration: underline; }
+.pipeline-link:hover, .group-link:hover { text-decoration: underline; }
+
+/* Clickable tag badges (dashboard groups table only) */
+.tag-link { cursor: pointer; }
+.tag-link:hover { text-decoration: underline; }
 
 /* Expandable error cell */
 .err-detail { font-family: var(--mono); font-size: 12px; }
