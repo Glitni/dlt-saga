@@ -1068,17 +1068,21 @@
   }
 
   // ---- Pipeline Detail view ----
-  // Documentation card for the pipeline detail view: description, governance
-  // classification, and free-form config `meta`. All are git-only config (meta
-  // is never written to the warehouse), surfaced here as a lightweight catalog.
-  // Rendered as a compact label/value strip (small uppercase labels, regular
-  // values) rather than big KPI cards, so long values stay unobtrusive.
+  // Documentation card for the pipeline detail view: selection tags, description,
+  // governance classification, and free-form config `meta`. All are git-only
+  // config (tags and meta never reach the warehouse), surfaced here as a
+  // lightweight catalog. Tags (pipeline selection) and classification (data
+  // governance) are kept as distinct labeled fields — the framework treats them
+  // as separate concerns. Rendered as a compact label/value strip (small
+  // uppercase labels, regular values) rather than big KPI cards, so long values
+  // stay unobtrusive.
   function renderDocSection(p) {
     const hasDesc = p.description != null && String(p.description).trim() !== '';
+    const tags = p.tags || [];
     const cls = p.classification || [];
     const meta = p.meta || {};
     const metaKeys = Object.keys(meta);
-    if (!hasDesc && !cls.length && !metaKeys.length) return null;
+    if (!hasDesc && !tags.length && !cls.length && !metaKeys.length) return null;
 
     const section = h('div', { className: 'section' });
     section.appendChild(h('div', { className: 'section-header' }, 'Documentation'));
@@ -1092,6 +1096,9 @@
     const item = (label, valueEl) => h('div', { className: 'doc-item' },
       h('div', { className: 'doc-label' }, label), valueEl);
 
+    if (tags.length) {
+      grid.appendChild(item('Tags', h('div', { className: 'doc-value', innerHTML: tagBadges(tags) })));
+    }
     if (cls.length) {
       const badges = cls.map(c => '<span class="tag">' + escHtml(String(c)) + '</span>').join('');
       grid.appendChild(item('Classification', h('div', { className: 'doc-value', innerHTML: badges })));
@@ -1141,12 +1148,6 @@
         ));
       });
       panel.appendChild(infoGrid);
-
-      if (p.tags.length) {
-        const tagDiv = h('div', { innerHTML: tagBadges(p.tags) });
-        tagDiv.style.marginBottom = '24px';
-        panel.appendChild(tagDiv);
-      }
 
       const docSection = renderDocSection(p);
       if (docSection) panel.appendChild(docSection);
