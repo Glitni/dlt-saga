@@ -72,6 +72,8 @@ class TestIntrospection:
         assert "adapter" not in names
         assert "tags" not in names
         assert "enabled" not in names
+        # meta is emitted under Documentation, not in the introspected Ingest dump.
+        assert "meta" not in names
 
     def test_required_fields_flagged_via_metadata(self):
         required, _ = _classify_fields(ApiConfig)
@@ -107,6 +109,22 @@ class TestRender:
         assert "# timeout:" in text
         # Curated load options present.
         assert "# primary_key: [id]" in text
+
+    def test_sections_in_recommended_order(self):
+        text = render_config_yaml("dlt_saga.api", ApiConfig)
+        headers = [
+            "# 0. Control",
+            "# 1. Documentation & selection",
+            "# 2. Ingest",
+            "# 3. Historization & load",
+            "# 4. Schema",
+        ]
+        idxs = [text.index(h) for h in headers]
+        assert idxs == sorted(idxs), "scaffold sections not in recommended order"
+        # write_disposition is control (top), before ingest source fields.
+        assert text.index("write_disposition:") < text.index("base_url:")
+        # load keys come after the ingest source fields.
+        assert text.index("base_url:") < text.index("# primary_key: [id]")
 
 
 # ---------------------------------------------------------------------------

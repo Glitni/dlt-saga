@@ -273,42 +273,52 @@ existing adapter (`pipelines/database`, `pipelines/api`) before adding a new fie
 
 Pipeline configs live under `configs/<pipeline_group>/<name>.yml`. The directory structure determines the pipeline group (used for dataset naming and selectors).
 
+### Property order
+
+Order config keys by concern, top to bottom, so a file reads as a narrative. This is convention only — key order does not affect behavior — but it keeps configs scannable and diffs clean:
+
+0. **Control** — `adapter`, `enabled`, `write_disposition` (what implementation runs, whether it's on, and which stages run)
+1. **Documentation & selection** — `tags`, `description`, `classification`, `meta`, `persist_docs`
+2. **Ingest** — source connection/query fields, then incremental logic (`incremental`, `incremental_column`, `initial_value`, `dev`)
+3. **Historization & load** — keys (`primary_key`/`merge_key`), `merge_strategy`, physical-table hints, `historize`
+4. **Schema** — `columns`
+
 ### Common fields
 
 ```yaml
-# Metadata
-tags: [daily, critical]           # For selector filtering
-enabled: true                     # Master switch (default: true)
-adapter: dlt_saga.api.my_service  # Implementation binding (optional if convention-based)
+# 0. Control
+adapter: dlt_saga.api.my_service     # implementation binding (optional if convention-based)
+enabled: true                        # master switch (default: true)
+write_disposition: append+historize  # which stages run: append|merge|replace | *+historize | historize
 
-# Loading behavior
-write_disposition: append         # append | merge | replace | append+historize | historize
-primary_key: [id]                 # For merge/SCD2
-merge_strategy: scd2              # For merge disposition
+# 1. Documentation & selection
+tags: [daily, critical]             # selector filtering; never written to the warehouse
+description: Customer master data    # table description (overrides the auto-generated one)
+classification: [confidential]       # table-level governance labels (distinct from tags)
+meta:                                # free-form docs, git-only (mirrors dbt's meta)
+  data_owner: data-platform
 
-# Destination hints
-partition_column: date
+# 2. Ingest — source fields, then incremental logic
+# ... source-specific fields from your config dataclass (e.g. endpoint, spreadsheet_id)
+incremental: true
+incremental_column: updated_at
+initial_value: "2026-01-01"          # first-run seed for the high-water mark
+filters:                             # optional — drop rows during ingest (AND-composed)
+  - { column: status, op: in, value: [active, pending] }
+
+# 3. Historization & load
+primary_key: [id]
+merge_strategy: scd2                 # for the merge disposition
+partition_column: date               # physical-table hints
 cluster_columns: [id, category]
-partition_expiration_days: 365      # BigQuery only — sets time_partitioning.expiration_ms on the created table; reconciled (ALTER) on every subsequent run. Per-pipeline overrides the profile default.
+historize:                           # when write_disposition includes +historize / historize
+  track_deletions: true
 
-# Documentation & classification (written/reconciled onto the destination)
-description: Customer master data   # table description (overrides the auto-generated one)
-classification: [confidential]      # table-level governance labels (distinct from `tags`, which is selection-only)
+# 4. Schema
 columns:
   email:
     description: "Primary contact email"
-    classification: [pii]           # encoded into the column description as [saga:classification=pii]
-persist_docs:                       # gates writes; defaults {table: true, columns: false}
-  columns: true                     # opt into column docs (typically set once in saga_project.yml)
-
-# Row filters (optional) — drop rows during ingest
-filters:
-  - column: config
-    path: aid.legal_entity          # optional dotted JSON path
-    value: bm                       # op defaults to eq
-  - column: status
-    op: in
-    value: [active, pending]
+    classification: [pii]            # encoded into the column description as [saga:classification=pii]
 ```
 
 Filters compose as AND. Operators: `eq` (default), `ne`, `in`, `not_in`, `is_null`, `is_not_null`, `matches`. With `native_load`, filters push down to SQL `WHERE` automatically; for other adapters they evaluate in Python before dlt loads the rows.
