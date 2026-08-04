@@ -1054,6 +1054,51 @@
   }
 
   // ---- Pipeline Detail view ----
+  // Documentation card for the pipeline detail view: description, governance
+  // classification, and free-form config `meta`. All are git-only config (meta
+  // is never written to the warehouse), surfaced here as a lightweight catalog.
+  // Rendered as a compact label/value strip (small uppercase labels, regular
+  // values) rather than big KPI cards, so long values stay unobtrusive.
+  function renderDocSection(p) {
+    const hasDesc = p.description != null && String(p.description).trim() !== '';
+    const cls = p.classification || [];
+    const meta = p.meta || {};
+    const metaKeys = Object.keys(meta);
+    if (!hasDesc && !cls.length && !metaKeys.length) return null;
+
+    const section = h('div', { className: 'section' });
+    section.appendChild(h('div', { className: 'section-header' }, 'Documentation'));
+    const body = h('div', { className: 'doc-body' });
+
+    if (hasDesc) {
+      body.appendChild(h('div', { className: 'doc-desc' }, String(p.description)));
+    }
+
+    const grid = h('div', { className: 'doc-grid' });
+    const item = (label, valueEl) => h('div', { className: 'doc-item' },
+      h('div', { className: 'doc-label' }, label), valueEl);
+
+    if (cls.length) {
+      const badges = cls.map(c => '<span class="tag">' + escHtml(String(c)) + '</span>').join('');
+      grid.appendChild(item('Classification', h('div', { className: 'doc-value', innerHTML: badges })));
+    }
+    metaKeys.forEach(k => {
+      const v = meta[k];
+      // Scalars render as text; nested objects/arrays as compact JSON in a
+      // monospace value. Values pass through h() as string children, so they
+      // are auto-escaped.
+      const isObj = v !== null && typeof v === 'object';
+      const valueEl = h('div',
+        { className: isObj ? 'doc-value mono' : 'doc-value' },
+        isObj ? JSON.stringify(v) : String(v));
+      grid.appendChild(item(k, valueEl));
+    });
+
+    if (grid.childNodes.length) body.appendChild(grid);
+    section.appendChild(body);
+    return section;
+  }
+
   function showPipelineDetail(pipelineName) {
     const panel = $('#tab-pipeline-detail');
     panel.innerHTML = '';
@@ -1088,6 +1133,9 @@
         tagDiv.style.marginBottom = '24px';
         panel.appendChild(tagDiv);
       }
+
+      const docSection = renderDocSection(p);
+      if (docSection) panel.appendChild(docSection);
     }
 
     const pRuns = allIngestRuns.filter(r => r.pipeline_name === pipelineName);

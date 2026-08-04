@@ -575,6 +575,76 @@ class TestColumnHintDataType:
 
 
 @pytest.mark.unit
+class TestMetaProperty:
+    """A first-class, permissive `meta:` block for user documentation metadata.
+
+    Custom doc keys (data_owner, source_system, historization_type, ...) used to
+    trip validation: `additionalProperties: false` on per-config files, and at
+    the group level the schema models any unknown key as a nested pipeline entry
+    (must be an object, so scalars are rejected). A sanctioned `meta` block —
+    inherited from BaseConfig, mirroring dbt — gives users one permissive home.
+    """
+
+    _PROJECT_LEVEL = {
+        "dlt_common.json",
+        "profiles_config.json",
+        "saga_project_config.json",
+        "packages_config.json",
+    }
+
+    def _meta_def(self, data):
+        """Resolve the (possibly $ref'd) meta schema in a generated document."""
+        meta = data["properties"]["meta"]
+        if set(meta) == {"$ref"}:
+            meta = data["$defs"][meta["$ref"].split("/")[-1]]
+        return meta
+
+    def test_meta_permissive_in_every_pipeline_schema(self, tmp_path):
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        checked = 0
+        for schema_path in tmp_path.glob("*_config.json"):
+            if schema_path.name in self._PROJECT_LEVEL:
+                continue
+            data = json.loads(schema_path.read_text(encoding="utf-8"))
+            props = data.get("properties", {})
+            # Present with a `+meta:` merge alias, despite additionalProperties: false.
+            assert "meta" in props, f"{schema_path.name} missing meta"
+            assert "+meta" in props, f"{schema_path.name} missing +meta merge alias"
+            # Permissive object: arbitrary nested keys allowed.
+            meta = self._meta_def(data)
+            assert meta["type"] == "object"
+            assert meta["additionalProperties"] is True
+            checked += 1
+        assert checked > 0
+
+    def test_meta_recognized_at_all_project_levels(self, tmp_path):
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        data = json.loads(
+            (tmp_path / "saga_project_config.json").read_text(encoding="utf-8")
+        )
+        pipelines = data["properties"]["pipelines"]
+        group = pipelines["additionalProperties"]
+        # Project-wide, group, and individual-pipeline levels all accept meta,
+        # so a scalar doc key under `meta:` is no longer read as a pipeline entry.
+        assert "meta" in pipelines["properties"]
+        assert "meta" in group["properties"]
+        assert "+meta" in group["properties"]
+        assert "meta" in group["additionalProperties"]["properties"]
+
+    def test_meta_is_a_base_config_field(self):
+        """Recognized at runtime (stored, not silently dropped) — not just schema."""
+        from dataclasses import fields
+
+        from dlt_saga.pipelines.base_config import BaseConfig
+
+        assert "meta" in {f.name for f in fields(BaseConfig)}
+
+
+@pytest.mark.unit
 class TestSecretSupportNote:
     """Fields that resolve secret references are documented uniformly."""
 

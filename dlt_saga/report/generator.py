@@ -45,6 +45,9 @@ def _serialize_report_data(data: ReportData) -> str:
                 "table_name": p.table_name,
                 "schema_name": p.schema_name,
                 "adapter": p.adapter,
+                "description": p.description,
+                "classification": p.classification,
+                "meta": p.meta,
             }
         )
 

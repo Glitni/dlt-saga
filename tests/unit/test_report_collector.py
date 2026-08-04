@@ -6,11 +6,34 @@ loudly so a permission/network failure doesn't render a silently-empty section.
 
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from dlt_saga.report.collector import _query_load_runs, _sortable_ts
+from dlt_saga.report.collector import (
+    _as_str_list,
+    _query_load_runs,
+    _sortable_ts,
+    collect_pipeline_metadata,
+)
+
+
+def _fake_config(**config_dict):
+    """A minimal stand-in for PipelineConfig for collect_pipeline_metadata."""
+    return SimpleNamespace(
+        pipeline_name="api__orders",
+        pipeline_group="api",
+        get_tag_names=lambda: ["daily"],
+        raw_write_disposition="append",
+        ingest_enabled=True,
+        historize_enabled=False,
+        enabled=True,
+        table_name="orders",
+        schema_name="dlt_api",
+        adapter=None,
+        config_dict=config_dict,
+    )
 
 
 def _dest_raising(exc):
@@ -39,6 +62,38 @@ class TestReportQueryErrorClassification:
             r.levelno == logging.WARNING and "incomplete" in r.getMessage()
             for r in caplog.records
         )
+
+
+@pytest.mark.unit
+class TestCollectPipelineMetadata:
+    def test_reads_doc_metadata_from_config_dict(self):
+        cfg = _fake_config(
+            description="Orders",
+            classification=["pii:false"],
+            meta={"data_owner": "team@example.com"},
+        )
+        (info,) = collect_pipeline_metadata({"api": [cfg]})
+        assert info.description == "Orders"
+        assert info.classification == ["pii:false"]
+        assert info.meta == {"data_owner": "team@example.com"}
+
+    def test_absent_doc_metadata_defaults(self):
+        (info,) = collect_pipeline_metadata({"api": [_fake_config()]})
+        assert info.description is None
+        assert info.classification == []
+        assert info.meta is None
+
+
+@pytest.mark.unit
+class TestAsStrList:
+    def test_none_is_empty(self):
+        assert _as_str_list(None) == []
+
+    def test_scalar_string_wrapped(self):
+        assert _as_str_list("pii") == ["pii"]
+
+    def test_list_coerced_to_strings(self):
+        assert _as_str_list([1, "b"]) == ["1", "b"]
 
 
 @pytest.mark.unit

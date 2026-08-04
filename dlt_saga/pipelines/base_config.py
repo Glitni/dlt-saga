@@ -56,6 +56,19 @@ class BaseConfig:
         },
     )
 
+    meta: Optional[Dict[str, Any]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Free-form user metadata for documentation and governance "
+                "(e.g. data_owner, source_system, sla, pii_columns). Arbitrary "
+                "nested keys are allowed; the runtime does not interpret them. "
+                "A sanctioned home for custom annotations so they validate "
+                "instead of tripping schema validation. Mirrors dbt's 'meta'."
+            ),
+        },
+    )
+
     filters: Optional[List[Dict[str, Any]]] = field(
         default=None,
         metadata=_filter_field_metadata(
