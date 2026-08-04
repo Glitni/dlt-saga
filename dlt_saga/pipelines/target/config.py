@@ -4,8 +4,20 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
 from dlt_saga.historize.config import HistorizeConfig
+from dlt_saga.pipeline_config.base_config import BASE_WRITE_DISPOSITIONS
 from dlt_saga.utility.column_docs import compose_description
 from dlt_saga.utility.secrets.redaction import redact
+
+# The schema enum for ``write_disposition``, derived from the same canonical
+# base dispositions the runtime validation uses (``VALID_WRITE_DISPOSITIONS``),
+# so the ingest forms, their ``+historize`` variants, and historize-only stay in
+# lockstep across the schema, ``saga validate``, and the docs — and can't drift
+# (as they did before #425/#444, when this was a hand-maintained duplicate).
+_WRITE_DISPOSITION_ENUM = [
+    *BASE_WRITE_DISPOSITIONS,
+    *(f"{base}+historize" for base in BASE_WRITE_DISPOSITIONS),
+    "historize",
+]
 
 
 @dataclass
@@ -186,14 +198,7 @@ class TargetConfig:
         default="replace",
         metadata={
             "description": "How to write data to the destination table. One of: append, merge, replace, append+historize, merge+historize, replace+historize, historize. The '+historize' variants also build an SCD2 history layer from the ingested snapshots. Use 'historize' alone for external data delivery (no ingest).",
-            "enum": [
-                "replace",
-                "append",
-                "merge",
-                "append+historize",
-                "historize",
-                "replace+historize",
-            ],
+            "enum": _WRITE_DISPOSITION_ENUM,
         },
     )
 

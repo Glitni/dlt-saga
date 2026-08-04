@@ -575,6 +575,32 @@ class TestColumnHintDataType:
 
 
 @pytest.mark.unit
+class TestWriteDispositionEnum:
+    """The generated write_disposition enum tracks the canonical disposition set,
+    so it can't drift from `saga validate` / the docs (regression for #444: the
+    enum omitted `merge+historize` after #425/#430 fixed only validate + docs)."""
+
+    def test_enum_matches_canonical_set(self, tmp_path):
+        from dlt_saga.pipeline_config.base_config import VALID_WRITE_DISPOSITIONS
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        checked = 0
+        for schema_path in tmp_path.glob("*_config.json"):
+            data = json.loads(schema_path.read_text(encoding="utf-8"))
+            wd = data.get("$defs", {}).get("config_field_write_disposition")
+            if wd is None:
+                continue
+            assert set(wd["enum"]) == set(VALID_WRITE_DISPOSITIONS), (
+                f"{schema_path.name} write_disposition enum drifted from "
+                "VALID_WRITE_DISPOSITIONS"
+            )
+            assert "merge+historize" in wd["enum"]
+            checked += 1
+        assert checked > 0
+
+
+@pytest.mark.unit
 class TestMetaProperty:
     """A first-class, permissive `meta:` block for user documentation metadata.
 
