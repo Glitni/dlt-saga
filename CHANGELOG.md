@@ -1,3 +1,13 @@
+## 0.29.0 — 2026-08-04
+
+### Added
+- Add 'meta' config key surfaced in saga report (#443)
+
+
+### Fixed
+- Derive write_disposition schema enum from canonical dispositions (#445)
+- Correct stale dlt data_type enum and BigQuery json type mapping (#442)
+
 ## 0.28.0 — 2026-08-03
 
 ### Added
