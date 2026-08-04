@@ -59,6 +59,34 @@ class TestBigQueryStringAndJson:
 
 
 @pytest.mark.unit
+class TestBigQueryDltTypeMapping:
+    def test_json_maps_to_native_json(self):
+        # dlt's 'json' type (renamed from 'complex' in dlt 1.0) maps to
+        # BigQuery's native JSON type for standard tables.
+        assert _dest().dlt_type_to_native("json") == "JSON"
+
+    def test_removed_complex_type_is_gone(self):
+        assert "complex" not in BigQueryDestination.DLT_TO_BIGQUERY_TYPE
+
+    def test_iceberg_ddl_downgrades_json_to_string(self):
+        # BigLake Iceberg has no native JSON column type, so a json column is
+        # stored as STRING in the CREATE TABLE DDL.
+        dest = _dest()
+        dest.config = type(
+            "C",
+            (),
+            {
+                "project_id": "p",
+                "dataset_name": "d",
+                "storage_path": "gs://bucket/path/",
+            },
+        )()
+        ddl = dest._build_create_table_ddl("t", {"payload": {"data_type": "json"}})
+        assert "`payload` STRING" in ddl
+        assert "JSON" not in ddl
+
+
+@pytest.mark.unit
 class TestBigQueryListTablesByPattern:
     def _dest_with_capture(self):
         from types import SimpleNamespace
