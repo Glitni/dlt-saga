@@ -1054,6 +1054,47 @@
   }
 
   // ---- Pipeline Detail view ----
+  // Documentation card for the pipeline detail view: description, governance
+  // classification, and free-form config `meta`. All are git-only config (meta
+  // is never written to the warehouse), surfaced here as a lightweight catalog.
+  function renderDocSection(p) {
+    const hasDesc = p.description != null && String(p.description).trim() !== '';
+    const cls = p.classification || [];
+    const meta = p.meta || {};
+    const metaKeys = Object.keys(meta);
+    if (!hasDesc && !cls.length && !metaKeys.length) return null;
+
+    const section = h('div', { className: 'section' });
+    section.appendChild(h('div', { className: 'section-header' }, 'Documentation'));
+    const grid = h('div', { className: 'kpi-grid' });
+
+    if (hasDesc) {
+      grid.appendChild(h('div', { className: 'kpi-card' },
+        h('div', { className: 'kpi-label' }, 'Description'),
+        h('div', { className: 'kpi-value-sm' }, String(p.description)),
+      ));
+    }
+    if (cls.length) {
+      const badges = cls.map(c => '<span class="tag">' + escHtml(String(c)) + '</span>').join('');
+      grid.appendChild(h('div', { className: 'kpi-card' },
+        h('div', { className: 'kpi-label' }, 'Classification'),
+        h('div', { className: 'kpi-value-sm', innerHTML: badges }),
+      ));
+    }
+    metaKeys.forEach(k => {
+      const v = meta[k];
+      // Scalars render as text; nested objects/arrays as compact JSON. Values
+      // pass through h() as string children, so they are auto-escaped.
+      const text = (v !== null && typeof v === 'object') ? JSON.stringify(v) : String(v);
+      grid.appendChild(h('div', { className: 'kpi-card' },
+        h('div', { className: 'kpi-label' }, k),
+        h('div', { className: 'kpi-value-sm' }, text),
+      ));
+    });
+    section.appendChild(grid);
+    return section;
+  }
+
   function showPipelineDetail(pipelineName) {
     const panel = $('#tab-pipeline-detail');
     panel.innerHTML = '';
@@ -1088,6 +1129,9 @@
         tagDiv.style.marginBottom = '24px';
         panel.appendChild(tagDiv);
       }
+
+      const docSection = renderDocSection(p);
+      if (docSection) panel.appendChild(docSection);
     }
 
     const pRuns = allIngestRuns.filter(r => r.pipeline_name === pipelineName);

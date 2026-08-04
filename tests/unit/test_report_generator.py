@@ -145,6 +145,37 @@ class TestSerializeReportData:
         assert parsed["executions"][0]["start_value_override"] == "2026-02-20"
         assert parsed["executions"][0]["end_value_override"] == "2026-02-26"
 
+    def test_pipeline_doc_metadata_serializes(self):
+        data = _empty_report()
+        data.pipelines.append(
+            PipelineInfo(
+                pipeline_name="api__orders",
+                pipeline_group="api",
+                tags=[],
+                write_disposition="append",
+                ingest_enabled=True,
+                historize_enabled=False,
+                enabled=True,
+                table_name="orders",
+                schema_name="dlt_api",
+                description="Order events",
+                classification=["pii:false"],
+                meta={"data_owner": "team@example.com", "sla": {"hours": 24}},
+            )
+        )
+        p = json.loads(_serialize_report_data(data))["pipelines"][0]
+        assert p["description"] == "Order events"
+        assert p["classification"] == ["pii:false"]
+        assert p["meta"] == {"data_owner": "team@example.com", "sla": {"hours": 24}}
+
+    def test_pipeline_doc_metadata_defaults_are_empty(self):
+        # A pipeline without doc metadata serializes null/[] (not missing keys),
+        # so the detail view can rely on the fields existing.
+        p = json.loads(_serialize_report_data(_populated_report()))["pipelines"][0]
+        assert p["description"] is None
+        assert p["classification"] == []
+        assert p["meta"] is None
+
     def test_none_datetimes_serialize_as_null(self):
         data = _empty_report()
         data.load_runs.append(

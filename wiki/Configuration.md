@@ -71,6 +71,7 @@ spreadsheet_id: "123ABC"
 | `task_group` | string | — | Group pipelines to run together in orchestration mode |
 | `adapter` | string | — | Explicit pipeline implementation binding (e.g., `dlt_saga.api.myservice`) |
 | `filters` | list | — | Row-level filters applied during ingest — see [Row Filters](#row-filters) |
+| `meta` | dict | — | Free-form user metadata for documentation/governance — see [Custom Metadata](#custom-metadata) |
 
 ### Column Hints
 
@@ -139,6 +140,33 @@ pipelines:
 ```
 
 **How it reaches the warehouse.** On BigQuery and Databricks, dlt writes descriptions at table-creation time; saga additionally **reconciles** them after each load, so later edits to a description/classification propagate to existing tables (dlt only writes them when a column is first created), and DuckDB — which dlt doesn't document at all — is covered too. The reconcile is idempotent: an unchanged config performs a single metadata read and no writes.
+
+### Custom Metadata
+
+Attach your own documentation or governance annotations under a `meta:` block. Any nested keys are allowed — the runtime does not interpret them, so this is the sanctioned home for custom fields that would otherwise fail schema validation. It mirrors dbt's `meta`.
+
+```yaml
+# configs/api/orders.yml
+meta:
+  data_owner: data-platform@example.com
+  source_system: salesforce
+  sla_guaranteed: false
+  pii_columns: [email, phone]
+```
+
+`meta:` is valid both on a pipeline config (per-table file) and on a pipeline group in `saga_project.yml`:
+
+```yaml
+# saga_project.yml
+pipelines:
+  api:
+    meta:
+      team: growth
+```
+
+`meta` is surfaced in `saga report` — the per-pipeline detail view shows a **Documentation** card with the pipeline's `description`, `classification`, and `meta`, turning the report into a lightweight data catalog (what it is, who owns it, its governance labels, its custom metadata).
+
+> Unlike `classification`, `meta` is **not** written to the warehouse — it lives in git only, and the runtime does not interpret it. Use `classification`/`description` for docs you want on the tables themselves; use `meta` for ownership/provenance/operational notes (owner emails, source-system links, SLA, JSON-path PII notes) that `classification`'s charset and warehouse-governance semantics can't hold.
 
 ### Row Filters
 

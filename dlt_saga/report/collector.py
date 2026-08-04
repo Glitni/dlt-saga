@@ -136,6 +136,10 @@ class PipelineInfo:
     table_name: str
     schema_name: str
     adapter: Optional[str] = None
+    # Documentation metadata (git-only config, surfaced in the report detail view)
+    description: Optional[str] = None
+    classification: List[str] = field(default_factory=list)
+    meta: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -172,9 +176,25 @@ def collect_pipeline_metadata(
                     table_name=config.table_name,
                     schema_name=config.schema_name,
                     adapter=config.adapter,
+                    description=config.config_dict.get("description"),
+                    classification=_as_str_list(
+                        config.config_dict.get("classification")
+                    ),
+                    meta=config.config_dict.get("meta"),
                 )
             )
     return pipelines
+
+
+def _as_str_list(value: Any) -> List[str]:
+    """Coerce a config value to a list of strings for report display."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return [str(value)]
 
 
 def _query_load_runs(destination: Any, schema: str, days: int) -> List[LoadRun]:
