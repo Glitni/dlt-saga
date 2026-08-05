@@ -310,12 +310,10 @@ class TestRunSpanningLayersNoSpuriousWarning:
         from dlt_saga import cli
         from dlt_saga.utility.cli import common
 
-        # ticket_events is ingest-only (append); tickets is historized.
-        ticket_events = self._cfg(
-            "zendesk__ticket_events", "zendesk", ingest=True, historize=False
-        )
-        tickets = self._cfg("zendesk__tickets", "zendesk", ingest=True, historize=True)
-        enabled = {"zendesk": [ticket_events, tickets]}
+        # events is ingest-only (append); accounts is historized.
+        events = self._cfg("crm__events", "crm", ingest=True, historize=False)
+        accounts = self._cfg("crm__accounts", "crm", ingest=True, historize=True)
+        enabled = {"crm": [events, accounts]}
 
         source = MagicMock()
         source.discover.return_value = (enabled, {})
@@ -327,7 +325,7 @@ class TestRunSpanningLayersNoSpuriousWarning:
             # Mirror run's orchestrate discovery: one unfiltered selection,
             # then partition by layer.
             selected, _ = common.discover_and_select_configs(
-                ["zendesk__ticket_events zendesk__tickets"]
+                ["crm__events crm__accounts"]
             )
             ingest_configs = cli._filter_config_groups(selected, cli._is_ingest_enabled)
             historize_configs = cli._filter_config_groups(
@@ -336,10 +334,8 @@ class TestRunSpanningLayersNoSpuriousWarning:
 
         assert not any(r.levelno == logging.WARNING for r in caplog.records)
         # Both pipelines are planned, partitioned into the correct layers.
-        assert [c.pipeline_name for c in ingest_configs["zendesk"]] == [
-            "zendesk__ticket_events",
-            "zendesk__tickets",
+        assert [c.pipeline_name for c in ingest_configs["crm"]] == [
+            "crm__events",
+            "crm__accounts",
         ]
-        assert [c.pipeline_name for c in historize_configs["zendesk"]] == [
-            "zendesk__tickets"
-        ]
+        assert [c.pipeline_name for c in historize_configs["crm"]] == ["crm__accounts"]
