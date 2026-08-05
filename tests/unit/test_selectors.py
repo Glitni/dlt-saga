@@ -281,3 +281,65 @@ class TestDiscoverAndSelectNoSpuriousWarning:
 
         assert "api" in selected  # the enabled pipeline was selected and will run
         assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+@pytest.mark.unit
+class TestRunSpanningLayersNoSpuriousWarning:
+    """Regression: ``saga run`` spans both the ingest and historize layers. A
+    selector that matches a pipeline present in only ONE layer must not warn
+    'did not match any pipelines' — the pipeline still runs. Previously ``run``
+    probed the ingest- and historize-enabled subsets separately, so an
+    ingest-only selector warned against the historize subset (and vice versa)."""
+
+    def _cfg(self, pipeline_name, group, *, ingest, historize):
+        from unittest.mock import MagicMock
+
+        cfg = MagicMock()
+        cfg.pipeline_name = pipeline_name
+        cfg.pipeline_group = group
+        cfg.table_name = pipeline_name.split("__")[-1]
+        cfg.identifier = f"configs/{group}/{pipeline_name}.yml"
+        cfg.ingest_enabled = ingest
+        cfg.historize_enabled = historize
+        return cfg
+
+    def test_ingest_only_selector_does_not_warn_for_run(self, caplog):
+        import logging
+        from unittest.mock import MagicMock, patch
+
+        from dlt_saga import cli
+        from dlt_saga.utility.cli import common
+
+        # ticket_events is ingest-only (append); tickets is historized.
+        ticket_events = self._cfg(
+            "zendesk__ticket_events", "zendesk", ingest=True, historize=False
+        )
+        tickets = self._cfg("zendesk__tickets", "zendesk", ingest=True, historize=True)
+        enabled = {"zendesk": [ticket_events, tickets]}
+
+        source = MagicMock()
+        source.discover.return_value = (enabled, {})
+
+        with (
+            patch.object(common, "get_config_source", return_value=source),
+            caplog.at_level(logging.WARNING, logger="dlt_saga.utility.cli.selectors"),
+        ):
+            # Mirror run's orchestrate discovery: one unfiltered selection,
+            # then partition by layer.
+            selected, _ = common.discover_and_select_configs(
+                ["zendesk__ticket_events zendesk__tickets"]
+            )
+            ingest_configs = cli._filter_config_groups(selected, cli._is_ingest_enabled)
+            historize_configs = cli._filter_config_groups(
+                selected, cli._is_historize_enabled
+            )
+
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)
+        # Both pipelines are planned, partitioned into the correct layers.
+        assert [c.pipeline_name for c in ingest_configs["zendesk"]] == [
+            "zendesk__ticket_events",
+            "zendesk__tickets",
+        ]
+        assert [c.pipeline_name for c in historize_configs["zendesk"]] == [
+            "zendesk__tickets"
+        ]

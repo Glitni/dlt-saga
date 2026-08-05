@@ -116,6 +116,27 @@ def _is_historize_enabled(config: PipelineConfig) -> bool:
     return config.historize_enabled
 
 
+def _filter_config_groups(
+    configs: Dict[str, List[PipelineConfig]],
+    predicate,
+) -> Dict[str, List[PipelineConfig]]:
+    """Filter a group->configs mapping in place of a fresh discovery, dropping
+    any group left empty.
+
+    Used by ``run`` to partition a single selection into its ingest and
+    historize layers. Selecting once and partitioning here (rather than probing
+    each resource-type subset separately) keeps the no-match warning a
+    union-level concern: a selector warns only when it matches no enabled
+    pipeline at all, not when it merely misses one of the two layers.
+    """
+    filtered: Dict[str, List[PipelineConfig]] = {}
+    for group, cfgs in configs.items():
+        kept = [c for c in cfgs if predicate(c)]
+        if kept:
+            filtered[group] = kept
+    return filtered
+
+
 def _list_implementations():
     """Print available pipeline implementations."""
     from dlt_saga.pipelines.registry import discover_implementations
@@ -866,12 +887,15 @@ def _run_orchestrate(
     )
     provider = _resolve_orchestration_provider()
 
-    ingest_configs, _ = discover_and_select_configs(
-        select, filter_fn=_is_ingest_enabled
-    )
-    historize_configs, _ = discover_and_select_configs(
-        select, filter_fn=_is_historize_enabled
-    )
+    # Select once over the full enabled set — ``run`` spans both the ingest and
+    # historize layers, so the no-match warning must reflect whether a selector
+    # matches ANY enabled pipeline. Probing the ingest- and historize-enabled
+    # subsets separately would warn spuriously for a selector that matches a
+    # pipeline present in only one layer (e.g. an ingest-only pipeline warns
+    # against the historize subset even though it runs).
+    selected_configs, _ = discover_and_select_configs(select)
+    ingest_configs = _filter_config_groups(selected_configs, _is_ingest_enabled)
+    historize_configs = _filter_config_groups(selected_configs, _is_historize_enabled)
     if not ingest_configs and not historize_configs:
         logger.error("No pipelines matched the selection criteria")
         raise typer.Exit(1)
@@ -1025,8 +1049,11 @@ def run(
     session = Session(profile=profile, target=target, _profile_target=profile_target)
     select_list = list(select) if select else None
 
-    ingest_cfgs = session.discover(select_list, resource_type="ingest")
-    historize_cfgs = session.discover(select_list, resource_type="historize")
+    # Discover once over the full enabled set, then partition by layer — see the
+    # orchestrate path for why per-resource-type probing warns spuriously here.
+    all_cfgs = session.discover(select_list)
+    ingest_cfgs = [c for c in all_cfgs if c.ingest_enabled]
+    historize_cfgs = [c for c in all_cfgs if c.historize_enabled]
 
     if not ingest_cfgs and not historize_cfgs:
         logger.error("No pipelines matched the selection criteria")
