@@ -1,3 +1,13 @@
+## 0.30.0 — 2026-08-11
+
+### Added
+- Link dashboard pipeline groups and tags to the Catalog (#450)
+
+
+### Fixed
+- Spurious 'did not match' warning from saga run's per-layer selector probe (#454)
+- Label pipeline tags and move them into the report Documentation section (#452)
+
 ## 0.29.0 — 2026-08-04
 
 ### Added
