@@ -1,3 +1,8 @@
+## 0.30.1 — 2026-08-11
+
+### Fixed
+- Populate saga execution telemetry tables on DuckDB (#457)
+
 ## 0.30.0 — 2026-08-11
 
 ### Added
