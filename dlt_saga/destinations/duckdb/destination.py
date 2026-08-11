@@ -365,6 +365,11 @@ class DuckDBDestination(Destination):
     # SQL dialect overrides
     # -------------------------------------------------------------------------
 
+    def current_timestamp_expression(self) -> str:
+        # DuckDB treats CURRENT_TIMESTAMP as a keyword, not a scalar function:
+        # the parenthesised CURRENT_TIMESTAMP() raises a Catalog Error. Use now().
+        return "now()"
+
     def timestamp_n_days_ago(self, days: int) -> str:
         return f"now() - INTERVAL '{days}' DAY"
 

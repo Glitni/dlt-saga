@@ -71,6 +71,38 @@ class TestGoldenPath:
             "DuckDB file not created after ingest"
         )
 
+    def test_ingest_records_execution_plan_and_execution_rows(
+        self, tmp_path, monkeypatch
+    ):
+        """After a local DuckDB ingest, the telemetry tables are populated.
+
+        These tables are the only place a *failed* pipeline is recorded
+        (``_saga_load_info`` only gets a row on success), so a silently-empty
+        telemetry table hides every failure. Regression test for the DuckDB
+        ``CURRENT_TIMESTAMP()`` dialect mismatch (issue #456).
+        """
+        import duckdb
+
+        monkeypatch.chdir(tmp_path)
+        run_init(no_input=True)
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["ingest", "--select", "filesystem__sample"])
+        assert result.exit_code == 0, (
+            f"saga ingest exited {result.exit_code}:\n{result.output}"
+        )
+
+        con = duckdb.connect(str(tmp_path / "local.duckdb"))
+        try:
+            con.execute("use dlt_dev")
+            plans = con.sql("select count(*) from _saga_execution_plans").fetchone()[0]
+            executions = con.sql("select count(*) from _saga_executions").fetchone()[0]
+        finally:
+            con.close()
+
+        assert plans == 1, f"expected 1 _saga_execution_plans row, got {plans}"
+        assert executions == 1, f"expected 1 _saga_executions row, got {executions}"
+
     def test_generate_schemas_writes_and_links(self, tmp_path, monkeypatch):
         """`saga generate-schemas` writes schema files and links the sample
         config to its adapter's schema via a yaml-language-server modeline."""
