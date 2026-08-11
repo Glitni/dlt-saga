@@ -578,7 +578,11 @@ class ExecutionPlanManager:
                 )
                 return execution_id
             except Exception as e:
-                logger.debug(f"Could not record local run {execution_id}: {e}")
+                # Second failure: ensure_table_exists() has already ruled out the
+                # "table doesn't exist yet" explanation, so this is a genuine
+                # problem worth surfacing (e.g. a SQL dialect mismatch) even though
+                # the path stays best-effort and never breaks the run it reports on.
+                logger.warning(f"Could not record local run {execution_id}: {e}")
                 return None
 
     def get_task_assignment(
