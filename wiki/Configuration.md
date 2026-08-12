@@ -2,19 +2,21 @@
 
 ## Hierarchical Configuration
 
-Use `configs/dlt_project.yml` to set defaults that apply across multiple pipelines. Individual pipeline configs inherit and can override these defaults.
+Use the `pipelines:` section of `saga_project.yml` (repo root) to set defaults that apply across multiple pipelines. Individual pipeline configs inherit and can override these defaults.
 
 ```mermaid
 graph TB
-    P["Project defaults<br/><i>dlt_project.yml → project:</i>"] --> F["Folder defaults<br/><i>dlt_project.yml → project: → google_sheets:</i>"]
-    F --> S["Sub-folder defaults<br/><i>dlt_project.yml → project: → google_sheets: → budget:</i>"]
-    S --> C["Pipeline config<br/><i>configs/google_sheets/budget/vest.yml</i>"]
+    P["Project defaults<br/><i>saga_project.yml → pipelines:</i>"] --> F["Folder defaults<br/><i>pipelines: → google_sheets:</i>"]
+    F --> S["Sub-folder defaults<br/><i>pipelines: → google_sheets: → regional_budget:</i>"]
+    S --> C["Pipeline config<br/><i>configs/google_sheets/regional_budget/vest.yml</i>"]
 
     style C fill:#2d6,stroke:#1a4,color:#fff
     style P fill:#666,stroke:#444,color:#fff
 ```
 
 **Most specific wins.** A value in the pipeline config overrides folder defaults, which override project defaults.
+
+Nested keys under `pipelines:` are folder scopes when they name an **actual sub-directory** in the config tree — pipeline groups and their subfolders. Any other dict-valued key (`persist_docs`, `historize`, `columns`, …) is treated as a config value, so dict-valued defaults work at every level.
 
 ### Merge Syntax
 
@@ -23,28 +25,34 @@ graph TB
 | `key:` | **Override** — replaces parent value | `tags: ["custom"]` |
 | `+key:` | **Inherit** — merges with parent | `+tags: ["extra"]` adds to parent tags |
 
+With `+key:`, lists are concatenated and de-duplicated (order preserved), dicts get a **shallow** (one-level) merge where child keys win, and scalars take the child value. A nested dict under a merged key replaces its parent wholesale — e.g. `+historize:` merges the block's top-level keys, but a `columns:` map inside it replaces the parent's `columns:` rather than merging per column.
+
 ### Example
 
 ```yaml
-# configs/dlt_project.yml
-project:
+# saga_project.yml
+pipelines:
   tags: ["production"]
-  access:
-    - "group:data-engineers@example.com"
+  schema_access:
+    - "OWNER:serviceAccount:dlt-run@<project>.iam.gserviceaccount.com"
+    - "READER:group:data-engineers@example.com"
 
-  google_sheets:
+  google_sheets:                   # = configs/google_sheets/
+    adapter: dlt_saga.google_sheets
     +tags: ["sheets"]              # → ["production", "sheets"]
     write_disposition: "replace"
 
-    regional_budget:
+    regional_budget:               # = configs/google_sheets/regional_budget/
       +tags: ["budget"]            # → ["production", "sheets", "budget"]
 ```
 
 ```yaml
 # configs/google_sheets/regional_budget/vest.yml
 spreadsheet_id: "123ABC"
-# Inherits: tags, access, write_disposition from hierarchy
+# Inherits: tags, schema_access, adapter, write_disposition from hierarchy
 ```
+
+Other ways to avoid repeating yourself: [`dev:` override blocks](#dev-overrides) for environment-specific values, `{{ env_var(...) }}` templating (rendered on `profiles.yml`, `saga_project.yml` and pipeline configs alike, before the merge), target-level `table_format` / `storage_path` defaults in [profiles.yml](Profiles), and standard YAML anchors with `<<:` merge keys within a single file.
 
 ## Pipeline Config Reference
 

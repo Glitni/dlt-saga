@@ -141,7 +141,7 @@ class BigQueryDestinationConfig(DestinationConfig):
             dataset_name: already resolved by ConfigSource (e.g., FilePipelineConfig)
             table_format: config_dict > context (profile) > "native"
             storage_path: context (profile) — required for iceberg
-            schema_access: config_dict (from dlt_project.yml)
+            schema_access: config_dict (from saga_project.yml)
         """
         from dlt_saga.utility.env import get_env
 
