@@ -186,9 +186,9 @@ class TargetConfig:
         default=None,
         metadata={
             "description": (
-                "Read-access list for the tables this pipeline loads, applied by "
-                "the destination's access manager, in production only. "
-                "None means access is not managed; [] revokes all managed grants."
+                "Read-access list for the target table, applied by the "
+                "destination's access manager, in production only. None means "
+                "access is not managed; [] revokes all managed table-level grants."
             )
         },
     )
