@@ -1891,6 +1891,7 @@ def doctor(
         _doctor_check_destination,
         _doctor_check_profile,
         _doctor_check_project,
+        _doctor_check_stray_project_config,
         _doctor_emit_version,
     )
 
@@ -1907,6 +1908,7 @@ def doctor(
         profile, target, verbose, _emit
     )
     ok = _doctor_check_project(verbose, _emit)
+    _doctor_check_stray_project_config(_emit)
     selected_configs = _doctor_check_configs(select, context, verbose, _emit)
     ok = (
         _doctor_check_destination(
