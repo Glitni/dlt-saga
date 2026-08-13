@@ -124,7 +124,7 @@ Capability flags (`supports_partitioning()`, `supports_clustering()`) let pipeli
 
 ### Pipeline configs (`configs/`)
 
-YAML files discovered at startup. They are hierarchical — defaults flow from `configs/dlt_project.yml` down through folders to individual files using dbt-style `+key` merge syntax.
+YAML files discovered at startup. They are hierarchical — defaults flow from the `pipelines:` section of `saga_project.yml` down through folders to individual files using dbt-style `+key` merge syntax.
 
 `PipelineConfig.write_disposition` controls which commands apply:
 

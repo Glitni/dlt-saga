@@ -1,7 +1,7 @@
 """File-based pipeline configuration with hierarchical resolution.
 
 Implements file-based pipeline discovery with dbt-style configuration
-inheritance via ``dlt_project.yml``. Naming resolution is delegated to
+inheritance via ``saga_project.yml``. Naming resolution is delegated to
 :mod:`dlt_saga.pipeline_config.naming`, which holds the framework's default
 ``generate_*`` implementations and the custom-module loader; users
 overriding naming behaviour should import the defaults from there.
@@ -42,10 +42,10 @@ class FilePipelineConfig(ConfigSource):
     """Configuration source that reads YAML files from a directory structure.
 
     Expects configs in: configs/<pipeline_group>/<optional_subfolders>/<name>.yml
-    Supports hierarchical configuration with dlt_project.yml defaults.
+    Supports hierarchical configuration with saga_project.yml defaults.
 
     Resolution order:
-    1. Project-level defaults (configs/dlt_project.yml :: project section)
+    1. Project-level defaults (saga_project.yml :: pipelines section)
     2. Folder hierarchy defaults (walking down the path)
     3. File-level configuration
 
@@ -479,7 +479,7 @@ class FilePipelineConfig(ConfigSource):
         # before the hierarchical merge so mixed-name trees compose correctly.
         normalize_config_aliases(file_config)
 
-        # Apply hierarchical resolution (dlt_project.yml defaults)
+        # Apply hierarchical resolution (saga_project.yml defaults)
         resolved_config = self._resolve_config(config_path, file_config)
 
         # Fold the `dev:` override block into the config (dev only). Applied

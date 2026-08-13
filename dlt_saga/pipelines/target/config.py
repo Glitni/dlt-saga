@@ -185,7 +185,11 @@ class TargetConfig:
     access: Optional[List[str]] = field(
         default=None,
         metadata={
-            "description": "BigQuery access control list (only applied in production)"
+            "description": (
+                "Read-access list for the target table, applied by the "
+                "destination's access manager, in production only. None means "
+                "access is not managed; [] revokes all managed table-level grants."
+            )
         },
     )
 

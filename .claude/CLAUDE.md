@@ -394,7 +394,7 @@ historize:
 - `write_disposition` controls what runs: `append` (ingest only), `append+historize` (both), `historize` (historize-only)
 - Historize config: `historize:` section with `snapshot_column`, `track_columns`, `ignore_columns`, `track_deletions`, etc.
 - Snapshot date extraction: `snapshot_date_regex` + `snapshot_date_format` (top-level, filesystem only)
-- Hierarchical inheritance via `dlt_project.yml` (use `+key:` for merge, `key:` for override)
+- Hierarchical inheritance via the `pipelines:` section of `saga_project.yml` (use `+key:` for merge, `key:` for override)
 
 ## Testing
 - Create unit tests for core logic (selectors, config parsing, etc.)
