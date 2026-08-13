@@ -33,9 +33,8 @@ With `+key:`, lists are concatenated and de-duplicated (order preserved), dicts 
 # saga_project.yml
 pipelines:
   tags: ["production"]
-  schema_access:
-    - "OWNER:serviceAccount:dlt-run@<project>.iam.gserviceaccount.com"
-    - "READER:group:data-engineers@example.com"
+  access:
+    - "group:data-engineers@example.com"
 
   google_sheets:                   # = configs/google_sheets/
     adapter: dlt_saga.google_sheets
@@ -49,7 +48,7 @@ pipelines:
 ```yaml
 # configs/google_sheets/regional_budget/vest.yml
 spreadsheet_id: "123ABC"
-# Inherits: tags, schema_access, adapter, write_disposition from hierarchy
+# Inherits: tags, access, adapter, write_disposition from hierarchy
 ```
 
 Other ways to avoid repeating yourself: [`dev:` override blocks](#dev-overrides) for environment-specific values, `{{ env_var(...) }}` templating (rendered on `profiles.yml`, `saga_project.yml` and pipeline configs alike, before the merge), target-level `table_format` / `storage_path` defaults in [profiles.yml](Profiles), and standard YAML anchors with `<<:` merge keys within a single file.
