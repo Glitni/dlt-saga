@@ -25,7 +25,9 @@ Nested keys under `pipelines:` are folder scopes when they name an **actual sub-
 | `key:` | **Override** — replaces parent value | `tags: ["custom"]` |
 | `+key:` | **Inherit** — merges with parent | `+tags: ["extra"]` adds to parent tags |
 
-With `+key:`, lists are concatenated and de-duplicated (order preserved), dicts get a **shallow** (one-level) merge where child keys win, and scalars take the child value. A nested dict under a merged key replaces its parent wholesale — e.g. `+historize:` merges the block's top-level keys, but a `columns:` map inside it replaces the parent's `columns:` rather than merging per column.
+At folder level and below, `+key:` concatenates and de-duplicates lists (order preserved), gives dicts a **shallow** (one-level) merge where child keys win, and takes the child value for scalars. A nested dict under a merged key replaces its parent wholesale — e.g. `+historize:` merges the block's top-level keys, but a `columns:` map inside it replaces the parent's `columns:` rather than merging per column.
+
+Directly under `pipelines:` there is nothing to merge into yet, so a `+` there is simply stripped: those entries seed the base that the levels below merge against. Writing `+key:` at the top level is harmless but has no effect — use the plain `key:` form.
 
 ### Example
 
