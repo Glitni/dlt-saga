@@ -26,6 +26,7 @@ from dlt_saga.utility.cli.common import (
     setup_execution_context,
 )
 from dlt_saga.utility.cli.context import get_execution_context
+from dlt_saga.utility.project_root import find_project_root
 
 if TYPE_CHECKING:
     from dlt_saga.utility.cli.context import ExecutionContext
@@ -101,6 +102,93 @@ def _doctor_check_project(verbose: bool, emit: Callable[..., None]) -> bool:
         if verbose:
             typer.echo(traceback.format_exc())
         return False
+
+
+def _describe_project_lookalike(loc_label: str, stem: str, ext: str) -> str:
+    """Explain every way a project-defaults look-alike differs from the canonical
+    ``saga_project.yml`` at the project root, so the warning points straight at
+    the fix.
+    """
+    issues = []
+    if stem.startswith("dlt"):
+        issues.append("old docs name (rename to saga_project)")
+    if "-" in stem:
+        issues.append("hyphen instead of underscore")
+    if ext != ".yml":
+        issues.append(f"{ext} instead of .yml")
+    if loc_label:
+        issues.append("in configs/ instead of the project root")
+    return ", ".join(issues) or "misplaced"
+
+
+def _doctor_check_stray_project_config(emit: Callable[..., None]) -> None:
+    """Warn when a project-defaults file looks misplaced or misnamed.
+
+    Project defaults are read from ``saga_project.yml`` at the project root
+    (``find_project_root()``; see :func:`dlt_saga.project_config.get_project_config`).
+    A file named ``dlt_project.yml`` (the name the docs used before #459), a
+    ``saga_project.yml`` left inside ``configs/`` instead of the root, or a
+    near-miss spelling at the root is **never read**: the hierarchical merge
+    short-circuits on an empty project config (``FilePipelineConfig._resolve_config``)
+    and every shared default (``tags``, ``schema_access``, ``adapter``,
+    ``write_disposition``) is silently dropped while pipelines still run green.
+
+    Emitted as a warning (``!``), never a failure — these are all valid files to
+    have lying around, and ``doctor`` should not exit non-zero on a project that
+    works. Stays silent when the canonical file is present (a shadowed look-alike
+    is harmless) to avoid noise.
+    """
+    root = find_project_root()
+    canonical = root / "saga_project.yml"
+
+    # Every look-alike is the correct/old base name crossed with a separator or
+    # extension typo and the two directories people drop it in. Enumerating the
+    # matrix (rather than a hand-listed set) closes the whole class of near-miss
+    # — `dlt-project.yml`, `saga_project.yaml`, `configs/saga-project.yml`, … —
+    # instead of whichever variants someone happened to think of. Only the
+    # canonical file is read; anything else here is silently ignored.
+    stems = ["saga_project", "saga-project", "dlt_project", "dlt-project"]
+    exts = [".yml", ".yaml"]
+    locations = [("", root), ("configs/", root / "configs")]
+
+    stray = []
+    for loc_label, loc_dir in locations:
+        for stem in stems:
+            for ext in exts:
+                path = loc_dir / f"{stem}{ext}"
+                if path == canonical or not path.exists():
+                    continue
+                stray.append((path, _describe_project_lookalike(loc_label, stem, ext)))
+
+    if canonical.exists():
+        # The correct file is being read; any look-alike is inert. Keep quiet.
+        return
+
+    if stray:
+        found = "; ".join(f"{path} ({why})" for path, why in stray)
+        emit(
+            "!",
+            "Project defaults",
+            f"{canonical} is missing, so shared defaults (tags, schema_access, "
+            f"adapter, write_disposition) are silently ignored. Found {found} — "
+            "rename/move it to that path",
+        )
+        return
+
+    # No project file and no look-alike. Only worth flagging when the config tree
+    # has more than one pipeline group — that combination is far more often an
+    # oversight than a deliberate choice to forgo shared defaults.
+    configs_dir = root / "configs"
+    if configs_dir.is_dir():
+        groups = [d for d in configs_dir.iterdir() if d.is_dir()]
+        if len(groups) > 1:
+            emit(
+                "!",
+                "Project defaults",
+                f"no saga_project.yml at {root}, but {len(groups)} pipeline "
+                "groups in configs/ — shared defaults have nowhere to live "
+                f"(create {canonical})",
+            )
 
 
 def _doctor_emit_version(emit: Callable[..., None]) -> None:

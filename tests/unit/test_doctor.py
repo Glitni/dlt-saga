@@ -130,6 +130,78 @@ class TestDoctorCheckConfigs:
 
 
 @pytest.mark.unit
+class TestDoctorCheckStrayProjectConfig:
+    """The layout guard warns (never fails) when project defaults are unreadable."""
+
+    def _run(self, root):
+        emit = _CaptureEmit()
+        with patch.object(doctor, "find_project_root", return_value=root):
+            doctor._doctor_check_stray_project_config(emit)
+        return emit.calls
+
+    def test_silent_when_canonical_file_present(self, tmp_path):
+        (tmp_path / "saga_project.yml").write_text("pipelines: {}\n")
+        # A shadowed look-alike alongside the real file is inert → no warning.
+        (tmp_path / "configs").mkdir()
+        (tmp_path / "configs" / "dlt_project.yml").write_text("project: {}\n")
+        assert self._run(tmp_path) == []
+
+    def test_warns_on_old_docs_name_in_configs(self, tmp_path):
+        (tmp_path / "configs").mkdir()
+        (tmp_path / "configs" / "dlt_project.yml").write_text("project: {}\n")
+        calls = self._run(tmp_path)
+        assert len(calls) == 1
+        symbol, label, detail = calls[0]
+        assert symbol == "!"
+        assert label == "Project defaults"
+        assert "dlt_project.yml" in detail
+        assert "old docs name" in detail
+        # Names the path actually read.
+        assert str(tmp_path / "saga_project.yml") in detail
+
+    def test_warns_on_right_name_wrong_directory(self, tmp_path):
+        (tmp_path / "configs").mkdir()
+        (tmp_path / "configs" / "saga_project.yml").write_text("pipelines: {}\n")
+        symbol, label, detail = self._run(tmp_path)[0]
+        assert symbol == "!"
+        assert "in configs/ instead of the project root" in detail
+
+    def test_warns_on_near_miss_spellings_at_root(self, tmp_path):
+        (tmp_path / "saga_project.yaml").write_text("pipelines: {}\n")
+        (tmp_path / "saga-project.yml").write_text("pipelines: {}\n")
+        detail = self._run(tmp_path)[0][2]
+        assert "saga_project.yaml" in detail
+        assert "saga-project.yml" in detail
+
+    def test_warns_on_dlt_hyphen_variant(self, tmp_path):
+        # The hyphen typo of the *old* base name — the gap that hand-listing left.
+        (tmp_path / "dlt-project.yml").write_text("project: {}\n")
+        detail = self._run(tmp_path)[0][2]
+        assert "dlt-project.yml" in detail
+        assert "old docs name" in detail
+        assert "hyphen instead of underscore" in detail
+
+    def test_warns_when_no_project_file_but_multiple_groups(self, tmp_path):
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "google_sheets").mkdir()
+        (configs / "filesystem").mkdir()
+        symbol, label, detail = self._run(tmp_path)[0]
+        assert symbol == "!"
+        assert "2 pipeline" in detail
+
+    def test_silent_when_no_project_file_and_single_group(self, tmp_path):
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        (configs / "google_sheets").mkdir()
+        assert self._run(tmp_path) == []
+
+    def test_silent_on_empty_project(self, tmp_path):
+        # Nothing to warn about: no project file, no configs tree.
+        assert self._run(tmp_path) == []
+
+
+@pytest.mark.unit
 class TestDoctorEmitVersion:
     def test_marks_editable_vs_installed(self):
         emit = _CaptureEmit()
