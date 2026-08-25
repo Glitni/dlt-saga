@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import dlt
 
+from dlt_saga.pipeline_config.base_config import resolve_write_disposition
 from dlt_saga.pipelines.base_pipeline import BasePipeline
 from dlt_saga.pipelines.filesystem.client import FilesystemClient
 from dlt_saga.pipelines.filesystem.config import FilesystemConfig
@@ -246,7 +247,7 @@ class FilesystemPipeline(BasePipeline):
         Returns True for append-mode pipelines where _dlt_source_file_name and
         _dlt_source_modification_date are needed for _dlt_ingested_at resolution.
         """
-        wd = self.config_dict.get("write_disposition", "append")
+        wd = resolve_write_disposition(self.config_dict)
         # Strip +historize suffix to get base disposition
         base_wd = wd.split("+")[0] if "+" in wd else wd
         return base_wd == "append"

@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from dlt_saga.pipeline_config.base_config import resolve_write_disposition
 from dlt_saga.pipelines.base_pipeline import BasePipeline
 from dlt_saga.pipelines.native_load.config import NativeLoadConfig
 from dlt_saga.pipelines.native_load.state import NativeLoadStateManager, make_load_id
@@ -55,7 +56,7 @@ class NativeLoadPipeline(BasePipeline):
         self.context = get_execution_context()
 
         # Validate write_disposition before any I/O
-        write_disp = config.get("write_disposition", "append") or "append"
+        write_disp = resolve_write_disposition(config)
         base_disp = write_disp.replace("+historize", "")
         if base_disp not in ("append", "replace"):
             raise ValueError(

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import dlt
 
 from dlt_saga.destinations.factory import DestinationFactory
+from dlt_saga.pipeline_config.base_config import resolve_write_disposition
 from dlt_saga.pipelines.target.config import MergeStrategy, TargetConfig
 from dlt_saga.pipelines.target.writer import TargetWriter
 from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
@@ -83,7 +84,7 @@ class BasePipeline:
         # After state reset, the pipeline runs normally with its configured disposition/strategy
         target_config = TargetConfig(
             # Loading configuration
-            write_disposition=config.get("write_disposition", "replace"),
+            write_disposition=resolve_write_disposition(config),
             replace_strategy=config.get("replace_strategy"),
             # Merge configuration
             merge_key=config.get("merge_key"),
