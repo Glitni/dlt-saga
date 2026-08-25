@@ -14,11 +14,13 @@ from dlt_saga.historize.sql import HistorizeSqlBuilder
 from dlt_saga.historize.state import (
     HistorizeLogEntry,
     HistorizeStateManager,
+    LateArrivals,
     SnapshotDiscovery,
 )
 from dlt_saga.pipeline_config.base_config import resolve_write_disposition
 from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
 from dlt_saga.utility.filters import and_filter, filter_where_clause
+from dlt_saga.utility.sql import looks_like_missing_table
 
 logger = logging.getLogger(__name__)
 
@@ -419,6 +421,7 @@ class HistorizeRunner:
         # regardless of incremental state.
         new_snapshots = None
         discovery = None
+        baseline_snapshot = state.last_snapshot_value
         if not self.full_refresh and not is_partial and state.has_successful_run:
             discovery = self.state_manager.discover_unprocessed_snapshots(
                 state=state,
@@ -428,6 +431,15 @@ class HistorizeRunner:
                 primary_key=self.config.primary_key,
             )
             new_snapshots = discovery.snapshots
+
+            # Late-arrival detection runs even when nothing sits above the
+            # watermark — a late file for an already-processed snapshot is
+            # exactly the case where watermark-only discovery finds nothing.
+            discovery, baseline_snapshot = self._apply_late_arrivals(
+                state, discovery, baseline_snapshot
+            )
+            new_snapshots = discovery.snapshots
+
             if not new_snapshots:
                 timings["init"] = time.time() - t
                 self.logger.info(
@@ -470,7 +482,7 @@ class HistorizeRunner:
             stats = self._run_full_reprocess(value_columns, started_at)
         else:
             stats = self._run_incremental(
-                value_columns, started_at, state, new_snapshots
+                value_columns, started_at, new_snapshots, baseline_snapshot
             )
         timings["execute"] = time.time() - t
 
@@ -547,6 +559,207 @@ class HistorizeRunner:
             for pk, alias in zip(self.config.primary_key, aliases)
             if getattr(row, alias, 0)
         ] or list(self.config.primary_key)
+
+    def _apply_late_arrivals(
+        self,
+        state: "HistorizeStateManager.PipelineState",
+        discovery: SnapshotDiscovery,
+        baseline_snapshot: Optional[str],
+    ) -> tuple:
+        """Fold late-arrival detection into the incremental discovery result.
+
+        Returns ``(discovery, baseline_snapshot)`` — either unchanged
+        (no in-window late arrivals, or the retention guard refused), or the
+        replay window from the earliest late snapshot with the baseline
+        re-anchored below it.
+        """
+        late = self._find_late_arrivals(state)
+        if not late:
+            return discovery, baseline_snapshot
+
+        # Detect-and-warn default: replay only when explicitly enabled. The
+        # warning is the forcing function — late data never disappears
+        # silently — while the history-rewriting rewind stays opt-in.
+        if self.config.detect_late_arrivals is not True:
+            total = late.snapshot_count + late.ignored_count
+            earliest = late.ignored_min or late.min_snapshot
+            self.logger.warning(
+                f"{self.pipeline_name}: {total} late-arriving snapshot(s) "
+                f"found at or below the watermark (earliest: {earliest}) — "
+                f"not historized. Set 'detect_late_arrivals: true' under "
+                f"historize: to rewind and replay them automatically, replay "
+                f"manually with --historize-from, or set it to false to "
+                f"silence this warning."
+            )
+            return discovery, baseline_snapshot
+
+        if late.ignored_count:
+            self.logger.warning(
+                f"{self.pipeline_name}: {late.ignored_count} late-arriving "
+                f"snapshot(s) older than late_arrival_window_days="
+                f"{self.config.late_arrival_window_days} ignored "
+                f"(earliest: {late.ignored_min}). Replay them manually with "
+                f"--historize-from if they should enter history."
+            )
+        if not late.min_snapshot:
+            return discovery, baseline_snapshot
+
+        replay = self.state_manager.discover_unprocessed_snapshots(
+            state=state,
+            source_table_id=self.source_table_id,
+            snapshot_column=self.config.snapshot_column,
+            filter_sql=self._filter_sql,
+            primary_key=self.config.primary_key,
+            min_snapshot_inclusive=late.min_snapshot,
+        )
+        # Retention guard: the rewind deletes target history in the replay
+        # window and rebuilds it from raw, so every historized snapshot in the
+        # window must still exist in raw. Partition expiration on the raw
+        # table can violate that — replaying would silently truncate history,
+        # which is worse than the late file staying unprocessed. (The
+        # partial-refresh path's MIN-clamp can't catch this shape: the late
+        # rows themselves just landed, so raw's MIN is below the boundary
+        # while expired neighbors leave holes inside the window.)
+        missing = self._target_snapshots_missing_from_source(
+            late.min_snapshot, replay.snapshots
+        )
+        if missing:
+            self.logger.warning(
+                f"{self.pipeline_name}: {late.snapshot_count} late-arriving "
+                f"snapshot(s) detected (earliest: {late.min_snapshot}), but "
+                f"the source no longer contains {len(missing)} historized "
+                f"snapshot(s) in the replay window "
+                f"(earliest missing: {missing[0]}) — likely partition "
+                f"expiration. Skipping automatic replay to avoid truncating "
+                f"history. Handle manually with --historize-from, or set "
+                f"detect_late_arrivals: false to silence detection."
+            )
+            return discovery, baseline_snapshot
+
+        self.logger.warning(
+            f"{self.pipeline_name}: {late.snapshot_count} late-arriving "
+            f"snapshot(s) at or below the watermark "
+            f"(earliest: {late.min_snapshot}); rewinding and replaying "
+            f"{len(replay.snapshots)} snapshot(s) from that boundary"
+        )
+        return replay, self._resolve_pre_boundary_snapshot(late.min_snapshot)
+
+    def _find_late_arrivals(
+        self, state: "HistorizeStateManager.PipelineState"
+    ) -> Optional[LateArrivals]:
+        """Run late-arrival detection when the config and source support it.
+
+        Detection compares ``arrival_column`` (warehouse load time) against the
+        previous run's start, so it only makes sense when:
+
+        - ``detect_late_arrivals`` is not explicitly disabled (unset detects and
+          warns; ``true`` detects and replays; ``false`` skips entirely);
+        - ``snapshot_column`` differs from ``arrival_column`` — when they are the
+          same column (the default snapshot config), snapshots are stamped at
+          load time and are monotonic by construction, so late arrival is
+          impossible and the common case pays no extra query;
+        - the source retains snapshot history. ``append`` and ``historize``
+          (external delivery) sources accumulate snapshots, so a rewind can
+          replay them from the raw table. ``replace``/``merge`` sources
+          overwrite prior snapshot rows — a rewind there would destroy correct
+          history and rebuild from partial data, so detection is skipped;
+        - the arrival column actually exists in the source (external deliveries
+          may not carry one).
+        """
+        cfg = self.config
+        if cfg.detect_late_arrivals is False:
+            return None
+        if cfg.arrival_column == cfg.snapshot_column:
+            return None
+        base = resolve_write_disposition(self.config_dict).split("+", 1)[0]
+        if base not in ("append", "historize"):
+            self.logger.debug(
+                f"Late-arrival detection skipped for {self.pipeline_name}: "
+                f"'{base}' sources do not retain snapshot history to replay"
+            )
+            return None
+        if not self._source_has_column(cfg.arrival_column):
+            self.logger.debug(
+                f"Late-arrival detection skipped for {self.pipeline_name}: "
+                f"arrival column '{cfg.arrival_column}' not present in source"
+            )
+            return None
+        return self.state_manager.find_late_arrivals(
+            state=state,
+            source_table_id=self.source_table_id,
+            snapshot_column=cfg.snapshot_column,
+            arrival_column=cfg.arrival_column,
+            filter_sql=self._filter_sql,
+            window_days=cfg.late_arrival_window_days,
+        )
+
+    def _source_has_column(self, column: str) -> bool:
+        """Check whether the source table has the given column."""
+        base_query = self.destination.columns_query(
+            self._src_database, self._src_schema, self._src_table
+        )
+        safe = self.destination.escape_string_literal(column)
+        sql = f"""
+            SELECT column_name FROM ({base_query}) sub
+            WHERE column_name = '{safe}'
+        """
+        return bool(list(self.destination.execute_sql(sql, self.schema)))
+
+    def _target_snapshots_missing_from_source(
+        self, boundary: str, source_snapshots: List[str]
+    ) -> List[str]:
+        """Historized snapshots in the replay window that raw no longer has.
+
+        Every target ``valid_from`` at or above the rewind boundary was stamped
+        from a real source snapshot (changes, deletion markers, and closes all
+        carry snapshot values), so after a replay the window must be
+        reconstructible from raw alone. A non-empty result means raw lost part
+        of the window — typically partition expiration — and the caller must
+        not rewind. Both sides render through the destination's
+        ``cast_to_string``, so the set comparison is format-consistent.
+        """
+        q_vf = self.destination.quote_identifier(self.config.valid_from_column)
+        cast_expr = self.destination.cast_to_string(q_vf)
+        safe_boundary = self.destination.escape_string_literal(boundary)
+        sql = f"""
+            SELECT DISTINCT {cast_expr} AS snapshot_val
+            FROM {self.target_table_id}
+            WHERE {q_vf} >= TIMESTAMP '{safe_boundary}'
+        """
+        try:
+            rows = list(self.destination.execute_sql(sql, self.schema))
+        except Exception as exc:
+            # A missing target is handled with a friendly error later in the
+            # run (_guard_target_exists); don't pre-empt it here.
+            if looks_like_missing_table(exc):
+                return []
+            raise
+        target_vals = {row.snapshot_val for row in rows}
+        return sorted(target_vals - set(source_snapshots))
+
+    def _resolve_pre_boundary_snapshot(self, min_snapshot: str) -> Optional[str]:
+        """Resolve the change-detection baseline for a late-arrival replay.
+
+        The replay's baseline must be stamped strictly before the rewind
+        boundary: after the rollback prefix runs, the target's open rows hold
+        the state as of the last snapshot below the boundary, and the baseline
+        stamp anchors them in the LEAD sequencing. Any value below the boundary
+        works (baseline rows are never inserted); the greatest source snapshot
+        below it is the natural choice. None (late data predates all history)
+        degrades gracefully: no baseline union, and the rollback deletes the
+        whole target — a clean rebuild through the incremental path.
+        """
+        q_snapshot = self.destination.quote_identifier(self.config.snapshot_column)
+        cast_expr = self.destination.cast_to_string(f"MAX({q_snapshot})")
+        safe_min = self.destination.escape_string_literal(min_snapshot)
+        base_where = f"{q_snapshot} < TIMESTAMP '{safe_min}'"
+        sql = f"""
+            SELECT {cast_expr} AS baseline_snapshot
+            FROM {self.source_table_id}
+            WHERE {and_filter(self._filter_sql, base_where)}
+        """
+        rows = list(self.destination.execute_sql(sql, self.schema))
+        return rows[0].baseline_snapshot if rows else None
 
     def _guard_target_exists(self, needs_full: bool) -> None:
         """Fail clearly if an incremental/partial run's historized target is gone.
@@ -815,17 +1028,24 @@ class HistorizeRunner:
         self,
         value_columns: List[str],
         started_at: datetime,
-        state: "HistorizeStateManager.PipelineState",
         new_snapshots: List[str],
+        baseline_snapshot: Optional[str],
     ) -> Dict[str, Any]:
-        """Execute incremental historization: process only new snapshots."""
+        """Execute incremental historization: process only new snapshots.
+
+        ``baseline_snapshot`` is the change-detection reference: normally the
+        watermark (last historized snapshot), or the resolved pre-boundary
+        snapshot when a late-arrival rewind replays a window that starts at or
+        below the watermark. None means no baseline exists (replay from the
+        beginning of history).
+        """
         self.logger.info(
             f"Historizing {self.pipeline_name} → {self._target_display}: "
             f"{len(new_snapshots)} new snapshot(s)"
         )
 
-        # Use last historized snapshot from pre-fetched state as reference for LAG
-        last_historized = state.last_snapshot_value
+        # Reference snapshot for LEAD-based change detection
+        last_historized = baseline_snapshot
 
         # Build and execute incremental SQL. rollback_prefix=True makes the in-place
         # write re-entrant: a crash between this SQL and the log write leaves the

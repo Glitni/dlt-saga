@@ -681,11 +681,16 @@ disappearances AS (
         # attempt at this exact batch wrote makes the whole operation idempotent.
         #
         # The batch's snapshot boundary alone scopes this correctly, with no
-        # affected-keys table (unlike build_rollback_sql): new snapshots are strictly
-        # after the last historized snapshot, which bounds every legit target
-        # valid_from/valid_to, so nothing legitimate is >= min_new. On a clean first
-        # run both statements are no-ops. The DELETE and UPDATE target disjoint row
-        # sets, so they're order-independent and each is itself re-entrant.
+        # affected-keys table (unlike build_rollback_sql). In the normal case new
+        # snapshots are strictly after the last historized snapshot, which bounds
+        # every legit target valid_from/valid_to, so nothing legitimate is >=
+        # min_new and both statements are no-ops on a clean run. A late-arrival
+        # replay deliberately starts the batch at or below the watermark: there
+        # the same two statements act as the rewind — rows from the replayed
+        # window are deleted and pre-boundary rows reopened, leaving the target's
+        # open rows exactly at the pre-boundary state the replay rebuilds from.
+        # The DELETE and UPDATE target disjoint row sets, so they're
+        # order-independent and each is itself re-entrant.
         rollback_prefix_sql = ""
         if rollback_prefix and new_snapshots:
             min_new = self.destination.escape_string_literal(new_snapshots[0])

@@ -38,6 +38,24 @@ class HistorizeLogEntry:
 
 
 @dataclass
+class LateArrivals:
+    """Snapshots found at or below the watermark that arrived after the last run.
+
+    ``min_snapshot`` is the earliest late snapshot value inside the accepted
+    lateness window — the rewind/replay boundary (None when every late snapshot
+    fell outside the window). ``snapshot_count`` is how many distinct in-window
+    late snapshot values were found. ``ignored_count``/``ignored_min`` describe
+    late snapshots older than ``late_arrival_window_days``, which are reported
+    but never replayed automatically.
+    """
+
+    min_snapshot: Optional[str]
+    snapshot_count: int
+    ignored_count: int = 0
+    ignored_min: Optional[str] = None
+
+
+@dataclass
 class SnapshotDiscovery:
     """What incremental discovery found in the source above the watermark.
 
@@ -120,6 +138,7 @@ class HistorizeStateManager:
 
         last_snapshot_value: Optional[str] = None
         last_finished_at: Optional[Any] = None
+        last_started_at: Optional[Any] = None
         config_fingerprint: Optional[str] = None  # base64-encoded JSON
         has_successful_run: bool = False
 
@@ -141,7 +160,7 @@ class HistorizeStateManager:
         # real prior baseline. Also self-heals pre-existing tables poisoned with a
         # NULL-snapshot completed row.
         sql = f"""
-            SELECT snapshot_value, finished_at, config_fingerprint
+            SELECT snapshot_value, finished_at, started_at, config_fingerprint
             FROM {q}
             WHERE pipeline_name = '{safe_name}'
               AND status = 'completed'
@@ -164,6 +183,7 @@ class HistorizeStateManager:
             return self.PipelineState(
                 last_snapshot_value=rows[0].snapshot_value,
                 last_finished_at=rows[0].finished_at,
+                last_started_at=rows[0].started_at,
                 config_fingerprint=rows[0].config_fingerprint,
                 has_successful_run=True,
             )
@@ -364,6 +384,7 @@ class HistorizeStateManager:
         snapshot_column: str,
         filter_sql: Optional[str] = None,
         primary_key: Optional[List[str]] = None,
+        min_snapshot_inclusive: Optional[str] = None,
     ) -> SnapshotDiscovery:
         """Discover snapshot values in the raw table that haven't been historized yet.
 
@@ -378,6 +399,11 @@ class HistorizeStateManager:
                 columns contain NULL (see :class:`SnapshotDiscovery`). Folded in
                 here rather than probed separately because this query already
                 reads exactly the rows the run will process.
+            min_snapshot_inclusive: When set, discover every snapshot at or
+                after this value instead of strictly above the watermark — the
+                replay window for a late-arrival rewind (see
+                :meth:`find_late_arrivals`). Includes already-historized
+                snapshots by design: the rewind replays them.
 
         Returns:
             A :class:`SnapshotDiscovery` whose ``snapshots`` are ordered
@@ -403,7 +429,11 @@ class HistorizeStateManager:
         projection = f"{cast_expr} AS snapshot_val{null_flags}"
         grouping = f"GROUP BY {cast_expr}" if pk_cols else ""
 
-        if not state.has_successful_run:
+        if min_snapshot_inclusive is not None:
+            safe_val = self.destination.escape_string_literal(min_snapshot_inclusive)
+            base_where = f"{q_snapshot} >= TIMESTAMP '{safe_val}'"
+            where = f" WHERE {and_filter(filter_sql, base_where)}"
+        elif not state.has_successful_run:
             where = filter_where_clause(filter_sql)
         else:
             safe_val = self.destination.escape_string_literal(state.last_snapshot_value)
@@ -438,3 +468,115 @@ class HistorizeStateManager:
             null_pk_columns=null_pk_columns,
             null_pk_snapshot=null_pk_snapshot,
         )
+
+    def find_late_arrivals(
+        self,
+        state: "HistorizeStateManager.PipelineState",
+        source_table_id: str,
+        snapshot_column: str,
+        arrival_column: str,
+        filter_sql: Optional[str] = None,
+        window_days: Optional[int] = None,
+    ) -> Optional[LateArrivals]:
+        """Find snapshots at or below the watermark that arrived after the last run.
+
+        The incremental watermark assumes the snapshot column advances
+        monotonically for the whole source. A row whose snapshot value is at or
+        below the watermark but whose ``arrival_column`` (warehouse load time)
+        postdates the previous run's start is a late arrival — watermark-only
+        discovery would never see it. Comparing against the previous run's
+        *start* (not finish) is deliberately conservative: a row loaded while
+        that run was executing may or may not have been read, so it is offered
+        again; the replay is idempotent, so the worst case is one redundant
+        replay.
+
+        Kept as a separate query rather than folded into
+        :meth:`discover_unprocessed_snapshots`'s WHERE: an OR across the two
+        predicates would defeat snapshot-column partition pruning on the common
+        no-late-arrivals path, while this query prunes on ``arrival_column``
+        (append-mode raw tables are auto-clustered on ``_dlt_ingested_at``).
+
+        ``window_days`` bounds accepted lateness: late snapshots more than that
+        many days behind the watermark are counted (``ignored_count``) but never
+        offered for replay. Split with conditional aggregation so bounded and
+        unbounded detection cost the same single scan.
+
+        Returns None when there are no late arrivals (or no prior run to
+        compare against).
+        """
+        if not state.has_successful_run or state.last_started_at is None:
+            return None
+
+        from dlt_saga.utility.filters import and_filter
+
+        q_snapshot = self.destination.quote_identifier(snapshot_column)
+        q_arrival = self.destination.quote_identifier(arrival_column)
+        cast_expr = self.destination.cast_to_string(q_snapshot)
+        safe_wm = self.destination.escape_string_literal(state.last_snapshot_value)
+        started = state.last_started_at
+        started_iso = (
+            started.isoformat() if hasattr(started, "isoformat") else str(started)
+        )
+        safe_started = self.destination.escape_string_literal(started_iso)
+
+        base_where = (
+            f"{q_snapshot} <= TIMESTAMP '{safe_wm}' "
+            f"AND {q_arrival} > TIMESTAMP '{safe_started}'"
+        )
+
+        window_bound = self._window_lower_bound(state.last_snapshot_value, window_days)
+        if window_bound is None:
+            projection = f"""MIN({cast_expr}) AS min_snapshot,
+                   COUNT(DISTINCT {cast_expr}) AS snapshot_count,
+                   CAST(NULL AS {self.destination.type_name("string")}) AS ignored_min,
+                   0 AS ignored_count"""
+        else:
+            safe_bound = self.destination.escape_string_literal(window_bound)
+            in_window = f"{q_snapshot} >= TIMESTAMP '{safe_bound}'"
+            projection = f"""MIN(CASE WHEN {in_window} THEN {cast_expr} END) AS min_snapshot,
+                   COUNT(DISTINCT CASE WHEN {in_window} THEN {cast_expr} END) AS snapshot_count,
+                   MIN(CASE WHEN NOT ({in_window}) THEN {cast_expr} END) AS ignored_min,
+                   COUNT(DISTINCT CASE WHEN NOT ({in_window}) THEN {cast_expr} END) AS ignored_count"""
+
+        sql = f"""
+            SELECT {projection}
+            FROM {source_table_id}
+            WHERE {and_filter(filter_sql, base_where)}
+        """
+        rows = list(self.destination.execute_sql(sql, self.schema))
+        if not rows:
+            return None
+        row = rows[0]
+        if row.min_snapshot is None and not (row.ignored_count or 0):
+            return None
+        return LateArrivals(
+            min_snapshot=row.min_snapshot,
+            snapshot_count=int(row.snapshot_count or 0),
+            ignored_count=int(row.ignored_count or 0),
+            ignored_min=row.ignored_min,
+        )
+
+    def _window_lower_bound(
+        self, watermark: Optional[str], window_days: Optional[int]
+    ) -> Optional[str]:
+        """Render the accepted-lateness floor: watermark minus window_days.
+
+        The watermark string is our own ``cast_to_string`` rendering of a
+        timestamp, so it parses back with ``fromisoformat`` on every supported
+        destination. If it ever doesn't, the window degrades to unbounded with
+        a warning rather than blocking detection.
+        """
+        if window_days is None or watermark is None:
+            return None
+        from datetime import datetime, timedelta
+
+        try:
+            bound = datetime.fromisoformat(watermark) - timedelta(days=window_days)
+        except ValueError:
+            self.logger.warning(
+                f"Could not parse watermark '{watermark}' to apply "
+                f"late_arrival_window_days={window_days}; treating the window "
+                f"as unbounded for this run"
+            )
+            return None
+        return bound.isoformat(sep=" ")

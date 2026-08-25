@@ -179,6 +179,57 @@ class HistorizeConfig:
         },
     )
 
+    detect_late_arrivals: Optional[bool] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Handling of snapshots that land in the source after later "
+                "snapshots have already been historized (below the incremental "
+                "watermark). Unset (default): detect and warn, suggesting this "
+                "key — nothing is replayed. true: automatically rewind and "
+                "replay history from the earliest late snapshot (refused with a "
+                "warning if raw no longer contains every historized snapshot in "
+                "the rewind window, e.g. after partition expiration). false: "
+                "skip detection entirely (silences the warning). Detection "
+                "compares arrival_column against the previous run's start time, "
+                "so it only engages when snapshot_column differs from "
+                "arrival_column and the source retains snapshot history (append "
+                "or historize write dispositions)."
+            )
+        },
+    )
+
+    late_arrival_window_days: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "How late a snapshot may arrive and still be replayed "
+                "automatically, in days behind the incremental watermark. Late "
+                "snapshots older than this are ignored with a warning (handle "
+                "them manually with --historize-from). Bounds the worst-case "
+                "rewind: without it, a stray very old file triggers a "
+                "correspondingly large replay. Only meaningful with "
+                "detect_late_arrivals: true; omit for no bound."
+            )
+        },
+    )
+
+    arrival_column: str = field(
+        default="_dlt_ingested_at",
+        metadata={
+            "description": (
+                "Column holding each row's warehouse arrival time, used to detect "
+                "late-arriving snapshots. Defaults to '_dlt_ingested_at' (injected "
+                "automatically by saga ingest); external deliveries can point it at "
+                "their own load-time column. Detection is skipped when the column "
+                "is absent from the source or equal to snapshot_column. A custom "
+                "arrival column is still a normal value column — add it to "
+                "ignore_columns so a redelivery of unchanged data doesn't register "
+                "as a change."
+            )
+        },
+    )
+
     table_format: Optional[str] = field(
         default=None,
         metadata={
@@ -269,6 +320,14 @@ class HistorizeConfig:
         # partition_column defaults to the SCD2 valid-from column when not set.
         if not self.partition_column:
             self.partition_column = self.valid_from_column
+        if (
+            self.late_arrival_window_days is not None
+            and self.late_arrival_window_days < 1
+        ):
+            raise ValueError(
+                f"late_arrival_window_days must be a positive number of days, "
+                f"got {self.late_arrival_window_days}"
+            )
         self._validate_column_identifiers()
 
     def _validate_column_identifiers(self):
@@ -280,6 +339,7 @@ class HistorizeConfig:
         """
         for attr in (
             "snapshot_column",
+            "arrival_column",
             "valid_from_column",
             "valid_to_column",
             "is_deleted_column",
