@@ -96,11 +96,13 @@ saga historize --select "filesystem__snapshots__companies"
 
 The primary key *is* the SCD2 identity, and SQL equality is never true for NULL. Change detection partitions by the key — where `NULL` groups with `NULL`, so change rows are produced — but the MERGE that closes the previously-open row (`ON t.pk = n.pk`) never matches, and neither do the deletion-marker joins. A NULL-keyed row therefore gains another permanently-open history row on every run, breaking the "exactly one open row per key" guarantee the historized table exists to provide.
 
-There is no correct NULL-safe answer to *which entity is this*, so historize refuses to start instead. Before any work, each run probes the rows it is about to read (the new snapshots for an incremental run, the whole filtered source for a full or partial refresh) and fails as a config error if any primary-key column is NULL:
+There is no correct NULL-safe answer to *which entity is this*, so historize refuses to start instead. Before any work, each run checks the rows it is about to read and fails as a config error if any primary-key column is NULL:
 
 ```
-Primary key column(s) 'company_id' contain NULL in project.dataset.raw_companies. ...
+Primary key column(s) 'company_id' contain NULL in project.dataset.raw_companies (snapshot 2026-01-02). ...
 ```
+
+An incremental run gets this from the snapshot-discovery query it already runs, so it costs no extra round trip — and the message names the offending snapshot. A full or partial refresh has no earlier scan of the source to fold into, so it runs one `LIMIT 1` probe first.
 
 Three ways out, in order of preference:
 
@@ -115,7 +117,7 @@ historize:
       op: is_not_null
 ```
 
-Filtered-out rows are never historized, so their NULL keys don't block the run. The probe applies the same filter as the source read, so option 3 takes effect immediately.
+Filtered-out rows are never historized, so their NULL keys don't block the run. The check applies the same filter as the source read, so option 3 takes effect immediately.
 
 The check is scoped to what the run reads: a NULL key that lands in an already-processed snapshot is below the watermark and never blocks later incremental runs. And because it runs before the destructive part of a full refresh, a rejected `--full-refresh` leaves the existing historized table untouched.
 

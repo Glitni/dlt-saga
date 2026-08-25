@@ -37,6 +37,21 @@ class HistorizeLogEntry:
     status: str  # 'completed' | 'failed'
 
 
+@dataclass
+class SnapshotDiscovery:
+    """What incremental discovery found in the source above the watermark.
+
+    ``null_pk_columns`` rides along because discovery already scans exactly the
+    rows the run will process, with the same filter — checking the primary key
+    for NULLs there costs no extra query, and the offending snapshot is known.
+    Empty when no primary key was passed or every key value is populated.
+    """
+
+    snapshots: List[str]
+    null_pk_columns: List[str]
+    null_pk_snapshot: Optional[str] = None
+
+
 class HistorizeStateManager:
     """Manages historization state via _saga_historize_log table.
 
@@ -348,7 +363,8 @@ class HistorizeStateManager:
         source_table_id: str,
         snapshot_column: str,
         filter_sql: Optional[str] = None,
-    ) -> List[str]:
+        primary_key: Optional[List[str]] = None,
+    ) -> SnapshotDiscovery:
         """Discover snapshot values in the raw table that haven't been historized yet.
 
         Args:
@@ -358,33 +374,67 @@ class HistorizeStateManager:
             filter_sql: Optional pre-rendered SQL WHERE body (no leading
                 ``WHERE``) applied to the source read so the discovered
                 snapshots match what historize will actually process.
+            primary_key: When given, the same scan also reports which of these
+                columns contain NULL (see :class:`SnapshotDiscovery`). Folded in
+                here rather than probed separately because this query already
+                reads exactly the rows the run will process.
 
         Returns:
-            List of snapshot values (as strings) to process, ordered chronologically
+            A :class:`SnapshotDiscovery` whose ``snapshots`` are ordered
+            chronologically.
         """
+        from dlt_saga.historize.sql import null_pk_alias
         from dlt_saga.utility.filters import and_filter, filter_where_clause
 
         src = source_table_id
         q_snapshot = self.destination.quote_identifier(snapshot_column)
         cast_expr = self.destination.cast_to_string(q_snapshot)
+        pk_cols = list(primary_key or [])
+
+        # DISTINCT vs GROUP BY on the same expression are equivalent; grouping is
+        # what lets the NULL-key flags ride along per snapshot. The GROUP BY
+        # repeats the expression rather than referencing the alias — portable
+        # across all three destinations.
+        null_flags = "".join(
+            f", MAX(CASE WHEN {self.destination.quote_identifier(pk)} IS NULL "
+            f"THEN 1 ELSE 0 END) AS {null_pk_alias(i)}"
+            for i, pk in enumerate(pk_cols)
+        )
+        projection = f"{cast_expr} AS snapshot_val{null_flags}"
+        grouping = f"GROUP BY {cast_expr}" if pk_cols else ""
 
         if not state.has_successful_run:
-            sql = f"""
-                SELECT DISTINCT {cast_expr} AS snapshot_val
-                FROM {src}{filter_where_clause(filter_sql)}
-                ORDER BY snapshot_val
-            """
+            where = filter_where_clause(filter_sql)
         else:
             safe_val = self.destination.escape_string_literal(state.last_snapshot_value)
             base_where = f"{q_snapshot} > TIMESTAMP '{safe_val}'"
-            sql = f"""
-                SELECT DISTINCT {cast_expr} AS snapshot_val
-                FROM {src}
-                WHERE {and_filter(filter_sql, base_where)}
-                ORDER BY snapshot_val
-            """
+            where = f" WHERE {and_filter(filter_sql, base_where)}"
+
+        distinct = "" if pk_cols else "DISTINCT "
+        sql = f"""
+            SELECT {distinct}{projection}
+            FROM {src}{where}
+            {grouping}
+            ORDER BY snapshot_val
+        """
 
         rows = list(self.destination.execute_sql(sql, self.schema))
         snapshots = [row.snapshot_val for row in rows]
         self.logger.debug(f"Discovered {len(snapshots)} unprocessed snapshot(s)")
-        return snapshots
+
+        null_pk_columns: List[str] = []
+        null_pk_snapshot: Optional[str] = None
+        for row in rows:
+            offending = [
+                pk for i, pk in enumerate(pk_cols) if getattr(row, null_pk_alias(i), 0)
+            ]
+            if offending:
+                null_pk_columns = offending
+                null_pk_snapshot = row.snapshot_val
+                break
+
+        return SnapshotDiscovery(
+            snapshots=snapshots,
+            null_pk_columns=null_pk_columns,
+            null_pk_snapshot=null_pk_snapshot,
+        )

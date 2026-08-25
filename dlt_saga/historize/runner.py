@@ -11,7 +11,11 @@ from typing import Any, Dict, List, Optional
 
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.sql import HistorizeSqlBuilder
-from dlt_saga.historize.state import HistorizeLogEntry, HistorizeStateManager
+from dlt_saga.historize.state import (
+    HistorizeLogEntry,
+    HistorizeStateManager,
+    SnapshotDiscovery,
+)
 from dlt_saga.pipeline_config.base_config import resolve_write_disposition
 from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
 from dlt_saga.utility.filters import and_filter, filter_where_clause
@@ -414,13 +418,16 @@ class HistorizeRunner:
         # Skipped for partial refresh — it reprocesses a specific window
         # regardless of incremental state.
         new_snapshots = None
+        discovery = None
         if not self.full_refresh and not is_partial and state.has_successful_run:
-            new_snapshots = self.state_manager.discover_unprocessed_snapshots(
+            discovery = self.state_manager.discover_unprocessed_snapshots(
                 state=state,
                 source_table_id=self.source_table_id,
                 snapshot_column=self.config.snapshot_column,
                 filter_sql=self._filter_sql,
+                primary_key=self.config.primary_key,
             )
+            new_snapshots = discovery.snapshots
             if not new_snapshots:
                 timings["init"] = time.time() - t
                 self.logger.info(
@@ -436,7 +443,7 @@ class HistorizeRunner:
 
         # Runs before mode selection, so a full refresh refuses *before*
         # clear_log_entries + CREATE OR REPLACE destroy the existing history.
-        self._guard_null_primary_keys(new_snapshots)
+        self._guard_null_primary_keys(discovery)
 
         value_columns = self._discover_value_columns()
 
@@ -470,7 +477,7 @@ class HistorizeRunner:
         stats["timings"] = timings
         return stats
 
-    def _guard_null_primary_keys(self, new_snapshots: Optional[List[str]]) -> None:
+    def _guard_null_primary_keys(self, discovery: Optional[SnapshotDiscovery]) -> None:
         """Refuse to historize source rows whose primary key contains NULL.
 
         The primary key *is* the SCD2 identity, and SQL equality is never true
@@ -486,46 +493,60 @@ class HistorizeRunner:
         fails as a config error rather than producing history nobody can trust.
 
         Args:
-            new_snapshots: The snapshots an incremental run will process, so the
-                probe reads exactly those rows. ``None`` for full/partial
-                refreshes, which read the whole filtered source.
+            discovery: An incremental run's snapshot discovery, which already
+                checked the primary key over exactly the rows it found — no
+                second query. ``None`` for full/partial refreshes, which have no
+                such scan and fall back to a ``LIMIT 1`` probe over the whole
+                filtered source.
         """
-        snapshot_filter = (
-            self.sql_builder.snapshot_in_clause(
-                self.destination.quote_identifier(self.config.snapshot_column),
-                new_snapshots,
+        if discovery is not None:
+            offending = discovery.null_pk_columns
+            where = (
+                f" (snapshot {discovery.null_pk_snapshot})"
+                if discovery.null_pk_snapshot
+                else ""
             )
-            if new_snapshots
-            else None
-        )
-        probe_sql = self.sql_builder.build_null_pk_probe_sql(snapshot_filter)
-        if probe_sql is None:
-            return
+        else:
+            offending = self._probe_null_primary_keys()
+            where = ""
 
-        rows = list(self.destination.execute_sql(probe_sql, self.schema))
-        if not rows:
+        if not offending:
             return
-
-        row = rows[0]
-        aliases = self.sql_builder.null_pk_probe_aliases()
-        offending = [
-            pk
-            for pk, alias in zip(self.config.primary_key, aliases)
-            if getattr(row, alias, 0)
-        ] or list(self.config.primary_key)
 
         cols = ", ".join(f"'{c}'" for c in offending)
         raise ValueError(
             f"Primary key column(s) {cols} contain NULL in "
-            f"{self.source_table_id}. The primary key is the SCD2 identity, and "
-            f"NULL never equals NULL in SQL, so these rows would accumulate a new "
-            f"permanently-open history row on every run instead of versioning one "
-            f"entity. Fix the source so the key is always populated, choose a "
+            f"{self.source_table_id}{where}. The primary key is the SCD2 identity, "
+            f"and NULL never equals NULL in SQL, so these rows would accumulate a "
+            f"new permanently-open history row on every run instead of versioning "
+            f"one entity. Fix the source so the key is always populated, choose a "
             f"primary_key that is, or exclude the rows with a "
             f"'historize.filters' entry (op: is_not_null). If earlier runs already "
             f"wrote duplicate open rows for a NULL key, rebuild afterwards with "
             f"'saga historize -s \"{self.pipeline_name}\" --full-refresh'."
         )
+
+    def _probe_null_primary_keys(self) -> List[str]:
+        """Return the primary-key columns holding NULL anywhere in the source.
+
+        The full/partial-refresh fallback: those paths read the whole filtered
+        source and have no earlier scan of it to fold the check into.
+        """
+        probe_sql = self.sql_builder.build_null_pk_probe_sql()
+        if probe_sql is None:
+            return []
+
+        rows = list(self.destination.execute_sql(probe_sql, self.schema))
+        if not rows:
+            return []
+
+        row = rows[0]
+        aliases = self.sql_builder.null_pk_probe_aliases()
+        return [
+            pk
+            for pk, alias in zip(self.config.primary_key, aliases)
+            if getattr(row, alias, 0)
+        ] or list(self.config.primary_key)
 
     def _guard_target_exists(self, needs_full: bool) -> None:
         """Fail clearly if an incremental/partial run's historized target is gone.
