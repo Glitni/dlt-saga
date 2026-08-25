@@ -18,7 +18,10 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Type
 
 from dlt_saga.pipeline_config import ConfigSource, PipelineConfig
-from dlt_saga.pipeline_config.base_config import VALID_WRITE_DISPOSITIONS
+from dlt_saga.pipeline_config.base_config import (
+    DEFAULT_WRITE_DISPOSITION,
+    VALID_WRITE_DISPOSITIONS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,12 +84,23 @@ def _get_config_module_path(pipeline_module_path: str) -> str:
 
 
 def _validate_write_disposition(config: PipelineConfig, result: ValidationResult):
-    """Check write_disposition is a known value."""
+    """Check write_disposition is set and a known value."""
     wd = config.raw_write_disposition
     if wd not in VALID_WRITE_DISPOSITIONS:
         result.errors.append(
             f"Invalid write_disposition '{wd}'. "
             f"Must be one of: {', '.join(sorted(VALID_WRITE_DISPOSITIONS))}"
+        )
+        return
+
+    # Omitting the key is legal but leaves the loading behavior implicit, and
+    # which stages run (ingest / historize) depends entirely on it. Surface it so
+    # it's a deliberate choice rather than an inherited default nobody read.
+    if not config.config_dict.get("write_disposition"):
+        result.warnings.append(
+            f"write_disposition is not set — defaulting to "
+            f"'{DEFAULT_WRITE_DISPOSITION}'. Set it explicitly (in the config, or "
+            f"as a shared default under 'pipelines:' in saga_project.yml)."
         )
 
 

@@ -24,6 +24,28 @@ VALID_WRITE_DISPOSITIONS = frozenset(
     | {"historize"}
 )
 
+# The effective ``write_disposition`` when a config omits the key. Matches dlt's
+# own default, and is non-destructive: omitting a key must never silently
+# overwrite a table. Every reader goes through ``resolve_write_disposition`` so
+# the config layer (selection, ``saga list``, ``saga validate``, reports) and the
+# runtime (the dlt hand-off, adapters) can never disagree about what a config
+# means.
+DEFAULT_WRITE_DISPOSITION = "append"
+
+
+def resolve_write_disposition(config_dict: Dict[str, Any]) -> str:
+    """Resolve the effective ``write_disposition`` for a raw config dict.
+
+    Args:
+        config_dict: Raw pipeline config mapping.
+
+    Returns:
+        The configured disposition, or :data:`DEFAULT_WRITE_DISPOSITION` when the
+        key is absent, null or empty. May include a ``+historize`` suffix.
+    """
+    return config_dict.get("write_disposition") or DEFAULT_WRITE_DISPOSITION
+
+
 # Canonical weekday names (lowercase)
 WEEKDAY_NAMES = {
     "monday",
@@ -405,8 +427,8 @@ class PipelineConfig:
 
     @property
     def raw_write_disposition(self) -> str:
-        """The write_disposition as specified in config (may include +historize suffix)."""
-        return self.config_dict.get("write_disposition", "append")
+        """The effective write_disposition (may include a +historize suffix)."""
+        return resolve_write_disposition(self.config_dict)
 
     @property
     def dlt_write_disposition(self) -> str:
@@ -604,6 +626,8 @@ class ConfigSource(ABC):
         - schema_name: Already resolved by ConfigSource, carried forward
         - table_name: Environment-aware table name (with/without pipeline group prefix)
         - pipeline_name: Pipeline name (always includes pipeline group prefix)
+        - write_disposition: Materialized so the runtime reads the same value the
+          config layer selected on
         - initial_value: Overridden for incremental models in dev (if profile has override)
 
         Args:
@@ -616,6 +640,11 @@ class ConfigSource(ABC):
 
         # schema_name is already resolved by ConfigSource during discovery
         config_dict["schema_name"] = pipeline_config.schema_name
+
+        # Materialize the resolved write_disposition so every downstream reader
+        # (pipeline constructors, adapters, historize) sees the exact value that
+        # selection, `saga list` and `saga validate` reported for this config.
+        config_dict["write_disposition"] = pipeline_config.raw_write_disposition
 
         # Add environment-aware table name (includes pipeline group prefix in dev, excludes in prod)
         config_dict["table_name"] = pipeline_config.table_name

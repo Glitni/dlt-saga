@@ -373,6 +373,10 @@ class ExecutionPlanManager:
                 **config_overrides,
                 "pipeline_name": config.pipeline_name,
                 "schema_name": config.schema_name,
+                # Freeze the resolved disposition into the plan so a worker
+                # loads exactly what the orchestrator selected on, even if the
+                # framework default changes between the two.
+                "write_disposition": config.raw_write_disposition,
             }
 
         # Build task units: every singleton is a 1-element unit, every

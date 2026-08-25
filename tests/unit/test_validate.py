@@ -5,7 +5,10 @@ from unittest.mock import patch
 
 import pytest
 
-from dlt_saga.pipeline_config.base_config import PipelineConfig
+from dlt_saga.pipeline_config.base_config import (
+    DEFAULT_WRITE_DISPOSITION,
+    PipelineConfig,
+)
 from dlt_saga.validate import (
     ValidationResult,
     is_collision_check_failure,
@@ -135,6 +138,38 @@ class TestValidateWriteDisposition:
         result = validate_pipeline_config(config)
         assert not result.is_valid
         assert any("write_disposition" in e for e in result.errors)
+
+    def test_omitted_write_disposition_warns_but_is_valid(self):
+        config = PipelineConfig(
+            pipeline_group="google_sheets",
+            pipeline_name="google_sheets__test",
+            table_name="google_sheets__test",
+            identifier="configs/google_sheets/test.yml",
+            config_dict={
+                "base_table_name": "test",
+                "spreadsheet_id": "abc123",
+                "sheet_name": "Sheet1",
+            },
+            enabled=True,
+            tags=[],
+        )
+        result = validate_pipeline_config(config)
+        assert result.is_valid
+        assert any(
+            "write_disposition is not set" in w and DEFAULT_WRITE_DISPOSITION in w
+            for w in result.warnings
+        )
+
+    def test_explicit_write_disposition_does_not_warn(self):
+        config = _make_config(
+            config_dict={
+                "write_disposition": "append",
+                "spreadsheet_id": "abc123",
+                "sheet_name": "Sheet1",
+            }
+        )
+        result = validate_pipeline_config(config)
+        assert not any("write_disposition is not set" in w for w in result.warnings)
 
 
 @pytest.mark.unit

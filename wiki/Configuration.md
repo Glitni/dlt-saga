@@ -63,7 +63,7 @@ Other ways to avoid repeating yourself: [`dev:` override blocks](#dev-overrides)
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Master switch — disables both ingest and historize |
 | `tags` | list | `[]` | Tags for selector filtering (`saga ingest --select "tag:daily"`). Supports schedule values — see [Scheduling tags](#scheduling-tags) |
-| `write_disposition` | string | `"replace"` | Controls operations — see below |
+| `write_disposition` | string | `"append"` | Controls operations — see below. Always set it explicitly; `saga validate` warns when it is omitted |
 | `primary_key` | string/list | — | Primary key column(s) for merge/historize |
 | `partition_column` | string | — | BigQuery partition column |
 | `cluster_columns` | list | — | BigQuery cluster columns (max 4) |

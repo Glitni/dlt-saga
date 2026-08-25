@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.sql import HistorizeSqlBuilder
 from dlt_saga.historize.state import HistorizeLogEntry, HistorizeStateManager
+from dlt_saga.pipeline_config.base_config import resolve_write_disposition
 from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
 from dlt_saga.utility.filters import and_filter, filter_where_clause
 
@@ -64,8 +65,7 @@ class HistorizeRunner:
         # Build fully qualified source table ID
         # Only use source_* fields for historize-only pipelines (write_disposition: "historize")
         # For append+historize, the source is the ingested table
-        write_disposition = (self.config_dict).get("write_disposition", "")
-        is_historize_only = write_disposition == "historize"
+        is_historize_only = resolve_write_disposition(self.config_dict) == "historize"
         src_table = self.config_dict.get("source_table") if is_historize_only else None
         if src_table:
             # An external delivery may live in another project/catalog. When
