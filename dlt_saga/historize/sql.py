@@ -18,6 +18,23 @@ from dlt_saga.utility.filters import and_filter, filter_where_clause
 
 logger = logging.getLogger(__name__)
 
+
+def null_pk_alias(index: int) -> str:
+    """Result alias for the NULL-check flag of primary-key column ``index``.
+
+    Positional and indexed (like the ``_rk_`` correlated-subquery aliases below)
+    so no config-supplied identifier has to survive a round-trip through
+    result-set metadata, where destinations may normalize case or reject a name
+    that is legal as a column but not as an alias.
+
+    One definition on purpose: both the full-refresh probe (:mod:`sql`) and the
+    incremental discovery query (:mod:`state`) emit these flags, and readers map
+    them back with ``getattr(row, alias, 0)`` — a divergence would silently read
+    as "no NULL keys found" rather than failing.
+    """
+    return f"_null_pk_{index}"
+
+
 # System columns excluded from change detection hashing
 SYSTEM_COLUMNS = {
     "_dlt_id",
@@ -335,6 +352,39 @@ class HistorizeSqlBuilder:
             return self.filter_sql
         bound = self.destination.escape_string_literal(snapshot_upper_bound)
         return and_filter(self.filter_sql, f"{q_snapshot} <= TIMESTAMP '{bound}'")
+
+    def null_pk_probe_aliases(self) -> List[str]:
+        """Column aliases returned by :meth:`build_null_pk_probe_sql`, in PK order."""
+        return [null_pk_alias(i) for i in range(len(self.primary_key))]
+
+    def build_null_pk_probe_sql(self) -> Optional[str]:
+        """Build a one-row probe for NULL primary-key values across the source.
+
+        SCD2 identity is the primary key, and SQL equality is never true for NULL:
+        the change-detection window functions treat ``NULL = NULL`` as one group
+        (so a NULL-keyed entity does produce change rows), but the MERGE that
+        closes the previous open row, and the deletion-marker joins, never match
+        it. Each run therefore adds another permanently-open row for the same
+        NULL key. There is no NULL-safe reading of "which entity is this" to fall
+        back on, so the run must refuse to start instead.
+
+        Only the full-reprocess and partial-refresh paths need this: they read the
+        whole filtered source and have no earlier scan of it to piggyback on. An
+        incremental run gets the same answer for free out of
+        ``discover_unprocessed_snapshots``.
+
+        Returns ``None`` when there is no primary key to check. Otherwise a
+        ``LIMIT 1`` existence probe reading only the PK columns.
+        """
+        if not self.primary_key:
+            return None
+        flags = ", ".join(
+            f"CASE WHEN {self._q(pk)} IS NULL THEN 1 ELSE 0 END AS {alias}"
+            for pk, alias in zip(self.primary_key, self.null_pk_probe_aliases())
+        )
+        any_null = " OR ".join(f"{self._q(pk)} IS NULL" for pk in self.primary_key)
+        where = and_filter(self.filter_sql, f"({any_null})")
+        return f"SELECT {flags} FROM {self.source_table_id} WHERE {where} LIMIT 1"
 
     def build_full_reprocess_sql(
         self, value_columns: List[str], snapshot_upper_bound: Optional[str] = None

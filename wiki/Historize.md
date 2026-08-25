@@ -69,7 +69,7 @@ saga historize --select "filesystem__snapshots__companies"
 
 | Field | Location | Default | Description |
 |-------|----------|---------|-------------|
-| `primary_key` | top-level | required | Key columns identifying a unique record |
+| `primary_key` | top-level | required | Key columns identifying a unique record. Must never be NULL in the source — see [NULL primary keys are rejected](#null-primary-keys-are-rejected) |
 | `snapshot_date_regex` | top-level | — | Regex to extract snapshot date from file paths (filesystem only) |
 | `snapshot_date_format` | top-level | — | `strptime` format for the extracted date string |
 | `snapshot_column` | `historize:` | `_dlt_ingested_at` | Column used as the snapshot timestamp |
@@ -91,6 +91,37 @@ saga historize --select "filesystem__snapshots__companies"
 | `classification` | `historize:` | inherited | Table classification for the historized table (overrides top-level `classification`) |
 | `columns` | `historize:` | inherited | Per-column description/classification overrides, merged over top-level `columns` (override only the keys you set) |
 | `persist_docs` | `historize:` | inherited | Override `persist_docs` (`{table, columns}`) for the historized table only |
+
+### NULL primary keys are rejected
+
+The primary key *is* the SCD2 identity, and SQL equality is never true for NULL. Change detection partitions by the key — where `NULL` groups with `NULL`, so change rows are produced — but the MERGE that closes the previously-open row (`ON t.pk = n.pk`) never matches, and neither do the deletion-marker joins. A NULL-keyed row therefore gains another permanently-open history row on every run, breaking the "exactly one open row per key" guarantee the historized table exists to provide.
+
+There is no correct NULL-safe answer to *which entity is this*, so historize refuses to start instead. Before any work, each run checks the rows it is about to read and fails as a config error if any primary-key column is NULL:
+
+```
+Primary key column(s) 'company_id' contain NULL in project.dataset.raw_companies (snapshot 2026-01-02). ...
+```
+
+An incremental run gets this from the snapshot-discovery query it already runs, so it costs no extra round trip — and the message names the offending snapshot. A full or partial refresh has no earlier scan of the source to fold into, so it runs one `LIMIT 1` probe first.
+
+Three ways out, in order of preference:
+
+1. Fix the source so the key is always populated.
+2. Pick a `primary_key` that is always populated.
+3. Exclude the rows from historization with a `historize.filters` entry:
+
+```yaml
+historize:
+  filters:
+    - column: company_id
+      op: is_not_null
+```
+
+Filtered-out rows are never historized, so their NULL keys don't block the run. The check applies the same filter as the source read, so option 3 takes effect immediately.
+
+The check is scoped to what the run reads: a NULL key that lands in an already-processed snapshot is below the watermark and never blocks later incremental runs. And because it runs before the destructive part of a full refresh, a rejected `--full-refresh` leaves the existing historized table untouched.
+
+If earlier runs already wrote duplicate open rows for a NULL key, rebuild with `--full-refresh` once the source is clean.
 
 ### Renaming the SCD2 columns
 
