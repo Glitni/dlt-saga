@@ -150,6 +150,9 @@ def make_historize_runner(
     valid_to_column="_dlt_valid_to",
     is_deleted_column="_dlt_is_deleted",
     filters=None,
+    merge_key=None,
+    detect_late_arrivals=None,
+    late_arrival_window_days=None,
 ):
     """Create a HistorizeRunner for testing."""
     config = HistorizeConfig(
@@ -161,6 +164,9 @@ def make_historize_runner(
         valid_to_column=valid_to_column,
         is_deleted_column=is_deleted_column,
         filters=filters,
+        merge_key=merge_key,
+        detect_late_arrivals=detect_late_arrivals,
+        late_arrival_window_days=late_arrival_window_days,
     )
     return HistorizeRunner(
         pipeline_name="test__raw_companies",

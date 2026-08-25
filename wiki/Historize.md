@@ -79,6 +79,9 @@ saga historize --select "filesystem__snapshots__companies"
 | `cluster_columns` | `historize:` | — | Cluster the SCD2 output table |
 | `track_deletions` | `historize:` | `false` | Emit deletion marker rows when a key disappears |
 | `merge_key` | `historize:` | — | Subset of `primary_key` that scopes deletion / reappearance detection. See [Scoping deletion detection (`merge_key`)](#scoping-deletion-detection-merge_key) |
+| `detect_late_arrivals` | `historize:` | unset | Late snapshots below the watermark: unset = detect + warn, `true` = detect + rewind-and-replay, `false` = skip detection. See [Late-arriving snapshots](#late-arriving-snapshots) |
+| `late_arrival_window_days` | `historize:` | — | How many days behind the watermark a late snapshot may be and still replay automatically; older ones are ignored with a warning. Omit for no bound |
+| `arrival_column` | `historize:` | `_dlt_ingested_at` | Column holding each row's warehouse arrival time, used for late-arrival detection |
 | `valid_from_column` | `historize:` | `_dlt_valid_from` | Name of the SCD2 valid-from column in the output table |
 | `valid_to_column` | `historize:` | `_dlt_valid_to` | Name of the SCD2 valid-to column in the output table |
 | `is_deleted_column` | `historize:` | `_dlt_is_deleted` | Name of the soft-delete marker column in the output table |
@@ -381,6 +384,32 @@ See [Custom Naming](Custom-Naming) for the `layer="historize"` hook that pairs w
 ## Incremental vs full refresh
 
 **Incremental** (default): processes only snapshots not yet historized. Uses `LEAD` for within-batch sequencing and `MERGE` to close existing open records.
+
+### Late-arriving snapshots
+
+Incremental discovery is watermark-based: it looks for snapshot values above the last historized one. That assumes the snapshot column advances monotonically for the whole source — which it doesn't when the source unions independently-delivered partitions sharing one snapshot column (the `merge_key` configuration), or whenever a file for an already-processed snapshot date lands late. A snapshot at or below the watermark would never be discovered, and its versions would be silently lost.
+
+Every incremental run therefore also checks for rows whose snapshot value is at or below the watermark but whose **arrival time** (`arrival_column`, default `_dlt_ingested_at`) postdates the previous run's start. What happens on a hit is controlled by `detect_late_arrivals`:
+
+- **unset** (default): the run **warns** — naming the count and earliest late snapshot, and suggesting this key — but historizes nothing extra. Late data never disappears silently, and the history-rewriting replay stays a deliberate choice.
+- **`true`**: the run warns, rewinds the historized table to the earliest late snapshot, and replays every snapshot from that boundary — the same idempotent rewind-and-replay mechanism that makes crashed incremental runs safe to retry. History comes out exactly as if every file had arrived on time, including healing any deletion markers the late file's absence had produced.
+- **`false`**: detection is skipped entirely (silences the warning; watermark-only discovery).
+
+```yaml
+historize:
+  snapshot_column: delivery_date
+  merge_key: [dbinstance]
+  detect_late_arrivals: true
+  late_arrival_window_days: 14   # optional: accept files up to 14 days late
+```
+
+Notes:
+
+- Detection only makes sense with a custom `snapshot_column`: with the default (`_dlt_ingested_at`), snapshots are stamped at load time and can't arrive late, so detection is skipped and the default configuration pays no extra query.
+- The replay rebuilds the rewind window from the raw table, so raw must still contain every historized snapshot in that window. A **retention guard** verifies this before rewinding: if raw has lost part of the window (e.g. `partition_expiration_days` on the raw table), the run warns and skips the replay instead of truncating history — handle it manually with `--historize-from` at a boundary raw still covers, or accept the gap.
+- Detection runs for `append+historize` and `historize` (external delivery) sources; `replace`/`merge` sources overwrite prior snapshot rows, so it's skipped there.
+- External deliveries without a `_dlt_ingested_at` column can point `arrival_column` at their own load-time column (and should usually add it to `ignore_columns` so a redelivery of unchanged data doesn't register as a change). Without an arrival column, detection is skipped.
+- A replay's cost is proportional to how far back the late snapshot sits. `late_arrival_window_days` bounds it: late snapshots further behind the watermark are ignored with a warning instead of replayed, so a stray very old file can't trigger a huge rewind. Per detection run the overhead is one arrival-time query (cheap on raw tables clustered by `_dlt_ingested_at`).
 
 **Full refresh** (`--full-refresh`): rebuilds the SCD2 table from all raw snapshots. Required after config changes:
 
