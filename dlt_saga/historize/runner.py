@@ -434,6 +434,10 @@ class HistorizeRunner:
                     "timings": timings,
                 }
 
+        # Runs before mode selection, so a full refresh refuses *before*
+        # clear_log_entries + CREATE OR REPLACE destroy the existing history.
+        self._guard_null_primary_keys(new_snapshots)
+
         value_columns = self._discover_value_columns()
 
         # Mode selection:
@@ -465,6 +469,63 @@ class HistorizeRunner:
 
         stats["timings"] = timings
         return stats
+
+    def _guard_null_primary_keys(self, new_snapshots: Optional[List[str]]) -> None:
+        """Refuse to historize source rows whose primary key contains NULL.
+
+        The primary key *is* the SCD2 identity, and SQL equality is never true
+        for NULL. Change detection partitions by the PK, where ``NULL`` groups
+        with ``NULL``, so a NULL-keyed entity does produce change rows — but the
+        MERGE that closes the previously-open row (``ON t.pk = n.pk``) never
+        matches, and neither do the deletion-marker joins. Every run therefore
+        leaves another permanently-open row for the same key, and the "exactly one
+        open row per key" invariant the historized table exists to provide is
+        quietly gone.
+
+        There is no correct NULL-safe answer to "which entity is this", so this
+        fails as a config error rather than producing history nobody can trust.
+
+        Args:
+            new_snapshots: The snapshots an incremental run will process, so the
+                probe reads exactly those rows. ``None`` for full/partial
+                refreshes, which read the whole filtered source.
+        """
+        snapshot_filter = (
+            self.sql_builder.snapshot_in_clause(
+                self.destination.quote_identifier(self.config.snapshot_column),
+                new_snapshots,
+            )
+            if new_snapshots
+            else None
+        )
+        probe_sql = self.sql_builder.build_null_pk_probe_sql(snapshot_filter)
+        if probe_sql is None:
+            return
+
+        rows = list(self.destination.execute_sql(probe_sql, self.schema))
+        if not rows:
+            return
+
+        row = rows[0]
+        aliases = self.sql_builder.null_pk_probe_aliases()
+        offending = [
+            pk
+            for pk, alias in zip(self.config.primary_key, aliases)
+            if getattr(row, alias, 0)
+        ] or list(self.config.primary_key)
+
+        cols = ", ".join(f"'{c}'" for c in offending)
+        raise ValueError(
+            f"Primary key column(s) {cols} contain NULL in "
+            f"{self.source_table_id}. The primary key is the SCD2 identity, and "
+            f"NULL never equals NULL in SQL, so these rows would accumulate a new "
+            f"permanently-open history row on every run instead of versioning one "
+            f"entity. Fix the source so the key is always populated, choose a "
+            f"primary_key that is, or exclude the rows with a "
+            f"'historize.filters' entry (op: is_not_null). If earlier runs already "
+            f"wrote duplicate open rows for a NULL key, rebuild afterwards with "
+            f"'saga historize -s \"{self.pipeline_name}\" --full-refresh'."
+        )
 
     def _guard_target_exists(self, needs_full: bool) -> None:
         """Fail clearly if an incremental/partial run's historized target is gone.

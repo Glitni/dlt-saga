@@ -336,6 +336,64 @@ class HistorizeSqlBuilder:
         bound = self.destination.escape_string_literal(snapshot_upper_bound)
         return and_filter(self.filter_sql, f"{q_snapshot} <= TIMESTAMP '{bound}'")
 
+    def snapshot_in_clause(self, q_snapshot: str, snapshots: List[str]) -> str:
+        """``<snapshot_col> IN (TIMESTAMP '…', …)`` for a discovered snapshot list.
+
+        Shared by the incremental source read and the NULL-primary-key probe so
+        the probe checks exactly the rows the run will process — a probe scoped
+        wider would reject a run over clean snapshots, and one scoped narrower
+        would miss the rows about to be historized.
+        """
+        values = ", ".join(
+            f"TIMESTAMP '{self.destination.escape_string_literal(s)}'"
+            for s in snapshots
+        )
+        return f"{q_snapshot} IN ({values})"
+
+    def null_pk_probe_aliases(self) -> List[str]:
+        """Column aliases returned by :meth:`build_null_pk_probe_sql`, in PK order.
+
+        Positional, indexed aliases rather than the user's column names: the
+        caller maps them back to ``primary_key`` by position, so no config-supplied
+        identifier has to survive a round-trip through the result-set metadata
+        (where destinations may normalize case or reject a name that is legal as a
+        column but not as an alias).
+        """
+        return [f"_null_pk_{i}" for i in range(len(self.primary_key))]
+
+    def build_null_pk_probe_sql(
+        self, snapshot_filter: Optional[str] = None
+    ) -> Optional[str]:
+        """Build a one-row probe for NULL primary-key values in the source.
+
+        SCD2 identity is the primary key, and SQL equality is never true for NULL:
+        the change-detection window functions treat ``NULL = NULL`` as one group
+        (so a NULL-keyed entity does produce change rows), but the MERGE that
+        closes the previous open row, and the deletion-marker joins, never match
+        it. Each run therefore adds another permanently-open row for the same
+        NULL key. There is no NULL-safe reading of "which entity is this" to fall
+        back on, so the run must refuse to start instead.
+
+        Returns ``None`` when there is no primary key to check. Otherwise a
+        ``LIMIT 1`` existence probe: cheap on a hit, and on a clean source it
+        reads only the PK columns (plus whatever the filter prunes).
+
+        Args:
+            snapshot_filter: Optional WHERE body scoping the probe to the rows
+                this run will actually read (the incremental snapshot list). When
+                omitted the whole filtered source is checked.
+        """
+        if not self.primary_key:
+            return None
+        flags = ", ".join(
+            f"CASE WHEN {self._q(pk)} IS NULL THEN 1 ELSE 0 END AS {alias}"
+            for pk, alias in zip(self.primary_key, self.null_pk_probe_aliases())
+        )
+        any_null = " OR ".join(f"{self._q(pk)} IS NULL" for pk in self.primary_key)
+        where = and_filter(self.filter_sql, f"({any_null})")
+        where = and_filter(snapshot_filter, where)
+        return f"SELECT {flags} FROM {self.source_table_id} WHERE {where} LIMIT 1"
+
     def build_full_reprocess_sql(
         self, value_columns: List[str], snapshot_upper_bound: Optional[str] = None
     ) -> str:
@@ -585,8 +643,7 @@ disappearances AS (
         # on every run). For append sources the target's open rows carry the same
         # values as the reference snapshot, so the result is unchanged. Values are
         # cast to TIMESTAMP (not the column) to preserve source-side pruning.
-        snapshot_values = ", ".join(f"TIMESTAMP '{s}'" for s in new_snapshots)
-        new_snapshot_filter = f"{q_snapshot} IN ({snapshot_values})"
+        new_snapshot_filter = self.snapshot_in_clause(q_snapshot, new_snapshots)
         if last_historized_snapshot:
             reference_filter = (
                 f"AND c.{q_snapshot} != TIMESTAMP '{last_historized_snapshot}'"
