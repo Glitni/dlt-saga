@@ -3,9 +3,9 @@
 ### Fixed
 - Deadlock when two threads import submodules of the same package at once:
   re-exports in `dlt_saga.utility.secrets`, `dlt_saga.pipeline_config`,
-  `dlt_saga.destinations`, `dlt_saga.destinations.bigquery` and
-  `dlt_saga.destinations.duckdb` now resolve lazily (PEP 562). Public import
-  paths and package attributes are unchanged.
+  `dlt_saga.destinations`, `dlt_saga.destinations.bigquery`,
+  `dlt_saga.destinations.duckdb` and `dlt_saga.hooks` now resolve lazily
+  (PEP 562). Public import paths and package attributes are unchanged.
 
 ## 0.30.1 — 2026-08-11
 

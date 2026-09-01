@@ -197,6 +197,16 @@ PAIRS = [
         ["dlt_saga"],
         id="pipeline-config-submodules",
     ),
+    pytest.param(
+        # dlt_saga.session imports both of these directly, and the
+        # get_hook_registry() call sits in _execute_single_ingest, i.e. on a
+        # worker thread.
+        "dlt_saga.hooks.loader",
+        "dlt_saga.hooks.registry",
+        "dlt_saga.hooks",
+        ["dlt_saga"],
+        id="hooks-submodules",
+    ),
 ]
 
 
@@ -249,12 +259,24 @@ def _dlt_saga_root() -> pathlib.Path:
     return pathlib.Path(dlt_saga.__file__).parent
 
 
-def _imported_dlt_saga_modules(nodes) -> set[str]:
+def _imported_dlt_saga_modules(nodes, module: str, is_init: bool) -> set[str]:
     """Absolute ``dlt_saga`` modules named by the import statements in *nodes*."""
+    # A relative import resolves against the enclosing package: the package
+    # itself inside an ``__init__``, the parent otherwise, one level up per
+    # extra dot. Unresolved, ``from .loader import x`` is invisible here.
+    package = module if is_init else module.rsplit(".", 1)[0]
+    parts = package.split(".")
     names: set[str] = set()
     for node in nodes:
-        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names.add(node.module)
+        if isinstance(node, ast.ImportFrom):
+            up = node.level - 1 if node.level else 0
+            if up >= len(parts):
+                continue
+            base = ".".join(parts[: len(parts) - up]) if node.level else ""
+            if node.module:
+                names.add(f"{base}.{node.module}" if base else node.module)
+            elif base:
+                names.add(base)
         elif isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
     return {n for n in names if n == "dlt_saga" or n.startswith("dlt_saga.")}
@@ -280,11 +302,11 @@ def _scan_imports(root: pathlib.Path):
             # imports inside an __init__ never run at package-import time.
             init_submodules[module] = {
                 name
-                for name in _imported_dlt_saga_modules(tree.body)
+                for name in _imported_dlt_saga_modules(tree.body, module, is_init)
                 if name.startswith(f"{module}.")
             }
         # Any scope for the other side: a function-level import races too.
-        for name in _imported_dlt_saga_modules(ast.walk(tree)):
+        for name in _imported_dlt_saga_modules(ast.walk(tree), module, is_init):
             importers.setdefault(name, set()).add(module)
     return init_submodules, importers
 
@@ -356,6 +378,7 @@ def test_secrets_package_exposes_its_public_api():
         ("dlt_saga.destinations", ["base", "factory"]),
         ("dlt_saga.destinations.bigquery", ["access", "config", "destination"]),
         ("dlt_saga.destinations.duckdb", ["config", "destination"]),
+        ("dlt_saga.hooks", ["loader", "registry"]),
     ],
 )
 def test_submodule_attributes_survive_in_a_cold_interpreter(package, attributes):
