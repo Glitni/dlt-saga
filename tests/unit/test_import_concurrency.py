@@ -229,9 +229,9 @@ def test_concurrent_submodule_import_does_not_deadlock(left, right, hook, warm):
     line = next(
         (ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")), None
     )
-    assert (
-        line
-    ), f"child produced no result\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert line, (
+        f"child produced no result\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
     result = json.loads(line[len("RESULT ") :])
 
     assert result["hook_fired"], (
@@ -242,9 +242,9 @@ def test_concurrent_submodule_import_does_not_deadlock(left, right, hook, warm):
     assert not result["errors"], "concurrent import raised:\n" + "\n".join(
         f"--- {name} ---\n{tb}" for name, tb in result["errors"].items()
     )
-    assert all(
-        result["in_sys_modules"].values()
-    ), f"module missing from sys.modules after import: {result['in_sys_modules']}"
+    assert all(result["in_sys_modules"].values()), (
+        f"module missing from sys.modules after import: {result['in_sys_modules']}"
+    )
     assert not result["unusable"], "module not fully initialised:\n" + "\n".join(
         f"--- {name} ---\n{tb}" for name, tb in result["unusable"].items()
     )
@@ -400,9 +400,9 @@ def test_submodule_attributes_survive_in_a_cold_interpreter(package, attributes)
     proc = subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
     )
-    assert (
-        proc.returncode == 0 and "OK" in proc.stdout
-    ), f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert proc.returncode == 0 and "OK" in proc.stdout, (
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
 
 
 def test_destination_factory_registers_builtins_when_reached_via_the_package():
