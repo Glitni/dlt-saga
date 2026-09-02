@@ -1,3 +1,18 @@
+## 0.31.0 — 2026-09-02
+
+### Breaking Changes
+- Resolve the default write_disposition in one place (#464)
+
+
+### Added
+- Detect late-arriving snapshots below the historize watermark, with opt-in replay (#468)
+- Warn in saga doctor on a misplaced or misnamed saga_project.yml (#462)
+
+
+### Fixed
+- Import deadlock by making package re-exports lazy (#469)
+- Reject NULL primary keys before historizing (#466)
+
 ## 0.30.1 — 2026-08-11
 
 ### Fixed
