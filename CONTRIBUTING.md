@@ -59,22 +59,58 @@ Use the issue templates:
 
 ## Pull request process
 
-1. **Branch** off `main`. Use descriptive names:
+1. **Branch** off `main`, named `<type>/<description>` with the same type you will
+   use in the PR title:
    `fix/historize-full-refresh-bug`, `feat/databricks-destination`, `docs/config-reference`.
 2. **Keep PRs focused.** One logical change per PR makes review faster.
 3. **Write tests** for any new behaviour. Bug fixes should include a regression test.
 4. **Update docs** if your change affects user-facing behaviour (CLI flags, config
    keys, output format).
-5. **Add a CHANGELOG entry** under `## Unreleased` in `CHANGELOG.md`.
+5. **Do not edit `CHANGELOG.md`.** It is regenerated from git history at release
+   time, so a hand-written entry is discarded. Your PR title is what becomes the
+   changelog line — see [Titling your PR](#titling-your-pr).
 6. **Fill in the PR template** before requesting review.
 7. **CI must be green.** All checks (format, lint, type check, unit tests) must
    pass before a PR can be merged.
 8. **One approving review** from a maintainer is required.
 
-Commit message style: imperative present tense, 72-character subject line.
+## Titling your PR
 
-- Good: `Fix historize skipping last snapshot when batch size = 1`
+`CHANGELOG.md` is generated from git history by
+[git-cliff](https://git-cliff.org/), so **your PR title is the changelog entry**.
+It must follow [Conventional Commits](https://www.conventionalcommits.org/):
+`type: description`, imperative present tense, ideally under 72 characters. An
+optional `(scope)` is fine. Use the same prefix on your commits — depending on
+how the PR is merged, either the PR title or a single commit's subject becomes
+the entry.
+
+Pick the prefix that matches the box you ticked under *Type of change* in the PR
+template. These types reach the changelog:
+
+| Prefix | Changelog section |
+| --- | --- |
+| `feat:` (or `feature:`) | Added |
+| `fix:` | Fixed |
+| `refactor:` | Changed |
+| `perf:` (or `performance:`) | Performance |
+| `sec:` (or `security:`) | Security |
+
+For a **breaking change**, add `!` before the colon — `fix!:`, `feat(config)!:`.
+It moves to a prominent *Breaking Changes* section, whatever the type, and the
+PR template's breaking-changes section is where you describe the impact and
+migration path.
+
+These prefixes are recognised but deliberately kept out of the changelog:
+`docs:`, `ci:`, `chore:`, `config:`, `bump:`, `test:`, `debug:`.
+
+Prefixes are case-insensitive. A title with **no** recognised prefix is dropped
+silently rather than rejected, so it simply never appears in the release notes.
+
+- Good: `fix: skip the last snapshot when historize batch size is 1`
+- Good: `feat(databricks): support Unity Catalog volume staging`
+- Good: `fix!: resolve the default write_disposition in one place`
 - Bad: `fixed bug`, `changes`, `WIP`
+- Bad: `Add support for Snowflake` — no prefix, so it is silently dropped
 
 ## AI-assisted contributions
 
@@ -119,14 +155,18 @@ Full guide: [wiki/Plugin-Development.md](wiki/Plugin-Development.md).
 
 ## Release process
 
-Releases are made by project maintainers:
+Releases are made by project maintainers, through `mise`:
 
-1. Update `CHANGELOG.md` (move `Unreleased` to a version heading).
-2. Bump `version` in `pyproject.toml`.
-3. Open and merge a release PR.
-4. Push a semver tag (`v0.x.y`) — CI publishes to PyPI automatically.
+1. `mise run release X.Y.Z` — regenerates `CHANGELOG.md` from git history with
+   git-cliff (configured in [`cliff.toml`](cliff.toml)), bumps `version` in
+   `pyproject.toml`, and opens a release PR.
+2. Merge the release PR.
+3. `mise run tag X.Y.Z` — pushes the semver tag (`v0.x.y`); CI publishes to PyPI
+   automatically.
 
-Community contributors do not need to do anything beyond merging their PR.
+Contributors do not need to do anything beyond merging their PR. The one thing
+that carries into the release is the PR title, which step 1 turns into the
+changelog entry — see [Titling your PR](#titling-your-pr).
 
 ## Getting help
 

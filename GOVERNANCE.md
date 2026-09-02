@@ -33,8 +33,10 @@ changes needed. See [Plugin Development](wiki/Plugin-Development.md).
 **Core contributions** require a PR approved by at least one maintainer. Large
 features should be discussed in an issue or Discussion first to avoid wasted effort.
 
-**Breaking changes** require an explicit maintainer decision and must be documented
-in `CHANGELOG.md` with a migration path.
+**Breaking changes** require an explicit maintainer decision, must be marked with a
+conventional `!` in the PR title (`feat!:`, `fix!:`) so they are grouped as breaking
+in the generated changelog, and must describe the impact and migration path in the
+PR description. See [Titling your PR](CONTRIBUTING.md#titling-your-pr).
 
 **Automated and agentic submissions** are subject to the same standards as human
 contributions. Maintainers may close any issue or PR that appears to have been
