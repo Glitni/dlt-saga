@@ -259,27 +259,80 @@ def _dlt_saga_root() -> pathlib.Path:
     return pathlib.Path(dlt_saga.__file__).parent
 
 
-def _imported_dlt_saga_modules(nodes, module: str, is_init: bool) -> set[str]:
-    """Absolute ``dlt_saga`` modules named by the import statements in *nodes*."""
-    # A relative import resolves against the enclosing package: the package
-    # itself inside an ``__init__``, the parent otherwise, one level up per
-    # extra dot. Unresolved, ``from .loader import x`` is invisible here.
+def _only_dlt_saga(names: list[str | None]) -> set[str]:
+    return {n for n in names if n and (n == "dlt_saga" or n.startswith("dlt_saga."))}
+
+
+def _resolve_from_clause(
+    node: ast.ImportFrom, module: str, is_init: bool
+) -> str | None:
+    """*node*'s ``from`` clause as an absolute module name.
+
+    A relative import resolves against the enclosing package: the package
+    itself inside an ``__init__``, the parent otherwise, one level up per extra
+    dot. Unresolved, ``from .loader import x`` is invisible to both scans
+    below. ``None`` when the level walks off the top of the tree.
+    """
+    if not node.level:
+        return node.module
     package = module if is_init else module.rsplit(".", 1)[0]
     parts = package.split(".")
-    names: set[str] = set()
+    up = node.level - 1
+    if up >= len(parts):
+        return None
+    base = ".".join(parts[: len(parts) - up])
+    return f"{base}.{node.module}" if node.module else base
+
+
+def _locked_before_parent(nodes, module: str, is_init: bool) -> set[str]:
+    """``dlt_saga`` modules whose own lock is taken *before* their parent's.
+
+    This is the outside-the-package half of the cycle. ``import pkg.sub`` and
+    ``from pkg.sub import name`` both route through
+    ``_find_and_load("pkg.sub")``, which locks the full dotted name and only
+    then imports ``pkg``.
+
+    ``from pkg import sub`` (and its relative form ``from . import sub``) is
+    deliberately absent: it locks ``pkg`` and *releases* it before
+    ``_handle_fromlist`` reaches for ``pkg.sub``, so it never holds the two
+    together and cannot be this half of the cycle.
+    """
+    names: list[str | None] = []
     for node in nodes:
         if isinstance(node, ast.ImportFrom):
-            up = node.level - 1 if node.level else 0
-            if up >= len(parts):
-                continue
-            base = ".".join(parts[: len(parts) - up]) if node.level else ""
             if node.module:
-                names.add(f"{base}.{node.module}" if base else node.module)
-            elif base:
-                names.add(base)
+                names.append(_resolve_from_clause(node, module, is_init))
         elif isinstance(node, ast.Import):
-            names.update(alias.name for alias in node.names)
-    return {n for n in names if n == "dlt_saga" or n.startswith("dlt_saga.")}
+            names.extend(alias.name for alias in node.names)
+    return _only_dlt_saga(names)
+
+
+def _submodules_imported_by_init(body, package: str, known: set[str]) -> set[str]:
+    """Own submodules a package ``__init__`` imports while holding ``lock(pkg)``.
+
+    This is the inside-the-package half, and here *every* import form counts.
+    The ``__init__`` body runs inside ``lock(pkg)``, so reaching ``pkg.sub`` by
+    any route — including the ``from . import sub`` and ``from pkg import sub``
+    forms that are harmless elsewhere — takes the second lock in the order that
+    closes the cycle.
+
+    Names are kept only when *known* confirms they are modules, so an imported
+    class or constant is not mistaken for a submodule.
+    """
+    names: list[str | None] = []
+    for node in body:
+        if isinstance(node, ast.ImportFrom):
+            base = _resolve_from_clause(node, package, True)
+            names.append(base)
+            if base:
+                names.extend(f"{base}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Import):
+            names.extend(alias.name for alias in node.names)
+    return {
+        name
+        for name in _only_dlt_saga(names)
+        if name.startswith(f"{package}.") and name in known
+    }
 
 
 def _module_name(root: pathlib.Path, path: pathlib.Path) -> tuple[str, bool]:
@@ -292,21 +345,23 @@ def _module_name(root: pathlib.Path, path: pathlib.Path) -> tuple[str, bool]:
 
 def _scan_imports(root: pathlib.Path):
     """Return (submodules each package __init__ imports eagerly, importers)."""
+    sources = [
+        (*_module_name(root, path), ast.parse(path.read_text(encoding="utf-8")))
+        for path in sorted(root.rglob("*.py"))
+    ]
+    known = {module for module, _, _ in sources}
+
     init_submodules: dict[str, set[str]] = {}
     importers: dict[str, set[str]] = {}
-    for path in sorted(root.rglob("*.py")):
-        module, is_init = _module_name(root, path)
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for module, is_init, tree in sources:
         if is_init:
             # Module scope only: ``if TYPE_CHECKING:`` and function-level
             # imports inside an __init__ never run at package-import time.
-            init_submodules[module] = {
-                name
-                for name in _imported_dlt_saga_modules(tree.body, module, is_init)
-                if name.startswith(f"{module}.")
-            }
+            init_submodules[module] = _submodules_imported_by_init(
+                tree.body, module, known
+            )
         # Any scope for the other side: a function-level import races too.
-        for name in _imported_dlt_saga_modules(ast.walk(tree), module, is_init):
+        for name in _locked_before_parent(ast.walk(tree), module, is_init):
             importers.setdefault(name, set()).add(module)
     return init_submodules, importers
 
@@ -339,6 +394,39 @@ def test_no_package_init_eagerly_imports_a_directly_imported_submodule():
     assert not hazards, (
         "module-lock cycle risk -- make the package re-export lazy "
         "(module-level __getattr__, PEP 562):\n  " + "\n  ".join(hazards)
+    )
+
+
+def test_lazy_helper_imports_nothing_from_dlt_saga():
+    """``dlt_saga.utility.lazy`` must stay free of ``dlt_saga`` imports.
+
+    Every lazy package ``__init__`` reaches this module while holding its own
+    package lock, so an import from ``dlt_saga`` here is inherited by all of
+    them as a lock-ordering constraint -- one edit in one leaf module would put
+    six packages back in the shape this suite exists to rule out. Its docstring
+    states the invariant; this is what holds it.
+    """
+    module = "dlt_saga.utility.lazy"
+    tree = ast.parse(
+        (_dlt_saga_root() / "utility" / "lazy.py").read_text(encoding="utf-8")
+    )
+
+    # Any scope and any form, including the ``from pkg import sub`` shapes the
+    # scans above split apart: none of them are acceptable in this module.
+    names: list[str | None] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            base = _resolve_from_clause(node, module, False)
+            names.append(base)
+            if base:
+                names.extend(f"{base}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Import):
+            names.extend(alias.name for alias in node.names)
+
+    assert not _only_dlt_saga(names), (
+        f"{module} must not import from dlt_saga -- every lazy package "
+        "__init__ would inherit the lock ordering. Found: "
+        f"{sorted(_only_dlt_saga(names))}"
     )
 
 
