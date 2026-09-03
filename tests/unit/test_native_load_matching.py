@@ -18,18 +18,18 @@ from dlt_saga.pipelines.native_load.storage.matching import (
 
 # Layout used by both the direct and the fsspec-parity tests.
 _LAYOUT = [
-    "daily-stats.csv",
-    "daily-stats.csv.ingested",
+    "report.csv",
+    "report.csv.ingested",
     "notes.txt",
-    "legacy/daily-stats.csv",
-    "legacy/deep/daily-stats.csv",
+    "legacy/report.csv",
+    "legacy/deep/report.csv",
     "2026/01/part.parquet",
 ]
 
 _PATTERNS = [
     "*.csv",
     "*.csv*",
-    "daily-*.csv",
+    "report-*.csv",
     "*",
     "**",
     "**/*.csv",
@@ -37,10 +37,10 @@ _PATTERNS = [
     "legacy/**/*.csv",
     "*/*/part.parquet",
     "**/part.parquet",
-    "daily-stats.csv",
+    "report.csv",
     "notes.???",
-    "[dn]*.csv",
-    "[!d]*.txt",
+    "[rn]*.csv",
+    "[!r]*.txt",
 ]
 
 
@@ -67,26 +67,26 @@ def _like_to_regex(body):
 class TestPatternMatcherSemantics:
     def test_star_does_not_cross_directories(self):
         matcher = PatternMatcher("*.csv")
-        assert matcher.matches("daily-stats.csv")
-        assert not matcher.matches("legacy/daily-stats.csv")
+        assert matcher.matches("report.csv")
+        assert not matcher.matches("legacy/report.csv")
 
     def test_double_star_recurses(self):
         matcher = PatternMatcher("**/*.csv")
-        assert matcher.matches("daily-stats.csv")
-        assert matcher.matches("legacy/daily-stats.csv")
-        assert matcher.matches("legacy/deep/daily-stats.csv")
+        assert matcher.matches("report.csv")
+        assert matcher.matches("legacy/report.csv")
+        assert matcher.matches("legacy/deep/report.csv")
         assert not matcher.matches("notes.txt")
 
     def test_folder_segment_is_matched(self):
         matcher = PatternMatcher("legacy/*.csv")
-        assert matcher.matches("legacy/daily-stats.csv")
-        assert not matcher.matches("daily-stats.csv")
-        assert not matcher.matches("legacy/deep/daily-stats.csv")
+        assert matcher.matches("legacy/report.csv")
+        assert not matcher.matches("report.csv")
+        assert not matcher.matches("legacy/deep/report.csv")
 
     def test_pattern_list_matches_any(self):
         matcher = PatternMatcher(["*.csv", "*.csv.ingested"])
-        assert matcher.matches("daily-stats.csv")
-        assert matcher.matches("daily-stats.csv.ingested")
+        assert matcher.matches("report.csv")
+        assert matcher.matches("report.csv.ingested")
         assert not matcher.matches("notes.txt")
 
     def test_question_mark_and_character_class(self):
@@ -96,9 +96,9 @@ class TestPatternMatcherSemantics:
         assert not matcher.matches("file10.csv")
 
     def test_negated_character_class(self):
-        matcher = PatternMatcher("[!d]*.csv")
-        assert matcher.matches("weekly.csv")
-        assert not matcher.matches("daily.csv")
+        matcher = PatternMatcher("[!r]*.csv")
+        assert matcher.matches("export.csv")
+        assert not matcher.matches("report.csv")
 
     def test_leading_slash_and_dot_slash_normalized(self):
         assert PatternMatcher("/*.csv").matches("a.csv")
@@ -138,10 +138,10 @@ class TestPatternMatcherProperties:
 
     def test_widened_patterns_reach_subfolders(self):
         matcher = PatternMatcher(PatternMatcher("*.csv").widened())
-        assert matcher.matches("legacy/deep/daily-stats.csv")
+        assert matcher.matches("legacy/deep/report.csv")
 
     def test_sql_like_bodies_are_suffix_anchored(self):
-        assert PatternMatcher("daily-*.csv").sql_like_bodies() == ["%daily-%.csv"]
+        assert PatternMatcher("report-*.csv").sql_like_bodies() == ["%report-%.csv"]
 
     def test_sql_like_bodies_escape_sql_wildcards(self):
         assert PatternMatcher("data_*.csv").sql_like_bodies() == [r"%data\_%.csv"]
@@ -152,12 +152,12 @@ class TestPatternMatcherProperties:
 
     def test_sql_like_bodies_widen_character_classes(self):
         # SQL LIKE has no character classes; "_" is the any-single-char widening
-        assert PatternMatcher("[dn]*.csv").sql_like_bodies() == ["%_%.csv"]
+        assert PatternMatcher("[rn]*.csv").sql_like_bodies() == ["%_%.csv"]
 
     def test_sql_like_bodies_collapse_recursive_separator(self):
-        # "%/daily-%.csv" would demand a subfolder and drop the top-level files
+        # "%/report-%.csv" would demand a subfolder and drop the top-level files
         # that "**/" is meant to include.
-        assert PatternMatcher("**/daily-*.csv").sql_like_bodies() == ["%daily-%.csv"]
+        assert PatternMatcher("**/report-*.csv").sql_like_bodies() == ["%report-%.csv"]
         assert PatternMatcher("a/**/b.csv").sql_like_bodies() == ["%a/%b.csv"]
 
     @pytest.mark.parametrize("pattern", _PATTERNS)

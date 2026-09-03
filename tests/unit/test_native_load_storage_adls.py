@@ -46,7 +46,7 @@ class TestSqlLikePrefilter:
     def test_prefix_pattern_is_suffix_anchored(self):
         # The LIKE body must not be anchored at the start of the LIST path,
         # which is absolute or container-relative while the pattern is not.
-        assert "path LIKE '%daily-%.csv'" in _sql_for("daily-*.csv")
+        assert "path LIKE '%report-%.csv'" in _sql_for("report-*.csv")
 
     def test_escapes_sql_wildcards_in_literals(self):
         sql = _sql_for("data_*.csv")
@@ -170,19 +170,19 @@ class TestAdlsListFiles:
         assert [r.full_uri for r in result] == [f"{root}/file1.parquet"]
 
     def test_prefix_pattern_matches_nested_paths_when_recursive(self):
-        # Regression: the LIKE prefilter used to anchor "daily-*" at the start
+        # Regression: the LIKE prefilter used to anchor "report-*" at the start
         # of the LIST path, dropping every row before the glob filter ran.
         uri = "abfss://lake@account.dfs.core.windows.net/raw/"
         root = "abfss://lake@account.dfs.core.windows.net/raw"
         rows = [
-            _row(f"{root}/daily-stats.csv"),
-            _row(f"{root}/legacy/daily-stats.csv"),
+            _row(f"{root}/report-stats.csv"),
+            _row(f"{root}/legacy/report-stats.csv"),
         ]
         client = _make_client(rows)
-        result = list(client.list_files(uri, "**/daily-*.csv"))
+        result = list(client.list_files(uri, "**/report-*.csv"))
         assert [r.full_uri for r in result] == [
-            f"{root}/daily-stats.csv",
-            f"{root}/legacy/daily-stats.csv",
+            f"{root}/report-stats.csv",
+            f"{root}/legacy/report-stats.csv",
         ]
 
     def test_start_offset_ignored(self):
