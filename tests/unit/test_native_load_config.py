@@ -348,6 +348,22 @@ class TestFilePatternList:
         assert cfg.file_pattern == "*.parquet"
         assert isinstance(cfg.file_pattern, str)
 
+    def test_recursive_pattern_accepted(self):
+        cfg = _make(file_pattern="**/*.parquet")
+        assert cfg.file_pattern == "**/*.parquet"
+
+    def test_invalid_pattern_rejected_at_config_time(self):
+        with pytest.raises(ValueError, match="whole path segment"):
+            _make(file_pattern="data**.parquet")
+
+    def test_invalid_pattern_in_list_rejected(self):
+        with pytest.raises(ValueError, match="whole path segment"):
+            _make(file_pattern=["*.parquet", "data**.parquet"])
+
+    def test_empty_pattern_rejected(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            _make(file_pattern="")
+
 
 @pytest.mark.unit
 class TestTableFormat:

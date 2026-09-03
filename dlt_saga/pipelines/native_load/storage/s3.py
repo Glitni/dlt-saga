@@ -11,11 +11,15 @@ date-partitioned source traversal instead (mirrors the ADLS client).
 """
 
 import datetime
-import fnmatch
 import logging
 from typing import Iterator, List, Optional, Union
 
 from dlt_saga.pipelines.native_load.storage.base import StorageClient, StorageObject
+from dlt_saga.pipelines.native_load.storage.matching import (
+    PatternMatcher,
+    relative_path,
+    supports_delimiter_listing,
+)
 from dlt_saga.utility.secrets import resolve_secret
 
 logger = logging.getLogger(__name__)
@@ -61,7 +65,9 @@ class S3StorageClient(StorageClient):
 
         Args:
             uri: s3://bucket/prefix/ root to list from.
-            pattern: Glob pattern(s) matched against the object key's basename.
+            pattern: Glob pattern(s) matched against each key's path relative to
+                     ``uri`` (e.g. "*.parquet" for the top level only,
+                     "**/*.parquet" to recurse).
             start_offset: Not used for S3; silently ignored.
 
         Yields:
@@ -75,23 +81,30 @@ class S3StorageClient(StorageClient):
         bucket_name = parts[0]
         prefix = parts[1] if len(parts) > 1 else ""
 
-        patterns = [pattern] if isinstance(pattern, str) else list(pattern)
+        matcher = PatternMatcher(pattern)
+
+        paginate_kwargs: dict = {"Bucket": bucket_name, "Prefix": prefix}
+        if supports_delimiter_listing(matcher, prefix):
+            # The pattern cannot reach below the prefix, so let S3 skip the
+            # subtrees instead of listing and discarding them here.
+            paginate_kwargs["Delimiter"] = "/"
 
         logger.debug(
-            "S3 list_objects_v2: bucket=%s prefix=%r pattern=%r",
+            "S3 list_objects_v2: bucket=%s prefix=%r pattern=%r delimiter=%r",
             bucket_name,
             prefix,
-            patterns,
+            pattern,
+            paginate_kwargs.get("Delimiter"),
         )
 
         paginator = self._client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+        for page in paginator.paginate(**paginate_kwargs):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
-                basename = key.rsplit("/", 1)[-1]
-                if not basename:
+                rel_path = relative_path(key, prefix)
+                if not rel_path:
                     continue  # "directory" placeholder key
-                if not any(fnmatch.fnmatch(basename, p) for p in patterns):
+                if not matcher.matches(rel_path):
                     continue
                 last_modified = obj.get("LastModified")
                 yield StorageObject(

@@ -17,6 +17,7 @@ from dlt_saga.pipelines.base_pipeline import BasePipeline
 from dlt_saga.pipelines.native_load.config import NativeLoadConfig
 from dlt_saga.pipelines.native_load.state import NativeLoadStateManager, make_load_id
 from dlt_saga.pipelines.native_load.storage import get_storage_client
+from dlt_saga.pipelines.native_load.storage.matching import PatternMatcher
 from dlt_saga.utility.cli.logging import PrefixedLoggerAdapter
 from dlt_saga.utility.naming import normalize_identifier
 
@@ -35,6 +36,10 @@ class NativeLoadPipeline(BasePipeline):
     Bypasses dlt's extract/normalize machinery entirely.  ``run()`` is fully
     overridden; ``extract_data()`` raises NotImplementedError.
     """
+
+    # Objects matched by file_pattern in the current run's discovery, before
+    # state dedup (see _discover_new_files).
+    _matched_count: int = 0
 
     _INGESTED_AT_COLUMN = "_dlt_ingested_at"
     _FILE_NAME_COLUMN = "_dlt_source_file_name"
@@ -308,9 +313,58 @@ class NativeLoadPipeline(BasePipeline):
         return bool(self.native_config.filename_date_regex)
 
     def _discover_new_files(self) -> dict:
-        if self._date_mode:
-            return self._discover_date_mode()
-        return self._discover_flat_mode()
+        # Objects the pattern matched this run, before state dedup. Zero means
+        # the pattern itself selected nothing, which is worth diagnosing;
+        # "matched but already loaded" is the normal incremental steady state.
+        self._matched_count = 0
+        files = (
+            self._discover_date_mode()
+            if self._date_mode
+            else self._discover_flat_mode()
+        )
+        if self._matched_count == 0:
+            self._warn_if_pattern_too_shallow()
+        return files
+
+    def _warn_if_pattern_too_shallow(self) -> None:
+        """Warn when nothing matched but files exist below ``source_uri``.
+
+        ``file_pattern`` is matched against the path relative to ``source_uri``,
+        so a pattern without ``**`` never reaches into subfolders. Without this
+        probe that mistake is silent - the run just loads nothing. Only reached
+        on a zero-match run, so the extra listing never costs a working
+        pipeline anything.
+        """
+        matcher = PatternMatcher(self.native_config.file_pattern)
+        if matcher.is_recursive:
+            return
+
+        widened = matcher.widened()
+        try:
+            nested = list(
+                itertools.islice(
+                    self.storage_client.list_files(
+                        self.native_config.source_uri, widened
+                    ),
+                    3,
+                )
+            )
+        except Exception as exc:
+            self.logger.debug("Could not probe for files in subfolders: %s", exc)
+            return
+
+        if not nested:
+            return
+
+        self.logger.warning(
+            "file_pattern %s matched no files under %s, but matching files exist in "
+            "subfolders (e.g. %s). Patterns are matched against the path relative to "
+            "source_uri, where '*' does not cross '/'. Use %s to recurse.",
+            list(matcher.patterns),
+            self.native_config.source_uri,
+            ", ".join(obj.full_uri for obj in nested),
+            widened,
+        )
 
     def _discover_flat_mode(self) -> dict:
         """Full prefix listing, deduped against state log when incremental.
@@ -332,6 +386,7 @@ class NativeLoadPipeline(BasePipeline):
             self.native_config.source_uri,
             self.native_config.file_pattern,
         ):
+            self._matched_count += 1
             load_id = make_load_id(self.pipeline_name, obj.full_uri, obj.generation)
             if load_id not in loaded:
                 new_files.append(obj)
@@ -393,6 +448,7 @@ class NativeLoadPipeline(BasePipeline):
                 self.native_config.file_pattern,
                 start_offset=start_offset,
             ):
+                self._matched_count += 1
                 if (obj.full_uri, obj.generation) in loaded:
                     continue
                 # Match cursor on the full path for partition patterns, basename for flat

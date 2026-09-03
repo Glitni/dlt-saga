@@ -28,9 +28,15 @@ class StorageClient(ABC):
     ) -> Iterator[StorageObject]:
         """List objects matching glob pattern(s) under a URI prefix.
 
+        Patterns are matched against each object's path *relative to* ``uri``
+        with fsspec glob semantics — ``*`` stays within one path segment and
+        ``**`` recurses — so ``"*.parquet"`` lists only the top level and
+        ``"**/*.parquet"`` walks subfolders. See
+        :mod:`dlt_saga.pipelines.native_load.storage.matching`.
+
         Args:
             uri: Root URI to list from (e.g. gs://bucket/prefix/).
-            pattern: Glob pattern(s) to filter by basename.
+            pattern: Glob pattern(s) to filter by relative path.
                      A single pattern (e.g. "*.parquet") or a list of patterns.
             start_offset: Optional storage-backend start offset.
                          For GCS: lexicographic start_offset (blob path within bucket).

@@ -422,6 +422,89 @@ class TestFlatModeDiscovery:
 
 
 @pytest.mark.unit
+class TestShallowPatternWarning:
+    """A pattern that matched nothing is diagnosed against the subfolders.
+
+    file_pattern is matched against the path relative to source_uri, so a
+    pattern without '**' never reaches into subfolders - a silent no-op run
+    unless discovery says so.
+    """
+
+    @staticmethod
+    def _nested_object() -> StorageObject:
+        return StorageObject(
+            name="prefix/legacy/file1.parquet",
+            full_uri="gs://bucket/prefix/legacy/file1.parquet",
+            size=1000,
+            generation=100,
+            updated=None,
+        )
+
+    def test_warns_when_files_only_exist_in_subfolders(self, caplog):
+        p = _make_pipeline()
+        # Nothing matched; the widened probe finds the files one level down.
+        p.storage_client.list_files.side_effect = [[], [self._nested_object()]]
+
+        with caplog.at_level("WARNING"):
+            assert p._discover_new_files() == {None: []}
+
+        assert "matched no files" in caplog.text
+        assert "gs://bucket/prefix/legacy/file1.parquet" in caplog.text
+        assert "**/*.parquet" in caplog.text
+        probe_patterns = p.storage_client.list_files.call_args[0][1]
+        assert probe_patterns == ["**/*.parquet"]
+
+    def test_no_warning_when_subfolders_are_empty_too(self, caplog):
+        p = _make_pipeline()
+        p.storage_client.list_files.side_effect = [[], []]
+
+        with caplog.at_level("WARNING"):
+            p._discover_new_files()
+
+        assert "matched no files" not in caplog.text
+
+    def test_no_probe_when_pattern_is_recursive(self, caplog):
+        p = _make_pipeline(file_pattern="**/*.parquet")
+        p.storage_client.list_files.return_value = []
+
+        with caplog.at_level("WARNING"):
+            p._discover_new_files()
+
+        assert p.storage_client.list_files.call_count == 1
+        assert "matched no files" not in caplog.text
+
+    def test_no_probe_when_files_matched_but_were_already_loaded(self, caplog):
+        p = _make_pipeline(incremental=True)
+        loaded = StorageObject(
+            name="prefix/file1.parquet",
+            full_uri="gs://bucket/prefix/file1.parquet",
+            size=1000,
+            generation=100,
+            updated=None,
+        )
+        p.state_manager.get_loaded_load_ids.return_value = {
+            make_load_id(p.pipeline_name, loaded.full_uri, loaded.generation)
+        }
+        p.storage_client.list_files.return_value = [loaded]
+
+        with caplog.at_level("WARNING"):
+            assert p._discover_new_files() == {None: []}
+
+        # Steady-state incremental run: matched, deduped, no extra listing.
+        assert p.storage_client.list_files.call_count == 1
+        assert "matched no files" not in caplog.text
+
+    def test_probe_failure_is_swallowed(self, caplog):
+        p = _make_pipeline()
+        p.storage_client.list_files.side_effect = [[], RuntimeError("listing denied")]
+
+        with caplog.at_level("WARNING"):
+            assert p._discover_new_files() == {None: []}
+
+        assert "matched no files" not in caplog.text
+
+
+@pytest.mark.unit
 class TestDateModeDedupPruning:
     """The dedup set must only be pruned to the lookback window when the file
     scan is itself restricted to that window. A pruned dedup set combined with a

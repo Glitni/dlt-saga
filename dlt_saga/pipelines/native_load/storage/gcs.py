@@ -1,10 +1,14 @@
 """GCS storage client for the native_load adapter."""
 
-import fnmatch
 import logging
 from typing import Iterator, List, Optional, Union
 
 from dlt_saga.pipelines.native_load.storage.base import StorageClient, StorageObject
+from dlt_saga.pipelines.native_load.storage.matching import (
+    PatternMatcher,
+    relative_path,
+    supports_delimiter_listing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +35,9 @@ class GcsStorageClient(StorageClient):
 
         Args:
             uri: gs://bucket/prefix/ root to list from.
-            pattern: Glob pattern(s) matched against the blob's basename.
-                     A string (e.g. "*.parquet") or a list of patterns.
+            pattern: Glob pattern(s) matched against each blob's path relative
+                     to ``uri`` (e.g. "*.parquet" for the top level only,
+                     "**/*.parquet" to recurse). A string or a list of patterns.
             start_offset: Optional blob path (within bucket) to start listing from
                           (lexicographically inclusive).
 
@@ -48,25 +53,30 @@ class GcsStorageClient(StorageClient):
         prefix = parts[1] if len(parts) > 1 else ""
 
         bucket = self._client.bucket(bucket_name)
+        matcher = PatternMatcher(pattern)
 
         list_kwargs: dict = {"prefix": prefix}
         if start_offset:
             list_kwargs["start_offset"] = start_offset
+        if supports_delimiter_listing(matcher, prefix):
+            # The pattern cannot reach below the prefix, so let GCS skip the
+            # subtrees instead of listing and discarding them here.
+            list_kwargs["delimiter"] = "/"
 
         logger.debug(
-            "GCS list_blobs: bucket=%s prefix=%r start_offset=%r pattern=%r",
+            "GCS list_blobs: bucket=%s prefix=%r start_offset=%r pattern=%r delimiter=%r",
             bucket_name,
             prefix,
             start_offset,
             pattern,
+            list_kwargs.get("delimiter"),
         )
 
-        patterns = [pattern] if isinstance(pattern, str) else pattern
         for blob in bucket.list_blobs(**list_kwargs):
-            basename = blob.name.rsplit("/", 1)[-1]
-            if not basename:
+            rel_path = relative_path(blob.name, prefix)
+            if not rel_path:
                 continue
-            if not any(fnmatch.fnmatch(basename, p) for p in patterns):
+            if not matcher.matches(rel_path):
                 continue
             yield StorageObject(
                 name=blob.name,
