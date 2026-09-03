@@ -1,3 +1,8 @@
+## 0.32.0 — 2026-09-03
+
+### Breaking Changes
+- Match native_load file_pattern against the path relative to source_uri (#475)
+
 ## 0.31.0 — 2026-09-02
 
 ### Breaking Changes
