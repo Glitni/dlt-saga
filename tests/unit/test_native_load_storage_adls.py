@@ -8,7 +8,6 @@ import pytest
 from dlt_saga.pipelines.native_load.storage.adls import (
     AdlsStorageClient,
     _mtime_to_generation,
-    _pattern_to_sql_like,
 )
 
 # ---------------------------------------------------------------------------
@@ -29,27 +28,40 @@ def _row(path, size=1024, mtime=1_000_000_000_000):
 
 
 # ---------------------------------------------------------------------------
-# _pattern_to_sql_like
+# SQL LIKE prefilter
 # ---------------------------------------------------------------------------
 
 
+def _sql_for(pattern, uri="abfss://lake@account.dfs.core.windows.net/raw/"):
+    client = _make_client()
+    list(client.list_files(uri, pattern))
+    return client._destination.execute_sql.call_args[0][0]
+
+
 @pytest.mark.unit
-class TestPatternToSqlLike:
-    def test_star_extension(self):
-        assert _pattern_to_sql_like("*.parquet") == "%.parquet"
+class TestSqlLikePrefilter:
+    def test_extension_pattern(self):
+        assert "path LIKE '%.parquet'" in _sql_for("*.parquet")
 
-    def test_prefix_wildcard(self):
-        # The literal _ in "data_" is a SQL wildcard and must be escaped
-        assert _pattern_to_sql_like("data_*.csv") == r"data\_%.csv"
+    def test_prefix_pattern_is_suffix_anchored(self):
+        # The LIKE body must not be anchored at the start of the LIST path,
+        # which is absolute or container-relative while the pattern is not.
+        assert "path LIKE '%report-%.csv'" in _sql_for("report-*.csv")
 
-    def test_question_mark(self):
-        assert _pattern_to_sql_like("file?.parquet") == "file_.parquet"
+    def test_escapes_sql_wildcards_in_literals(self):
+        sql = _sql_for("data_*.csv")
+        assert r"path LIKE '%data\_%.csv'" in sql
 
-    def test_escapes_percent(self):
-        assert _pattern_to_sql_like("100%.parquet") == r"100\%.parquet"
+    def test_question_mark_becomes_underscore(self):
+        assert "path LIKE '%file_.parquet'" in _sql_for("file?.parquet")
 
-    def test_escapes_underscore(self):
-        assert _pattern_to_sql_like("my_table.parquet") == r"my\_table.parquet"
+    def test_pattern_list_is_or_joined(self):
+        sql = _sql_for(["*.parquet", "*.csv"])
+        assert "path LIKE '%.parquet' OR path LIKE '%.csv'" in sql
+
+    def test_pure_wildcard_pattern_skips_prefilter(self):
+        # "**" would render as LIKE '%', which filters nothing
+        assert "WHERE" not in _sql_for("**")
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +110,7 @@ class TestAdlsListFiles:
         )
         assert result[1].size == 2000
 
-    def test_filters_non_matching_basename(self):
+    def test_filters_non_matching_name(self):
         uri = "abfss://lake@account.dfs.core.windows.net/raw/"
         rows = [
             _row("abfss://lake@account.dfs.core.windows.net/raw/file1.parquet"),
@@ -123,15 +135,55 @@ class TestAdlsListFiles:
     def test_relative_path_prefixed_with_uri(self):
         uri = "abfss://lake@account.dfs.core.windows.net/raw/"
         rows = [
-            _row("subdir/file1.parquet", 100),  # relative path
+            _row("file1.parquet", 100),  # path relative to the listed URI
         ]
         client = _make_client(rows)
         result = list(client.list_files(uri, "*.parquet"))
         assert len(result) == 1
         assert (
             result[0].full_uri
+            == "abfss://lake@account.dfs.core.windows.net/raw/file1.parquet"
+        )
+
+    def test_relative_path_in_subfolder_needs_recursive_pattern(self):
+        uri = "abfss://lake@account.dfs.core.windows.net/raw/"
+        rows = [_row("subdir/file1.parquet", 100)]
+
+        assert list(_make_client(rows).list_files(uri, "*.parquet")) == []
+
+        result = list(_make_client(rows).list_files(uri, "**/*.parquet"))
+        assert len(result) == 1
+        assert (
+            result[0].full_uri
             == "abfss://lake@account.dfs.core.windows.net/raw/subdir/file1.parquet"
         )
+
+    def test_flat_pattern_excludes_subfolders(self):
+        uri = "abfss://lake@account.dfs.core.windows.net/raw/"
+        root = "abfss://lake@account.dfs.core.windows.net/raw"
+        rows = [
+            _row(f"{root}/file1.parquet"),
+            _row(f"{root}/legacy/file1.parquet"),
+        ]
+        client = _make_client(rows)
+        result = list(client.list_files(uri, "*.parquet"))
+        assert [r.full_uri for r in result] == [f"{root}/file1.parquet"]
+
+    def test_prefix_pattern_matches_nested_paths_when_recursive(self):
+        # Regression: the LIKE prefilter used to anchor "report-*" at the start
+        # of the LIST path, dropping every row before the glob filter ran.
+        uri = "abfss://lake@account.dfs.core.windows.net/raw/"
+        root = "abfss://lake@account.dfs.core.windows.net/raw"
+        rows = [
+            _row(f"{root}/report-stats.csv"),
+            _row(f"{root}/legacy/report-stats.csv"),
+        ]
+        client = _make_client(rows)
+        result = list(client.list_files(uri, "**/report-*.csv"))
+        assert [r.full_uri for r in result] == [
+            f"{root}/report-stats.csv",
+            f"{root}/legacy/report-stats.csv",
+        ]
 
     def test_start_offset_ignored(self):
         uri = "abfss://lake@account.dfs.core.windows.net/raw/"

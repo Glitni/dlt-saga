@@ -116,9 +116,19 @@ saga ingest --select "native_load__my_bucket__orders"
 
 Discovery mode is implied: set both `filename_date_regex` and `filename_date_format` to enable date-based grouping; omit both for flat (full-prefix) listing.
 
+`file_pattern` is matched against each file's path **relative to `source_uri`**, with the same glob semantics as the `filesystem` adapter's `file_glob` — `*` stays within one path segment, `**` recurses:
+
+| Pattern | Selects |
+|---|---|
+| `*.parquet` | only the files directly under `source_uri` |
+| `**/*.parquet` | those files *and* every subfolder, at any depth |
+| `legacy/*.parquet` | only the files in the `legacy/` subfolder |
+
+A pattern that cannot reach below `source_uri` also prunes the listing server-side (GCS/S3 delimiter listing), so scoping to the top level is faster on buckets with large subtrees. When a pattern matches nothing but matching files exist deeper, discovery logs a warning naming the `**/` form to use.
+
 | Field | Default | Description |
 |---|---|---|
-| `file_pattern` | derived from `file_type` | Glob pattern(s) to filter filenames. Single string or list of strings. |
+| `file_pattern` | derived from `file_type` | Glob pattern(s) matched against each file's path relative to `source_uri` (see above). Single string or list of strings. |
 | `filename_date_regex` | — | Regex with one capture group extracting a date string from the filename. When set (with `filename_date_format`), files are grouped by date and loaded chronologically; `_dlt_source_file_date` is populated. |
 | `filename_date_format` | — | strftime format string matching the capture group (e.g. `%Y%m%d`). Must be set if and only if `filename_date_regex` is set. **Must be lexicographically monotonic** — big-endian, fixed-width, fields ordered most- to least-significant (`%Y%m%d`, `%Y-%m-%d`, `%Y-%m-%dT%H:%M:%S`). The extracted date is compared as a *string* throughout the incremental machinery (cursor high-water mark, dedup window, and the cloud-storage `start_offset`, which skips by byte-wise object-name order), so a format whose lexical order differs from chronological order (e.g. `%d%m%Y`, `%m/%d/%Y`) is rejected at config validation. |
 | `date_lookback_days` | `2` | How many days before the last loaded date to re-scan for late-arriving files. Requires `incremental: true`; a warning is logged when set without it. |

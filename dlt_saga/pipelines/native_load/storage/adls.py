@@ -5,30 +5,19 @@ external location — no Azure SDK or separate auth surface required.  The activ
 SQL warehouse that saga already holds for COPY INTO is reused for listing.
 """
 
-import fnmatch
 import logging
 from typing import TYPE_CHECKING, Iterator, List, Optional, Union
 
 from dlt_saga.pipelines.native_load.storage.base import StorageClient, StorageObject
+from dlt_saga.pipelines.native_load.storage.matching import (
+    PatternMatcher,
+    relative_path,
+)
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.databricks.destination import DatabricksDestination
 
 logger = logging.getLogger(__name__)
-
-
-def _pattern_to_sql_like(pattern: str) -> str:
-    """Convert a fnmatch glob pattern to a SQL LIKE expression fragment.
-
-    Only the common case (leading/trailing ``*``) is handled.  Python's fnmatch
-    is applied afterwards for precise filtering; the SQL clause is a prefilter
-    only.
-    """
-    # Replace fnmatch wildcards: * → %, ? → _
-    # Escape existing SQL metacharacters first
-    result = pattern.replace("%", r"\%").replace("_", r"\_")
-    result = result.replace("*", "%").replace("?", "_")
-    return result
 
 
 class AdlsStorageClient(StorageClient):
@@ -56,7 +45,9 @@ class AdlsStorageClient(StorageClient):
 
         Args:
             uri: abfss:// URI prefix to list from.
-            pattern: Glob pattern(s) matched against the full path.
+            pattern: Glob pattern(s) matched against each path relative to
+                     ``uri`` (e.g. "*.parquet" for the top level only,
+                     "**/*.parquet" to recurse).
             start_offset: Not used for ADLS; silently ignored.
         """
         if not uri.startswith("abfss://"):
@@ -64,22 +55,32 @@ class AdlsStorageClient(StorageClient):
                 f"AdlsStorageClient requires an abfss:// URI, got: {uri!r}"
             )
 
-        patterns = [pattern] if isinstance(pattern, str) else list(pattern)
+        matcher = PatternMatcher(pattern)
+        root = uri.rstrip("/") + "/"
 
-        # Build SQL LIKE prefilter — OR-joined across all patterns
-        like_clauses = " OR ".join(
-            f"path LIKE '{_pattern_to_sql_like(p)}'" for p in patterns
+        # Optional SQL LIKE prefilter — OR-joined across all patterns. Only a
+        # prefilter: the bodies are suffix-anchored and their wildcards cross
+        # "/", so they never exclude a path that matcher.matches() would accept.
+        like_bodies = matcher.sql_like_bodies()
+        where_clause = (
+            " OR ".join(f"path LIKE '{body}'" for body in like_bodies)
+            if like_bodies
+            else None
         )
-        where_clause = f"({like_clauses})"
 
         sql = (
-            f"SELECT path, size, modification_time "
+            "SELECT path, size, modification_time "
             f"FROM LIST('{self._destination.escape_string_literal(uri)}', RECURSIVE => TRUE) "
-            f"WHERE {where_clause} "
-            f"ORDER BY path"
+            + (f"WHERE ({where_clause}) " if where_clause else "")
+            + "ORDER BY path"
         )
 
-        logger.debug("ADLS LIST via Databricks SQL: uri=%r patterns=%r", uri, patterns)
+        logger.debug(
+            "ADLS LIST via Databricks SQL: uri=%r patterns=%r prefilter=%r",
+            uri,
+            matcher.patterns,
+            where_clause,
+        )
 
         try:
             rows = self._destination.execute_sql(sql)
@@ -96,19 +97,21 @@ class AdlsStorageClient(StorageClient):
                 continue
 
             # Derive full_uri: the path returned by LIST is either relative to the
-            # container root or the full abfss:// URI depending on the Databricks
-            # runtime version.  Normalise to full_uri.
+            # listed URI or the full abfss:// URI depending on the Databricks
+            # runtime version.  Normalise to full_uri plus the path relative to
+            # the listed URI, which is what the pattern matches against.
             if path.startswith("abfss://"):
                 full_uri = path
+                rel_path = relative_path(path, root)
             else:
-                full_uri = uri.rstrip("/") + "/" + path.lstrip("/")
+                rel_path = path.lstrip("/")
+                full_uri = root + rel_path
 
-            basename = full_uri.rsplit("/", 1)[-1]
-            if not basename:
+            if not rel_path:
                 continue
 
-            # Python-side precise fnmatch filter (SQL LIKE is a prefilter only)
-            if not any(fnmatch.fnmatch(basename, p) for p in patterns):
+            # Python-side precise glob filter (SQL LIKE is a prefilter only)
+            if not matcher.matches(rel_path):
                 continue
 
             size = int(row[1]) if row[1] is not None else 0

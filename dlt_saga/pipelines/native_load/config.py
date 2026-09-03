@@ -98,8 +98,11 @@ class NativeLoadConfig(BaseConfig):
         default=None,
         metadata={
             "description": (
-                "Glob pattern matched against file basenames. "
-                "Can be a single pattern (e.g. '*.parquet') or a list of patterns. "
+                "Glob pattern matched against each file's path relative to source_uri, "
+                "with the same semantics as the filesystem adapter's file_glob: '*' "
+                "stays within one path segment and '**' recurses. So '*.parquet' loads "
+                "only the files directly under source_uri, while '**/*.parquet' also "
+                "walks subfolders. Can be a single pattern or a list of patterns. "
                 "Defaults to *.parquet / *.csv / *.jsonl based on file_type."
             )
         },
@@ -463,6 +466,7 @@ class NativeLoadConfig(BaseConfig):
         self._validate_date_fields()
         self._validate_numeric_floors()
         self._apply_format_defaults()
+        self._validate_file_pattern()
         self._validate_csv_fields()
         self._validate_csv_schema()
         self._validate_table_format()
@@ -618,6 +622,12 @@ class NativeLoadConfig(BaseConfig):
     def _apply_format_defaults(self) -> None:
         if self.file_pattern is None:
             self.file_pattern = _DEFAULT_PATTERNS[self.file_type]
+
+    def _validate_file_pattern(self) -> None:
+        """Reject unusable glob patterns before any storage listing happens."""
+        from dlt_saga.pipelines.native_load.storage.matching import PatternMatcher
+
+        PatternMatcher(self.file_pattern)  # type: ignore[arg-type]
 
     def _validate_csv_fields(self) -> None:
         csv_only = {

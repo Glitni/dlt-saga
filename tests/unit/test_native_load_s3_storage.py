@@ -50,7 +50,7 @@ class TestS3StorageClientUriHandling:
         client, s3, _ = _make_client_with_pages([{"Contents": [_obj("a.parquet")]}])
         list(client.list_files("s3://my-bucket", "*.parquet"))
         s3.get_paginator.return_value.paginate.assert_called_once_with(
-            Bucket="my-bucket", Prefix=""
+            Bucket="my-bucket", Prefix="", Delimiter="/"
         )
 
     def test_uri_with_prefix_passed_to_paginate(self):
@@ -59,7 +59,7 @@ class TestS3StorageClientUriHandling:
         )
         list(client.list_files("s3://my-bucket/data/2026/", "*.parquet"))
         s3.get_paginator.return_value.paginate.assert_called_once_with(
-            Bucket="my-bucket", Prefix="data/2026/"
+            Bucket="my-bucket", Prefix="data/2026/", Delimiter="/"
         )
 
     def test_start_offset_is_ignored(self):
@@ -72,7 +72,7 @@ class TestS3StorageClientUriHandling:
         )
         _, kwargs = s3.get_paginator.return_value.paginate.call_args
         assert "start_offset" not in kwargs
-        assert kwargs == {"Bucket": "my-bucket", "Prefix": "data/"}
+        assert kwargs == {"Bucket": "my-bucket", "Prefix": "data/", "Delimiter": "/"}
 
     def test_credentials_and_region_passed_to_boto3(self):
         _, _, boto3 = _make_client_with_pages([], region="eu-west-1")
@@ -81,6 +81,35 @@ class TestS3StorageClientUriHandling:
             aws_access_key_id="AKIA_TEST",
             aws_secret_access_key="secret",
             region_name="eu-west-1",
+        )
+
+
+@pytest.mark.unit
+class TestS3StorageClientPathScoping:
+    """file_pattern is matched against the path relative to the listed URI."""
+
+    def test_flat_pattern_excludes_subfolders(self):
+        pages = [{"Contents": [_obj("root/a.parquet"), _obj("root/legacy/a.parquet")]}]
+        client, _, _ = _make_client_with_pages(pages)
+        results = list(client.list_files("s3://my-bucket/root/", "*.parquet"))
+        assert [r.name for r in results] == ["root/a.parquet"]
+
+    def test_recursive_pattern_includes_subfolders(self):
+        pages = [
+            {"Contents": [_obj("root/a.parquet"), _obj("root/legacy/deep/b.parquet")]}
+        ]
+        client, _, _ = _make_client_with_pages(pages)
+        results = list(client.list_files("s3://my-bucket/root/", "**/*.parquet"))
+        assert [r.name for r in results] == [
+            "root/a.parquet",
+            "root/legacy/deep/b.parquet",
+        ]
+
+    def test_recursive_pattern_does_not_prune_listing(self):
+        client, s3, _ = _make_client_with_pages([{"Contents": []}])
+        list(client.list_files("s3://my-bucket/root/", "**/*.parquet"))
+        s3.get_paginator.return_value.paginate.assert_called_once_with(
+            Bucket="my-bucket", Prefix="root/"
         )
 
 

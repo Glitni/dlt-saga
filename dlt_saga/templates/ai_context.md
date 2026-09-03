@@ -378,6 +378,7 @@ adapter: dlt_saga.native_load
 write_disposition: append          # or replace, append+historize, replace+historize
 source_uri: "gs://bucket/raw/"
 file_type: csv                     # csv | parquet | jsonl
+file_pattern: "*.csv"              # relative to source_uri; "*" stays in one folder, "**/" recurses
 incremental: true                  # opt-in file-level state in _saga_native_load_log
 
 # CSV parsing options (BigQuery only — ignored on Databricks):
