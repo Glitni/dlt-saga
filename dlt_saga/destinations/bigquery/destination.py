@@ -1027,6 +1027,24 @@ class BigQueryDestination(BigQueryBaseDestination):
         except NotFound:
             return False
 
+    def list_tables(self, schema: str) -> List[str]:
+        # The metadata API rather than INFORMATION_SCHEMA: it needs no query
+        # job (so no region to get wrong — an INFORMATION_SCHEMA query run
+        # outside the dataset's region reports the dataset as missing) and it
+        # distinguishes an absent dataset (NotFound → legitimately empty) from
+        # a denied one (Forbidden → propagates). See Destination.list_tables.
+        from google.cloud.exceptions import NotFound
+
+        client = self._client()
+        try:
+            return [
+                table.table_id
+                for table in client.list_tables(f"{self.config.project_id}.{schema}")
+            ]
+        except NotFound:
+            logger.debug("Dataset %s does not exist; no tables to list", schema)
+            return []
+
     def drop_table(self, dataset: str, table: str) -> None:
         full_id = f"{self.config.project_id}.{dataset}.{table}"
         self._drop_table(full_id)

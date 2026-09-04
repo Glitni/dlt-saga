@@ -6,7 +6,7 @@ import logging
 import threading
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from dlt_saga.destinations.base import Destination
 from dlt_saga.destinations.databricks.config import DatabricksDestinationConfig
@@ -803,6 +803,19 @@ class DatabricksDestination(Destination):
             return True
         except Exception:
             return False
+
+    def list_tables(self, schema: str) -> List[str]:
+        safe_catalog = self.escape_string_literal(self.config.catalog)
+        safe_schema = self.escape_string_literal(schema)
+        # system.information_schema mirrors columns_query: a schema that does
+        # not exist simply matches no rows, so the empty listing needs no
+        # special-casing here.
+        rows = self.execute_sql(
+            "SELECT table_name FROM system.information_schema.tables "
+            f"WHERE table_catalog = '{safe_catalog}' "
+            f"AND table_schema = '{safe_schema}'"
+        )
+        return [r.table_name for r in rows]
 
     def drop_table(self, dataset: str, table: str) -> None:
         self.execute_sql(

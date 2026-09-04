@@ -330,6 +330,19 @@ class TestDatabricksExecuteSql:
         assert rows[0].name == "Alice"
         assert rows[0].age == 30
 
+    def test_list_tables_scopes_to_catalog_and_schema(self):
+        dest, mock_conn = self._dest_with_mock_conn()
+        self._setup_cursor(
+            mock_conn, description=[("table_name",)], rows=[("orders",), ("stock",)]
+        )
+
+        assert dest.list_tables("my_schema") == ["orders", "stock"]
+
+        sql = mock_conn.cursor.return_value.__enter__().execute.call_args[0][0]
+        assert "system.information_schema.tables" in sql
+        assert "table_catalog = 'my_catalog'" in sql
+        assert "table_schema = 'my_schema'" in sql
+
     def test_row_supports_index_access(self):
         dest, mock_conn = self._dest_with_mock_conn()
         self._setup_cursor(mock_conn, description=[("x",)], rows=[("val",)])

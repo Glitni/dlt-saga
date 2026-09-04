@@ -6,7 +6,11 @@ from unittest.mock import patch
 import pytest
 
 from dlt_saga.pipeline_config.base_config import PipelineConfig
-from dlt_saga.utility.cli.selectors import PipelineSelector, format_config_list
+from dlt_saga.utility.cli.selectors import (
+    PipelineSelector,
+    SelectorSyntaxError,
+    format_config_list,
+)
 
 
 @pytest.mark.unit
@@ -339,3 +343,50 @@ class TestRunSpanningLayersNoSpuriousWarning:
             "crm__accounts",
         ]
         assert [c.pipeline_name for c in historize_configs["crm"]] == ["crm__accounts"]
+
+
+@pytest.mark.unit
+class TestUnknownSelectorPrefix:
+    """An unrecognized prefix is a typo, and must not read as "no matches".
+
+    Falling through to the name match made ``--select "tags:daily"`` behave
+    exactly like a valid selector that matched nothing, so a scheduled run
+    would do nothing and report success.
+    """
+
+    @pytest.mark.parametrize(
+        "selector",
+        ["tags:daily", "groups:api", "owner:me", "state_new:true"],
+    )
+    def test_unknown_prefix_raises(self, sample_configs, selector):
+        with pytest.raises(SelectorSyntaxError, match=selector):
+            PipelineSelector(sample_configs).select([selector])
+
+    def test_known_prefix_with_unknown_keyword_raises_its_own_error(
+        self, sample_configs
+    ):
+        """``state:`` is recognized, so its keyword is validated separately."""
+        from dlt_saga.utility.cli.pipeline_state import StateSelectorError
+
+        with pytest.raises(StateSelectorError, match="state:latest"):
+            PipelineSelector(sample_configs).select(["state:latest"])
+
+    def test_message_lists_the_supported_prefixes(self, sample_configs):
+        with pytest.raises(SelectorSyntaxError) as excinfo:
+            PipelineSelector(sample_configs).select(["owner:me"])
+
+        message = str(excinfo.value)
+        for supported in ("tag:<name>", "group:<name>", "state:new", "state:failed"):
+            assert supported in message
+
+    def test_unknown_prefix_inside_an_intersection_raises(self, sample_configs):
+        with pytest.raises(SelectorSyntaxError):
+            PipelineSelector(sample_configs).select(["tag:daily,owner:me"])
+
+    @pytest.mark.parametrize(
+        "selector", ["tag:nonexistent", "group:nonexistent", "nonexistent_pipeline"]
+    )
+    def test_valid_selectors_that_match_nothing_still_do_not_raise(
+        self, sample_configs, selector
+    ):
+        assert PipelineSelector(sample_configs).select([selector]) == {}

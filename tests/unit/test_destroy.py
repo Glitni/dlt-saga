@@ -178,7 +178,7 @@ def test_discover_and_select_threads_warn_flag(monkeypatch):
     warn_flags = []
 
     class FakeSelector:
-        def __init__(self, configs):
+        def __init__(self, configs, state=None):
             pass
 
         def select(self, selectors=None, warn_on_no_match=True):

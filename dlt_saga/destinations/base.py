@@ -8,7 +8,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -879,6 +879,27 @@ class Destination(ABC):
         """Return True if the table exists in the given dataset."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement table_exists"
+        )
+
+    def list_tables(self, schema: str) -> List[str]:
+        """Return every table name in ``schema``, or ``[]`` if it doesn't exist.
+
+        Unlike :meth:`list_tables_by_pattern` this must **raise** on any error
+        other than a missing schema. Its caller (the ``state:`` selectors)
+        reads an empty listing as "nothing has been built here yet" and selects
+        every pipeline in the schema, so a swallowed permission or network
+        error would silently expand a run into a full re-ingest instead of
+        failing.
+
+        Args:
+            schema: Schema/dataset to list.
+
+        Returns:
+            Table names as the destination stores them. Empty when the schema
+            itself does not exist.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement list_tables"
         )
 
     def drop_table(self, dataset: str, table: str) -> None:

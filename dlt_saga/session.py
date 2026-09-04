@@ -27,6 +27,11 @@ from dlt_saga.project_config import get_config_source_settings
 from dlt_saga.utility.auth.providers import get_auth_provider
 from dlt_saga.utility.cli.common import flatten_configs
 from dlt_saga.utility.cli.context import execution_context_scope
+from dlt_saga.utility.cli.pipeline_state import (
+    build_state_resolver,
+    layer_for_resource_type,
+    selection_needs_state,
+)
 from dlt_saga.utility.cli.profiles import ProfileTarget, get_profiles_config
 from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.cli.selectors import PipelineSelector
@@ -181,6 +186,10 @@ class Session:
     ) -> List[PipelineConfig]:
         """Discover and select pipeline configs.
 
+        A ``state:`` selector makes this read warehouse state, so it needs
+        credentials (and runs under the profile's ``run_as`` identity); every
+        other selection stays offline.
+
         Args:
             select: Selector expressions (dbt-style). None = all.
             resource_type: Filter by ``"ingest"``, ``"historize"``, or ``"all"``.
@@ -189,6 +198,12 @@ class Session:
             Flat list of matching PipelineConfig objects.
         """
         filter_fn = self._resource_type_filter(resource_type)
+        layer = layer_for_resource_type(resource_type)
+
+        def _select() -> List[PipelineConfig]:
+            configs, _ = self._discover_and_select(select, filter_fn, layer=layer)
+            return flatten_configs(configs)
+
         # Resolve inside the profile's execution context so environment-aware
         # names (notably the dev schema from a profile's ``env_var()``) bind to
         # the profile rather than the bare ``dlt_dev``/``SAGA_SCHEMA_NAME``
@@ -198,8 +213,9 @@ class Session:
         # pre-discovers for its pipeline count) landing in ``dlt_dev`` while
         # ``saga ingest`` resolved correctly.
         with execution_context_scope(self._profile_target):
-            configs, _ = self._discover_and_select(select, filter_fn)
-        return flatten_configs(configs)
+            if selection_needs_state(select):
+                return self._execute_with_auth(_select)
+            return _select()
 
     def ingest(
         self,
@@ -551,7 +567,10 @@ class Session:
         # Resolve within the profile context so schema-name resolution matches a
         # real run (mirrors discover()); no auth — validation never connects.
         with execution_context_scope(self._profile_target):
-            configs, _ = self._discover_and_select(select)
+            # layer=None: validation is offline, so a ``state:`` selector (which
+            # would need a warehouse read) is refused rather than silently
+            # matching nothing.
+            configs, _ = self._discover_and_select(select, layer=None)
             return validate_pipeline_configs(
                 flatten_configs(configs), self._config_source
             )
@@ -716,6 +735,7 @@ class Session:
         select: Optional[List[str]],
         filter_fn: Optional[Callable[[PipelineConfig], bool]] = None,
         warn_on_no_match: bool = True,
+        layer: Optional[str] = "any",
     ) -> tuple:
         """Discover configs using this session's config source and apply selectors.
 
@@ -727,10 +747,17 @@ class Session:
                 a match may live only in the disabled set, so the enabled-set
                 miss is expected and its own no-match message is reported once
                 over the union instead.
+            layer: Layer a ``state:new`` selector judges newness in —
+                ``"ingest"``, ``"historize"``, or ``"any"``. Pass the layer this
+                call is selecting *for*, so a two-phase command judges each
+                phase against its own target. Only consulted when the selection
+                uses a ``state:`` selector; None rejects those (``validate`` is
+                offline and never connects).
 
         Returns:
             Tuple of (selected_enabled, selected_disabled) dicts.
         """
+        state = build_state_resolver(select, layer)
         all_enabled, all_disabled = self._config_source.discover()
 
         if filter_fn:
@@ -740,13 +767,13 @@ class Session:
             }
             all_enabled = {k: v for k, v in all_enabled.items() if v}
 
-        enabled_selector = PipelineSelector(all_enabled)
+        enabled_selector = PipelineSelector(all_enabled, state=state)
         selected = enabled_selector.select(select, warn_on_no_match=warn_on_no_match)
 
         # The disabled set is only probed to report matches that are disabled;
         # a non-match here is expected and must not warn (it would contradict a
         # successful enabled match).
-        disabled_selector = PipelineSelector(all_disabled)
+        disabled_selector = PipelineSelector(all_disabled, state=state)
         selected_disabled = disabled_selector.select(select, warn_on_no_match=False)
 
         return selected, selected_disabled
@@ -868,7 +895,7 @@ class Session:
     ) -> SessionResult:
         """Discover ingest-enabled configs and execute them."""
         configs, _ = self._discover_and_select(
-            select, filter_fn=lambda c: c.ingest_enabled
+            select, filter_fn=lambda c: c.ingest_enabled, layer="ingest"
         )
         all_configs = flatten_configs(configs)
 
@@ -1080,7 +1107,7 @@ class Session:
     ) -> SessionResult:
         """Discover historize-enabled configs and execute them."""
         configs, _ = self._discover_and_select(
-            select, filter_fn=lambda c: c.historize_enabled
+            select, filter_fn=lambda c: c.historize_enabled, layer="historize"
         )
         all_configs = flatten_configs(configs)
 
@@ -1275,9 +1302,12 @@ class Session:
         """Run ingest then historize, combining results."""
         all_results: List[PipelineResult] = []
 
-        # Ingest phase
+        # Ingest phase. Each phase selects with its own layer so ``state:new``
+        # asks about the target that phase is about to write: a pipeline whose
+        # raw table exists but whose historized table doesn't is skipped here
+        # and picked up by the historize phase below.
         ingest_configs, _ = self._discover_and_select(
-            select, filter_fn=lambda c: c.ingest_enabled
+            select, filter_fn=lambda c: c.ingest_enabled, layer="ingest"
         )
         ingest_list = flatten_configs(ingest_configs)
 
@@ -1301,7 +1331,7 @@ class Session:
 
         # Historize phase
         historize_configs, _ = self._discover_and_select(
-            select, filter_fn=lambda c: c.historize_enabled
+            select, filter_fn=lambda c: c.historize_enabled, layer="historize"
         )
         historize_list = flatten_configs(historize_configs)
 

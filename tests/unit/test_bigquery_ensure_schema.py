@@ -1,7 +1,10 @@
-"""Unit tests for BigQueryDestination.ensure_schema_exists.
+"""Unit tests for BigQueryDestination's dataset-level metadata calls.
 
-Covers the race-safety contract: only a genuine NotFound triggers creation,
-other errors propagate, and a parallel create (Conflict) is tolerated.
+Both share one contract: only a genuine ``NotFound`` means "the dataset isn't
+there", and every other error propagates. For ``ensure_schema_exists`` that's
+race-safety (NotFound triggers creation, a parallel create's Conflict is
+tolerated); for ``list_tables`` it's the difference between "nothing built
+here" and "we couldn't look".
 """
 
 from unittest.mock import MagicMock
@@ -53,3 +56,34 @@ class TestBigQueryEnsureSchemaExists:
         # Should not raise — another process won the race.
         BigQueryDestination.ensure_schema_exists(dest, "my_schema")
         client.create_dataset.assert_called_once()
+
+
+@pytest.mark.unit
+class TestBigQueryListTables:
+    """``state:new`` reads this listing, so an empty answer must mean empty."""
+
+    def test_returns_table_ids(self):
+        dest, client = _make_dest()
+        client.list_tables.return_value = [
+            MagicMock(table_id="orders"),
+            MagicMock(table_id="orders_historized"),
+        ]
+
+        tables = BigQueryDestination.list_tables(dest, "my_schema")
+
+        assert tables == ["orders", "orders_historized"]
+        client.list_tables.assert_called_once_with("proj.my_schema")
+
+    def test_missing_dataset_lists_nothing(self):
+        dest, client = _make_dest()
+        client.list_tables.side_effect = NotFound("dataset missing")
+
+        assert BigQueryDestination.list_tables(dest, "my_schema") == []
+
+    def test_permission_error_propagates(self):
+        # Read as an empty listing this would mark every pipeline "new".
+        dest, client = _make_dest()
+        client.list_tables.side_effect = Forbidden("no access")
+
+        with pytest.raises(Forbidden):
+            BigQueryDestination.list_tables(dest, "my_schema")

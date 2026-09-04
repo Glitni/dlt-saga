@@ -5,6 +5,7 @@ This module implements dbt-style selector syntax for filtering pipeline configur
 - Glob patterns: "google_sheets__*", "*balance*"
 - Tag selectors: "tag:daily", "tag:critical", "tag:hourly:10" (with schedule value)
 - Group selectors: "group:google_sheets"
+- State selectors: "state:new", "state:failed" (see below)
 
 Tag selector syntax:
 - tag:hourly        - Match configs that should run at the CURRENT hour
@@ -40,9 +41,27 @@ Schedule values in config files:
         - tuesday: [6]     # AND Tuesdays at 6am
         - 9                # AND every day at 9am
 
+State selectors:
+- state:new     - Pipelines whose target table does not exist yet
+- state:failed  - Pipelines whose most recent recorded run failed
+
+Unlike every other selector these read warehouse state rather than config, so
+they require a :class:`~dlt_saga.utility.cli.pipeline_state.PipelineStateResolver`
+(passed as ``state``) and are scoped to the target being run — a pipeline can be
+new in dev and not in prod. "new" is judged per layer: the ingest target for
+``saga ingest``, the historized target for ``saga historize``, either one for a
+command spanning both. See that module for the semantics and their rationale.
+
+An unrecognized prefix (``tags:daily``, ``owner:me``) is a syntax error rather
+than a selector that matches nothing — see :class:`SelectorSyntaxError`. A
+recognized prefix validates its own value: an unknown ``state:`` keyword raises
+``StateSelectorError``, while ``tag:`` and ``group:`` take open-ended values and
+simply match nothing.
+
 Selector combinations:
 - Space-separated: UNION (OR) - "tag:daily group:google_sheets"
 - Comma-separated: INTERSECTION (AND) - "tag:daily,group:google_sheets"
+- State composes like any other: "tag:daily,state:new" is daily AND new
 """
 
 import fnmatch
@@ -52,9 +71,23 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from dlt_saga.pipeline_config.base_config import PipelineConfig, normalize_weekday
+from dlt_saga.utility.cli.pipeline_state import (
+    STATE_KEYWORDS,
+    PipelineStateResolver,
+    StateSelectorError,
+)
 
 # Tags that have schedule semantics and should use current time
 SCHEDULE_AWARE_TAGS = {"hourly", "daily"}
+
+
+class SelectorSyntaxError(ValueError):
+    """A selector that isn't valid syntax (rather than one matching nothing).
+
+    A configuration error (subclasses ``ValueError``), so callers render it as
+    a message without a traceback.
+    """
+
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +95,22 @@ logger = logging.getLogger(__name__)
 class PipelineSelector:
     """Parses and applies dbt-style selectors to filter pipeline configurations."""
 
-    def __init__(self, all_configs: Dict[str, List[PipelineConfig]]):
+    def __init__(
+        self,
+        all_configs: Dict[str, List[PipelineConfig]],
+        state: Optional[PipelineStateResolver] = None,
+    ):
         """Initialize selector with all available configs.
 
         Args:
             all_configs: Dictionary of configs organized by pipeline type
+            state: Resolver backing the ``state:`` selectors. Required only
+                when the selection uses one; build it with
+                :func:`~dlt_saga.utility.cli.pipeline_state.build_state_resolver`,
+                which returns None for a selection that needs no warehouse read.
         """
         self.all_configs = all_configs
+        self.state = state
         # Flatten for easier searching
         self.flat_configs: List[PipelineConfig] = []
         for configs in all_configs.values():
@@ -159,60 +201,34 @@ class PipelineSelector:
         """
         selector = selector.strip()
 
+        # State selector: state:new or state:failed
+        if selector.startswith("state:"):
+            return self._select_state(selector[6:])
+
         # Tag selector: tag:daily or tag:hourly:10 or tag:daily:monday
         if selector.startswith("tag:"):
-            tag_part = selector[4:]
-            # Check if there's an explicit schedule value (e.g., "hourly:10", "daily:monday")
-            if ":" in tag_part:
-                tag_name, value_str = tag_part.split(":", 1)
-                # Try int first, then weekday name
-                try:
-                    tag_value = int(value_str)
-                    # Explicit int value: use exact=True
-                    return [
-                        c
-                        for c in self.flat_configs
-                        if c.has_tag(tag_name, tag_value, exact=True)
-                    ]
-                except ValueError:
-                    weekday = normalize_weekday(value_str)
-                    if weekday is not None:
-                        # Explicit weekday: use exact=True
-                        return [
-                            c
-                            for c in self.flat_configs
-                            if c.has_tag(tag_name, exact=True, query_weekday=weekday)
-                        ]
-                    logger.warning(
-                        f"Invalid tag value '{value_str}', must be integer or weekday name"
-                    )
-                    return []
-            else:
-                # No explicit value - check if this is a schedule-aware tag
-                tag_name = tag_part
-                if tag_name in SCHEDULE_AWARE_TAGS:
-                    # Use current time for schedule-aware tags
-                    # exact=False: include configs with no values (run always)
-                    tag_value, weekday = self._get_current_schedule_value(tag_name)
-                    logger.debug(
-                        f"Schedule-aware tag '{tag_name}' using current value: "
-                        f"{tag_value}" + (f" ({weekday})" if weekday else "")
-                    )
-                    return [
-                        c
-                        for c in self.flat_configs
-                        if c.has_tag(
-                            tag_name, tag_value, exact=False, query_weekday=weekday
-                        )
-                    ]
-                else:
-                    # Non-schedule tag - match any config with this tag
-                    return [c for c in self.flat_configs if c.has_tag(tag_name)]
+            return self._select_tag(selector[4:])
 
         # Group selector: group:google_sheets
         if selector.startswith("group:"):
             pipeline_group = selector.split(":", 1)[1]
             return self.all_configs.get(pipeline_group, [])
+
+        # The prefix set above is closed, so anything else carrying a ':' is a
+        # mistyped prefix rather than a name — pipeline names and glob patterns
+        # are built from config paths and never contain one. Raise instead of
+        # falling through to the name match, where an unknown prefix would be
+        # indistinguishable from a valid selector that matched nothing, and a
+        # scheduled run would quietly do nothing and report success.
+        if ":" in selector:
+            supported = ["tag:<name>", "group:<name>"] + [
+                f"state:{keyword}" for keyword in STATE_KEYWORDS
+            ]
+            raise SelectorSyntaxError(
+                f"Unknown selector '{selector}'. Supported prefixes: "
+                f"{', '.join(supported)}. A pipeline name or glob pattern "
+                f"cannot contain ':'."
+            )
 
         # Pipeline name (exact or glob pattern)
         # Try exact match first
@@ -235,6 +251,93 @@ class PipelineSelector:
 
         # No matches found for this selector
         return []
+
+    def _select_tag(self, tag_part: str) -> List[PipelineConfig]:
+        """Apply the part of a ``tag:`` selector after the prefix.
+
+        Args:
+            tag_part: e.g. ``"daily"``, ``"hourly:10"``, ``"daily:monday"``.
+
+        Returns:
+            List of matching configs
+        """
+        # Check if there's an explicit schedule value (e.g., "hourly:10", "daily:monday")
+        if ":" in tag_part:
+            tag_name, value_str = tag_part.split(":", 1)
+            # Try int first, then weekday name
+            try:
+                tag_value = int(value_str)
+                # Explicit int value: use exact=True
+                return [
+                    c
+                    for c in self.flat_configs
+                    if c.has_tag(tag_name, tag_value, exact=True)
+                ]
+            except ValueError:
+                weekday = normalize_weekday(value_str)
+                if weekday is not None:
+                    # Explicit weekday: use exact=True
+                    return [
+                        c
+                        for c in self.flat_configs
+                        if c.has_tag(tag_name, exact=True, query_weekday=weekday)
+                    ]
+                logger.warning(
+                    f"Invalid tag value '{value_str}', must be integer or weekday name"
+                )
+                return []
+        else:
+            # No explicit value - check if this is a schedule-aware tag
+            tag_name = tag_part
+            if tag_name in SCHEDULE_AWARE_TAGS:
+                # Use current time for schedule-aware tags
+                # exact=False: include configs with no values (run always)
+                tag_value, weekday = self._get_current_schedule_value(tag_name)
+                logger.debug(
+                    f"Schedule-aware tag '{tag_name}' using current value: "
+                    f"{tag_value}" + (f" ({weekday})" if weekday else "")
+                )
+                return [
+                    c
+                    for c in self.flat_configs
+                    if c.has_tag(
+                        tag_name, tag_value, exact=False, query_weekday=weekday
+                    )
+                ]
+            else:
+                # Non-schedule tag - match any config with this tag
+                return [c for c in self.flat_configs if c.has_tag(tag_name)]
+
+    def _select_state(self, keyword: str) -> List[PipelineConfig]:
+        """Apply a ``state:`` selector against warehouse state.
+
+        Args:
+            keyword: The part after ``state:`` (e.g. ``"new"``).
+
+        Returns:
+            Matching configs.
+
+        Raises:
+            StateSelectorError: Unknown keyword, or no resolver available. Both
+                are raised rather than matching nothing: ``state:`` is a closed
+                vocabulary, so a typo is a mistake to surface — silently
+                selecting zero pipelines would let a scheduled run do nothing
+                and look successful.
+        """
+        if keyword not in STATE_KEYWORDS:
+            raise StateSelectorError(
+                f"Unknown state selector 'state:{keyword}'. "
+                f"Supported: {', '.join(f'state:{k}' for k in STATE_KEYWORDS)}."
+            )
+        if self.state is None:
+            raise StateSelectorError(
+                f"Selector 'state:{keyword}' needs warehouse state, but none "
+                f"was provided to the selector. This is a wiring bug — build a "
+                f"resolver with build_state_resolver()."
+            )
+        if keyword == "new":
+            return [c for c in self.flat_configs if self.state.is_new(c)]
+        return [c for c in self.flat_configs if self.state.last_run_failed(c)]
 
     def _select_intersection(self, selectors: List[str]) -> List[PipelineConfig]:
         """Apply multiple selectors with INTERSECTION (AND) logic.

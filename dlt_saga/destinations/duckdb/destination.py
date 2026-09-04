@@ -7,7 +7,7 @@ and development without requiring cloud credentials.
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import duckdb
 
@@ -434,6 +434,13 @@ class DuckDBDestination(Destination):
             "LIMIT 1"
         )
         return bool(list(rows))
+
+    def list_tables(self, schema: str) -> List[str]:
+        safe_schema = self.escape_string_literal(schema)
+        rows = self.execute_sql(
+            f"SELECT table_name FROM duckdb_tables() WHERE schema_name = '{safe_schema}'"
+        )
+        return [r.table_name for r in rows]
 
     def drop_table(self, dataset: str, table: str) -> None:
         """Drop a table; no-op if it does not exist."""
