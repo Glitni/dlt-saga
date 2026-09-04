@@ -71,6 +71,8 @@ Selectors filter which pipelines to run. They work across all commands.
 | `*glob*` | Glob pattern | `--select "*balance*"` |
 | `tag:name` | Filter by tag | `--select "tag:daily"` (schedule-aware — see [Configuration → Scheduling tags](wiki/Configuration.md#scheduling-tags)) |
 | `group:name` | Filter by source group | `--select "group:google_sheets"` |
+| `state:new` | Target table doesn't exist yet | `--select "state:new"` (see [CLI Reference → State selectors](wiki/CLI-Reference.md#state-selectors)) |
+| `state:failed` | Last recorded run failed | `--select "state:failed"` |
 | space-separated | UNION (OR) | `--select "tag:daily group:filesystem"` |
 | comma-separated | INTERSECTION (AND) | `--select "tag:daily,group:google_sheets"` |
 

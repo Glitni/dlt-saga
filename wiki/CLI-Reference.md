@@ -397,6 +397,8 @@ All commands that accept `--select` use dbt-style selector syntax:
 | `*glob*` | Glob pattern | `--select "*balance*"` |
 | `tag:name` | Filter by tag | `--select "tag:daily"` |
 | `group:name` | Filter by source group | `--select "group:google_sheets"` |
+| `state:new` | Target table doesn't exist yet | `--select "state:new"` |
+| `state:failed` | Last recorded run failed | `--select "state:failed"` |
 | space-separated | UNION (OR) | `--select "tag:daily group:filesystem"` |
 | comma-separated | INTERSECTION (AND) | `--select "tag:daily,group:google_sheets"` |
 
@@ -405,6 +407,55 @@ Multiple `--select` flags are also combined with UNION:
 ```bash
 saga ingest --select "tag:daily" --select "tag:critical"
 ```
+
+The prefix set is closed: `tag:`, `group:`, `state:`. An unrecognized one is
+rejected as a typo rather than treated as a pipeline name, so a mistyped
+selector fails the command instead of silently selecting nothing. Values behind
+`tag:` and `group:` are open-ended and still just match nothing when unknown.
+
+```bash
+saga list --select "tags:daily"   # error: Unknown selector 'tags:daily'
+saga list --select "tag:nosuch"   # warning: matched no pipelines
+```
+
+### State selectors
+
+`state:new` and `state:failed` filter on what has already happened in the
+warehouse, so unlike the other selectors they read from the destination — and
+are answered for the target you are running against. A pipeline can be new in
+`dev` and not in `prod`.
+
+```bash
+saga list --select "state:new"                   # Preview what is un-ingested
+saga run --select "state:new"                    # Onboard newly added pipelines
+saga ingest --select "state:failed"              # Retry what broke
+saga ingest --select "tag:daily,state:new"       # Intersect like any selector
+```
+
+**`state:new`** matches a pipeline whose **target table does not exist yet**,
+judged per layer: the ingest target for `saga ingest`, the historized target for
+`saga historize`, either one for a command spanning both. So `saga run --select
+"state:new"` ingests a brand-new pipeline and, for one whose raw table exists
+but whose historized table doesn't, historizes it without re-ingesting.
+
+Two consequences worth knowing:
+
+- A pipeline that keeps failing before it creates its table stays `state:new`,
+  so a scheduled `--select "state:new"` retries it every run.
+- `saga historize --select "state:new"` on a pipeline that has never been
+  ingested fails on the missing source table — use `saga run` for onboarding, so
+  ingest creates the raw table first.
+
+**`state:failed`** matches a pipeline whose most recent outcome in the
+execution-plan log (`_saga_execution_plans`) is a failure, looking back 30 days.
+It is layer-agnostic: a local `saga run` records one outcome per pipeline for
+both phases, so the log cannot attribute a failure to ingest or historize.
+Crashed runs that `saga maintenance` relabelled to `abandoned` count as failed;
+pipelines currently `pending` or `running` do not.
+
+Both selectors need credentials — `saga list --select "state:new"`, normally
+offline, connects to the destination and impersonates the target's `run_as`
+identity. `saga validate` is offline by design and rejects them.
 
 ---
 

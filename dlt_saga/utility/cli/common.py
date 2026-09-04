@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from dlt_saga.utility.cli.context import ExecutionContext
+    from dlt_saga.utility.cli.pipeline_state import PipelineStateResolver
     from dlt_saga.utility.cli.profiles import ProfileTarget
 
 import typer
@@ -23,6 +24,10 @@ from dlt_saga.utility.auth.providers import (
 )
 from dlt_saga.utility.cli.context import get_execution_context, set_execution_context
 from dlt_saga.utility.cli.logging import set_console_verbose
+from dlt_saga.utility.cli.pipeline_state import (
+    build_state_resolver,
+    selection_needs_state,
+)
 from dlt_saga.utility.cli.profiles import get_profiles_config
 from dlt_saga.utility.cli.selectors import PipelineSelector
 from dlt_saga.utility.env import get_env
@@ -169,6 +174,9 @@ def setup_execution_context(
 def discover_and_select_configs(
     select: Optional[List[str]],
     filter_fn=None,
+    layer: Optional[str] = "any",
+    warn_on_no_match: bool = True,
+    state: Optional["PipelineStateResolver"] = None,
 ) -> Tuple[Dict[str, List[PipelineConfig]], Dict[str, List[PipelineConfig]]]:
     """Discover and select pipeline configs.
 
@@ -176,10 +184,21 @@ def discover_and_select_configs(
         select: Selector expressions
         filter_fn: Optional function to filter configs before selection.
                    Takes a PipelineConfig, returns True to keep.
+        layer: Layer a ``state:new`` selector judges newness in — ``"ingest"``,
+               ``"historize"``, or ``"any"``. Only consulted when the selection
+               actually uses a ``state:`` selector; None rejects those outright
+               (for a caller with no warehouse access).
+        warn_on_no_match: Emit a warning for selectors that match nothing.
+        state: Pre-built state resolver, so a caller selecting more than once
+               over the same selection (``saga run --orchestrate``, once per
+               layer) reads warehouse state once instead of per pass. Built
+               from ``select`` and ``layer`` when omitted.
 
     Returns:
         Tuple of (selected_enabled_configs, selected_disabled_configs)
     """
+    if state is None:
+        state = build_state_resolver(select, layer)
     config_source = get_config_source()
     all_enabled_configs, all_disabled_configs = config_source.discover()
 
@@ -192,16 +211,63 @@ def discover_and_select_configs(
                 filtered_enabled[ptype] = kept
         all_enabled_configs = filtered_enabled
 
-    enabled_selector = PipelineSelector(all_enabled_configs)
-    selected_configs = enabled_selector.select(select)
+    enabled_selector = PipelineSelector(all_enabled_configs, state=state)
+    selected_configs = enabled_selector.select(
+        select, warn_on_no_match=warn_on_no_match
+    )
 
     # The disabled set is only probed to report matches that are disabled; a
     # non-match here is expected and must not warn (it would contradict a
     # successful enabled match).
-    disabled_selector = PipelineSelector(all_disabled_configs)
+    disabled_selector = PipelineSelector(all_disabled_configs, state=state)
     selected_disabled_configs = disabled_selector.select(select, warn_on_no_match=False)
 
     return selected_configs, selected_disabled_configs
+
+
+def discover_and_select_with_auth(
+    select: Optional[List[str]],
+    profile_target: Optional["ProfileTarget"],
+    filter_fn=None,
+    layer: Optional[str] = "any",
+    warn_on_no_match: bool = True,
+) -> Tuple[Dict[str, List[PipelineConfig]], Dict[str, List[PipelineConfig]]]:
+    """Select configs, reading warehouse state under the run's own identity.
+
+    ``state:`` selectors query the destination, so a selection using one has to
+    run with the credentials — and the impersonated identity — the command
+    itself would use; resolving ``state:new`` against prod as the local user
+    would fail on a target that runs as a service account. Selections without a
+    ``state:`` selector are pure config work and stay offline, so commands that
+    deliberately need no credentials (``saga list``, ``saga plan --dry-run``)
+    keep needing none.
+
+    For a caller already inside an impersonation scope (anything going through
+    :meth:`Session._execute_with_auth`) use :func:`discover_and_select_configs`
+    directly — impersonation does not nest.
+
+    Args:
+        select: Selector expressions.
+        profile_target: Profile target, for its ``run_as`` identity.
+        filter_fn: Optional pre-selection filter.
+        layer: Layer a ``state:new`` selector judges newness in.
+        warn_on_no_match: Emit a warning for selectors that match nothing.
+
+    Returns:
+        Tuple of (selected_enabled_configs, selected_disabled_configs)
+    """
+    if not selection_needs_state(select):
+        return discover_and_select_configs(
+            select, filter_fn=filter_fn, layer=layer, warn_on_no_match=warn_on_no_match
+        )
+
+    validate_credentials(check_cloud_run_environment())
+    return execute_with_impersonation(
+        profile_target,
+        lambda: discover_and_select_configs(
+            select, filter_fn=filter_fn, layer=layer, warn_on_no_match=warn_on_no_match
+        ),
+    )
 
 
 def validate_credentials(

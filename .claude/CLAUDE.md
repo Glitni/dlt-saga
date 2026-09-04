@@ -34,7 +34,7 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
 
 **Selector System** (`utility/cli/selectors.py`)
 - dbt-style selector syntax for filtering pipelines
-- Supports: pipeline names, glob patterns, tag selectors, group selectors
+- Supports: pipeline names, glob patterns, tag selectors, group selectors, state selectors
 - UNION (OR): space-separated or multiple `--select` flags
 - INTERSECTION (AND): comma-separated selectors
 - Examples:
@@ -43,6 +43,34 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
   - `--select "*sales*"` - glob pattern
   - `--select "tag:daily,group:google_sheets"` - intersection (AND)
   - `--select "tag:daily group:filesystem"` - union (OR)
+  - `--select "state:new"` - un-ingested / un-historized pipelines
+  - `--select "state:failed"` - last recorded run failed
+- Prefix set is closed (`tag:`, `group:`, `state:`): an unknown prefix raises `SelectorSyntaxError`
+  rather than falling through to the name/glob match, where a typo was indistinguishable from a
+  valid selector matching nothing (a scheduled run would do nothing and report success). Values
+  behind `tag:`/`group:` stay open-ended and still just warn when they match nothing
+
+**State Selectors** (`utility/cli/pipeline_state.py`)
+- `state:new` = the target table doesn't exist yet; `state:failed` = the pipeline's most recent
+  outcome in `_saga_execution_plans` is `failed`/`abandoned` (30-day lookback, latest row per
+  `(pipeline_type, table_name)` — the stored `pipeline_identifier` is a config path and differs
+  between a local checkout and a worker container)
+- The only selectors that read warehouse state, so they're scoped to the target being run (new in
+  dev ≠ new in prod) and need credentials — `build_state_resolver()` returns None when the
+  selection has no `state:` token, keeping every other selection offline. `saga validate` passes
+  `layer=None` and refuses them
+- Newness is judged per **layer**: the ingest target for `saga ingest`, the historized target
+  (`historize.factory.resolve_historize_target`) for `saga historize`, either enabled layer for a
+  command spanning both. `saga run` selects once per phase, so a pipeline whose raw table exists
+  but whose historized table doesn't gets historized without being re-ingested (local and
+  `--orchestrate` agree — `_run_orchestrate` re-selects per layer off one shared resolver)
+- Newness comes from **table existence** (`Destination.list_tables`, one listing per schema),
+  not `_saga_load_info`: a zero-row load records nothing there and a historize-only pipeline never
+  writes to it, so both would look permanently new. `list_tables` must raise on anything but a
+  missing schema — an empty listing means "select every pipeline here", so a swallowed permission
+  error would silently turn `state:new` into a full re-ingest
+- Selection must run inside the impersonation scope (`discover_and_select_with_auth` for CLI
+  commands not already inside one; impersonation does not nest)
 
 **Execution Modes**
 1. Local execution: Run pipelines sequentially or in parallel

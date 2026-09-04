@@ -21,6 +21,7 @@ from dlt_saga.utility.auth.providers import AuthenticationError
 from dlt_saga.utility.cli.common import (
     check_cloud_run_environment,
     discover_and_select_configs,
+    discover_and_select_with_auth,
     execute_with_impersonation,
     flatten_configs,
     load_profile_config,
@@ -33,6 +34,11 @@ from dlt_saga.utility.cli.logging import (
     configure_cli_logging,
     ensure_utf8_streams,
     reenable_saga_loggers,
+)
+from dlt_saga.utility.cli.pipeline_state import (
+    StateSelectorError,
+    build_state_resolver,
+    layer_for_resource_type,
 )
 from dlt_saga.utility.cli.prompts import (
     _confirm_destroy,
@@ -50,7 +56,7 @@ from dlt_saga.utility.cli.run_modes import (
     run_orchestrator_mode,
     run_worker_mode,
 )
-from dlt_saga.utility.cli.selectors import format_config_list
+from dlt_saga.utility.cli.selectors import SelectorSyntaxError, format_config_list
 from dlt_saga.utility.collisions import TargetCollisionError
 from dlt_saga.utility.env import get_env
 from dlt_saga.utility.naming import get_environment
@@ -97,7 +103,9 @@ def _app_callback(
 _SELECT_HELP = (
     "Select pipelines using dbt-style selectors "
     "(space-separated=UNION, comma-separated=INTERSECTION). "
-    "Supports: pipeline names, glob patterns (*), tag:name, group:name."
+    "Supports: pipeline names, glob patterns (*), tag:name, group:name, "
+    "state:new (target table doesn't exist yet), "
+    "state:failed (last recorded run failed)."
 )
 
 
@@ -305,8 +313,11 @@ def list_pipelines(
         )
         raise typer.Exit(1)
 
-    selected_configs, selected_disabled = discover_and_select_configs(
-        select, filter_fn=filter_fn
+    selected_configs, selected_disabled = discover_and_select_with_auth(
+        select,
+        profile_target,
+        filter_fn=filter_fn,
+        layer=layer_for_resource_type(resource_type),
     )
     output = format_config_list(selected_configs, selected_disabled)
     print(output)
@@ -538,17 +549,22 @@ def ingest(
             end_value_override=end_value_override,
         )
         provider = _resolve_orchestration_provider()
-        selected_configs, _ = discover_and_select_configs(
-            select, filter_fn=_is_ingest_enabled
-        )
-        if not selected_configs:
-            logger.error("No ingest-enabled pipelines matched the selection criteria")
-            raise typer.Exit(1)
         validate_credentials(in_cloud_run)
         select_str = " ".join(select) if select else None
-        execute_with_impersonation(
-            profile_target,
-            lambda: run_orchestrator_mode(
+
+        def _plan_ingest() -> None:
+            # Selection runs inside the impersonation scope: a ``state:``
+            # selector reads the target's warehouse state, and it must read it
+            # as the identity the run itself uses.
+            selected_configs, _ = discover_and_select_configs(
+                select, filter_fn=_is_ingest_enabled, layer="ingest"
+            )
+            if not selected_configs:
+                logger.error(
+                    "No ingest-enabled pipelines matched the selection criteria"
+                )
+                raise typer.Exit(1)
+            run_orchestrator_mode(
                 selected_configs,
                 debug_logging=verbose,
                 command="ingest",
@@ -560,8 +576,9 @@ def ingest(
                 end_value_override=end_value_override,
                 force=force,
                 workers=workers,
-            ),
-        )
+            )
+
+        execute_with_impersonation(profile_target, _plan_ingest)
         return
 
     # Normal (local) execution via Session
@@ -671,20 +688,21 @@ def historize(
     if orchestrate:
         setup_execution_context(profile_target, full_refresh=full_refresh)
         provider = _resolve_orchestration_provider()
-        selected_configs, _ = discover_and_select_configs(
-            select, filter_fn=_is_historize_enabled
-        )
-        if not selected_configs:
-            logger.error(
-                "No historize-enabled pipelines matched the selection criteria. "
-                "Use write_disposition 'append+historize' or 'historize' in pipeline config."
-            )
-            raise typer.Exit(1)
         validate_credentials(in_cloud_run)
         select_str = " ".join(select) if select else None
-        execute_with_impersonation(
-            profile_target,
-            lambda: run_orchestrator_mode(
+
+        def _plan_historize() -> None:
+            # Inside the impersonation scope — see the ingest path.
+            selected_configs, _ = discover_and_select_configs(
+                select, filter_fn=_is_historize_enabled, layer="historize"
+            )
+            if not selected_configs:
+                logger.error(
+                    "No historize-enabled pipelines matched the selection criteria. "
+                    "Use write_disposition 'append+historize' or 'historize' in pipeline config."
+                )
+                raise typer.Exit(1)
+            run_orchestrator_mode(
                 selected_configs,
                 debug_logging=verbose,
                 command="historize",
@@ -693,8 +711,9 @@ def historize(
                 target=target,
                 provider=provider,
                 workers=workers,
-            ),
-        )
+            )
+
+        execute_with_impersonation(profile_target, _plan_historize)
         return
 
     # Normal (local) execution via Session
@@ -886,35 +905,61 @@ def _run_orchestrate(
         end_value_override=end_value_override,
     )
     provider = _resolve_orchestration_provider()
-
-    # Select once over the full enabled set — ``run`` spans both the ingest and
-    # historize layers, so the no-match warning must reflect whether a selector
-    # matches ANY enabled pipeline. Probing the ingest- and historize-enabled
-    # subsets separately would warn spuriously for a selector that matches a
-    # pipeline present in only one layer (e.g. an ingest-only pipeline warns
-    # against the historize subset even though it runs).
-    selected_configs, _ = discover_and_select_configs(select)
-    ingest_configs = _filter_config_groups(selected_configs, _is_ingest_enabled)
-    historize_configs = _filter_config_groups(selected_configs, _is_historize_enabled)
-    if not ingest_configs and not historize_configs:
-        logger.error("No pipelines matched the selection criteria")
-        raise typer.Exit(1)
     validate_credentials(in_cloud_run)
-    refresh_ingest, _ = _confirm_run_full_refresh(
-        full_refresh, in_cloud_run, bool(ingest_configs), bool(historize_configs), yes
-    )
-    get_execution_context().full_refresh = refresh_ingest
-    # Merge ingest + historize configs, dedup by identifier
-    all_configs: Dict[str, List[PipelineConfig]] = {}
-    for source in [ingest_configs, historize_configs]:
-        for k, v in source.items():
-            existing = {c.identifier for c in all_configs.get(k, [])}
-            all_configs.setdefault(k, []).extend(
-                c for c in v if c.identifier not in existing
-            )
-    execute_with_impersonation(
-        profile_target,
-        lambda: run_orchestrator_mode(
+
+    def _plan() -> None:
+        # Selection runs inside the impersonation scope: a ``state:`` selector
+        # reads the target's warehouse state, and it must read it as the
+        # identity the run itself uses.
+        state = build_state_resolver(select, "any")
+
+        # One pass over the full enabled set, for the no-match warning alone:
+        # ``run`` spans both the ingest and historize layers, so the warning
+        # must reflect whether a selector matches ANY enabled pipeline. Probing
+        # the ingest- and historize-enabled subsets separately would warn
+        # spuriously for a selector that matches a pipeline present in only one
+        # layer (e.g. an ingest-only pipeline warns against the historize subset
+        # even though it runs), which is why the per-layer passes below don't.
+        discover_and_select_configs(select, state=state)
+
+        # Select per layer, so ``state:new`` judges each layer against the
+        # target that layer writes — matching what a local ``saga run`` does
+        # across its two phases. Without a ``state:`` selector these are just
+        # the enabled subsets of the pass above.
+        ingest_configs, _ = discover_and_select_configs(
+            select,
+            filter_fn=_is_ingest_enabled,
+            layer="ingest",
+            warn_on_no_match=False,
+            state=state.scoped("ingest") if state else None,
+        )
+        historize_configs, _ = discover_and_select_configs(
+            select,
+            filter_fn=_is_historize_enabled,
+            layer="historize",
+            warn_on_no_match=False,
+            state=state.scoped("historize") if state else None,
+        )
+        if not ingest_configs and not historize_configs:
+            logger.error("No pipelines matched the selection criteria")
+            raise typer.Exit(1)
+        refresh_ingest, _ = _confirm_run_full_refresh(
+            full_refresh,
+            in_cloud_run,
+            bool(ingest_configs),
+            bool(historize_configs),
+            yes,
+        )
+        get_execution_context().full_refresh = refresh_ingest
+        # Merge ingest + historize configs, dedup by identifier
+        all_configs: Dict[str, List[PipelineConfig]] = {}
+        for source in [ingest_configs, historize_configs]:
+            for k, v in source.items():
+                existing = {c.identifier for c in all_configs.get(k, [])}
+                all_configs.setdefault(k, []).extend(
+                    c for c in v if c.identifier not in existing
+                )
+        run_orchestrator_mode(
             all_configs,
             debug_logging=verbose,
             command="run",
@@ -926,8 +971,9 @@ def _run_orchestrate(
             end_value_override=end_value_override,
             force=force,
             workers=workers,
-        ),
-    )
+        )
+
+    execute_with_impersonation(profile_target, _plan)
 
 
 @app.command()
@@ -1283,12 +1329,17 @@ def plan(
     # Determine filter based on command
     if command == "ingest":
         filter_fn = _is_ingest_enabled
+        layer = "ingest"
     elif command == "historize":
         filter_fn = _is_historize_enabled
+        layer = "historize"
     else:
         filter_fn = None  # "run" includes both
+        layer = "any"
 
-    selected_configs, _ = discover_and_select_configs(select, filter_fn=filter_fn)
+    selected_configs, _ = discover_and_select_with_auth(
+        select, profile_target, filter_fn=filter_fn, layer=layer
+    )
     if not selected_configs:
         logger.error("No pipelines matched the selection criteria")
         raise typer.Exit(1)
@@ -2012,7 +2063,7 @@ def maintenance(
         setup_execution_context(profile_target)
     context = get_execution_context()
 
-    selected_configs, _ = discover_and_select_configs(select)
+    selected_configs, _ = discover_and_select_with_auth(select, profile_target)
     if not selected_configs:
         logger.error("No pipeline configs found matching selectors")
         raise typer.Exit(1)
@@ -2058,6 +2109,13 @@ def main_saga():
     ensure_utf8_streams()
     try:
         app()
+    except (SelectorSyntaxError, StateSelectorError) as e:
+        # A malformed selector is a mistake in the command line, not a bug —
+        # report it like any other config error, with no traceback. Handled
+        # here because selection happens in a dozen places (every command,
+        # plus Session).
+        logger.error(str(e))
+        raise SystemExit(1)
     except KeyboardInterrupt:
         logger.info("Operation cancelled by user")
         raise SystemExit(1)
