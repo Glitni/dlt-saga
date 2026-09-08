@@ -18,7 +18,7 @@ from dlt_saga.pipelines.native_load.config import NativeLoadConfig
 from dlt_saga.pipelines.native_load.state import NativeLoadStateManager, make_load_id
 from dlt_saga.pipelines.native_load.storage import get_storage_client
 from dlt_saga.pipelines.native_load.storage.matching import PatternMatcher
-from dlt_saga.utility.cli.logging import PrefixedLoggerAdapter
+from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
 from dlt_saga.utility.naming import normalize_identifier
 
 logger = logging.getLogger(__name__)
@@ -141,6 +141,19 @@ class NativeLoadPipeline(BasePipeline):
         self._column_hints: dict = self._build_column_hints()
         self._external_schema: Optional[list] = self._build_external_schema()
         self._filters: list = self._parse_filters()
+
+        # Same target announcement BasePipeline.__init__ emits — this adapter
+        # bypasses that constructor, so log it here or the run has no line
+        # naming the destination table. Suppressed in update-access mode for
+        # the same reason as the base path (the access diff is the output).
+        if not self.context.update_access:
+            self.logger.info(
+                f"Ingesting {self.pipeline_name} → "
+                + colorize(
+                    f"{self.destination_database}.{self._schema}.{self.table_name}",
+                    YELLOW,
+                )
+            )
 
     # ------------------------------------------------------------------
     # Entry points
