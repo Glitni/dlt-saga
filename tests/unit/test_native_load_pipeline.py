@@ -1,5 +1,6 @@
 """Unit tests for NativeLoadPipeline."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1399,3 +1400,18 @@ class TestBuildChunks:
         ]
         chunks = p._build_chunks(flat)
         assert [len(c) for c in chunks] == [1, 1, 1]
+
+
+@pytest.mark.unit
+class TestTargetAnnouncement:
+    def test_init_logs_destination_table(self, caplog):
+        """The adapter bypasses BasePipeline.__init__, so it must log the target itself."""
+        with caplog.at_level(
+            logging.INFO, logger="dlt_saga.pipelines.native_load.pipeline"
+        ):
+            _make_pipeline()
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "Ingesting test__my_table" in m and "my_dataset.test__my_table" in m
+            for m in messages
+        ), messages
