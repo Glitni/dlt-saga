@@ -611,10 +611,37 @@ class Destination(ABC):
         return f"CAST({expression} AS {self.type_name('string')})"
 
     def columns_query(self, database: str, schema: str, table: str) -> str:
-        """Return SQL to discover column names and types from the destination's schema catalog."""
+        """Return SQL to discover a table's data columns from the schema catalog.
+
+        The result must be the columns that are part of the table's schema —
+        the ones ``SELECT *`` returns and DDL can recreate — as
+        ``(column_name, data_type)`` rows in ordinal order. Catalogs that also
+        expose pseudo-columns (hidden, system-generated names that are
+        referenceable but not part of the table) must filter them out:
+        callers materialize whatever this returns, so a pseudo-column reaching
+        them is emitted into DDL and into change-detection hashes.
+
+        Explicit references are unaffected — a config may still name a
+        pseudo-column (e.g. a snapshot column) and it resolves normally; only
+        discovery is narrowed.
+        """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement columns_query"
         )
+
+    def is_pseudo_column(self, name: str) -> bool:
+        """Whether ``name`` is a catalog pseudo-column rather than a real column.
+
+        Pseudo-columns are referenceable on a direct scan of the table they
+        belong to, but are not part of its schema: they survive neither
+        ``SELECT *`` nor a CTE that projects one, and cannot be materialized
+        into a new table. Generated SQL therefore cannot use one as an input
+        column, and callers use this to say so before a query fails with an
+        opaque "unrecognized name".
+
+        Default is False — destinations with no such concept inherit it.
+        """
+        return False
 
     def ensure_schema_exists(self, schema: str) -> None:
         """Ensure a schema/dataset exists, creating it if necessary.

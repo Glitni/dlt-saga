@@ -107,3 +107,49 @@ class TestBigQueryListTablesByPattern:
         dest.list_tables_by_pattern("ds", "t__ext_%", min_age_hours=6)
         assert "creation_time <" in captured["sql"]
         assert "INTERVAL 6 HOUR" in captured["sql"]
+
+
+@pytest.mark.unit
+class TestBigQueryColumnsQuery:
+    """Discovery must return only materializable columns.
+
+    An ingestion-time partitioned table lists _PARTITIONTIME/_PARTITIONDATE in
+    INFORMATION_SCHEMA.COLUMNS as hidden pseudo-columns. Callers materialize
+    whatever discovery returns, so without the predicate historize emits DDL
+    with a reserved-prefix column name and BigQuery rejects the whole run.
+    """
+
+    def test_filters_hidden_pseudo_columns(self):
+        sql = _dest().columns_query("proj", "ds", "tbl")
+        assert "is_hidden = 'NO'" in sql
+
+    def test_selects_name_and_type_in_ordinal_order(self):
+        sql = _dest().columns_query("proj", "ds", "tbl")
+        assert "SELECT column_name, data_type" in sql
+        assert "ORDER BY ordinal_position" in sql
+        assert "`proj.ds.INFORMATION_SCHEMA.COLUMNS`" in sql
+
+    def test_table_name_is_escaped(self):
+        sql = _dest().columns_query("proj", "ds", "it's")
+        assert r"table_name = 'it\'s'" in sql
+
+
+@pytest.mark.unit
+class TestBigQueryPseudoColumns:
+    """Reserved field-name prefixes identify pseudo-columns.
+
+    BigQuery rejects these prefixes for real column names, so a config naming
+    one is always referring to a pseudo-column — which generated SQL cannot
+    read once the source is projected through a CTE.
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        ["_PARTITIONTIME", "_partitiondate", "_TABLE_SUFFIX", "_FILE_NAME"],
+    )
+    def test_reserved_prefixes_are_pseudo_columns(self, name):
+        assert _dest().is_pseudo_column(name) is True
+
+    @pytest.mark.parametrize("name", ["id", "_dlt_ingested_at", "partition_date"])
+    def test_ordinary_columns_are_not(self, name):
+        assert _dest().is_pseudo_column(name) is False

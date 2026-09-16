@@ -24,6 +24,9 @@ def _stub_destination():
     dest.quote_identifier.side_effect = lambda s: f"`{s}`"
     dest.escape_string_literal.side_effect = lambda s: s
     dest.hash_expression.side_effect = lambda cols: f"HASH({', '.join(cols)})"
+    # Ordinary snapshot column: a bare MagicMock would be truthy here
+    # and silently switch the builder to its pseudo-column path.
+    dest.is_pseudo_column.return_value = False
     dest.cast_to_string.side_effect = lambda expr: f"CAST({expr} AS STRING)"
     dest.type_name.side_effect = lambda t: t.upper()
     dest.get_full_table_id.side_effect = lambda ds, tbl: f"proj.{ds}.{tbl}"

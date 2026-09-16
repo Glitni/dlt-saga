@@ -28,6 +28,9 @@ def _stub_destination():
     dest = MagicMock()
     dest.quote_identifier.side_effect = lambda s: f"`{s}`"
     dest.hash_expression.side_effect = lambda cols: f"HASH({', '.join(cols)})"
+    # Ordinary snapshot column: a bare MagicMock would be truthy here
+    # and silently switch the builder to its pseudo-column path.
+    dest.is_pseudo_column.return_value = False
     dest.cast_to_string.side_effect = lambda expr: f"CAST({expr} AS STRING)"
     dest.type_name.side_effect = lambda t: t.upper()
     dest.get_full_table_id.side_effect = lambda ds, tbl: f"proj.{ds}.{tbl}"
@@ -260,3 +263,31 @@ class TestColumnNamesInFingerprint:
         # table_name is not part of the fingerprint — renaming it must not
         # trigger a full refresh.
         assert self._fp() == self._fp(table_name="custom_name")
+
+
+@pytest.mark.unit
+class TestSystemColumnExclusionIsShared:
+    """Both historize target-DDL paths must exclude the same system columns.
+
+    The CTAS path (HistorizeSqlBuilder) and BigQuery's explicit-column Iceberg
+    path pick the target's columns independently; two copies of the exclusion
+    set would produce a target whose shape depends on table_format.
+    """
+
+    def test_bigquery_iceberg_path_binds_shared_set(self):
+        from dlt_saga.destinations.bigquery.destination import BigQueryDestination
+        from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS
+
+        assert BigQueryDestination._HISTORIZE_EXCLUDE_COLS is HISTORIZE_SYSTEM_COLUMNS
+
+    def test_ctas_path_excludes_shared_set(self):
+        from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS
+
+        builder = HistorizeSqlBuilder(
+            config=HistorizeConfig(primary_key=["id"]),
+            destination=_stub_destination(),
+            source_table_id="proj.ds.src",
+            target_table_id="proj.ds.tgt",
+            primary_key=["id"],
+        )
+        assert HISTORIZE_SYSTEM_COLUMNS <= builder._output_exclude
