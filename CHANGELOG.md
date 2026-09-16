@@ -1,3 +1,14 @@
+## 0.33.0 — 2026-09-16
+
+### Breaking Changes
+- Add state:new and state:failed selectors (#478)
+
+
+### Fixed
+- Support ingestion-time partitioned BigQuery sources in historize (#484)
+- Bump GitPython to 3.1.62 to clear Dependabot alerts (#482)
+- Log destination table for native_load ingests (#480)
+
 ## 0.32.0 — 2026-09-03
 
 ### Breaking Changes
