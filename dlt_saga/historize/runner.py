@@ -112,6 +112,9 @@ class HistorizeRunner:
         # discovery, partial-refresh boundary resolution).
         self._filter_sql: Optional[str] = self._parse_historize_filters()
 
+        # Populated by the first _source_columns() call; see that method.
+        self._source_columns_cache: Optional[List[str]] = None
+
         self.sql_builder = HistorizeSqlBuilder(
             config=self.config,
             destination=destination,
@@ -402,6 +405,7 @@ class HistorizeRunner:
 
         self.config.validate(self.config_dict)
         self._validate_destination_capabilities()
+        self._guard_source_columns()
 
         # Init phase: fetch state (creates log table on first access if needed)
         t = time.time()
@@ -678,11 +682,19 @@ class HistorizeRunner:
                 f"'{base}' sources do not retain snapshot history to replay"
             )
             return None
-        if not self._source_has_column(cfg.arrival_column):
-            self.logger.debug(
+        if not self._source_can_reference(cfg.arrival_column):
+            msg = (
                 f"Late-arrival detection skipped for {self.pipeline_name}: "
                 f"arrival column '{cfg.arrival_column}' not present in source"
             )
+            # Unset (detect + warn) is the default and fires for every pipeline
+            # without an arrival column, so it stays at debug. An explicit
+            # ``detect_late_arrivals: true`` asked for replay: silently doing
+            # nothing there would read as "no late data" run after run.
+            if cfg.detect_late_arrivals is True:
+                self.logger.warning(msg)
+            else:
+                self.logger.debug(msg)
             return None
         return self.state_manager.find_late_arrivals(
             state=state,
@@ -693,17 +705,94 @@ class HistorizeRunner:
             window_days=cfg.late_arrival_window_days,
         )
 
-    def _source_has_column(self, column: str) -> bool:
-        """Check whether the source table has the given column."""
-        base_query = self.destination.columns_query(
-            self._src_database, self._src_schema, self._src_table
-        )
-        safe = self.destination.escape_string_literal(column)
-        sql = f"""
-            SELECT column_name FROM ({base_query}) sub
-            WHERE column_name = '{safe}'
+    def _source_columns(self) -> List[str]:
+        """The source table's columns, read once per run and cached.
+
+        Every column-dependent check in the run (the config guard, value-column
+        discovery, the arrival-column probe) filters this one result, so a
+        column can't be visible to one of them and absent from another. The
+        destination's ``columns_query`` contract limits this to materializable
+        columns; pseudo-columns are absent by design and are handled separately
+        by the checks that accept one.
         """
-        return bool(list(self.destination.execute_sql(sql, self.schema)))
+        if self._source_columns_cache is None:
+            sql = self.destination.columns_query(
+                self._src_database, self._src_schema, self._src_table
+            )
+            rows = list(self.destination.execute_sql(sql, self.schema))
+            self._source_columns_cache = [row.column_name for row in rows]
+        return self._source_columns_cache
+
+    def _source_can_reference(self, column: str) -> bool:
+        """Whether generated SQL can read ``column`` off the source table.
+
+        True for a real column, and for a pseudo-column: those are absent from
+        the catalog but resolve on a direct scan of the table they belong to,
+        which is all the queries that ask this need.
+
+        Case-insensitive — every supported destination resolves column
+        references without regard to case, so a config that spells a column
+        differently from the catalog still produces working SQL.
+        """
+        if self.destination.is_pseudo_column(column):
+            return True
+        return column.lower() in {col.lower() for col in self._source_columns()}
+
+    def _guard_source_columns(self) -> None:
+        """Refuse configs naming columns the generated SQL cannot read.
+
+        Runs before any query that references them. Without it a bad
+        ``snapshot_column`` / ``primary_key`` / ``merge_key`` surfaces as the
+        destination's own "unrecognized name" error, mid-run and without saying
+        which config key is at fault.
+
+        A pseudo-column is accepted as the snapshot column — the SQL builder
+        projects it under an alias — but not as a primary key or merge key: the
+        primary key is materialized into the historized table, and a
+        destination that reserves the name for pseudo-columns rejects it there.
+        """
+        source_columns = self._source_columns()
+        if not source_columns:
+            raise ValueError(
+                f"Source table {self.source_table_id} has no columns. "
+                f"Check that it exists and that the pipeline's source "
+                f"configuration points at the right table."
+            )
+
+        referenced = [
+            ("snapshot_column", [self.config.snapshot_column], True),
+            ("primary_key", list(self.config.primary_key or []), False),
+            ("merge_key", list(self.config.merge_key or []), False),
+        ]
+        missing = [
+            (key, col)
+            for key, cols, pseudo_ok in referenced
+            for col in cols
+            if not (pseudo_ok and self.destination.is_pseudo_column(col))
+            and not self._source_can_reference_real(col)
+        ]
+        if not missing:
+            return
+
+        lines = [
+            f"Historize config for '{self.pipeline_name}' references columns "
+            f"that are not in {self.source_table_id}:"
+        ]
+        lines += [f"  - {key}: '{col}'" for key, col in missing]
+        for key, col in missing:
+            if self.destination.is_pseudo_column(col):
+                lines.append(
+                    f"'{col}' is a pseudo-column. It is usable as snapshot_column "
+                    f"(and as arrival_column), but not as {key}: those columns are "
+                    f"written into the historized table, and the destination "
+                    f"reserves this name."
+                )
+        lines.append(f"Available columns: {', '.join(source_columns)}")
+        raise ValueError("\n".join(lines))
+
+    def _source_can_reference_real(self, column: str) -> bool:
+        """Whether ``column`` is a real (materializable) column of the source."""
+        return column.lower() in {col.lower() for col in self._source_columns()}
 
     def _target_snapshots_missing_from_source(
         self, boundary: str, source_snapshots: List[str]
@@ -864,9 +953,7 @@ class HistorizeRunner:
 
     def _discover_value_columns(self) -> List[str]:
         """Discover non-PK, non-system columns from the source table."""
-        sql = self.sql_builder.build_discover_columns_sql()
-        rows = list(self.destination.execute_sql(sql, self.schema))
-        columns = [row.column_name for row in rows]
+        columns = self.sql_builder.select_value_columns(self._source_columns())
 
         if not columns:
             raise ValueError(

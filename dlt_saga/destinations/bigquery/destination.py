@@ -8,6 +8,7 @@ from dlt_saga.destinations.bigquery.base import BigQueryBaseDestination
 from dlt_saga.destinations.bigquery.config import BigQueryDestinationConfig
 from dlt_saga.utility.naming import normalize_identifier
 from dlt_saga.utility.sql import looks_like_missing_table
+from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.base import MaterializationHints
@@ -737,19 +738,10 @@ class BigQueryDestination(BigQueryBaseDestination):
     # state does not persist across calls.  The clone-and-swap pattern in
     # the partial-refresh runner protects the live table regardless.
 
-    # System columns never written to the historize target table
-    _HISTORIZE_EXCLUDE_COLS = frozenset(
-        {
-            "_dlt_id",
-            "_dlt_load_id",
-            "_dlt_valid_from",
-            "_dlt_valid_to",
-            "_dlt_is_deleted",
-            "_dlt_source_file_name",
-            "_dlt_source_modification_date",
-            "_dlt_ingested_at",
-        }
-    )
+    # System columns never written to the historize target table. Bound to the
+    # shared definition so this DDL path and the CTAS path in
+    # ``historize.sql`` cannot disagree about a target's shape.
+    _HISTORIZE_EXCLUDE_COLS = HISTORIZE_SYSTEM_COLUMNS
 
     def build_historize_create_table_sql(
         self,
@@ -849,12 +841,37 @@ class BigQueryDestination(BigQueryBaseDestination):
 
     def columns_query(self, database: str, schema: str, table: str) -> str:
         safe_table = self.escape_string_literal(table)
+        # is_hidden = 'NO' keeps pseudo-columns out of the result. An
+        # ingestion-time partitioned table lists _PARTITIONTIME/_PARTITIONDATE
+        # here; discovered as data columns they make BigQuery reject the
+        # generated DDL outright (_PARTITION is a reserved field-name prefix),
+        # and a per-row ingestion timestamp in the change-detection hash would
+        # open a new SCD2 version for every row on every run.
         return f"""
             SELECT column_name, data_type
             FROM `{database}.{schema}.INFORMATION_SCHEMA.COLUMNS`
             WHERE table_name = '{safe_table}'
+              AND is_hidden = 'NO'
             ORDER BY ordinal_position
         """
+
+    # Field-name prefixes BigQuery reserves for pseudo-columns and internal
+    # names; a real column can never carry one, so a config naming one is
+    # always referring to a pseudo-column. Quoted verbatim from the error
+    # BigQuery raises when such a name reaches DDL.
+    _PSEUDO_COLUMN_PREFIXES = (
+        "_partition",
+        "_table_",
+        "_file_",
+        "_row_timestamp",
+        "__root__",
+        "_colidentifier",
+        "__dremel_pk_merged_struct_",
+    )
+
+    def is_pseudo_column(self, name: str) -> bool:
+        lowered = name.lower()
+        return lowered.startswith(self._PSEUDO_COLUMN_PREFIXES)
 
     def reset_destination_state(self, pipeline_name: str, table_name: str) -> None:
         """Reset destination state by dropping tables and metadata.

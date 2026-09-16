@@ -30,6 +30,36 @@ downstream convention expects domain-specific names. See [Renaming the SCD2 colu
 When column docs are enabled (`persist_docs.columns`), these three columns also receive canned
 descriptions automatically. See [Descriptions & classification](#descriptions--classification).
 
+Every other column of the source table is carried through unchanged, minus the framework's own
+system columns (`_dlt_id`, `_dlt_load_id`, ingest metadata).
+
+### Pseudo-columns (ingestion-time partitioned sources)
+
+Catalog **pseudo-columns** — on BigQuery `_PARTITIONTIME` and `_PARTITIONDATE`, exposed by
+**ingestion-time partitioned** tables — are not part of a table's schema: they resolve on a direct
+scan of their own table, but are returned by neither `SELECT *` nor a projection.
+
+They are never carried into the historized table as data columns. They **are** usable as the
+`snapshot_column` (and as `arrival_column`), which is what matters for an ingestion-time partitioned
+source where the partition time is the only timestamp available:
+
+```yaml
+write_disposition: historize
+primary_key: [customer_id]
+
+historize:
+  snapshot_column: _PARTITIONTIME
+```
+
+Historize reads the value off the source under an internal alias and carries that through its CTEs,
+so the SCD2 output is identical to what a real timestamp column produces — `_dlt_valid_from` holds
+the partition time. Prefer `_PARTITIONTIME` over `_PARTITIONDATE`: snapshot values are compared
+against `TIMESTAMP` literals, and `_PARTITIONTIME` is the `TIMESTAMP`-typed one.
+
+A pseudo-column cannot be a `primary_key` or `merge_key` — those are written into the historized
+table, under a name the destination reserves. Configs naming one there are rejected before any query
+runs, as are `snapshot_column` / `primary_key` / `merge_key` values the source simply doesn't have.
+
 ---
 
 ## Enabling historize
@@ -408,7 +438,7 @@ Notes:
 - Detection only makes sense with a custom `snapshot_column`: with the default (`_dlt_ingested_at`), snapshots are stamped at load time and can't arrive late, so detection is skipped and the default configuration pays no extra query.
 - The replay rebuilds the rewind window from the raw table, so raw must still contain every historized snapshot in that window. A **retention guard** verifies this before rewinding: if raw has lost part of the window (e.g. `partition_expiration_days` on the raw table), the run warns and skips the replay instead of truncating history — handle it manually with `--historize-from` at a boundary raw still covers, or accept the gap.
 - Detection runs for `append+historize` and `historize` (external delivery) sources; `replace`/`merge` sources overwrite prior snapshot rows, so it's skipped there.
-- External deliveries without a `_dlt_ingested_at` column can point `arrival_column` at their own load-time column (and should usually add it to `ignore_columns` so a redelivery of unchanged data doesn't register as a change). Without an arrival column, detection is skipped.
+- External deliveries without a `_dlt_ingested_at` column can point `arrival_column` at their own load-time column (and should usually add it to `ignore_columns` so a redelivery of unchanged data doesn't register as a change). Without an arrival column, detection is skipped — with `detect_late_arrivals: true` the skip is warned about, so an opted-in pipeline can't quietly do nothing. A [pseudo-column](#pseudo-columns-ingestion-time-partitioned-sources) is accepted here.
 - A replay's cost is proportional to how far back the late snapshot sits. `late_arrival_window_days` bounds it: late snapshots further behind the watermark are ignored with a warning instead of replayed, so a stray very old file can't trigger a huge rewind. Per detection run the overhead is one arrival-time query (cheap on raw tables clustered by `_dlt_ingested_at`).
 
 **Full refresh** (`--full-refresh`): rebuilds the SCD2 table from all raw snapshots. Required after config changes:

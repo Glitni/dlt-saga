@@ -236,6 +236,10 @@ class TestHistorizeRunnerAllColumnsIgnored:
         runner.destination = dest
         runner.schema = "test"
         runner.source_table_id = "test.source"
+        runner._source_columns_cache = None
+        runner._src_database = ""
+        runner._src_schema = "test"
+        runner._src_table = "source"
 
         # Stub sql_builder with a real instance so _get_hash_columns works
         sql_builder = object.__new__(HistorizeSqlBuilder)
@@ -284,6 +288,10 @@ class TestHistorizeRunnerAllColumnsIgnored:
         runner.destination = dest
         runner.schema = "test"
         runner.source_table_id = "test.source"
+        runner._source_columns_cache = None
+        runner._src_database = ""
+        runner._src_schema = "test"
+        runner._src_table = "source"
 
         sql_builder = object.__new__(HistorizeSqlBuilder)
         sql_builder.config = config

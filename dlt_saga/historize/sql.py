@@ -15,8 +15,14 @@ from typing import Any, List, Optional
 from dlt_saga.destinations.base import MaterializationHints
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.utility.filters import and_filter, filter_where_clause
+from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS
 
 logger = logging.getLogger(__name__)
+
+
+# Internal alias a pseudo-column snapshot value is projected under; see
+# HistorizeSqlBuilder._snap. Prefixed so it can't collide with a source column.
+SNAPSHOT_ALIAS = "_saga_snapshot"
 
 
 def null_pk_alias(index: int) -> str:
@@ -33,19 +39,6 @@ def null_pk_alias(index: int) -> str:
     as "no NULL keys found" rather than failing.
     """
     return f"_null_pk_{index}"
-
-
-# System columns excluded from change detection hashing
-SYSTEM_COLUMNS = {
-    "_dlt_id",
-    "_dlt_load_id",
-    "_dlt_valid_from",
-    "_dlt_valid_to",
-    "_dlt_is_deleted",
-    "_dlt_source_file_name",
-    "_dlt_source_modification_date",
-    "_dlt_ingested_at",
-}
 
 
 class HistorizeSqlBuilder:
@@ -87,12 +80,27 @@ class HistorizeSqlBuilder:
         # Exclude both the default _dlt_* system columns AND the configured SCD2 names
         # from value-column discovery, so a source that happens to contain a literal
         # valid_from/valid_to/is_deleted column doesn't get propagated into the output.
-        self._output_exclude = SYSTEM_COLUMNS | {
+        self._output_exclude = HISTORIZE_SYSTEM_COLUMNS | {
             config.snapshot_column,
             self.valid_from,
             self.valid_to,
             self.is_deleted,
         }
+        # A snapshot column may be a destination pseudo-column: on an
+        # ingestion-time partitioned BigQuery table, _PARTITIONTIME is often the
+        # only timestamp the source has. Pseudo-columns resolve on a direct scan
+        # of their own table but survive neither SELECT * nor a projection, so
+        # the generated CTEs carry the value under an alias instead: _snap_src
+        # names it where the source itself is read, _snap everywhere downstream.
+        # For an ordinary column the two are identical and the SQL is unchanged.
+        self._snapshot_is_pseudo = bool(
+            destination.is_pseudo_column(config.snapshot_column)
+        )
+        self._snap_src = self._q(config.snapshot_column)
+        self._snap = (
+            self._q(SNAPSHOT_ALIAS) if self._snapshot_is_pseudo else self._snap_src
+        )
+
         # Pre-rendered source-side WHERE body shared with the runner; ``None`` when
         # no historize.filters: block is configured.  Spliced at each source-read
         # site via the module-level ``filter_where_clause`` / ``and_filter`` helpers.
@@ -111,6 +119,23 @@ class HistorizeSqlBuilder:
             return [c for c in value_columns if c in candidate_set]
         ignore_set = set(self.config.ignore_columns)
         return [c for c in value_columns if c not in ignore_set]
+
+    def _snapshot_projection(self) -> str:
+        """Snapshot value as projected by a CTE that reads the source directly."""
+        if self._snapshot_is_pseudo:
+            return f"{self._snap_src} AS {self._snap}"
+        return self._snap_src
+
+    def _snapshot_star_projection(self) -> str:
+        """Extra projection carrying the snapshot value through a ``SELECT *``.
+
+        ``SELECT *`` doesn't return pseudo-columns, so a source read that relies
+        on it has to name the value explicitly. Empty for an ordinary column,
+        which ``*`` already carries.
+        """
+        if self._snapshot_is_pseudo:
+            return f",\n    {self._snap_src} AS {self._snap}"
+        return ""
 
     def _q(self, name: str) -> str:
         """Quote a column or table identifier using the destination's quoting style."""
@@ -214,7 +239,7 @@ class HistorizeSqlBuilder:
         """
         tgt = self.target_table_id
         src = self.source_table_id
-        q_snapshot = self._q(self.config.snapshot_column)
+        q_snapshot = self._snap_src
         safe_date = self.destination.escape_string_literal(effective_from_date)
 
         keys_table = self.destination.get_full_table_id(
@@ -267,25 +292,18 @@ class HistorizeSqlBuilder:
 
         return [create_keys, delete_sql, update_sql]
 
-    def build_discover_columns_sql(self) -> str:
-        """SQL to discover value columns from the destination's schema catalog.
+    def select_value_columns(self, source_columns: List[str]) -> List[str]:
+        """Return the source columns carried into the historized target.
 
-        Returns SQL that fetches column names from the source table,
-        excluding PKs and system columns.
+        Drops the primary key (emitted separately, ahead of the value columns)
+        and the framework's system columns. Source order is preserved.
+
+        Takes the column list rather than querying for it: the runner reads the
+        source's columns once per run and every consumer filters that one
+        result, so a column can't be visible to one check and not another.
         """
-        pk_set = set(self.primary_key)
-        exclude = self._output_exclude | pk_set
-        exclude_list = ", ".join(f"'{c}'" for c in exclude)
-
-        base_query = self.destination.columns_query(
-            self.source_database, self.source_schema, self.source_table
-        )
-
-        # Wrap to filter out excluded columns
-        return f"""
-            SELECT column_name FROM ({base_query}) sub
-            WHERE column_name NOT IN ({exclude_list})
-        """
+        exclude = self._output_exclude | set(self.primary_key)
+        return [col for col in source_columns if col not in exclude]
 
     def build_drop_target_table_sql(self) -> str:
         """DROP TABLE IF EXISTS for the historized target table."""
@@ -408,8 +426,12 @@ class HistorizeSqlBuilder:
         """
         pk_cols = self._pk_cols_sql()
         snapshot_col = self.config.snapshot_column
-        q_snapshot = self._q(snapshot_col)
-        source_filter = self._source_filter_with_bound(q_snapshot, snapshot_upper_bound)
+        # Downstream CTEs read the projected value; the source-side filter is
+        # applied where the source itself is scanned.
+        q_snapshot = self._snap
+        source_filter = self._source_filter_with_bound(
+            self._snap_src, snapshot_upper_bound
+        )
         hash_columns = self._get_hash_columns(value_columns)
         hash_expr = self.destination.hash_expression(hash_columns)
         all_output_cols = list(self.primary_key) + list(value_columns)
@@ -454,7 +476,7 @@ CREATE OR REPLACE TEMP TABLE _historize_result AS
 WITH
 -- All unique snapshot dates (per merge_key group when configured).
 all_snapshots AS (
-  SELECT DISTINCT {self._merge_key_cols_raw_with_comma()}{q_snapshot} AS snapshot_date
+  SELECT DISTINCT {self._merge_key_cols_raw_with_comma()}{self._snap_src} AS snapshot_date
   FROM {src}{filter_where_clause(source_filter)}
 ),
 
@@ -473,7 +495,7 @@ snapshot_sequence AS (
 -- Hash value columns for change detection
 hashed AS (
   SELECT *,
-    {hash_expr} AS _row_hash
+    {hash_expr} AS _row_hash{self._snapshot_star_projection()}
   FROM {src}{filter_where_clause(source_filter)}
 ),
 
@@ -545,7 +567,7 @@ SELECT {all_columns_sql} FROM _historize_result;
         with any snapshot upper bound, so the deletion-detection read stays in
         lockstep with the change-detection reads.
         """
-        q_snapshot = self._q(snapshot_col)
+        q_snapshot = self._snap_src
         return f"""
 -- Track key presence across snapshots for deletion detection
 key_presence AS (
@@ -575,7 +597,7 @@ disappearances AS (
         Closed rows always have is_deleted=FALSE. Deletions are tracked
         via separate deletion marker rows (added in the outer query).
         """
-        q_snapshot = self._q(snapshot_col)
+        q_snapshot = self._snap
         if self.config.track_deletions:
             pk_join_d_c = self._pk_join("d", "c")
             return f"""COALESCE(
@@ -618,7 +640,9 @@ disappearances AS (
         """
         pk_cols = self._pk_cols_sql()
         snapshot_col = self.config.snapshot_column
-        q_snapshot = self._q(snapshot_col)
+        # source_rows projects the snapshot value once; everything downstream
+        # (including the target-derived baseline union) reads that projection.
+        q_snapshot = self._snap
         hash_columns = self._get_hash_columns(value_columns)
         hash_expr = self.destination.hash_expression(hash_columns)
         all_output_cols = list(self.primary_key) + list(value_columns)
@@ -636,7 +660,7 @@ disappearances AS (
         # values as the reference snapshot, so the result is unchanged. Values are
         # cast to TIMESTAMP (not the column) to preserve source-side pruning.
         snapshot_values = ", ".join(f"TIMESTAMP '{s}'" for s in new_snapshots)
-        new_snapshot_filter = f"{q_snapshot} IN ({snapshot_values})"
+        new_snapshot_filter = f"{self._snap_src} IN ({snapshot_values})"
         if last_historized_snapshot:
             reference_filter = (
                 f"AND c.{q_snapshot} != TIMESTAMP '{last_historized_snapshot}'"
@@ -717,7 +741,7 @@ WITH
 -- the baseline from the target (not the source) is what keeps replace-mode
 -- sources from re-versioning every unchanged row.
 source_rows AS (
-  SELECT {self._qcols(all_output_cols)}, {q_snapshot}
+  SELECT {self._qcols(all_output_cols)}, {self._snapshot_projection()}
   FROM {src}
   WHERE {and_filter(self.filter_sql, new_snapshot_filter)}{baseline_union}
 ),
@@ -838,7 +862,7 @@ SELECT {all_columns_sql} FROM _historize_incremental;
         detected as a deletion. ``source_rows`` is already filtered and scoped to
         the snapshots being processed, so no extra filter is needed here.
         """
-        q_snapshot = self._q(snapshot_col)
+        q_snapshot = self._snap
         return f"""
 -- Detect deletions: keys present in reference but missing in new snapshots
 deletion_candidates AS (
