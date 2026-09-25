@@ -1,3 +1,8 @@
+## 0.33.1 — 2026-09-25
+
+### Fixed
+- Bound historize snapshot batches by range instead of an inlined list (#487)
+
 ## 0.33.0 — 2026-09-16
 
 ### Breaking Changes
