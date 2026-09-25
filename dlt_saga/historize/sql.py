@@ -25,6 +25,37 @@ logger = logging.getLogger(__name__)
 SNAPSHOT_ALIAS = "_saga_snapshot"
 
 
+def snapshot_range_filter(destination: Any, column: str, snapshots: List[str]) -> str:
+    """Render a ``column >= first AND column <= last`` bound for a snapshot batch.
+
+    Every site that scopes work to a discovered batch bounds it by range rather
+    than by an inlined list of each value. The two select the same rows:
+    discovery reads *all* distinct snapshot values its filter admits between the
+    batch's bounds, so a value inside the range but absent from the list is
+    absent from the data too. The range is a fixed handful of characters where
+    the list grows with the batch — a snapshot column stamped per row (rather
+    than per run) accumulates tens of thousands of distinct values in a backlog,
+    which pushes the statement past the destination's query-length limit.
+
+    The upper bound also pins the batch against rows landing mid-run: a snapshot
+    arriving above ``last`` stays for the next run, matching the explicit
+    ``snapshot_upper_bound`` the full-reprocess path takes.
+
+    Args:
+        destination: Destination supplying literal escaping.
+        column: Already-quoted column reference to bound.
+        snapshots: Chronologically ordered snapshot values; must be non-empty.
+    """
+    if not snapshots:
+        raise ValueError(
+            "Cannot bound an empty snapshot batch — callers skip the run when "
+            "discovery finds no snapshots"
+        )
+    lower = destination.escape_string_literal(snapshots[0])
+    upper = destination.escape_string_literal(snapshots[-1])
+    return f"{column} >= TIMESTAMP '{lower}' AND {column} <= TIMESTAMP '{upper}'"
+
+
 def null_pk_alias(index: int) -> str:
     """Result alias for the NULL-check flag of primary-key column ``index``.
 
@@ -659,8 +690,9 @@ disappearances AS (
         # on every run). For append sources the target's open rows carry the same
         # values as the reference snapshot, so the result is unchanged. Values are
         # cast to TIMESTAMP (not the column) to preserve source-side pruning.
-        snapshot_values = ", ".join(f"TIMESTAMP '{s}'" for s in new_snapshots)
-        new_snapshot_filter = f"{self._snap_src} IN ({snapshot_values})"
+        new_snapshot_filter = snapshot_range_filter(
+            self.destination, self._snap_src, new_snapshots
+        )
         if last_historized_snapshot:
             reference_filter = (
                 f"AND c.{q_snapshot} != TIMESTAMP '{last_historized_snapshot}'"
@@ -716,7 +748,7 @@ disappearances AS (
         # The DELETE and UPDATE target disjoint row sets, so they're
         # order-independent and each is itself re-entrant.
         rollback_prefix_sql = ""
-        if rollback_prefix and new_snapshots:
+        if rollback_prefix:
             min_new = self.destination.escape_string_literal(new_snapshots[0])
             rollback_prefix_sql = f"""-- Re-entrancy rollback: undo a prior crashed attempt at this snapshot batch.
 DELETE FROM {tgt}

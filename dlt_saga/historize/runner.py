@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from dlt_saga.historize.config import HistorizeConfig
-from dlt_saga.historize.sql import HistorizeSqlBuilder
+from dlt_saga.historize.sql import HistorizeSqlBuilder, snapshot_range_filter
 from dlt_saga.historize.state import (
     HistorizeLogEntry,
     HistorizeStateManager,
@@ -1155,14 +1155,19 @@ class HistorizeRunner:
         # Get stats: count new/changed rows inserted + deletions marked
         # Query target table for rows affected by processed snapshots
         t_stats = time.time()
-        snapshot_list = ", ".join(f"TIMESTAMP '{s}'" for s in new_snapshots)
+        # Bounding by the batch's snapshot range counts exactly the rows this run
+        # wrote: the rollback prefix deleted everything at or above the batch's
+        # first snapshot before the insert, so nothing older survives in the range.
+        batch_range = snapshot_range_filter(
+            self.destination, self.config.valid_from_column, new_snapshots
+        )
         tgt = self.target_table_id
         stats_sql = f"""
             SELECT
                 SUM(CASE WHEN NOT {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS new_or_changed_rows,
                 SUM(CASE WHEN {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS deleted_rows
             FROM {tgt}
-            WHERE {self.config.valid_from_column} IN ({snapshot_list})
+            WHERE {batch_range}
         """
         rows = list(self.destination.execute_sql(stats_sql, self.schema))
         row = rows[0] if rows else None
@@ -1419,13 +1424,18 @@ class HistorizeRunner:
         target_schema: str,
     ) -> tuple:
         """Query row counts from the staging table for reprocessed snapshots."""
-        snapshot_list = ", ".join(f"TIMESTAMP '{s}'" for s in snapshots)
+        # As in _run_incremental: the staging clone was rolled back from a boundary
+        # at or below the first reprocessed snapshot, so the range holds only rows
+        # this refresh rebuilt.
+        batch_range = snapshot_range_filter(
+            self.destination, self.config.valid_from_column, snapshots
+        )
         stats_sql = f"""
             SELECT
                 SUM(CASE WHEN NOT {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS new_or_changed_rows,
                 SUM(CASE WHEN {self.config.is_deleted_column} THEN 1 ELSE 0 END) AS deleted_rows
             FROM {staging_table_id}
-            WHERE {self.config.valid_from_column} IN ({snapshot_list})
+            WHERE {batch_range}
         """
         stat_rows = list(self.destination.execute_sql(stats_sql, target_schema))
         stat_row = stat_rows[0] if stat_rows else None
