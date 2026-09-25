@@ -84,11 +84,13 @@ class TestRollbackPrefixToggle:
             "CREATE OR REPLACE TEMP TABLE"
         )
 
-    def test_prefix_noop_when_no_new_snapshots(self):
-        sql = _builder().build_incremental_sql(
-            ["a", "b"],
-            new_snapshots=[],
-            last_historized_snapshot="2024-01-01",
-            rollback_prefix=True,
-        )
-        assert "DELETE FROM proj.ds.tgt" not in sql
+    def test_empty_batch_is_rejected(self):
+        # An empty batch has no boundary to scope the rollback (or the source
+        # read) to; both callers skip the run instead of building SQL for it.
+        with pytest.raises(ValueError, match="empty snapshot batch"):
+            _builder().build_incremental_sql(
+                ["a", "b"],
+                new_snapshots=[],
+                last_historized_snapshot="2024-01-01",
+                rollback_prefix=True,
+            )

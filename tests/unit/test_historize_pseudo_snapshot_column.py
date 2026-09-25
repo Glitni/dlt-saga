@@ -97,7 +97,10 @@ class TestIncrementalWithPseudoSnapshotColumn:
 
     def test_source_side_filter_uses_the_pseudo_name(self):
         # Pruning must hit the partition pseudo-column on the source itself.
-        assert f"`{PSEUDO}` IN (TIMESTAMP '2026-09-16 00:00:00')" in self.sql
+        assert (
+            f"`{PSEUDO}` >= TIMESTAMP '2026-09-16 00:00:00' "
+            f"AND `{PSEUDO}` <= TIMESTAMP '2026-09-16 00:00:00'"
+        ) in self.sql
 
     def test_target_derived_baseline_is_stamped_under_the_alias(self):
         # The baseline comes from the historized table, which has no such column.
