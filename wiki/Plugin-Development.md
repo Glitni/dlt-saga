@@ -614,11 +614,14 @@ or metrics to any pipeline run.
 
 ### Available Events
 
-| Event | When | `ctx.result` | `ctx.error` |
-|-------|------|-------------|-------------|
-| `on_pipeline_start` | Before execution begins | `None` | `None` |
-| `on_pipeline_complete` | After successful completion | load_info / run_result dict | `None` |
-| `on_pipeline_error` | After failure | `None` | `Exception` |
+| Event | When | Context | `ctx.result` | `ctx.error` |
+|-------|------|---------|-------------|-------------|
+| `on_pipeline_start` | Before execution begins | `HookContext` | `None` | `None` |
+| `on_pipeline_complete` | After successful completion | `HookContext` | load_info / run_result dict | `None` |
+| `on_pipeline_error` | After failure | `HookContext` | `None` | `Exception` |
+| `on_run_complete` | Once per command invocation | `RunContext` | — | — |
+
+The first three fire **per pipeline**, in the worker thread that ran it, so handlers must be thread-safe and quick. `on_run_complete` fires **once per command** on the main thread, after every pipeline has finished — which is what lets a handler post a single summary instead of one message per pipeline. `saga run` executes ingest and historize as two phases but fires one `on_run_complete` covering both.
 
 ### Writing a Hook
 
@@ -650,6 +653,36 @@ on_failure.saga_hook_events = ["on_pipeline_error"]
 | `command` | `str` | `"ingest"` or `"historize"` |
 | `result` | `Any \| None` | load_info dict (ingest) or run_result dict (historize) on success |
 | `error` | `Exception \| None` | Exception raised on failure |
+
+`RunContext` fields (`on_run_complete`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `command` | `str` | `"ingest"`, `"historize"` or `"run"` |
+| `select` | `list[str] \| None` | Selector expressions the command was invoked with |
+| `target` / `environment` | `str \| None` | Profile target and its environment |
+| `results` | `list[PipelineResult]` | Per-pipeline outcomes; a combined `run` lists a pipeline once per phase |
+| `succeeded` / `failed` | `int` | Outcome counts |
+| `failures` | `list[PipelineResult]` | Only the failed results |
+| `has_failures` | `bool` | Whether anything failed |
+| `duration_seconds` | `float \| None` | Wall-clock duration of the command |
+| `started_at` / `finished_at` | `datetime \| None` | UTC stamps |
+
+A run whose selection matched nothing still fires, with `results == []` — a scheduled run that quietly stopped matching is worth hearing about.
+
+```python
+from dlt_saga.hooks import RunContext
+
+
+def on_run(ctx: RunContext) -> None:
+    if ctx.has_failures:
+        post(f"{ctx.command}: {ctx.failed}/{len(ctx.results)} failed")
+
+
+on_run.saga_hook_events = ["on_run_complete"]
+```
+
+> For Slack specifically there is no need to write this: see [Slack notifications](Configuration#slack-notifications) for the built-in notifier.
 
 ### Registering Hooks
 

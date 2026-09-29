@@ -18,6 +18,7 @@ Example::
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar
 
 from dlt_saga.pipeline_config import ConfigSource, PipelineConfig
@@ -248,8 +249,10 @@ class Session:
         ):
 
             def _ingest_and_record() -> SessionResult:
+                started_at = datetime.now(timezone.utc)
                 result = self._run_ingest(select, workers)
                 self._record_run("ingest", select, result)
+                self._fire_run_complete("ingest", select, result, started_at)
                 return result
 
             return self._execute_with_auth(_ingest_and_record)
@@ -281,10 +284,12 @@ class Session:
         ):
 
             def _historize_and_record() -> SessionResult:
+                started_at = datetime.now(timezone.utc)
                 result = self._run_historize(
                     select, workers, full_refresh, partial_refresh, historize_from
                 )
                 self._record_run("historize", select, result)
+                self._fire_run_complete("historize", select, result, started_at)
                 return result
 
             return self._execute_with_auth(_historize_and_record)
@@ -328,10 +333,12 @@ class Session:
         ):
 
             def _run_and_record() -> SessionResult:
+                started_at = datetime.now(timezone.utc)
                 result = self._run_both(
                     select, workers, full_refresh, partial_refresh, historize_from
                 )
                 self._record_run("run", select, result)
+                self._fire_run_complete("run", select, result, started_at)
                 return result
 
             return self._execute_with_auth(_run_and_record)
@@ -808,6 +815,60 @@ class Session:
             with self._auth_provider.impersonate(run_as):
                 return callback()
         return callback()
+
+    def _fire_run_complete(
+        self,
+        command: str,
+        select: Optional[List[str]],
+        result: SessionResult,
+        started_at: datetime,
+    ) -> None:
+        """Fire ``on_run_complete`` once for this command invocation.
+
+        Exactly one event per invocation — a combined ``run`` reports both
+        phases together — so a notifier can post a single digest instead of one
+        message per pipeline. Fires even when nothing was selected, since a
+        scheduled run whose selection silently stopped matching is precisely the
+        kind of quiet failure worth hearing about.
+
+        Best-effort: never raises into the run it is reporting on.
+        """
+        try:
+            from dlt_saga.hooks.registry import (
+                ON_RUN_COMPLETE,
+                RunContext,
+                get_hook_registry,
+            )
+            from dlt_saga.hooks.run_scope import contribute
+
+            target = self._profile_target
+            # `saga run` wraps both phases in a scope so one command produces one
+            # digest; inside a scope this call only contributes its results.
+            if contribute(
+                list(result.pipeline_results),
+                target=target.name if target else None,
+                environment=target.environment if target else None,
+            ):
+                return
+
+            registry = get_hook_registry()
+            if not registry.has_handlers(ON_RUN_COMPLETE):
+                return
+
+            registry.fire(
+                ON_RUN_COMPLETE,
+                RunContext(
+                    command=command,
+                    select=select,
+                    target=target.name if target else None,
+                    environment=target.environment if target else None,
+                    results=list(result.pipeline_results),
+                    started_at=started_at,
+                    finished_at=datetime.now(timezone.utc),
+                ),
+            )
+        except Exception:
+            logger.warning("Failed to fire on_run_complete hooks", exc_info=True)
 
     def _record_run(
         self,

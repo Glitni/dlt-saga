@@ -69,6 +69,21 @@ class BaseConfig:
         },
     )
 
+    notifications: Optional[Dict[str, Any]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Per-pipeline notification settings, same shape as the "
+                "'notifications:' block in saga_project.yml. Currently "
+                "'slack.mentions' (a string or list of Slack mention tokens), "
+                "appended to this pipeline's line in a failure digest — for "
+                "reaching whoever owns or is on call for it. Transport settings "
+                "(webhook, notify_on) are project-level only. Inherits through "
+                "the usual saga_project.yml 'pipelines:' hierarchy."
+            ),
+        },
+    )
+
     filters: Optional[List[Dict[str, Any]]] = field(
         default=None,
         metadata=_filter_field_metadata(
