@@ -86,6 +86,7 @@ class BasePipeline:
             # Loading configuration
             write_disposition=resolve_write_disposition(config),
             replace_strategy=config.get("replace_strategy"),
+            min_rows=config.get("min_rows"),
             # Merge configuration
             merge_key=config.get("merge_key"),
             merge_strategy=config.get("merge_strategy"),
@@ -559,6 +560,39 @@ class BasePipeline:
                 resource.add_limit(limit)
         return resource
 
+    def _build_row_guard(self) -> Any:
+        """Build the pre-load row-count guard for this pipeline, if configured.
+
+        Returns ``None`` when ``min_rows`` is unset, which keeps the run on
+        dlt's own ``pipeline.run()`` rather than the split
+        extract/normalize/load path.
+        """
+        from dlt_saga.pipelines.row_guard import build_row_guard
+
+        return build_row_guard(
+            self.target_writer.config.min_rows,
+            table_name=self.table_name,
+            pipeline_name=self.pipeline_name,
+            write_disposition=self.target_writer.config.write_disposition,
+        )
+
+    def _warn_on_empty_replace(self, load_info: Dict[str, Any]) -> None:
+        """Warn when a ``replace`` load just emptied its target table.
+
+        Covers the case the guard is not configured for: dlt emits a load job
+        for a replace even with no rows, so the truncate/swap runs and the run
+        reports success against an emptied table.
+        """
+        from dlt_saga.pipelines.row_guard import warn_on_empty_replace
+
+        warn_on_empty_replace(
+            load_info.get("row_counts"),
+            write_disposition=self.target_writer.config.write_disposition,
+            table_name=self.table_name,
+            min_rows=self.target_writer.config.min_rows,
+            run_logger=self.logger,
+        )
+
     def _process_resource_data(
         self, resource, description: str
     ) -> tuple[Dict, List[str]]:
@@ -575,10 +609,11 @@ class BasePipeline:
         processed_data = self.target_writer.apply_hints(adapted_resource)
 
         load_info = self.destination.run_pipeline(
-            self.pipeline, processed_data
+            self.pipeline, processed_data, guard=self._build_row_guard()
         ).asdict()
 
         self._capture_trace_timings(load_info)
+        self._warn_on_empty_replace(load_info)
 
         # Exclude dlt system tables (_dlt_loads, _dlt_pipeline_state, _dlt_version):
         # they must never be granted to end users, get user table options, or be
@@ -802,7 +837,12 @@ class BasePipeline:
             return all_load_info
 
         except Exception as e:
-            if not isinstance(e, ValueError):
+            from dlt_saga.pipelines.row_guard import MinRowsNotMetError
+
+            # A tripped row guard is an expected outcome with a self-explanatory
+            # message; it is still a real run failure (recorded as one), just not
+            # one a traceback helps with.
+            if not isinstance(e, (ValueError, MinRowsNotMetError)):
                 logger.error(f"Pipeline execution failed: {str(e)}", exc_info=True)
             raise
 

@@ -65,6 +65,7 @@ Other ways to avoid repeating yourself: [`dev:` override blocks](#dev-overrides)
 | `tags` | list | `[]` | Tags for selector filtering (`saga ingest --select "tag:daily"`). Supports schedule values — see [Scheduling tags](#scheduling-tags) |
 | `write_disposition` | string | `"append"` | Controls operations — see below. Always set it explicitly; `saga validate` warns when it is omitted |
 | `primary_key` | string/list | — | Primary key column(s) for merge/historize |
+| `min_rows` | int | — | Minimum rows a load must carry. Checked before anything is written; a short load is abandoned with the target left intact and the run failed. Guards `replace` against emptying the table and scd2 against retiring keys that failed to arrive — see [Guarding against short loads](#guarding-against-short-loads-min_rows) |
 | `partition_column` | string | — | BigQuery partition column |
 | `cluster_columns` | list | — | BigQuery cluster columns (max 4) |
 | `partition_expiration_days` | int | inherited from profile | BigQuery only. Sets `time_partitioning.expiration_ms` on the created table. Honored on first `CREATE TABLE` for both dlt-managed pipelines and `native_load`, and reconciled on every subsequent run — changing or unsetting the value emits `ALTER TABLE ... SET OPTIONS(partition_expiration_days = ...)` against the existing table. Pipeline-level value overrides the profile default. Has no effect on Iceberg tables. |
@@ -89,7 +90,7 @@ Key order doesn't affect behavior, but ordering keys by concern keeps configs sc
 0. **Control** — `adapter`, `enabled`, `write_disposition`
 1. **Documentation & selection** — `tags`, `description`, `classification`, `meta`, `persist_docs`
 2. **Ingest** — source connection/query fields, then incremental logic (`incremental`, `incremental_column`, `initial_value`, `dev`)
-3. **Historization & load** — keys (`primary_key`/`merge_key`), `merge_strategy`, physical-table hints (`partition_column`, `cluster_columns`), `historize`
+3. **Historization & load** — keys (`primary_key`/`merge_key`), `merge_strategy`, `min_rows`, physical-table hints (`partition_column`, `cluster_columns`), `historize`
 4. **Schema** — `columns`
 
 ### Column Hints
@@ -279,6 +280,50 @@ write_disposition: "merge"
 merge_strategy: "insert-only"
 primary_key: "event_id"
 ```
+
+### Guarding against short loads (`min_rows`)
+
+dlt reports a run as successful whenever the load succeeds, however little data arrived. For most dispositions that is harmless — a source that yields nothing produces no load package at all, so the target table is untouched. Two cases are different, and both quietly destroy data that was correct the day before:
+
+| Disposition | What a short load does |
+|-------------|------------------------|
+| `replace` | A **zero-row** extraction still truncates and swaps, leaving an empty table behind a green run. A moved source path, a glob that stopped matching, or a skipped upstream export all look like success. |
+| `merge` + `merge_strategy: scd2` | scd2 retires rows absent from the batch, so a **partial** extraction closes every key that failed to arrive. Two of three source files disappearing leaves one open row and a green run. |
+
+`min_rows` sets a floor, checked after dlt normalizes the data but **before anything is written**:
+
+```yaml
+write_disposition: "replace"
+min_rows: 1          # abandon the load rather than empty the table
+```
+
+```yaml
+write_disposition: "merge"
+merge_strategy: "scd2"
+primary_key: "customer_id"
+min_rows: 5000       # a full customer snapshot is never this small
+```
+
+When the load falls short, the pending load package is dropped, the target table keeps the previous run's data, and the run is reported as **failed** with an actionable message:
+
+```
+shop__orders extracted 0 row(s), below the configured min_rows=1. The load was
+abandoned before writing, so orders still holds the previous run's data. A
+zero-row extraction usually means the source moved or a glob stopped matching —
+check the source location before re-running.
+```
+
+Because the run fails, whatever already alerts you to failed pipelines (`on_pipeline_error` [hooks](#hooks), your orchestrator, `--select "state:failed"`) covers this too — no separate channel needed.
+
+**Picking a threshold.** `min_rows: 1` catches the total-disappearance case and never fires on a legitimate load. A threshold near the expected volume also catches partial losses, which is what an scd2 pipeline wants — the number checked is the rows that will be live in the target after the run, so `min_rows: 5000` reads as "never leave fewer than 5 000 live rows". Set it conservatively: a source with genuinely variable volume will eventually dip below an ambitious floor and fail a run that was fine.
+
+**Notes.**
+
+- Leaving `min_rows` unset means no guard. A zero-row `replace` then logs a warning *after* the table has been emptied — visible in the run output, but not prevented.
+- The threshold applies per resource, so a pipeline yielding several resources requires each of them to clear it.
+- Duplicate primary keys in a batch make the count overstate the surviving rows (four rows across two keys leave two open after an scd2 merge), so the guard errs permissive and never trips on a batch that would have been large enough.
+- `append` and the non-scd2 merge strategies accept `min_rows` too, where it simply means "rows in this load". They have no silent-destruction problem, so it is a data-quality assertion there rather than a safety net.
+- [`native_load`](Native-Load) does not use dlt's extract/normalize/load cycle and so does not read `min_rows`. It is already safe from the zero-row case — a run that matches no files returns before touching the target — but a `replace` run over a *partial* file set does rewrite the target with what it found.
 
 ### Databricks insert API
 

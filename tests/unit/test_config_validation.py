@@ -352,3 +352,39 @@ class TestHistorizeConfigColumnValidation:
             ValueError, match="cluster_columns contains invalid SQL identifier"
         ):
             self._make(cluster_columns=["ok", "not ok"])
+
+
+@pytest.mark.unit
+class TestTargetConfigMinRowsValidation:
+    """Pre-load row-count threshold validation for TargetConfig."""
+
+    def _make(self, **overrides):
+        from dlt_saga.pipelines.target.config import TargetConfig
+
+        return TargetConfig(**overrides)
+
+    def test_min_rows_unset_by_default(self):
+        assert self._make().min_rows is None
+
+    def test_positive_threshold_accepted(self):
+        assert self._make(min_rows=1000).min_rows == 1000
+
+    def test_zero_rejected(self):
+        # 0 would be a guard that can never trip; omitting the key is the
+        # way to disable it.
+        with pytest.raises(ValueError, match="min_rows must be >= 1"):
+            self._make(min_rows=0)
+
+    def test_negative_rejected(self):
+        with pytest.raises(ValueError, match="min_rows must be >= 1"):
+            self._make(min_rows=-5)
+
+    def test_non_integer_rejected(self):
+        with pytest.raises(ValueError, match="min_rows must be a positive integer"):
+            self._make(min_rows="many")
+
+    def test_bool_rejected(self):
+        # `min_rows: true` is a plausible YAML typo for a boolean-style flag,
+        # and bool is an int subclass, so it needs rejecting explicitly.
+        with pytest.raises(ValueError, match="min_rows must be a positive integer"):
+            self._make(min_rows=True)

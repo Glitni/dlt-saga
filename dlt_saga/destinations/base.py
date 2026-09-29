@@ -271,21 +271,48 @@ class Destination(ABC):
         """
         pass
 
-    def run_pipeline(self, pipeline: Any, data: Any) -> Any:
+    def run_pipeline(self, pipeline: Any, data: Any, guard: Any = None) -> Any:
         """Run pipeline with destination-specific preparation.
 
-        Base implementation just calls pipeline.run().
+        Base implementation just runs the pipeline.
         Destinations can override this to handle pre-execution setup
-        (e.g., ensuring datasets exist to prevent race conditions).
+        (e.g., ensuring datasets exist to prevent race conditions); overrides
+        should delegate the run itself to :meth:`execute_dlt_run` so the
+        row-count guard keeps working on every destination.
 
         Args:
             pipeline: dlt Pipeline instance
             data: Data to load
+            guard: Optional :class:`~dlt_saga.pipelines.row_guard.RowGuard`
+                enforcing a minimum row count before the load step.
 
         Returns:
-            LoadInfo from pipeline.run()
+            LoadInfo from the run
         """
-        return pipeline.run(data)
+        return self.execute_dlt_run(pipeline, data, guard)
+
+    def execute_dlt_run(self, pipeline: Any, data: Any, guard: Any = None) -> Any:
+        """Execute the dlt run itself, honoring an optional row-count guard.
+
+        Without a guard this is plain ``pipeline.run()``. With one, the run is
+        split into its extract → normalize → load phases so the row count can
+        be checked while the load package is still local — see
+        :mod:`dlt_saga.pipelines.row_guard`.
+
+        Args:
+            pipeline: dlt Pipeline instance
+            data: Data to load
+            guard: Optional row-count guard.
+
+        Returns:
+            LoadInfo from the run
+
+        Raises:
+            MinRowsNotMetError: If *guard* is set and the load is too small.
+        """
+        if guard is None:
+            return pipeline.run(data)
+        return guard.run(pipeline, data)
 
     def sync_table_options(self, dataset: str, table: str) -> None:
         """Reconcile declared table-level options against the destination.

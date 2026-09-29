@@ -33,6 +33,12 @@ class TestProcessResourceExcludesDltTables:
         p.destination.run_pipeline.return_value = run_result
         p.target_writer = MagicMock()
         p.target_writer.apply_hints = lambda r: r
+        # No row guard and no empty-replace warning in this fixture — both are
+        # covered by tests/unit/test_row_guard.py.
+        p.target_writer.config.min_rows = None
+        p.target_writer.config.write_disposition = "append"
+        p.table_name = "orders"
+        p.pipeline_name = "shop__orders"
         p.pipeline = MagicMock()
         return p
 

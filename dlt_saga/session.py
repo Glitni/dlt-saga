@@ -1062,13 +1062,23 @@ class Session:
             # error — the run never started, so flag it as developer feedback that
             # must not be recorded as a run outcome. Any other exception is a
             # genuine run failure (recorded).
+            from dlt_saga.pipelines.row_guard import MinRowsNotMetError
+
             config_error = isinstance(e, ValueError)
+            # A tripped row guard is a real, recorded run failure (so it reaches
+            # `saga report` and `state:failed`) whose message already says what
+            # happened and what to check — a traceback would only add noise.
+            expected_failure = isinstance(e, MinRowsNotMetError)
             # Failure display is single-sourced through the CLI end-of-run summary
             # (_exit_if_failures), which lists every failure on stderr. Genuine
             # failures also get one inline traceback here for real-time debugging;
             # config errors are clean developer feedback, so their display is left
             # to the summary alone (logging them here too would print them twice).
-            if not config_error:
+            if expected_failure:
+                logger.error(
+                    "%sPipeline %s failed: %s", prefix, config.pipeline_name, e
+                )
+            elif not config_error:
                 logger.error(
                     "%sPipeline %s failed: %s",
                     prefix,
