@@ -286,11 +286,14 @@ class DatabricksDestination(Destination):
             )
             return resource
 
-    def run_pipeline(self, pipeline: Any, data: Any) -> Any:
-        """Ensure the schema exists and run the pipeline."""
+    def run_pipeline(self, pipeline: Any, data: Any, guard: Any = None) -> Any:
+        """Ensure the schema exists and run the pipeline.
+
+        *guard*, when set, enforces a minimum row count before the load step.
+        """
         if self.config.schema_name:
             self.ensure_schema_exists(self.config.schema_name)
-        return pipeline.run(data)
+        return self.execute_dlt_run(pipeline, data, guard)
 
     # ------------------------------------------------------------------
     # Access management

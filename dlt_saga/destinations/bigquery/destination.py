@@ -302,7 +302,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                 )
                 cls._synced_datasets.add((project, dataset_name))
 
-    def run_pipeline(self, pipeline: Any, data: Any) -> Any:
+    def run_pipeline(self, pipeline: Any, data: Any, guard: Any = None) -> Any:
         """Run pipeline, ensuring datasets exist first to prevent race conditions.
 
         For native tables: Ensures datasets exist
@@ -311,9 +311,10 @@ class BigQueryDestination(BigQueryBaseDestination):
         Args:
             pipeline: dlt Pipeline instance
             data: Data to load
+            guard: Optional row-count guard enforced before the load step.
 
         Returns:
-            LoadInfo from pipeline.run()
+            LoadInfo from the run
         """
         if self.config.table_format == "iceberg":
             # Ensure dataset exists
@@ -363,7 +364,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                 )
 
             # Let dlt handle all loading
-            return pipeline.run(data)
+            return self.execute_dlt_run(pipeline, data, guard)
         else:
             # Native BigQuery tables
             # Sync main dataset and access controls before running pipeline
@@ -375,7 +376,7 @@ class BigQueryDestination(BigQueryBaseDestination):
             self.sync_dataset_and_access(staging_dataset_name)
 
             # Now run pipeline normally - datasets are guaranteed to exist
-            return pipeline.run(data)
+            return self.execute_dlt_run(pipeline, data, guard)
 
     def save_load_info(
         self, schema_name: str, records: list[dict], pipeline: Any = None

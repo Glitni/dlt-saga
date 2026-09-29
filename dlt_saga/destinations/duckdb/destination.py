@@ -112,15 +112,16 @@ class DuckDBDestination(Destination):
     def supports_clustering(self) -> bool:
         return False
 
-    def run_pipeline(self, pipeline: Any, data: Any) -> Any:
+    def run_pipeline(self, pipeline: Any, data: Any, guard: Any = None) -> Any:
         """Run pipeline with DuckDB destination.
 
-        Ensures the schema (dataset) exists before running.
+        Ensures the schema (dataset) exists before running. *guard*, when set,
+        enforces a minimum row count before the load step.
         """
         schema_name = pipeline.dataset_name
         if schema_name:
             self.connection.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"')
-        return pipeline.run(data)
+        return self.execute_dlt_run(pipeline, data, guard)
 
     def save_load_info(
         self, schema_name: str, records: list[dict], pipeline: Any = None

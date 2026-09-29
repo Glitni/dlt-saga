@@ -224,6 +224,29 @@ class TargetConfig:
         },
     )
 
+    # Pre-load row-count guard
+    min_rows: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Minimum rows a load must carry. Checked after dlt normalizes "
+                "the data but before anything is written, so a load below the "
+                "threshold is abandoned with the target table left untouched "
+                "and the run reported as failed. Guards the two dispositions "
+                "where a short load destroys good data: 'replace' (a zero-row "
+                "extraction still truncates and swaps, emptying the table) and "
+                "merge_strategy 'scd2' (rows absent from the batch are retired, "
+                "so a partial extraction closes every key that failed to "
+                "arrive). For both, the checked count equals the rows that will "
+                "be live in the target after the run; for append and the other "
+                "merge strategies it is simply the rows in this load. Unset "
+                "(default) means no guard — a zero-row replace instead logs a "
+                "warning after the fact."
+            ),
+            "minimum": 1,
+        },
+    )
+
     # Replace strategy
     replace_strategy: Optional[ReplaceStrategy] = field(
         default=None,
@@ -408,6 +431,7 @@ class TargetConfig:
         self._validate_destination_type()
         self._validate_column_identifiers()
         self._validate_insert_api()
+        self._validate_min_rows()
         self._normalize_keys()
         self._normalize_enums()
         self._validate_merge_strategy()
@@ -509,6 +533,20 @@ class TargetConfig:
                     f"or 'append+historize' (Zerobus is append-only); "
                     f"got write_disposition='{self.write_disposition}'."
                 )
+
+    def _validate_min_rows(self):
+        """Validate the pre-load row-count threshold."""
+        if self.min_rows is None:
+            return
+        if isinstance(self.min_rows, bool) or not isinstance(self.min_rows, int):
+            raise ValueError(
+                f"min_rows must be a positive integer, got {self.min_rows!r}"
+            )
+        if self.min_rows < 1:
+            raise ValueError(
+                f"min_rows must be >= 1, got {self.min_rows}. Omit the key to "
+                "disable the guard."
+            )
 
     def _normalize_keys(self):
         """Normalize primary_key and merge_key to lists."""
