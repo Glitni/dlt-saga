@@ -321,6 +321,137 @@ class LogTablesConfig:
         )
 
 
+def normalize_mentions(value: Any, context: str) -> Optional[List[str]]:
+    """Normalise a ``mentions`` value to a list of Slack tokens.
+
+    Shared by the project-level ``notifications.slack.mentions`` and the
+    per-pipeline key of the same name, so both accept a bare string and reject
+    the same shapes with the same message.
+
+    Args:
+        value: Raw value from YAML — a string, a list of strings, or None.
+        context: Dotted config path, used in the error message.
+
+    Returns:
+        A list of tokens, or ``None`` when unset.
+
+    Raises:
+        ValueError: If *value* is neither a string nor a list of strings.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list) or not all(isinstance(m, str) for m in value):
+        raise ValueError(
+            f"{context} must be a string or list of strings, got {value!r}"
+        )
+    return list(value)
+
+
+@dataclass
+class SlackNotificationConfig:
+    """Slack incoming-webhook notification settings.
+
+    Posting is opt-in: no ``webhook_url`` means no notifier is registered and
+    nothing is sent.
+    """
+
+    webhook_url: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Slack incoming-webhook URL. Use a secret URI "
+                "(googlesecretmanager::…, azurekeyvault::…, env_secret::…) "
+                "rather than {{ env_var() }}: env_var renders at config-load "
+                "time and would bake the webhook into the execution plan. The "
+                "webhook fixes the channel; routing to several channels needs "
+                "several webhooks."
+            )
+        },
+    )
+    notify_on: str = field(
+        default="failure",
+        metadata={
+            "description": (
+                "When to post the run digest. 'failure' (default) posts only "
+                "when at least one pipeline failed; 'always' posts every run."
+            ),
+            "enum": ["failure", "always"],
+        },
+    )
+    mentions: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Slack mention tokens appended to a failure digest, e.g. "
+                "'<@U012ABCDEF>' for a user or '<!subteam^S012ABCDEF>' for a "
+                "group. An incoming webhook cannot resolve display names, so "
+                "raw IDs are required. A pipeline can name its own under the "
+                "same key in its config, which is appended to that pipeline's "
+                "failure line."
+            )
+        },
+    )
+    per_pipeline: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "Also post one message per failed pipeline in addition to the "
+                "run digest. Off by default — a systemic failure across a large "
+                "selection would otherwise flood the channel."
+            )
+        },
+    )
+    timeout_seconds: float = field(
+        default=10.0,
+        metadata={
+            "description": "HTTP timeout for each Slack request, in seconds.",
+            "minimum": 1,
+        },
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SlackNotificationConfig":
+        """Create from the ``notifications.slack`` block."""
+        notify_on = str(data.get("notify_on", "failure")).lower()
+        if notify_on not in ("failure", "always"):
+            raise ValueError(
+                f"notifications.slack.notify_on must be 'failure' or 'always', "
+                f"got {data.get('notify_on')!r}"
+            )
+        mentions = normalize_mentions(
+            data.get("mentions"), "notifications.slack.mentions"
+        )
+        return cls(
+            webhook_url=data.get("webhook_url"),
+            notify_on=notify_on,
+            mentions=mentions,
+            per_pipeline=bool(data.get("per_pipeline", False)),
+            timeout_seconds=float(data.get("timeout_seconds", 10.0)),
+        )
+
+
+@dataclass
+class NotificationsConfig:
+    """Outbound notification settings."""
+
+    slack: Optional[SlackNotificationConfig] = field(
+        default=None,
+        metadata={"description": "Slack incoming-webhook notifications"},
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "NotificationsConfig":
+        """Create from the ``notifications:`` block."""
+        slack_data = data.get("slack")
+        return cls(
+            slack=(
+                SlackNotificationConfig.from_dict(slack_data) if slack_data else None
+            )
+        )
+
+
 @dataclass
 class SagaProjectConfig:
     """Top-level structure of saga_project.yml."""
@@ -366,6 +497,16 @@ class SagaProjectConfig:
             ),
         },
     )
+    notifications: Optional[NotificationsConfig] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Outbound notification settings. Configuring a channel here "
+                "registers the built-in notifier automatically — no 'hooks:' "
+                "entry needed."
+            ),
+        },
+    )
     profile: Optional[str] = field(
         default=None,
         metadata={
@@ -405,6 +546,7 @@ class SagaProjectConfig:
         prov_data = data.get("providers")
         orch_data = data.get("orchestration")
         hist_data = data.get("historize")
+        notif_data = data.get("notifications")
         return cls(
             config_source=(ConfigSourceConfig.from_dict(cs_data) if cs_data else None),
             providers=ProvidersConfig.from_dict(prov_data) if prov_data else None,
@@ -414,6 +556,9 @@ class SagaProjectConfig:
             naming_module=data.get("naming_module"),
             pipelines=data.get("pipelines"),
             hooks=data.get("hooks"),
+            notifications=(
+                NotificationsConfig.from_dict(notif_data) if notif_data else None
+            ),
             profile=data.get("profile"),
             log_tables=LogTablesConfig.from_dict(data.get("log_tables") or {}),
             historize=(

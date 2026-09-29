@@ -82,6 +82,7 @@ Other ways to avoid repeating yourself: [`dev:` override blocks](#dev-overrides)
 | `adapter` | string | — | Explicit pipeline implementation binding (e.g., `dlt_saga.api.myservice`) |
 | `filters` | list | — | Row-level filters applied during ingest — see [Row Filters](#row-filters) |
 | `meta` | dict | — | Free-form user metadata for documentation/governance — see [Custom Metadata](#custom-metadata) |
+| `notifications` | dict | — | Per-pipeline notification settings — currently `slack.mentions`, appended to this pipeline's line in a failure digest. See [Slack notifications](#slack-notifications) |
 
 ### Recommended property order
 
@@ -598,6 +599,68 @@ hooks:
 ```
 
 See the [Plugin Development Guide](Plugin-Development) for writing hooks.
+
+### Slack notifications
+
+A built-in notifier posts run outcomes to a Slack incoming webhook. Configuring it is enough to activate it — there is no `hooks:` entry to add:
+
+```yaml
+notifications:
+  slack:
+    webhook_url: googlesecretmanager::projects/my-project/secrets/slack-webhook/versions/latest
+    notify_on: failure          # failure (default) | always
+    mentions: ["<@U012ABCDEF>"]  # appended to failure messages
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `webhook_url` | — | Slack incoming-webhook URL. Required; without it nothing is registered |
+| `notify_on` | `failure` | `failure` posts only when a pipeline failed; `always` posts every run |
+| `mentions` | — | Mention tokens appended to a failure digest. A string or list |
+| `per_pipeline` | `false` | Also post one message per failed pipeline, on top of the digest |
+| `timeout_seconds` | `10` | HTTP timeout per Slack request |
+
+**One message per command, not per pipeline.** The notifier posts a digest when the command finishes, listing the failures (capped at ten, with a count of the rest). This matters when something systemic breaks: an expired credential fails every pipeline in the selection at once, and fifty separate messages bury the signal they were meant to carry. `saga run` posts one digest covering both the ingest and historize phases. Set `per_pipeline: true` to additionally get a message per failed pipeline.
+
+```
+:x: saga run failed — 2 of 34 pipeline(s)
+target `prod/prod` · select `tag:daily` · 412.7s
+
+• `shop__orders` — shop__orders extracted 0 row(s), below the configured min_rows=1. …
+• `crm__accounts` — 404 Client Error: Not Found for url: … <@U012ABCDEF>
+
+<@U012ABCDEF>
+```
+
+**Secrets.** Use a secret URI (`googlesecretmanager::`, `azurekeyvault::`, `env_secret::`) rather than `{{ env_var('SLACK_WEBHOOK') }}` — `env_var` renders when the config is loaded, which would bake the webhook into the execution plan sent to remote workers. The URI is resolved at send time, so a run that never notifies never touches the secret store.
+
+**Mentions** must be raw Slack IDs: `<@U012ABCDEF>` for a user, `<!subteam^S012ABCDEF>` for a group. An incoming webhook cannot resolve display names. They are appended only to failure messages, never to a success digest.
+
+**Per-pipeline mentions.** The same key works on a pipeline's own config, where it is appended to that pipeline's line instead of the whole digest — so a failure reaches whoever owns or is on call for it:
+
+```yaml
+# configs/shop/orders.yml
+notifications:
+  slack:
+    mentions: ["<@U012ABCDEF>"]
+```
+
+The project-level list and a pipeline's own list compose rather than compete: the project list is pinged once at the bottom of any failure digest (the "tell ops" list), a pipeline's own appears next to its failure. Set it for a whole group through the usual [hierarchical config](#hierarchical-configuration) in `saga_project.yml`, where `+notifications:` merges and `notifications:` overrides:
+
+```yaml
+# saga_project.yml
+pipelines:
+  shop:
+    +notifications:
+      slack:
+        mentions: ["<!subteam^S012ABCDEF>"]
+```
+
+Transport settings (`webhook_url`, `notify_on`, `timeout_seconds`) are project-level only — a pipeline chooses who hears about it, not where or whether the notifier posts.
+
+**Routing to several channels** means several webhooks — a webhook is bound to one channel and the notifier takes one. Post to one operational channel and route from there, or write a custom `on_run_complete` hook.
+
+**Failure to notify never fails a run.** A Slack outage, a revoked webhook, or a malformed payload is logged as a warning and the run continues; requests are retried on timeouts, connection errors, `429`, and `5xx`, but not on other `4xx` (a bad payload would only fail again). An empty selection still notifies when `notify_on: always`, so a scheduled run whose selector stopped matching does not pass silently.
 
 ### Historize Placement
 

@@ -49,15 +49,18 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only, never at runtime
         load_hooks,
         load_hooks_from_config,
         load_hooks_from_entry_points,
+        load_notifiers_from_config,
     )
     from .registry import (
         HOOK_EVENTS,
         ON_PIPELINE_COMPLETE,
         ON_PIPELINE_ERROR,
         ON_PIPELINE_START,
+        ON_RUN_COMPLETE,
         HookCallable,
         HookContext,
         HookRegistry,
+        RunContext,
         get_hook_registry,
     )
 
@@ -69,13 +72,16 @@ _EXPORTS = {
     "ON_PIPELINE_START": "registry",
     "ON_PIPELINE_COMPLETE": "registry",
     "ON_PIPELINE_ERROR": "registry",
+    "ON_RUN_COMPLETE": "registry",
     "HookCallable": "registry",
     "HookContext": "registry",
     "HookRegistry": "registry",
+    "RunContext": "registry",
     "get_hook_registry": "registry",
     "load_hooks": "loader",
     "load_hooks_from_config": "loader",
     "load_hooks_from_entry_points": "loader",
+    "load_notifiers_from_config": "loader",
 }
 
 __all__ = [
@@ -83,13 +89,16 @@ __all__ = [
     "ON_PIPELINE_START",
     "ON_PIPELINE_COMPLETE",
     "ON_PIPELINE_ERROR",
+    "ON_RUN_COMPLETE",
     "HookCallable",
     "HookContext",
     "HookRegistry",
+    "RunContext",
     "get_hook_registry",
     "load_hooks",
     "load_hooks_from_config",
     "load_hooks_from_entry_points",
+    "load_notifiers_from_config",
 ]
 
 __getattr__, __dir__ = lazy_exports(__name__, _EXPORTS, globals())

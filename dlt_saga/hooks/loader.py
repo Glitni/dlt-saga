@@ -2,7 +2,7 @@
 
 import importlib
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .registry import HOOK_EVENTS, HookCallable, HookRegistry, get_hook_registry
 
@@ -161,7 +161,34 @@ def load_hooks(registry: Optional[HookRegistry] = None) -> None:
     if project_config.hooks:
         load_hooks_from_config(project_config.hooks, registry)
 
+    load_notifiers_from_config(project_config, registry)
     load_hooks_from_entry_points(registry)
+
+
+def load_notifiers_from_config(
+    project_config: Any,
+    registry: Optional[HookRegistry] = None,
+) -> None:
+    """Register built-in notifiers declared under ``notifications:``.
+
+    Unlike ``hooks:``, which points at user callables, a notifier is shipped
+    with the framework and configured declaratively — so configuring a channel
+    is enough to activate it, with no ``module:callable`` entry to remember.
+
+    Args:
+        project_config: Parsed :class:`~dlt_saga.project_config.SagaProjectConfig`.
+        registry: Registry to register into.  Defaults to the global registry.
+    """
+    notifications = getattr(project_config, "notifications", None)
+    if notifications is None:
+        return
+    if registry is None:
+        registry = get_hook_registry()
+
+    if notifications.slack:
+        from dlt_saga.hooks.notifiers.slack import register_slack_notifier
+
+        register_slack_notifier(notifications.slack, registry)
 
 
 def _reset_loaded() -> None:

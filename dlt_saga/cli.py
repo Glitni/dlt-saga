@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from dlt_saga.session import SessionResult
+    from dlt_saga.session import Session, SessionResult
 
 import typer
 
+from dlt_saga.hooks.run_scope import run_notification_scope
 from dlt_saga.pipeline_config import PipelineConfig
 from dlt_saga.utility.auth.providers import AuthenticationError
 from dlt_saga.utility.cli.common import (
@@ -1090,10 +1091,52 @@ def run(
         return
 
     # Normal (local) execution via Session
-    from dlt_saga.session import Session, SessionResult
+    from dlt_saga.session import Session
 
     session = Session(profile=profile, target=target, _profile_target=profile_target)
     select_list = list(select) if select else None
+
+    # `run` is two session calls (ingest, then historize — the phases stay
+    # separate so --full-refresh can be confirmed per phase), but one command to
+    # the user. The scope coalesces them into a single on_run_complete event so
+    # a notifier posts one digest rather than one per phase.
+    with run_notification_scope(
+        "run",
+        select=select_list,
+        target=profile_target.name if profile_target else None,
+        environment=profile_target.environment if profile_target else None,
+    ):
+        _run_phases(
+            session,
+            select_list,
+            workers=workers,
+            force=force,
+            full_refresh=full_refresh,
+            partial_refresh=partial_refresh,
+            historize_from=historize_from,
+            start_value_override=start_value_override,
+            end_value_override=end_value_override,
+            in_cloud_run=in_cloud_run,
+            yes=yes,
+        )
+
+
+def _run_phases(
+    session: "Session",
+    select_list: Optional[List[str]],
+    *,
+    workers: int,
+    force: bool,
+    full_refresh: bool,
+    partial_refresh: bool,
+    historize_from: Optional[str],
+    start_value_override: Optional[str],
+    end_value_override: Optional[str],
+    in_cloud_run: bool,
+    yes: bool,
+) -> None:
+    """Run the ingest and historize phases of `saga run` and report the outcome."""
+    from dlt_saga.session import SessionResult
 
     # Discover once over the full enabled set, then partition by layer — see the
     # orchestrate path for why per-resource-type probing warns spuriously here.
