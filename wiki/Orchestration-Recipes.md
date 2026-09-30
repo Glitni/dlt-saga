@@ -393,7 +393,7 @@ The orchestrator's `--workers` is forwarded to each Cloud Run task as
 - **One `Session` per process is enough** — `Session.__init__` validates credentials and applies dlt defaults. For Dagster, share a single `Session` across asset definitions; for Airflow `PythonOperator`, recreate per-task (each task runs in its own process anyway).
 - **Selectors still work**: any selector that works on the CLI (`tag:daily`, `group:google_sheets`, `*sales*`) is valid as a list element passed to `select=[...]`. Use this to keep DAGs/repos focused.
 - **Failures**: every recipe re-raises on `result.has_failures` so the orchestrator marks the task failed. If you'd rather log and continue (e.g. for low-priority pipelines), inspect `result.failures` and decide per-pipeline.
-- **Hooks still fire**: lifecycle hooks (`ON_PIPELINE_START`, `ON_PIPELINE_COMPLETE`, `ON_PIPELINE_ERROR`) run inside `Session.ingest` / `Session.historize` regardless of who's calling — your alerting and reporting hooks keep working unchanged.
+- **Hooks still fire — when you call `Session`**: every lifecycle hook (`ON_PIPELINE_START`, `ON_PIPELINE_COMPLETE`, `ON_PIPELINE_ERROR`, `ON_RUN_COMPLETE`) fires from `Session.ingest` / `Session.historize`, so the recipes on this page keep your alerting and reporting hooks working unchanged. **saga's own `--orchestrate` path is the exception**: its remote workers run via `run_worker_mode`, which executes pipelines directly rather than through `Session`, so no hooks fire there — including the built-in [Slack notifier](Configuration#slack-notifications). Tracked in [#495](https://github.com/Glitni/dlt-saga/issues/495).
 
 ---
 

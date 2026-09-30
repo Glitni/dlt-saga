@@ -767,3 +767,122 @@ class TestNativeLoadChunkCrossCloud:
         _, kwargs = dest.create_external_table.call_args
         assert kwargs["location"] is None
         assert kwargs["connection_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# native_load_count_rows — min_rows pre-count
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNativeLoadCountRowsBQ:
+    """Counting must read what the load would read, and write nothing."""
+
+    def _dest_returning(self, count):
+        dest = _make_dest()
+        dest.list_table_columns.return_value = [("col1", "STRING")]
+        dest._render_native_load_where.return_value = ""
+        row = MagicMock()
+        row.cnt = count
+        dest.execute_sql.return_value = [row]
+        return dest
+
+    def test_returns_the_counted_rows(self):
+        dest = self._dest_returning(4321)
+
+        result = BigQueryDestination.native_load_count_rows(dest, _make_spec())
+
+        assert result == 4321
+
+    def test_counts_over_an_external_table_then_drops_it(self):
+        dest = self._dest_returning(1)
+
+        BigQueryDestination.native_load_count_rows(dest, _make_spec())
+
+        dest.create_external_table.assert_called_once()
+        assert dest.create_external_table.call_args.kwargs["source_uris"] == [
+            "gs://bucket/prefix/file1.parquet"
+        ]
+        dest.drop_table.assert_called_once()
+
+    def test_writes_nothing_to_the_target(self):
+        """The whole point — a count that materialised rows would be the very
+        write the guard exists to prevent.
+        """
+        dest = self._dest_returning(1)
+
+        BigQueryDestination.native_load_count_rows(dest, _make_spec())
+
+        dest.execute_sql_with_job.assert_not_called()
+        sql = dest.execute_sql.call_args[0][0]
+        assert sql.upper().startswith("SELECT COUNT(*)")
+
+    def test_external_table_is_dropped_even_when_the_count_fails(self):
+        dest = self._dest_returning(1)
+        dest.execute_sql.side_effect = RuntimeError("query failed")
+
+        with pytest.raises(RuntimeError):
+            BigQueryDestination.native_load_count_rows(dest, _make_spec())
+
+        dest.drop_table.assert_called_once()
+
+    def test_applies_the_load_filters(self):
+        dest = self._dest_returning(1)
+        dest._render_native_load_where.return_value = "`region` = 'eu'"
+
+        BigQueryDestination.native_load_count_rows(dest, _make_spec())
+
+        sql = dest.execute_sql.call_args[0][0]
+        assert "WHERE `region` = 'eu'" in sql
+
+    def test_empty_result_counts_as_zero(self):
+        dest = self._dest_returning(1)
+        dest.execute_sql.return_value = []
+
+        assert BigQueryDestination.native_load_count_rows(dest, _make_spec()) == 0
+
+    def test_cross_cloud_counts_in_the_omni_region(self):
+        dest = self._dest_returning(7)
+        dest._resolve_connection_id.return_value = "projects/p/connections/c"
+        spec = _make_spec(
+            source_uris=["s3://bucket/prefix/file1.parquet"],
+            omni_location="aws-eu-west-1",
+            source_connection="aws-eu-west-1.my-conn",
+        )
+
+        BigQueryDestination.native_load_count_rows(dest, spec)
+
+        dest._ensure_dataset.assert_called_once_with("ds_staging", "aws-eu-west-1")
+        assert (
+            dest.create_external_table.call_args.kwargs["location"] == "aws-eu-west-1"
+        )
+        assert dest.execute_sql.call_args.kwargs["location"] == "aws-eu-west-1"
+
+    def test_count_table_is_named_so_the_orphan_sweeper_reclaims_it(self):
+        """The pipeline sweeps `{table}__ext_%` in the staging dataset. The
+        finally above drops the count table normally, but a SIGKILL mid-count
+        skips it — a differently-prefixed name would linger forever.
+        """
+        dest = self._dest_returning(1)
+
+        BigQueryDestination.native_load_count_rows(dest, _make_spec())
+
+        created = dest.create_external_table.call_args.kwargs["name"]
+        assert created.startswith("tbl__ext_")
+
+    def test_hint_driven_columns_are_patched_as_the_load_patches_them(self):
+        """The load resolves its WHERE against the patched columns; the count
+        must resolve against the same ones, not merely equivalent ones.
+        """
+        dest = self._dest_returning(1)
+        dest._patch_ext_for_hints.return_value = [("col1", "STRING")]
+        spec = _make_spec(column_hints={"col1": "bigint"})
+
+        BigQueryDestination.native_load_count_rows(dest, spec)
+
+        dest._patch_ext_for_hints.assert_called_once()
+        # The WHERE is rendered from the patched columns, not the raw listing.
+        assert dest._render_native_load_where.call_args[0][1] == [("col1", "STRING")]
+
+    def test_precount_is_advertised_as_supported(self):
+        assert BigQueryDestination.supports_native_load_precount(_make_dest()) is True

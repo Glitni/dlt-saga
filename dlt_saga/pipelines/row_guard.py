@@ -84,6 +84,25 @@ def resolve_guarded_row_count(
     )
 
 
+def _pending_packages(pipeline: Any) -> set:
+    """Return the ids of load packages already pending for *pipeline*.
+
+    Captured before extraction so the guard can tell a package left by an
+    earlier crashed run apart from the one it is about to reject — dlt drops
+    them together, which is worth naming rather than doing silently.
+
+    Best-effort: an introspection failure yields an empty set, which only
+    costs the warning, never correctness.
+    """
+    try:
+        return set(pipeline.list_normalized_load_packages()) | set(
+            pipeline.list_extracted_load_packages()
+        )
+    except Exception:  # pragma: no cover - defensive; dlt API shape only
+        logger.debug("Could not list pending load packages", exc_info=True)
+        return set()
+
+
 @dataclass
 class RowGuard:
     """Row-count threshold enforced between dlt's normalize and load steps.
@@ -101,6 +120,9 @@ class RowGuard:
     table_name: Optional[str] = None
     pipeline_name: Optional[str] = None
     write_disposition: Optional[str] = None
+    # Set when the rejected package could not be deleted, so the raised error
+    # can tell the operator the next run would otherwise load it.
+    _drop_failed: bool = False
 
     def run(self, pipeline: Any, data: Any) -> Any:
         """Run *pipeline* over *data*, enforcing the threshold before loading.
@@ -121,6 +143,7 @@ class RowGuard:
         Raises:
             MinRowsNotMetError: If the load carries fewer than ``min_rows`` rows.
         """
+        preexisting = _pending_packages(pipeline)
         pipeline.extract(data)
         normalize_info = pipeline.normalize()
         row_count = resolve_guarded_row_count(
@@ -128,7 +151,7 @@ class RowGuard:
         )
 
         if row_count < self.min_rows:
-            pipeline.drop_pending_packages()
+            self._discard_pending(pipeline, preexisting)
             raise MinRowsNotMetError(self._message(row_count))
 
         logger.debug(
@@ -139,20 +162,77 @@ class RowGuard:
         )
         return pipeline.load()
 
+    def _discard_pending(self, pipeline: Any, preexisting: set) -> None:
+        """Drop the rejected load package so no later run can pick it up.
+
+        Without this, dlt finds the normalized package on the next run and
+        loads it then — turning a refused load into the same damage a day
+        later, with nothing connecting the two.
+
+        dlt's ``drop_pending_packages`` is all-or-nothing, so a package left
+        behind by an *earlier* crashed run is discarded alongside this one.
+        That is still the better of the two outcomes (the alternative is the
+        delayed rewrite above), but it is real data loss on an ``append``, so
+        it is named rather than swallowed.
+
+        Args:
+            pipeline: dlt Pipeline instance.
+            preexisting: Package ids pending *before* this run extracted, from
+                :func:`_pending_packages`.
+        """
+        if preexisting:
+            logger.warning(
+                "Discarding %d pending load package(s) from an earlier run "
+                "alongside the rejected one — dlt drops them together: %s",
+                len(preexisting),
+                ", ".join(sorted(preexisting)),
+            )
+        # dlt 1.30 renamed drop_pending_packages -> abort_packages (the old name
+        # warns until 2.0). Prefer the new one when present so the guard doesn't
+        # emit a DeprecationWarning on every rejected load, while still working
+        # on the versions that only have the old name.
+        discard = getattr(pipeline, "abort_packages", None) or getattr(
+            pipeline, "drop_pending_packages"
+        )
+        try:
+            discard()
+        except Exception as exc:
+            # The package is still on disk and the next run will load it, which
+            # is exactly the damage this guard exists to prevent. Say so loudly;
+            # the raised error carries the same warning for the run summary.
+            logger.error(
+                "Could not drop the rejected load package for %s: %s. The next "
+                "run will load it unless it is cleared manually "
+                "(`saga destroy` or deleting the pipeline working directory).",
+                self.pipeline_name or self.table_name,
+                exc,
+            )
+            self._drop_failed = True
+
     def _message(self, row_count: int) -> str:
         """Build the user-facing abort message."""
         target = self.pipeline_name or self.table_name or "pipeline"
+        # "unchanged" rather than "still holds the previous run's data": on a
+        # first run there is no previous data, and on a re-run after an earlier
+        # failure the table may not exist at all. Unchanged is true in every case
+        # and still says the thing that matters — the guard destroyed nothing.
         detail = (
             f"{target} extracted {row_count} row(s), below the configured "
             f"min_rows={self.min_rows}. The load was abandoned before writing, "
-            f"so {self.table_name or 'the target table'} still holds the "
-            "previous run's data."
+            f"so {self.table_name or 'the target table'} is unchanged."
         )
         if row_count == 0:
             detail += (
                 " A zero-row extraction usually means the source moved or a "
                 "glob stopped matching — check the source location before "
                 "re-running."
+            )
+        if self._drop_failed:
+            detail += (
+                " WARNING: the rejected load package could not be deleted, so "
+                "the next run of this pipeline will load it and apply the very "
+                "write this guard refused. Clear the pipeline working directory "
+                "before re-running."
             )
         return detail
 

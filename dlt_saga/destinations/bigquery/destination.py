@@ -1474,6 +1474,85 @@ class BigQueryDestination(BigQueryBaseDestination):
             except Exception as exc:
                 logger.warning("Could not drop external table %s: %s", ext_name, exc)
 
+    def supports_native_load_precount(self) -> bool:
+        return True
+
+    def native_load_count_rows(self, spec: "Any") -> int:
+        """Count rows across ``spec.source_uris`` without writing to the target.
+
+        Builds the same transient external table the load would, then runs
+        ``COUNT(*)`` over it with the load's own WHERE clause. ``COUNT(*)``
+        selects no columns, so on Parquet this reads footer metadata and is
+        near-free; on CSV/JSONL BigQuery still parses the files, making it a
+        genuine second pass over the data.
+
+        A filtered count reads the filter columns, so the saving over a full
+        scan shrinks as filters are added — still cheaper than materializing
+        the rows into a table.
+        """
+        import uuid
+
+        _BQ_FORMAT_MAP = {
+            "parquet": "PARQUET",
+            "csv": "CSV",
+            "jsonl": "NEWLINE_DELIMITED_JSON",
+        }
+        bq_format = _BQ_FORMAT_MAP.get(spec.file_type, "PARQUET")
+
+        omni_location = getattr(spec, "omni_location", None)
+        query_location = omni_location or None
+        connection_id = (
+            self._resolve_connection_id(spec.source_connection, omni_location)
+            if getattr(spec, "source_connection", None)
+            else None
+        )
+        if omni_location:
+            self._ensure_dataset(spec.staging_dataset, omni_location)
+
+        # Named under the same ``__ext_`` prefix the load path uses so the
+        # pipeline's orphan sweeper reclaims it too: the finally below drops it
+        # normally, but a SIGKILL or OOM-kill mid-count skips the finally and a
+        # differently-prefixed table would linger forever.
+        ext_name = f"{spec.target_table}__ext_cnt_{uuid.uuid4().hex[:8]}"
+        try:
+            self.create_external_table(
+                dataset=spec.staging_dataset,
+                name=ext_name,
+                source_uris=spec.source_uris,
+                source_format=bq_format,
+                autodetect=spec.autodetect_schema,
+                format_options=spec.format_options or None,
+                connection_id=connection_id,
+                location=query_location,
+                schema=getattr(spec, "external_schema", None),
+            )
+            ext_id = self.get_full_table_id(spec.staging_dataset, ext_name)
+            ext_cols = self.list_table_columns(
+                spec.staging_dataset, ext_name, location=query_location
+            )
+            # Patch hint-driven columns exactly as the load does. It changes
+            # column types, never row counts, but the load resolves its WHERE
+            # against the patched columns — running the same step here keeps the
+            # count's filter semantics identical to the load's rather than
+            # merely equivalent.
+            ext_cols = self._patch_ext_for_hints(spec, ext_name, ext_cols)
+            where_sql = self._render_native_load_where(spec, ext_cols)
+
+            sql = f"SELECT COUNT(*) AS cnt FROM {ext_id}"
+            if where_sql:
+                sql = f"{sql} WHERE {where_sql}"
+            rows = list(
+                self.execute_sql(sql, spec.staging_dataset, location=query_location)
+            )
+            return int(rows[0].cnt) if rows else 0
+        finally:
+            try:
+                self.drop_table(spec.staging_dataset, ext_name)
+            except Exception as exc:
+                logger.warning(
+                    "Could not drop pre-count external table %s: %s", ext_name, exc
+                )
+
     def _native_load_create_target(
         self,
         spec: "Any",
