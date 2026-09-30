@@ -155,6 +155,7 @@ A pattern that cannot reach below `source_uri` also prunes the listing server-si
 | `ignore_unknown_values` | `false` | BigQuery only: ignore extra JSON keys not in schema. |
 | `autodetect_schema` | `true` | Let the destination infer column types from the files. |
 | `include_file_metadata` | `true` | Inject `_dlt_source_file_name` and (when `filename_date_regex` is set) `_dlt_source_file_date`. |
+| `min_rows` | — | Minimum rows the source must carry. Counted before anything is written; a short source aborts the run with the target untouched. BigQuery only — see [Guarding against short loads](#guarding-against-short-loads-min_rows). |
 | `staging_dataset` | `<target_dataset>_staging` (`_omni_staging` for `s3://`) | BigQuery only: dataset for transient external tables. For `s3://` it is created in the Omni region. |
 
 ### Amazon S3 (BigQuery Omni)
@@ -280,6 +281,44 @@ write_disposition: replace   # CREATE OR REPLACE TABLE every run
 BigQuery emits `CREATE OR REPLACE TABLE … AS SELECT …`. Databricks managed tables use `CREATE OR REPLACE TABLE`. Databricks external tables (`target_location` set) use `TRUNCATE TABLE` on existing tables (clears data, keeps files and Delta time travel) or `CREATE TABLE IF NOT EXISTS` on first run. Physical files at LOCATION are never deleted on a routine `replace` run — only `--full-refresh` does that.
 
 `replace` + `incremental: true` is rejected at config validation — replacing the table each run while tracking which files were loaded would silently lose data on re-runs.
+
+---
+
+## Guarding against short loads (`min_rows`)
+
+A `replace` run rewrites the target from whatever the discovery matched. A zero-match run is already safe — it returns before touching the target — but a run that matches *some* of the expected files still rewrites the table with less data than it held, and reports success. A moved prefix, a partially-completed upstream export, or a `file_pattern` that stopped matching all look the same.
+
+`min_rows` sets a floor on the source, checked before anything is written:
+
+```yaml
+adapter: dlt_saga.native_load
+source_uri: gs://my-bucket/snapshots/
+file_type: parquet
+write_disposition: replace
+min_rows: 1000000        # a daily snapshot is never this small
+```
+
+If the source falls short, nothing is written, the target keeps the previous run's data, and the run fails:
+
+```
+native_load__my_bucket__orders matched 3 file(s) carrying 412 row(s), below the
+configured min_rows=1000000. Nothing was written, so dlt_prod.orders is
+unchanged. Check the source location and file_pattern before re-running.
+```
+
+**How it counts.** Because this adapter bypasses dlt, there is no staged load to inspect — instead the source itself is counted. On BigQuery that is a transient external table over the discovered files plus one `COUNT(*)`, carrying the same [row filters](#row-filters) the load would apply, so the number is what the target actually ends up holding rather than merely what the files contain.
+
+**All counting happens before any loading.** Large loads are [split into chunks](#load-behaviour), where chunk 1 issues the `CREATE OR REPLACE TABLE` and the rest are appends — so a check interleaved with loading would only notice on chunk 2, after the target had already been rewritten. The count is chunked the same way (a single external table over every discovered URI would exceed the per-statement source-URI limit that `load_batch_size` exists to respect), but every chunk is counted before the first is loaded.
+
+**Cost.** The count runs only when `min_rows` is set; an unguarded pipeline pays nothing. `COUNT(*)` selects no columns, so on Parquet it reads footer metadata and is close to free. On CSV and JSONL, BigQuery parses the files to count them, making it a genuine second pass over the data — worth weighing against the size of the source. Adding row filters means the count reads those columns too.
+
+Counting stops as soon as the threshold is cleared, since a floor needs no exact total: a healthy run over a large source usually pays for one chunk, and only a run that is genuinely short is counted in full. The `Row guard passed: >= N row(s)` line reports a lower bound for that reason, not the source's row count.
+
+**Destination support.** BigQuery only. Databricks `COPY INTO` reads files directly with no external table to count over, so it needs a different mechanism ([#494](https://github.com/Glitni/dlt-saga/issues/494)). On a destination that cannot count before writing, a configured `min_rows` fails the run with a clear message rather than being silently ignored — a pipeline whose config claims a guard it does not have is worse than one with no guard at all.
+
+**`append` accepts it too**, where it reads as "rows in this load" — a data-quality assertion rather than a safety net, since an append that falls short leaves what is already there intact. It is `replace` that needs the guard.
+
+**`--full-refresh` is not guarded.** It drops the target during init, before discovery has anything to count, so the data the guard would protect is already gone. The run warns when both are set. `--full-refresh` is an explicit, confirmed rebuild; the guard is for unattended runs.
 
 ---
 

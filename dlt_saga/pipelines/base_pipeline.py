@@ -560,6 +560,58 @@ class BasePipeline:
                 resource.add_limit(limit)
         return resource
 
+    def _destination_accepts_guard(self) -> bool:
+        """Return True if this destination's ``run_pipeline`` takes a ``guard``.
+
+        The plugin contract documented for external destinations is
+        ``run_pipeline(pipeline, data)`` (see the Plugin Development guide), so
+        a destination written against it predates the guard parameter. Passing
+        ``guard=`` to one unconditionally would break every run on that
+        destination, guarded or not — hence the check.
+
+        Defaults to True when the callable can't be introspected (C extensions,
+        exotic wrappers): the built-in destinations all accept it, and a
+        false negative would needlessly refuse a working guard.
+        """
+        import inspect
+
+        try:
+            params = inspect.signature(self.destination.run_pipeline).parameters
+        except (TypeError, ValueError):
+            return True
+        return "guard" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+
+    def _run_with_guard(self, processed_data: Any) -> Any:
+        """Run the pipeline through the destination, honoring ``min_rows``.
+
+        ``guard`` is passed only when one is configured, so destinations
+        implementing the older two-argument ``run_pipeline`` signature keep
+        working untouched.
+
+        Raises:
+            ValueError: If ``min_rows`` is set but this destination's
+                ``run_pipeline`` cannot accept a guard — silently dropping it
+                would leave the pipeline unguarded while its config says
+                otherwise.
+        """
+        guard = self._build_row_guard()
+        if guard is None:
+            return self.destination.run_pipeline(self.pipeline, processed_data)
+
+        if not self._destination_accepts_guard():
+            raise ValueError(
+                f"min_rows is set on {self.pipeline_name}, but destination "
+                f"{type(self.destination).__name__} implements the older "
+                "run_pipeline(pipeline, data) signature and cannot enforce it. "
+                "Add a `guard=None` parameter to that override and delegate to "
+                "`self.execute_dlt_run(pipeline, data, guard)`, or remove "
+                "min_rows from this pipeline."
+            )
+
+        return self.destination.run_pipeline(self.pipeline, processed_data, guard=guard)
+
     def _build_row_guard(self) -> Any:
         """Build the pre-load row-count guard for this pipeline, if configured.
 
@@ -608,9 +660,7 @@ class BasePipeline:
         adapted_resource = self.destination.apply_hints(resource, **hints)
         processed_data = self.target_writer.apply_hints(adapted_resource)
 
-        load_info = self.destination.run_pipeline(
-            self.pipeline, processed_data, guard=self._build_row_guard()
-        ).asdict()
+        load_info = self._run_with_guard(processed_data).asdict()
 
         self._capture_trace_timings(load_info)
         self._warn_on_empty_replace(load_info)

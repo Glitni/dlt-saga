@@ -513,7 +513,7 @@ warehouse. Every destination extends `Destination`.
 |--------|---------|-------------|
 | `get_client_pool()` | `None` | Return a client pool for connection reuse |
 | `prepare_for_execution(pipeline_configs)` | no-op | One-time setup before parallel execution (e.g., pre-create schemas) |
-| `run_pipeline(pipeline, data)` | `pipeline.run(data)` | Wrap pipeline execution (e.g., ensure dataset exists) |
+| `run_pipeline(pipeline, data, guard=None)` | `self.execute_dlt_run(pipeline, data, guard)` | Wrap pipeline execution (e.g., ensure dataset exists). Delegate the run itself to `execute_dlt_run` so the [`min_rows`](Configuration#guarding-against-short-loads-min_rows) guard keeps working. The older two-argument signature still runs normally; only a pipeline that sets `min_rows` needs the parameter. |
 | `save_load_info(dataset, records, pipeline)` | dlt resource append | Direct insert for performance |
 | `get_last_load_timestamp(dataset, pipeline, table)` | raises | Query last successful load time |
 | `get_max_column_value(table_id, column)` | raises | Query max column value for incremental loading |

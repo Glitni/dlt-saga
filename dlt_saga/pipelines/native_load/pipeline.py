@@ -10,7 +10,7 @@ import logging
 import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from dlt_saga.pipeline_config.base_config import resolve_write_disposition
 from dlt_saga.pipelines.base_pipeline import BasePipeline
@@ -20,6 +20,9 @@ from dlt_saga.pipelines.native_load.storage import get_storage_client
 from dlt_saga.pipelines.native_load.storage.matching import PatternMatcher
 from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
 from dlt_saga.utility.naming import normalize_identifier
+
+if TYPE_CHECKING:
+    from dlt_saga.destinations.base import NativeLoadSpec
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +144,7 @@ class NativeLoadPipeline(BasePipeline):
         self._column_hints: dict = self._build_column_hints()
         self._external_schema: Optional[list] = self._build_external_schema()
         self._filters: list = self._parse_filters()
+        self._min_rows: Optional[int] = self._resolve_min_rows()
 
         # Same target announcement BasePipeline.__init__ emits — this adapter
         # bypasses that constructor, so log it here or the run has no line
@@ -220,6 +224,8 @@ class NativeLoadPipeline(BasePipeline):
                 len(new_files_by_cursor),
             )
 
+            self._enforce_min_rows(new_files_by_cursor)
+
             first_run = not self._target_exists
 
             with self._phase("load"):
@@ -230,22 +236,26 @@ class NativeLoadPipeline(BasePipeline):
                     self._write_load_info(total_rows, first_run)
                 self._sync_target_table_options()
 
+            # Built from the recorded phases rather than a fixed format, so the
+            # breakdown always sums to the reported total — an optional phase
+            # (e.g. the min_rows guard) would otherwise be counted but unnamed.
             t = self._phase_timings
             self.logger.info(
-                "Loaded %d row(s) from %d file(s) in %.1fs total "
-                "(init: %.1fs, discover: %.1fs, load: %.1fs, finalize: %.1fs)",
+                "Loaded %d row(s) from %d file(s) in %.1fs total (%s)",
                 total_rows,
                 total_files,
                 sum(t.values()),
-                t.get("init", 0),
-                t.get("discover", 0),
-                t.get("load", 0),
-                t.get("finalize", 0),
+                ", ".join(f"{name}: {dur:.1f}s" for name, dur in t.items()),
             )
             return [self._build_load_info_entry(loaded=total_rows)]
 
         except Exception as exc:
-            if not isinstance(exc, ValueError):
+            from dlt_saga.pipelines.row_guard import MinRowsNotMetError
+
+            # A tripped row guard is an expected outcome with a self-explanatory
+            # message; it is still a real run failure, just not one a traceback
+            # helps with. Matches the dlt-based path in BasePipeline.run.
+            if not isinstance(exc, (ValueError, MinRowsNotMetError)):
                 self.logger.error("Native load failed: %s", exc, exc_info=True)
             raise
 
@@ -708,26 +718,144 @@ class NativeLoadPipeline(BasePipeline):
             chunks.append(current)
         return chunks
 
-    def _load_chunk(self, chunk: list, chunk_num: int, total_chunks: int) -> int:
+    def _resolve_min_rows(self) -> Optional[int]:
+        """Read and validate ``min_rows`` from the pipeline config.
+
+        This adapter bypasses ``BasePipeline.__init__`` and so never builds a
+        :class:`~dlt_saga.pipelines.target.config.TargetConfig`; the key is read
+        straight off the config dict. Validation mirrors ``TargetConfig``'s so
+        the same YAML is accepted or rejected identically on both paths.
+
+        Returns:
+            The configured threshold, or ``None`` when unset.
+
+        Raises:
+            ValueError: If the value is not a positive integer.
+        """
+        value = self.config_dict.get("min_rows")
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"min_rows must be a positive integer, got {value!r}")
+        if value < 1:
+            raise ValueError(
+                f"min_rows must be >= 1, got {value}. Omit the key to disable "
+                "the guard."
+            )
+        if self.context.full_refresh:
+            # --full-refresh drops the target during init, before discovery has
+            # anything to count — so by the time the guard could run, the data
+            # it would protect is already gone. It stays a warning rather than a
+            # hard error because --full-refresh is an explicit, confirmed
+            # "rebuild from scratch"; the guard exists for unattended runs.
+            self.logger.warning(
+                "min_rows=%d is not enforced under --full-refresh: the target is "
+                "dropped before the row count can be taken.",
+                value,
+            )
+        return value
+
+    def _enforce_min_rows(self, files_by_cursor: dict) -> None:
+        """Abort before loading when the source carries fewer rows than ``min_rows``.
+
+        Counts the **whole** discovered file set in one pass rather than per
+        chunk. Chunking is an implementation detail of how the load is split:
+        with ``replace``, chunk 1 issues the ``CREATE OR REPLACE TABLE`` and the
+        rest are ``INSERT``s, so a per-chunk check would compare chunk 1 against
+        a threshold meant for the entire run and, worse, would only notice on
+        chunk 2 — after the target had already been rewritten.
+
+        The count runs only when ``min_rows`` is configured, so an unguarded
+        pipeline pays nothing. See
+        :class:`~dlt_saga.pipelines.row_guard.MinRowsNotMetError` for why this
+        is not a ``ValueError``.
+
+        Args:
+            files_by_cursor: Discovered files, keyed by cursor value.
+
+        Raises:
+            MinRowsNotMetError: If the source carries too few rows.
+            ValueError: If ``min_rows`` is set but this destination cannot
+                pre-count — silently skipping would leave the pipeline
+                unguarded while its config says otherwise.
+        """
+        min_rows = self._min_rows
+        if not min_rows:
+            return
+
+        if not self.destination.supports_native_load_precount():
+            raise ValueError(
+                f"min_rows is set on {self.pipeline_name}, but the "
+                f"{self.context.get_destination_type()} destination cannot count "
+                "native_load source rows before writing, so the guard cannot be "
+                "honored. Remove min_rows, or load this source through a "
+                "dlt-based adapter where the guard is supported."
+            )
+
+        flat = [(f, cv) for cv, files in files_by_cursor.items() for f in files]
+        # Counted over the same chunks the load uses: a single external table
+        # over every discovered URI would exceed the per-statement source-URI
+        # limit that load_batch_size exists to respect, and this adapter is
+        # built for file counts well past it. Every chunk is counted before any
+        # chunk is loaded, which is the property that matters — chunking the
+        # count does not weaken it.
+        chunks = self._build_chunks(flat)
+        row_count = 0
+        with self._phase("guard"):
+            for chunk_num, chunk in enumerate(chunks, start=1):
+                uris = [f.full_uri for f, _ in chunk]
+                row_count += self.destination.native_load_count_rows(
+                    self._build_spec(
+                        uris,
+                        f"min_rows pre-count {chunk_num}/{len(chunks)} "
+                        f"({len(uris)} file(s))",
+                    )
+                )
+                # The threshold is a floor, so an exact total is not needed once
+                # it is cleared — stop early rather than scanning the remaining
+                # chunks. A healthy run over a large source usually pays for one
+                # chunk; only a run that is actually short pays for all of them.
+                if row_count >= min_rows:
+                    break
+
+        uris_total = len(flat)
+        if row_count < min_rows:
+            from dlt_saga.pipelines.row_guard import MinRowsNotMetError
+
+            raise MinRowsNotMetError(
+                f"{self.pipeline_name} matched {uris_total} file(s) carrying "
+                f"{row_count} row(s), below the configured min_rows={min_rows}. "
+                f"Nothing was written, so {self._schema}.{self.table_name} is "
+                "unchanged. Check the source location and file_pattern before "
+                "re-running."
+            )
+
+        # ">=" rather than an exact total: counting stops as soon as the floor is
+        # cleared, so the number reported is a lower bound, not the row count.
+        self.logger.info(
+            "Row guard passed: >= %d row(s) across %d file(s) (min_rows=%d)",
+            row_count,
+            uris_total,
+            min_rows,
+        )
+
+    def _build_spec(self, uris: list, chunk_label: str) -> "NativeLoadSpec":
+        """Build the NativeLoadSpec for a set of source URIs.
+
+        Shared by the load path and the ``min_rows`` pre-count so the count is
+        taken over exactly what the load would read, with the same filters — a
+        count built independently would drift from the load it is guarding.
+
+        Args:
+            uris: Full source URIs this spec covers.
+            chunk_label: Human-readable label used in destination logging.
+
+        Returns:
+            A :class:`~dlt_saga.destinations.base.NativeLoadSpec`.
+        """
         from dlt_saga.destinations.base import NativeLoadSpec
 
-        files = [f for f, _ in chunk]
-        uris = [f.full_uri for f in files]
-        rows_for_log = [(f.full_uri, cv, f.generation) for f, cv in chunk]
-
-        if self._incremental:
-            load_ids, started_at = self.state_manager.record_loads_started_bulk(
-                self.pipeline_name, rows_for_log
-            )
-        else:
-            load_ids = [None] * len(files)
-            started_at = None
-
-        chunk_label = self._format_chunk_label(chunk, chunk_num, total_chunks)
-        self.logger.info(chunk_label)
-
-        base_disp = "replace" if self._is_replace else "append"
-        spec = NativeLoadSpec(
+        return NativeLoadSpec(
             target_schema=self._schema,
             target_table=self.table_name,
             source_uris=uris,
@@ -740,7 +868,7 @@ class NativeLoadPipeline(BasePipeline):
             format_options=self._build_format_options(),
             staging_dataset=self._staging_dataset,
             chunk_label=chunk_label,
-            write_disposition=base_disp,
+            write_disposition="replace" if self._is_replace else "append",
             incremental=self._incremental,
             column_hints=self._column_hints,
             target_location=self._target_location,
@@ -759,6 +887,24 @@ class NativeLoadPipeline(BasePipeline):
             # span multiple directories.
             source_uri_root=self.native_config.source_uri,
         )
+
+    def _load_chunk(self, chunk: list, chunk_num: int, total_chunks: int) -> int:
+        files = [f for f, _ in chunk]
+        uris = [f.full_uri for f in files]
+        rows_for_log = [(f.full_uri, cv, f.generation) for f, cv in chunk]
+
+        if self._incremental:
+            load_ids, started_at = self.state_manager.record_loads_started_bulk(
+                self.pipeline_name, rows_for_log
+            )
+        else:
+            load_ids = [None] * len(files)
+            started_at = None
+
+        chunk_label = self._format_chunk_label(chunk, chunk_num, total_chunks)
+        self.logger.info(chunk_label)
+
+        spec = self._build_spec(uris, chunk_label)
 
         try:
             result = self.destination.native_load_chunk(spec)

@@ -903,6 +903,37 @@ class Destination(ABC):
             "Set adapter: dlt_saga.native_load only on bigquery or databricks destinations."
         )
 
+    def supports_native_load_precount(self) -> bool:
+        """Return True if this destination can count source rows before loading.
+
+        Gates the ``min_rows`` guard on the native_load adapter. The guard has
+        to know the row count *before* the load statement runs, because a
+        ``replace`` load rewrites the target in a single
+        ``CREATE OR REPLACE TABLE ... AS SELECT`` — once it has executed there
+        is nothing left to protect.
+        """
+        return False
+
+    def native_load_count_rows(self, spec: "NativeLoadSpec") -> int:
+        """Count the rows the source files would contribute, without loading.
+
+        Reads ``spec.source_uris`` and applies the same row filters the load
+        would, so the number is what the target actually ends up holding after
+        a ``replace`` — not merely what exists in the files.
+
+        Only called when :meth:`supports_native_load_precount` is True.
+
+        Databricks support is tracked in issue #494: ``COPY INTO`` reads the
+        files directly, so it needs ``read_files()`` rather than the external
+        table BigQuery counts over.
+
+        Raises:
+            NotImplementedError: if the destination cannot pre-count.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement native_load_count_rows"
+        )
+
     def native_load_file_name_expr(self) -> str:
         """Return the SQL expression that yields the source file path for each row.
 

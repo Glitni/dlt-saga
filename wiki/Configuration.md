@@ -309,7 +309,7 @@ When the load falls short, the pending load package is dropped, the target table
 
 ```
 shop__orders extracted 0 row(s), below the configured min_rows=1. The load was
-abandoned before writing, so orders still holds the previous run's data. A
+abandoned before writing, so orders is unchanged. A
 zero-row extraction usually means the source moved or a glob stopped matching —
 check the source location before re-running.
 ```
@@ -324,7 +324,7 @@ Because the run fails, whatever already alerts you to failed pipelines (`on_pipe
 - The threshold applies per resource, so a pipeline yielding several resources requires each of them to clear it.
 - Duplicate primary keys in a batch make the count overstate the surviving rows (four rows across two keys leave two open after an scd2 merge), so the guard errs permissive and never trips on a batch that would have been large enough.
 - `append` and the non-scd2 merge strategies accept `min_rows` too, where it simply means "rows in this load". They have no silent-destruction problem, so it is a data-quality assertion there rather than a safety net.
-- [`native_load`](Native-Load) does not use dlt's extract/normalize/load cycle and so does not read `min_rows`. It is already safe from the zero-row case — a run that matches no files returns before touching the target — but a `replace` run over a *partial* file set does rewrite the target with what it found.
+- [`native_load`](Native-Load) supports `min_rows` too, but enforces it differently: it bypasses dlt entirely, so instead of checking a staged load it counts the source files before writing. See [Guarding a native_load](Native-Load#guarding-against-short-loads-min_rows) for the cost and the destination support.
 
 ### Databricks insert API
 
@@ -659,6 +659,8 @@ pipelines:
 Transport settings (`webhook_url`, `notify_on`, `timeout_seconds`) are project-level only — a pipeline chooses who hears about it, not where or whether the notifier posts.
 
 **Routing to several channels** means several webhooks — a webhook is bound to one channel and the notifier takes one. Post to one operational channel and route from there, or write a custom `on_run_complete` hook.
+
+> **Not fired in orchestrated runs.** `--orchestrate` plans work and triggers remote workers; the workers execute pipelines through `run_worker_mode`, which does not go through `Session` — and every lifecycle hook, this notifier included, fires from `Session`. A Cloud Run worker deployment therefore posts nothing. Local runs (`saga ingest`/`historize`/`run`) and the programmatic `Session` API (Airflow, Dagster) both notify normally. Tracked in [#495](https://github.com/Glitni/dlt-saga/issues/495).
 
 **Failure to notify never fails a run.** A Slack outage, a revoked webhook, or a malformed payload is logged as a warning and the run continues; requests are retried on timeouts, connection errors, `429`, and `5xx`, but not on other `4xx` (a bad payload would only fail again). An empty selection still notifies when `notify_on: always`, so a scheduled run whose selector stopped matching does not pass silently.
 

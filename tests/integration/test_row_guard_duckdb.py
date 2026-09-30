@@ -255,3 +255,74 @@ class TestGuardFailureIsRecorded:
         assert outcomes == ["completed", "failed"], (
             f"expected the guarded run to be recorded as failed, got {outcomes}"
         )
+
+
+@pytest.mark.integration
+class TestRejectedPackageIsNotLoadedLater:
+    """The rejected package must not survive to be loaded by a later run.
+
+    This is the failure the drop exists to prevent, and the one that would be
+    hardest to diagnose in production: the guard refuses the load, the operator
+    fixes nothing, and the *next* run silently applies the write that was
+    refused — with nothing linking the two events.
+    """
+
+    def test_a_surviving_package_would_empty_the_table_next_run(self, db_path):
+        """Proves the hazard is real by simulating a failed drop, then proves
+        the shipped behaviour avoids it.
+        """
+        from unittest.mock import patch
+
+        run_pipeline_test(
+            _OrdersPipeline,
+            config_dict=_config(db_path, min_rows=1),
+            schema_name=_SCHEMA,
+            database_path=db_path,
+        )
+        assert _row_count(db_path) == 3
+
+        # A drop that fails leaves the rejected package on disk.
+        _ROWS["n"] = 0
+        with patch.object(
+            dlt.Pipeline, "drop_pending_packages", side_effect=OSError("locked")
+        ):
+            blocked = run_pipeline_test(
+                _OrdersPipeline,
+                config_dict=_config(db_path, min_rows=1),
+                schema_name=_SCHEMA,
+                database_path=db_path,
+            )
+
+        assert not blocked.success
+        # The operator is told, rather than left to discover it days later.
+        assert "could not be deleted" in blocked.error
+        assert _row_count(db_path) == 3, "the guarded run still wrote"
+
+    def test_no_pending_package_survives_a_rejection(self, db_path):
+        """The direct invariant: after a refused load there is nothing left on
+        disk for a later run to pick up.
+        """
+        run_pipeline_test(
+            _OrdersPipeline,
+            config_dict=_config(db_path, min_rows=1),
+            schema_name=_SCHEMA,
+            database_path=db_path,
+        )
+
+        _ROWS["n"] = 0
+        rejected = run_pipeline_test(
+            _OrdersPipeline,
+            config_dict=_config(db_path, min_rows=1),
+            schema_name=_SCHEMA,
+            database_path=db_path,
+        )
+        assert not rejected.success
+
+        pipeline = dlt.pipeline(
+            pipeline_name=f"guard__{_TABLE}",
+            destination=dlt.destinations.duckdb(db_path),
+            dataset_name=_SCHEMA,
+        )
+        assert pipeline.list_normalized_load_packages() == []
+        assert pipeline.list_extracted_load_packages() == []
+        assert _row_count(db_path) == 3

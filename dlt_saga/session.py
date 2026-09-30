@@ -1131,15 +1131,12 @@ class Session:
             # happened and what to check — a traceback would only add noise.
             expected_failure = isinstance(e, MinRowsNotMetError)
             # Failure display is single-sourced through the CLI end-of-run summary
-            # (_exit_if_failures), which lists every failure on stderr. Genuine
-            # failures also get one inline traceback here for real-time debugging;
-            # config errors are clean developer feedback, so their display is left
-            # to the summary alone (logging them here too would print them twice).
-            if expected_failure:
-                logger.error(
-                    "%sPipeline %s failed: %s", prefix, config.pipeline_name, e
-                )
-            elif not config_error:
+            # (_exit_if_failures), which lists every failure on stderr. The inline
+            # log here exists for the *traceback* on a genuine failure; anything
+            # whose message stands on its own is left to the summary alone, or the
+            # same sentence prints twice. That covers config errors (clean
+            # developer feedback) and expected failures like a tripped row guard.
+            if not config_error and not expected_failure:
                 logger.error(
                     "%sPipeline %s failed: %s",
                     prefix,

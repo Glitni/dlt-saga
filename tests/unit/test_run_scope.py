@@ -135,3 +135,43 @@ class TestScopeIsBestEffort:
         # Must not raise: a broken notifier cannot fail the command.
         with run_notification_scope("run"):
             contribute([_Result("a")])
+
+
+@pytest.mark.unit
+class TestHookReach:
+    """Where hooks actually fire, pinned so the documented caveat stays true.
+
+    Every `registry.fire(...)` lives in `session.py`, and saga's own worker mode
+    executes pipelines without going through `Session` — so an orchestrated
+    deployment fires nothing. That is a real gap (#495); this test exists so it
+    cannot change silently in either direction, and so the wiki caveat is
+    checkable rather than folklore.
+    """
+
+    def _fire_sites(self, module_name):
+        import importlib
+        import inspect
+
+        source = inspect.getsource(importlib.import_module(module_name))
+        return source.count("registry.fire(")
+
+    def test_session_is_the_only_module_that_fires_hooks(self):
+        assert self._fire_sites("dlt_saga.session") > 0
+
+    def test_worker_mode_fires_no_hooks(self):
+        """If this starts failing, #495 was fixed — update the wiki caveats in
+        Configuration.md and Orchestration-Recipes.md.
+        """
+        assert self._fire_sites("dlt_saga.utility.cli.run_modes") == 0
+
+    def test_worker_execution_bypasses_session(self):
+        """The mechanism behind the gap: worker mode calls execute_pipeline
+        directly rather than Session.ingest.
+        """
+        import inspect
+
+        from dlt_saga.utility.cli import run_modes
+
+        source = inspect.getsource(run_modes._run_pipeline_safe)
+        assert "execute_pipeline" in source
+        assert "Session" not in source
