@@ -320,6 +320,25 @@ write_disposition: "append"
 tags: ["hourly"]
 ```
 
+### Change detection
+
+The `filesystem`, `google_sheets` and `sharepoint` adapters skip extraction when the source is unchanged since the last load that wrote rows — no modified files, an untouched spreadsheet, an untouched SharePoint file. This is what keeps a frequently-scheduled pipeline over a rarely-changing source cheap.
+
+The skip is only sound while an unchanged source implies a correct target, so it is confirmed against the target before being taken: a target that is **empty or missing** extracts anyway, logging
+
+```
+Extracting orders despite no source changes - the target is empty or missing
+```
+
+Without that confirmation an emptied target stayed empty indefinitely — every run saw an unchanged source, skipped, and reported success, and only `--force` broke the cycle. `min_rows` now prevents the most common way a target gets emptied ([Guarding against short loads](Configuration#guarding-against-short-loads-min_rows)), but a target can diverge from its watermark by other routes: a table dropped by hand, a `--full-refresh` that failed after the drop, an external truncate.
+
+Two things worth knowing:
+
+- **The check costs one metadata read.** On BigQuery it reads the table's row count from metadata with no query job; elsewhere it is a `SELECT 1 … LIMIT 1` probe. It runs only when change detection has already decided to skip.
+- **An externally *dropped* table still needs `--full-refresh`.** The pipeline stops skipping, but dlt's own schema state still believes the table exists and the load fails against it. That is a loud failure rather than a silent one — which is the improvement — but recovery is not automatic.
+
+`--force` bypasses change detection entirely and remains available.
+
 ### Snapshot date extraction
 
 For snapshot-style pipelines where file paths encode the snapshot date (e.g. `snapshots/2024-03-15.parquet`):

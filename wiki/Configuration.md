@@ -314,6 +314,8 @@ zero-row extraction usually means the source moved or a glob stopped matching �
 check the source location before re-running.
 ```
 
+A target emptied *before* this guard existed has a second problem: change detection would keep skipping it, because the source hadn't changed. That is now confirmed against the target's state — see [Change detection](Pipeline-Types#change-detection).
+
 Because the run fails, whatever already alerts you to failed pipelines (`on_pipeline_error` [hooks](#hooks), your orchestrator, `--select "state:failed"`) covers this too — no separate channel needed.
 
 **Picking a threshold.** `min_rows: 1` catches the total-disappearance case and never fires on a legitimate load. A threshold near the expected volume also catches partial losses, which is what an scd2 pipeline wants — the number checked is the rows that will be live in the target after the run, so `min_rows: 5000` reads as "never leave fewer than 5 000 live rows". Set it conservatively: a source with genuinely variable volume will eventually dip below an ambitious floor and fail a run that was fine.

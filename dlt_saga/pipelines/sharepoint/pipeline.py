@@ -55,15 +55,11 @@ class SharePointPipeline(BasePipeline):
             last_load_time = self._get_last_load_with_data(self.table_name)
 
             if last_load_time and file_modified_time <= last_load_time:
-                self.logger.info(
-                    "Skipping extraction for %s "
-                    "- file not modified since last load "
-                    "(file: %s, last load: %s)",
-                    colorize(self.base_table_name, YELLOW),
-                    file_modified_time.isoformat(),
-                    last_load_time.isoformat(),
+                return self._confirm_skip(
+                    f"file not modified since last load "
+                    f"(file: {file_modified_time.isoformat()}, "
+                    f"last load: {last_load_time.isoformat()})"
                 )
-                return True
 
             self.logger.info(
                 "Starting extraction for %s",

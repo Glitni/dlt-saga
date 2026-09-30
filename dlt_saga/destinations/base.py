@@ -966,6 +966,31 @@ class Destination(ABC):
             f"{self.__class__.__name__} does not implement table_exists"
         )
 
+    def table_has_rows(self, dataset: str, table: str) -> Optional[bool]:
+        """Return whether *table* currently holds at least one row.
+
+        Used to confirm a change-detection skip against reality: the skip
+        assumes the target still holds what the last recorded load wrote, and
+        an emptied or dropped table breaks that assumption silently.
+
+        Returns:
+            ``True`` if the table has rows, ``False`` if it exists but is empty
+            or does not exist at all, and ``None`` when the answer could not be
+            determined. Callers must treat ``None`` as "don't skip" — doing
+            redundant work is recoverable, silently skipping is not.
+        """
+        try:
+            if not self.table_exists(dataset, table):
+                return False
+            table_id = self.get_full_table_id(dataset, table)
+            rows = list(self.execute_sql(f"SELECT 1 FROM {table_id} LIMIT 1", dataset))
+            return len(rows) > 0
+        except Exception as exc:
+            logger.debug(
+                "Could not determine whether %s.%s has rows: %s", dataset, table, exc
+            )
+            return None
+
     def list_tables(self, schema: str) -> List[str]:
         """Return every table name in ``schema``, or ``[]`` if it doesn't exist.
 

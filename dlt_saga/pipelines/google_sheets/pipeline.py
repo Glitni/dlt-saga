@@ -70,14 +70,11 @@ class GoogleSheetsPipeline(BasePipeline):
             if last_load_time:
                 # Compare timestamps
                 if sheet_modified_time <= last_load_time:
-                    self.logger.info(
-                        f"Skipping extraction for "
-                        f"{colorize(self.base_table_name, YELLOW)} "
-                        f"Sheet not modified since last load "
+                    return self._confirm_skip(
+                        f"sheet not modified since last load "
                         f"(sheet: {sheet_modified_time.isoformat()}, "
                         f"last load: {last_load_time.isoformat()})"
                     )
-                    return True
 
             self.logger.info(
                 f"Starting extraction for {colorize(self.base_table_name, YELLOW)}"

@@ -229,6 +229,48 @@ class BasePipeline:
             logger.debug(f"Could not get last load timestamp: {str(e)}")
             return None
 
+    def _confirm_skip(self, reason: str) -> bool:
+        """Confirm a change-detection skip against the target's actual state.
+
+        Skipping extraction is sound only while an unchanged source implies an
+        unchanged, correct target — "nothing new upstream, and we already hold
+        what was there". A target that has since been emptied or dropped breaks
+        that implication, and nothing else notices: the run reports success, the
+        table stays wrong, and the next run reaches the same conclusion. That is
+        how an emptied ``replace`` target stayed empty until someone ran
+        ``--force`` (issue #496).
+
+        The watermark itself is not at fault and is deliberately left alone: it
+        answers "when did we last load data", which is exactly what change
+        detection needs. What was missing is a check that the target still holds
+        that data.
+
+        Args:
+            reason: Why the source looks unchanged, for the skip log line.
+
+        Returns:
+            ``True`` to skip, ``False`` to extract anyway.
+        """
+        populated = self.destination.table_has_rows(
+            self.pipeline.dataset_name, self.table_name
+        )
+        if populated:
+            self.logger.info(
+                "Skipping extraction for %s - %s",
+                colorize(self.base_table_name, YELLOW),
+                reason,
+            )
+            return True
+
+        # False (empty/missing) or None (couldn't tell) both extract: redundant
+        # work is recoverable, a silent skip over a wrong target is not.
+        self.logger.info(
+            "Extracting %s despite no source changes - the target is %s",
+            colorize(self.base_table_name, YELLOW),
+            "empty or missing" if populated is False else "in an unknown state",
+        )
+        return False
+
     def _save_load_info(self, load_info_list: List[Dict]) -> None:
         """Save flattened load_info to a table for tracking and debugging.
 
