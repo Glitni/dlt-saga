@@ -225,13 +225,11 @@ class FilesystemPipeline(BasePipeline):
                 )
                 return False
 
-            # No files modified since last load - skip extraction
-            self.logger.info(
-                f"Skipping extraction for "
-                f"{colorize(self.base_table_name, YELLOW)} "
-                f"- No files modified since last load ({last_load_time.isoformat()})"
+            # No files modified since last load — but only skip if the target
+            # still holds what that load wrote (see BasePipeline._confirm_skip).
+            return self._confirm_skip(
+                f"no files modified since last load ({last_load_time.isoformat()})"
             )
-            return True
 
         except Exception as e:
             # If anything goes wrong with change detection, log and proceed with extraction

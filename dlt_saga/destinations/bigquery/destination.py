@@ -1045,6 +1045,28 @@ class BigQueryDestination(BigQueryBaseDestination):
         except NotFound:
             return False
 
+    def table_has_rows(self, dataset: str, table: str) -> Optional[bool]:
+        """Answer from table metadata — no query job, so no cost and no region
+        to get wrong.
+
+        ``num_rows`` lags for rows still in the streaming buffer, but saga loads
+        via DML and load jobs rather than streaming inserts, so the count is
+        current for tables it writes. A lag would only make an empty-looking
+        table extract again, which is the safe direction.
+        """
+        from google.cloud.exceptions import NotFound
+
+        try:
+            tbl = self._client().get_table(
+                f"{self.config.project_id}.{dataset}.{table}"
+            )
+            return int(tbl.num_rows or 0) > 0
+        except NotFound:
+            return False
+        except Exception as exc:
+            logger.debug("Could not read row count for %s.%s: %s", dataset, table, exc)
+            return None
+
     def list_tables(self, schema: str) -> List[str]:
         # The metadata API rather than INFORMATION_SCHEMA: it needs no query
         # job (so no region to get wrong — an INFORMATION_SCHEMA query run
