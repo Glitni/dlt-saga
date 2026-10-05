@@ -134,7 +134,7 @@ Detailed rules live in [`.claude/CLAUDE.md`](.claude/CLAUDE.md). Short version:
 
 - `ruff format` and `ruff check` are enforced by CI — run them before pushing.
 - Use type hints on public functions.
-- Log with the module-level logger (`logging_manager.get_logger(__name__)`), not `print`.
+- Log with the module-level logger (`logging.getLogger(__name__)`), not `print` — handlers are attached once by `configure_cli_logging()`.
 - Distinguish configuration errors (raise `ValueError`) from unexpected errors
   (let the traceback propagate).
 - Do not add code for hypothetical future requirements.

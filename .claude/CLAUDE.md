@@ -101,6 +101,12 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
 - Example: `adapter: local.api.my_source` → `pipelines/api/my_source/pipeline.py`
 - Scaffold new adapters with `saga new adapter <name>` (`new_adapter_command.py`) — generates a convention-following config.py + pipeline.py + starter config and registers the package in `packages.yml` (default dir `./pipelines`, namespace `local`)
 
+**Lifecycle Hooks & Notifiers** (`hooks/`)
+- Events: `on_pipeline_start`, `on_pipeline_complete`, `on_pipeline_error` (per pipeline, in the worker thread) and `on_run_complete` (once per command, main thread, carrying a `RunContext`)
+- **All fire from `Session` only** — `run_worker_mode` bypasses it, so an orchestrated fan-out fires nothing; use `saga notify` there
+- `saga run` is two `Session` calls but one command, so `hooks/run_scope.py` coalesces them into a single `on_run_complete`
+- Built-in Slack notifier (`hooks/notifiers/slack.py`), activated by a `notifications.slack` block in `saga_project.yml` — no `hooks:` entry needed. Webhook as a secret URI (never `{{ env_var() }}`, which bakes it into the execution plan). `notifications.slack.mentions` works at project level and on a pipeline's own config
+
 **Granular Timing Tracking**
 - Tracks: setup (constructor + destination/dlt orchestration overhead), extraction, normalize, load, finalization phases
 - Reports timing in format: `68.3s total (setup: 15.2s, extract: 25.7s, normalize: 10.2s, load: 32.4s, finalize: 10.0s)`. `extract`/`normalize`/`load` are dlt trace phase timings (subsets of wall-clock); `setup` is the reconciling remainder (constructor + destination client auth, dataset creation, dlt state sync, staging) so the breakdown sums to total.
@@ -115,7 +121,7 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
 - **sharepoint**: Extract files from SharePoint
 
 ### Bulk loaders
-- **native_load** (`adapter: dlt_saga.native_load`): Bypasses dlt extract/normalize and loads Parquet/CSV/JSONL directly into the warehouse via destination-native bulk mechanics (BigQuery external tables → INSERT, Databricks COPY INTO). Use for >1 000 files or >1 GB per run. Supports `append`, `replace`, `append+historize`, and `replace+historize` write dispositions. File-level dedup across runs requires `incremental: true` (opt-in, mirrors dlt's split between write_disposition and `dlt.sources.incremental`). `replace` rewrites the target table on every run (no state needed). Fully compatible with the historize layer — no extra config needed. State tracked in `_saga_native_load_log` (only when `incremental: true`). Supports BigQuery (`gs://`, `s3://`) and Databricks (`gs://`, `abfss://`). **S3 on BigQuery** goes through a BigQuery Omni cross-cloud connection: set `source_connection` (`<omni-region>.<id>`, e.g. `aws-eu-west-1.my-conn`) plus AWS listing credentials (`aws_access_key_id`/`aws_secret_access_key` as secret URIs, `aws_region`); the external table read runs in the Omni region, then a cross-cloud CTAS materializes a destination-region transfer table from which the real target is created/appended **in-region** (a single statement can't span the Omni + destination regions), so partitioning/clustering on the target work normally. Requires S3↔BigQuery region colocation (EU S3 via `aws-eu-west-1` → EU BigQuery). Large loads auto-split by cumulative file size (`load_batch_bytes`) to stay under the 60 GiB cross-cloud cap. `file_pattern` is matched against each file's path relative to `source_uri` with fsspec glob semantics (`*` stays within one path segment, `**` recurses) — identical to the `filesystem` adapter's `file_glob`, so configs migrate between the two without silently widening the input set; a non-recursive pattern also prunes the GCS/S3 listing server-side, and a zero-match run probes the subfolders and warns with the `**/` form to use (`storage/matching.py`). Column names always normalized to snake_case (BigQuery); explicit type hints via `columns:`; date-partition filtering via `partition_prefix_pattern` (requires `incremental: true`). **Headerless CSV/TSV** (e.g. Snowplow enriched): set `autodetect_schema: false` + an ordered `columns:` block — it becomes the positional external-table schema (all read as STRING, then SAFE_CAST to the declared types), since autodetect mis-types headerless columns non-deterministically. Databricks supports external Delta/Iceberg/DeltaUniform tables via `table_format` + `target_location`.
+- **native_load** (`adapter: dlt_saga.native_load`): Bypasses dlt extract/normalize and loads Parquet/CSV/JSONL directly into the warehouse via destination-native bulk mechanics (BigQuery external tables → INSERT, Databricks COPY INTO). Use for >1 000 files or >1 GB per run. Supports `append`, `replace`, `append+historize`, and `replace+historize` write dispositions. File-level dedup across runs requires `incremental: true` (opt-in, mirrors dlt's split between write_disposition and `dlt.sources.incremental`). `replace` rewrites the target table on every run (no state needed). Fully compatible with the historize layer — no extra config needed. State tracked in `_saga_native_load_log` (only when `incremental: true`). Supports BigQuery (`gs://`, `s3://`) and Databricks (`gs://`, `abfss://`). **S3 on BigQuery** goes through a BigQuery Omni cross-cloud connection: set `source_connection` (`<omni-region>.<id>`, e.g. `aws-eu-west-1.my-conn`) plus AWS listing credentials (`aws_access_key_id`/`aws_secret_access_key` as secret URIs, `aws_region`); the external table read runs in the Omni region, then a cross-cloud CTAS materializes a destination-region transfer table from which the real target is created/appended **in-region** (a single statement can't span the Omni + destination regions), so partitioning/clustering on the target work normally. Requires S3↔BigQuery region colocation (EU S3 via `aws-eu-west-1` → EU BigQuery). Large loads auto-split by cumulative file size (`load_batch_bytes`) to stay under the 60 GiB cross-cloud cap. `file_pattern` is matched against each file's path relative to `source_uri` with fsspec glob semantics (`*` stays within one path segment, `**` recurses) — identical to the `filesystem` adapter's `file_glob`, so configs migrate between the two without silently widening the input set; a non-recursive pattern also prunes the GCS/S3 listing server-side, and a zero-match run probes the subfolders and warns with the `**/` form to use (`pipelines/native_load/storage/matching.py`). Column names always normalized to snake_case (BigQuery); explicit type hints via `columns:`; date-partition filtering via `partition_prefix_pattern` (requires `incremental: true`). **Headerless CSV/TSV** (e.g. Snowplow enriched): set `autodetect_schema: false` + an ordered `columns:` block — it becomes the positional external-table schema (all read as STRING, then SAFE_CAST to the declared types), since autodetect mis-types headerless columns non-deterministically. Databricks supports external Delta/Iceberg/DeltaUniform tables via `table_format` + `target_location`.
 
 ### Destinations
 - **bigquery**: Full implementation with partitioning, clustering, IAM management
@@ -192,6 +198,22 @@ saga report --days 7 --output weekly.html           # Last 7 days
 saga report --select "tag:daily" --target prod      # Filtered by selector
 saga report --select "group:google_sheets" -o gs.html  # Single group
 ```
+
+### Notify Command
+```bash
+saga notify                                  # sweep: everything finished and unreported
+saga notify --since-days 1 --target prod
+saga notify --execution-id "$EXECUTION_ID"   # chained straight after a run
+saga notify --dry-run                        # preview; sends nothing, claims nothing
+```
+
+Reports run outcomes to the configured notifier by **reading recorded state**, not by hooking into a run. Every lifecycle hook fires from `Session`, and `run_worker_mode` executes pipelines without going through it — so on a fan-out deployment hooks post nothing, and a notification assembled inside one worker could only describe that worker's slice. `notify.py` reads `_saga_execution_plans` + `_saga_executions`, which every invocation style already writes (local, `saga plan` + workers, `--orchestrate`).
+
+- Selection is on **unreported** (`notified_at IS NULL` on `_saga_executions`), not recent: a late sweep misses nothing, overlapping schedules duplicate nothing. `--since-days` (default 7) is only a bound against reporting a large backlog.
+- Pipelines are identified by `(pipeline_type, table_name)` — the same key `state:` selectors use. `pipeline_identifier` is a config path that differs between a local checkout and a worker container, and `record_local_run` stores an empty `config_json`.
+- Scoped by **environment**, never target *name*: `target` stores whatever string the caller passed, and two targets can describe one warehouse differing only in `run_as`.
+- An execution with non-terminal rows is skipped as in-flight, but only for 24h (`PLANS_STALE_HOURS`); past that a dangling task is a crash, not work in progress, or it would be excluded until `saga maintenance` ran.
+- Quiet when nothing failed. A pipeline that failed and has since recovered is still reported, or one failing a run in five would never surface.
 
 ### AI Setup Command
 ```bash
@@ -341,6 +363,7 @@ historize:
 - Return `PipelineConfig` dataclass instances
 - Jinja2 templating is applied to config values at load time (see `utility/templating.py`): `{{ env_var('VAR') }}`, `{{ env_var('VAR', 'default') }}`, plus filters/nested calls, e.g. `{{ env_var('GCP_DATASET') | replace('-', '_') }}`. Sandboxed, rendered before the hierarchical merge across all three surfaces (`profiles.yml`, `saga_project.yml`, pipeline configs). Missing var with no default → `""`. Use `{% raw %}…{% endraw %}` to keep a literal `{{`. Secret URIs (`googlesecretmanager::`, `azurekeyvault::`) are plain strings, untouched by rendering and resolved later at runtime.
 - `write_disposition` controls what commands run: `append+historize` enables both, `historize` enables historize-only
+- **Row guard** (`pipelines/row_guard.py`): `min_rows: N` abandons a load carrying fewer rows, *before* anything is written — dlt emits a load job for a zero-row `replace`, so the truncate/swap runs and empties the target behind a green run; scd2 retires keys absent from a partial batch. The count comes from dlt's normalize step (destinations route the run through `Destination.execute_dlt_run`), and the rejected package is discarded or the next run would load it. `MinRowsNotMetError` is a `RuntimeError` deliberately — a `ValueError` from a pipeline is read as a pre-run config error and *not* recorded as a run outcome. `native_load` bypasses dlt, so it counts the source files instead (BigQuery only)
 - `PipelineConfig.ingest_enabled` — derived from `write_disposition` (True when base is append/merge/replace)
 - `PipelineConfig.historize_enabled` — derived from `write_disposition` (True when contains "historize")
 - `PipelineConfig.dlt_write_disposition` — strips `+historize` suffix for dlt
@@ -371,10 +394,10 @@ historize:
 - **Doc reconcile**: after each successful run `HistorizeRunner._reconcile_descriptions()` documents the historized table (its only source of descriptions — dlt never touches it). Inherits the pipeline's top-level `description`/`classification`/`columns`; override for the historized table via `historize.{description, classification, columns, persist_docs}` (`columns` merges per column, per key). SCD2 system columns (`valid_from`/`valid_to`/`is_deleted`) get canned descriptions. Gated by `persist_docs` (see Column & Table Documentation above).
 
 ### CLI and UX
-- Single `saga` entry point with subcommands: `list`, `ingest`, `historize`, `run`, `update-access`, `report`
+- Single `saga` entry point with subcommands: `list`, `ingest`, `historize`, `run`, `update-access`, `report`, `notify`, `maintenance`, `validate`, `doctor`
 - Use dbt-style conventions where applicable (profiles, selectors, targets)
 - `saga list` with `--resource-type` filter for filtered listing
-- Use `--verbose` / `-v` for debug logging (affects all loggers via `logging_manager.set_level()`)
+- Use `--verbose` / `-v` for debug logging (`setup_logging()` in `utility/cli/common.py`, also enabled by `SAGA_DEBUG_LOGGING=true`). It widens only what reaches the **terminal** — the file handler in `logs/` is always at DEBUG, so a non-verbose run still captures full detail
 - Default behavior should be sensible (e.g., `saga ingest` with no args runs all ingest-enabled pipelines)
 
 ## Naming Conventions
@@ -433,7 +456,7 @@ historize:
 - Verify edge cases: empty inputs, invalid selectors, race conditions
 
 ## Logging Best Practices
-- Use module-level logger: `logger = logging_manager.get_logger(__name__)`
+- Use module-level logger: `logger = logging.getLogger(__name__)` and nothing else — handlers, formatters and filters are attached once by `configure_cli_logging()` (`utility/cli/logging.py`). Use `PrefixedLoggerAdapter` when a pipeline needs a `[1/N]` prefix.
 - Log levels:
   - DEBUG: Implementation details, state transitions
   - INFO: User-facing progress updates, successful operations

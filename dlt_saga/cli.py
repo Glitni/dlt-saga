@@ -2118,6 +2118,96 @@ def maintenance(
 
 
 # ---------------------------------------------------------------------------
+# notify command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def notify(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+    profile: Optional[str] = typer.Option(
+        None, "--profile", help="Profile to use from profiles.yml"
+    ),
+    target: Optional[str] = typer.Option(
+        None, "--target", help="Target within profile"
+    ),
+    execution_id: Optional[str] = typer.Option(
+        None,
+        "--execution-id",
+        help="Report exactly this execution instead of sweeping unreported ones.",
+    ),
+    since_days: Optional[int] = typer.Option(
+        None,
+        "--since-days",
+        help=(
+            "How many days back to sweep. Only a bound — selection is on "
+            "whether an execution has been reported. Default: 7."
+        ),
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Report even executions already marked as reported.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Build and log the digest without sending or marking anything.",
+    ),
+):
+    """Report run outcomes to the configured notifiers.
+
+    Reads what saga recorded rather than hooking into a run, so it works the
+    same whether pipelines ran locally, through `saga run --orchestrate`, or
+    across worker containers that this process never saw.
+
+    Two ways to use it:
+
+    - **Scheduled** (the general case) — run it on its own cadence and it
+      reports every execution that has finished and not yet been reported.
+      Selection is on *unreported*, not *recent*, so a late run misses nothing
+      and overlapping schedules duplicate nothing.
+    - **Chained** — pass `--execution-id` straight after a run when waiting for
+      the next sweep is too slow. An orchestrator that already generates the id
+      for `saga plan` can hand the same one here.
+
+    Quiet when nothing failed. A pipeline that failed and has since recovered is
+    still reported, because one that fails every few runs and always recovers
+    before the next sweep would otherwise never be reported at all.
+
+    Examples:
+        saga notify                                  # sweep, default 7 days
+        saga notify --since-days 1 --target prod
+        saga notify --execution-id "$EXECUTION_ID"   # chained after a run
+        saga notify --dry-run                        # preview, sends nothing
+    """
+    from dlt_saga.notify import DEFAULT_SINCE_DAYS, run_notify
+
+    setup_logging(verbose)
+
+    profile_target = load_profile_config(profile, target)
+    if profile_target is not None:
+        setup_execution_context(profile_target)
+
+    # Scoped by environment, not target: `target` records whatever string the
+    # caller passed, so an orchestrator using `--target prod` and an operator
+    # using a differently-named target against the same warehouse would not
+    # match each other. Environment is derived and stable.
+    environment = profile_target.environment if profile_target is not None else None
+
+    execute_with_impersonation(
+        profile_target,
+        lambda: run_notify(
+            environment=environment,
+            since_days=DEFAULT_SINCE_DAYS if since_days is None else since_days,
+            execution_id=execution_id,
+            force=force,
+            dry_run=dry_run,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # AI setup command
 # ---------------------------------------------------------------------------
 

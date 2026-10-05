@@ -606,17 +606,32 @@ See the [Plugin Development Guide](Plugin-Development) for writing hooks.
 
 A built-in notifier posts run outcomes to a Slack incoming webhook. Configuring it is enough to activate it — there is no `hooks:` entry to add:
 
+Two transports, the same pair Elementary offers. A **bot token** posts through `chat.postMessage` and needs a `channel`; an **incoming webhook** posts to a URL whose channel was fixed when the webhook was created. `token` wins when both are set.
+
 ```yaml
 notifications:
   slack:
-    webhook_url: googlesecretmanager::projects/my-project/secrets/slack-webhook/versions/latest
-    notify_on: failure          # failure (default) | always
+    token: googlesecretmanager::my-project::slack-bot-token
+    channel: "#data-alerts"
+    notify_on: failure           # failure (default) | always
     mentions: ["<@U012ABCDEF>"]  # appended to failure messages
+```
+
+```yaml
+notifications:
+  slack:
+    webhook_url: googlesecretmanager::my-project::slack-webhook
+    notify_on: failure
 ```
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `webhook_url` | — | Slack incoming-webhook URL. Required; without it nothing is registered |
+| `token` | — | Slack bot token (`xoxb-…`). Needs `channel`. Takes precedence over `webhook_url` |
+| `channel` | — | Channel for `token` — `#data-alerts` or an ID. Required with `token`, ignored with `webhook_url` |
+| `webhook_url` | — | Slack incoming-webhook URL. One of this or `token` is required; without either, nothing is registered |
+| `report_url` | — | Public URL of the published [`saga report`](CLI-Reference#saga-report), linked from every digest |
+| `username` | `dlt-saga` | Display name on posted messages. Needs `chat:write.customize` with `token`; without it, saga posts under the app's own name and warns |
+| `icon_emoji` | `:satellite_antenna:` | Icon shown in place of the app's avatar. Same scope requirement as `username` |
 | `notify_on` | `failure` | `failure` posts only when a pipeline failed; `always` posts every run |
 | `mentions` | — | Mention tokens appended to a failure digest. A string or list |
 | `per_pipeline` | `false` | Also post one message per failed pipeline, on top of the digest |
@@ -662,7 +677,31 @@ Transport settings (`webhook_url`, `notify_on`, `timeout_seconds`) are project-l
 
 **Routing to several channels** means several webhooks — a webhook is bound to one channel and the notifier takes one. Post to one operational channel and route from there, or write a custom `on_run_complete` hook.
 
-> **Not fired in orchestrated runs.** `--orchestrate` plans work and triggers remote workers; the workers execute pipelines through `run_worker_mode`, which does not go through `Session` — and every lifecycle hook, this notifier included, fires from `Session`. A Cloud Run worker deployment therefore posts nothing. Local runs (`saga ingest`/`historize`/`run`) and the programmatic `Session` API (Airflow, Dagster) both notify normally. Tracked in [#495](https://github.com/Glitni/dlt-saga/issues/495).
+> **Orchestrated runs need [`saga notify`](CLI-Reference#saga-notify).** This hook fires from `Session`, and fan-out workers execute pipelines without going through it — so a worker deployment posts nothing here. `saga notify` covers that case by reading recorded state instead, and works for every way of running saga.
+
+**Linking the report.** `saga report` publishes to a URI you choose (`--output gs://…`), and saga never learns how that bucket is served — so the browsable URL has to be configured:
+
+```yaml
+notifications:
+  slack:
+    report_url: https://storage.example.com/saga_report.html
+```
+
+It renders as a footer link on every digest, failing or recovered, labelled by saga rather than by you — saga knows what the URL is, so every project's digest says the same thing about it. Deriving the URL is not possible: a `gs://` URI is not browsable, and whether a bucket is reachable at `storage.googleapis.com`, behind a load balancer, or on a custom domain is a property of the deployment.
+
+**Posting through a borrowed app.** `username` and `icon_emoji` default to `dlt-saga`, so a digest is attributable even when sent through an app installed for something else. With `token` that needs the `chat:write.customize` scope.
+
+Without the scope Slack does not refuse — it posts the message under the app's own name and reports success, so the override silently does nothing. saga compares the name it asked for against the one Slack actually used and warns once per run:
+
+```
+Slack posted under the app's own name, not 'dlt-saga' — the app lacks the
+chat:write.customize scope. Grant it to label these as dlt-saga, or set
+notifications.slack.username to null to stop asking.
+```
+
+The message body identifies itself either way: the context line carries `dlt-saga`, as does the notification text.
+
+**Which transport to pick.** A token is usually easier to operate: one credential covers every channel, the app **joins the channel itself** on `not_in_channel` rather than failing, and routing elsewhere is a config change rather than a new webhook. A webhook needs no app install and no scopes, so it is the lighter option when you only ever post to one channel. With a token the app needs `chat:write`, plus `chat:write.public` or membership of the target channel.
 
 **Failure to notify never fails a run.** A Slack outage, a revoked webhook, or a malformed payload is logged as a warning and the run continues; requests are retried on timeouts, connection errors, `429`, and `5xx`, but not on other `4xx` (a bad payload would only fail again). An empty selection still notifies when `notify_on: always`, so a scheduled run whose selector stopped matching does not pass silently.
 
