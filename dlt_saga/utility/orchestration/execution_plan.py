@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dlt_saga.pipeline_config import PipelineConfig
 from dlt_saga.utility.cli.logging import YELLOW, colorize
@@ -156,6 +156,7 @@ class ExecutionPlanManager:
         - completed_at: When execution completed
         - error_message: Error details if failed
         - is_orchestrated: True for orchestrator/worker runs, False for local
+        - notified_at: When `saga notify` reported this execution (NULL = unreported)
           runs recorded directly. NULL on legacy rows is read as orchestrated.
         """
         d = self.destination
@@ -195,7 +196,8 @@ class ExecutionPlanManager:
                 target {self._t("string")},
                 start_value_override {self._t("string")},
                 end_value_override {self._t("string")},
-                is_orchestrated {self._t("bool")}
+                is_orchestrated {self._t("bool")},
+                notified_at {self._t("timestamp")}
             )
         """
         d.execute_sql(exec_ddl, self.schema)
@@ -207,32 +209,56 @@ class ExecutionPlanManager:
             get_executions_table_name,
         )
 
-        self._ensure_column(get_execution_plans_table_name(), "is_orchestrated", "bool")
-        executions_table = get_executions_table_name()
-        self._ensure_column(executions_table, "is_orchestrated", "bool")
-        self._ensure_column(executions_table, "start_value_override", "string")
-        self._ensure_column(executions_table, "end_value_override", "string")
+        self._ensure_columns(
+            get_execution_plans_table_name(), [("is_orchestrated", "bool")]
+        )
+        self._ensure_columns(
+            get_executions_table_name(),
+            [
+                ("is_orchestrated", "bool"),
+                ("start_value_override", "string"),
+                ("end_value_override", "string"),
+                # When `saga notify` last reported this execution. NULL means
+                # unreported, which is what a sweep selects on — see notify.py.
+                ("notified_at", "timestamp"),
+            ],
+        )
 
         # View for latest status per pipeline per execution
         self._ensure_view_exists()
 
-    def _ensure_column(self, table_name: str, column: str, logical_type: str) -> None:
-        """Add a column to an existing table if it's missing (best-effort).
+    def _ensure_columns(
+        self, table_name: str, columns: Sequence[Tuple[str, str]]
+    ) -> None:
+        """Add any of *columns* missing from an existing table (best-effort).
 
-        Fresh tables already have the column from CREATE; this only matters for
-        tables that predate the column. Swallows errors (e.g. a destination
-        without column introspection) so it never breaks a run.
+        One introspection per table rather than per column: on BigQuery
+        ``list_table_columns`` is an INFORMATION_SCHEMA query job, so asking
+        about four columns separately cost four jobs — around a second each —
+        to answer what one job answers.
+
+        Fresh tables already have every column from CREATE; this only matters
+        for tables that predate one. Swallows errors (e.g. a destination
+        without column introspection) so it never breaks a run, and a failed
+        ALTER on one column does not skip the rest.
         """
         d = self.destination
         try:
             existing = {
                 c[0].lower() for c in d.list_table_columns(self.schema, table_name)
             }
-            if column.lower() not in existing:
+        except Exception as e:
+            logger.debug(f"Could not read columns of {table_name}: {e}")
+            return
+
+        for column, logical_type in columns:
+            if column.lower() in existing:
+                continue
+            try:
                 d.add_column(self.schema, table_name, column, self._t(logical_type))
                 logger.debug(f"Added column {column} to {self.schema}.{table_name}")
-        except Exception as e:
-            logger.debug(f"Could not ensure column {column} on {table_name}: {e}")
+            except Exception as e:
+                logger.debug(f"Could not add column {column} to {table_name}: {e}")
 
     def _ensure_view_exists(self):
         """Create or replace the current-status view.

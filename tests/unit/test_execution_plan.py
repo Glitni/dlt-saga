@@ -698,3 +698,82 @@ class TestExecutionsBackfillWindow:
         # Columns are always in the insert; absent overrides serialize as NULL.
         assert "start_value_override" in insert
         assert "NULL" in insert
+
+
+class _IntrospectableDestination(_RecordingDestination):
+    """Records column introspections and ALTERs alongside the SQL."""
+
+    def __init__(self, columns=None, fail_on=()):
+        super().__init__()
+        self.columns = dict(columns or {})
+        self.fail_on = set(fail_on)
+        self.introspections: list[str] = []
+        self.added: list[tuple] = []
+
+    def list_table_columns(self, schema: str, table: str, location=None) -> list:
+        self.introspections.append(table)
+        return [(c, "STRING") for c in self.columns.get(table, [])]
+
+    def add_column(self, schema: str, table: str, column: str, type_name: str) -> None:
+        if column in self.fail_on:
+            raise RuntimeError(f"no permission to add {column}")
+        self.added.append((table, column, type_name))
+
+
+@pytest.mark.unit
+class TestColumnBackfill:
+    """Columns added after a table shipped are backfilled on the existing table.
+
+    The check is per table, not per column: on BigQuery `list_table_columns`
+    is an INFORMATION_SCHEMA query job costing about a second, so asking about
+    four columns separately made the bootstrap four times more expensive than
+    the question warranted.
+    """
+
+    def test_one_introspection_per_table(self):
+        dest = _IntrospectableDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.ensure_table_exists()
+
+        assert len(dest.introspections) == len(set(dest.introspections)), (
+            f"introspected a table more than once: {dest.introspections}"
+        )
+
+    def test_missing_columns_are_added(self):
+        dest = _IntrospectableDestination(
+            columns={"_saga_executions": ["execution_id", "created_at"]}
+        )
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.ensure_table_exists()
+
+        added = {c for _, c, _ in dest.added}
+        assert "notified_at" in added
+        assert "is_orchestrated" in added
+
+    def test_present_columns_are_not_re_added(self):
+        dest = _IntrospectableDestination(
+            columns={
+                "_saga_executions": [
+                    "is_orchestrated",
+                    "start_value_override",
+                    "end_value_override",
+                    "notified_at",
+                ]
+            }
+        )
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.ensure_table_exists()
+
+        assert [c for t, c, _ in dest.added if t == "_saga_executions"] == []
+
+    def test_one_failed_alter_does_not_skip_the_others(self):
+        """Batching the introspection must not batch the failure with it."""
+        dest = _IntrospectableDestination(fail_on={"is_orchestrated"})
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.ensure_table_exists()
+
+        assert "notified_at" in {c for _, c, _ in dest.added}

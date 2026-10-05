@@ -346,6 +346,54 @@ def dlt_saga_by_tag(tag: str, target: str = "prod") -> None:
 
 ---
 
+## Notifications
+
+Lifecycle hooks fire from `Session`, and a fan-out worker never goes through it — so on an orchestrated deployment hooks post nothing. [`saga notify`](CLI-Reference#saga-notify) covers that by reading what saga recorded, which means it can describe a run that spanned containers. Nothing running *inside* one of those containers can.
+
+### Scheduled (the general case)
+
+Run it on its own cadence. It needs no coupling to whatever ran the pipelines — no execution id, no waiting, no hook firing in workers:
+
+```bash
+# Cron, Cloud Scheduler, a Kubernetes CronJob, an Airflow DAG — all equivalent
+0 */6 * * *  saga notify --target prod
+```
+
+Each sweep reports every execution that has finished and not yet been reported, so the schedule is only a heartbeat: running late misses nothing, and two schedules overlapping duplicate nothing. Pick an interval from how quickly you want to hear about a failure, not from how often pipelines run.
+
+```python
+# Airflow, as its own DAG
+notify = BashOperator(
+    task_id="notify",
+    bash_command="saga notify --target prod",
+)
+```
+
+### Chained (when the sweep interval is too slow)
+
+Where a failure needs to surface immediately, pass the execution id straight after the run. An orchestrator that already generates one for `saga plan` can hand over the same value:
+
+```python
+EXECUTION_ID = str(uuid.uuid4())
+
+plan = BashOperator(
+    task_id="plan",
+    bash_command=f"saga plan --select 'tag:daily' --execution-id {EXECUTION_ID} --target prod",
+)
+# ... workers run, Airflow waits on them ...
+notify = BashOperator(
+    task_id="notify",
+    bash_command=f"saga notify --execution-id {EXECUTION_ID} --target prod",
+    trigger_rule="all_done",  # report the failure, not just the success
+)
+```
+
+`trigger_rule="all_done"` matters: a notify step that only runs when the ingest succeeded would never report the failures it exists for.
+
+Both forms go through the same code, so the digest is identical. Use the schedule as the safety net even when chaining — it catches runs whose orchestrator died before reaching the notify step.
+
+---
+
 ## Granting access to the orchestration schema
 
 When an external orchestrator drives `saga plan` / `saga worker` (or wants to wait on / inspect runs it triggered), it needs read access to the orchestration schema where saga persists execution plans — `dlt_orchestration` in prod by default. Saga creates the schema on first plan run; access controls are declared in `saga_project.yml`:
@@ -393,7 +441,8 @@ The orchestrator's `--workers` is forwarded to each Cloud Run task as
 - **One `Session` per process is enough** — `Session.__init__` validates credentials and applies dlt defaults. For Dagster, share a single `Session` across asset definitions; for Airflow `PythonOperator`, recreate per-task (each task runs in its own process anyway).
 - **Selectors still work**: any selector that works on the CLI (`tag:daily`, `group:google_sheets`, `*sales*`) is valid as a list element passed to `select=[...]`. Use this to keep DAGs/repos focused.
 - **Failures**: every recipe re-raises on `result.has_failures` so the orchestrator marks the task failed. If you'd rather log and continue (e.g. for low-priority pipelines), inspect `result.failures` and decide per-pipeline.
-- **Hooks still fire — when you call `Session`**: every lifecycle hook (`ON_PIPELINE_START`, `ON_PIPELINE_COMPLETE`, `ON_PIPELINE_ERROR`, `ON_RUN_COMPLETE`) fires from `Session.ingest` / `Session.historize`, so the recipes on this page keep your alerting and reporting hooks working unchanged. **saga's own `--orchestrate` path is the exception**: its remote workers run via `run_worker_mode`, which executes pipelines directly rather than through `Session`, so no hooks fire there — including the built-in [Slack notifier](Configuration#slack-notifications). Tracked in [#495](https://github.com/Glitni/dlt-saga/issues/495).
+- **Hooks still fire — when you call `Session`**: every lifecycle hook (`ON_PIPELINE_START`, `ON_PIPELINE_COMPLETE`, `ON_PIPELINE_ERROR`, `ON_RUN_COMPLETE`) fires from `Session.ingest` / `Session.historize`, so the recipes on this page keep your alerting and reporting hooks working unchanged. **saga's own `--orchestrate` path is the exception**: its remote workers run via `run_worker_mode`, which executes pipelines directly rather than through `Session`, so no hooks fire there.
+- **Notifications for fan-out runs come from [`saga notify`](CLI-Reference#saga-notify)**, not hooks. It reads what saga recorded, so it describes a run that spanned containers — which nothing running *inside* one of those containers can do. Schedule it, or chain it after a run with `--execution-id`.
 
 ---
 

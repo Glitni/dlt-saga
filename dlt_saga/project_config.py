@@ -351,11 +351,41 @@ def normalize_mentions(value: Any, context: str) -> Optional[List[str]]:
 
 @dataclass
 class SlackNotificationConfig:
-    """Slack incoming-webhook notification settings.
+    """Slack notification settings.
 
-    Posting is opt-in: no ``webhook_url`` means no notifier is registered and
-    nothing is sent.
+    Posting is opt-in: with neither ``token`` nor ``webhook_url`` set, no
+    notifier is registered and nothing is sent.
+
+    Two transports, mirroring Elementary's: a **bot token** posts through
+    ``chat.postMessage`` and needs a ``channel``; an **incoming webhook** posts
+    to a URL whose channel is fixed when the webhook is created. As in
+    Elementary, ``token`` takes precedence when both are given.
     """
+
+    token: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Slack bot token (``xoxb-…``) posting via chat.postMessage. "
+                "Requires 'channel'. Use a secret URI "
+                "(googlesecretmanager::…, azurekeyvault::…, env_secret::…) "
+                "rather than {{ env_var() }}, which renders at config-load "
+                "time and would bake the token into the execution plan. The "
+                "app needs chat:write, and chat:write.public (or membership) "
+                "for the target channel. Takes precedence over webhook_url."
+            )
+        },
+    )
+    channel: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Channel to post to when using 'token' — '#data-alerts' or a "
+                "channel ID. Ignored with webhook_url, where the channel is "
+                "fixed by the webhook itself."
+            )
+        },
+    )
 
     webhook_url: Optional[str] = field(
         default=None,
@@ -370,6 +400,43 @@ class SlackNotificationConfig:
             )
         },
     )
+    username: Optional[str] = field(
+        default="dlt-saga",
+        metadata={
+            "description": (
+                "Display name on posted messages. Defaults to 'dlt-saga' so a "
+                "digest is attributable even when posted through an app "
+                "installed for something else. Requires the chat:write.customize "
+                "scope with 'token'; if the app lacks it, saga retries without "
+                "the override rather than failing to post. Set to null to "
+                "always use the app's own name."
+            )
+        },
+    )
+    icon_emoji: Optional[str] = field(
+        default=":satellite_antenna:",
+        metadata={
+            "description": (
+                "Emoji shown in place of the app's avatar, e.g. ':card_index_dividers:'. "
+                "Same scope requirement and fallback as 'username'."
+            )
+        },
+    )
+
+    report_url: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Public URL of the published `saga report`, linked from every "
+                "digest. saga cannot derive it: it only ever sees the 'gs://' "
+                "URI passed to `saga report --output`, which is not browsable, "
+                "and whether that bucket is served from storage.googleapis.com, "
+                "a load balancer or a custom domain is a property of the "
+                "deployment."
+            )
+        },
+    )
+
     notify_on: str = field(
         default="failure",
         metadata={
@@ -423,7 +490,26 @@ class SlackNotificationConfig:
         mentions = normalize_mentions(
             data.get("mentions"), "notifications.slack.mentions"
         )
+        report_url = data.get("report_url")
+        if report_url is not None and not isinstance(report_url, str):
+            raise ValueError(
+                f"notifications.slack.report_url must be a URL string, "
+                f"got {report_url!r}"
+            )
+        token = data.get("token")
+        channel = data.get("channel")
+        if token and not channel:
+            raise ValueError(
+                "notifications.slack.channel is required with 'token': "
+                "chat.postMessage has no channel of its own, unlike an "
+                "incoming webhook."
+            )
         return cls(
+            token=token,
+            channel=channel,
+            report_url=report_url,
+            username=data.get("username", "dlt-saga"),
+            icon_emoji=data.get("icon_emoji", ":satellite_antenna:"),
             webhook_url=data.get("webhook_url"),
             notify_on=notify_on,
             mentions=mentions,

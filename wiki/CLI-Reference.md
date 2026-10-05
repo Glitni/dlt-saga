@@ -328,6 +328,93 @@ saga maintenance --select "group:filesystem"   # Scope to one group's schema
 
 ---
 
+## saga notify
+
+Report run outcomes to the configured [notifiers](Configuration#slack-notifications) by reading what saga recorded, rather than hooking into a run.
+
+That distinction is the point. Every lifecycle hook fires from `Session`, and fan-out workers execute pipelines without going through it — so on an orchestrated deployment hooks post nothing, and a notification assembled *inside* one worker could only describe that worker's slice anyway. `saga notify` reads the execution-plan tables, which every way of running saga already writes:
+
+| How saga ran | Recorded | Covered by `saga notify` |
+|---|---|---|
+| `saga run` / `ingest` / `historize` locally | ✅ | ✅ |
+| `saga plan` + worker fan-out | ✅ | ✅ |
+| `saga run --orchestrate` | ✅ | ✅ |
+
+```bash
+saga notify [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-v, --verbose` | Enable debug logging |
+| `--profile TEXT` | Profile to use from profiles.yml |
+| `--target TEXT` | Target within profile. Selects the connection; the sweep is scoped to that target's **environment**, not its name |
+| `--execution-id TEXT` | Report exactly this execution instead of sweeping |
+| `--since-days INT` | How far back to sweep (default: 7) |
+| `--force` | Report even executions already marked as reported |
+| `--dry-run` | Build and log the digest without sending or marking anything |
+
+```bash
+saga notify                                  # sweep, default 7 days
+saga notify --since-days 1 --target prod
+saga notify --execution-id "$EXECUTION_ID"   # chained straight after a run
+saga notify --dry-run                        # preview; sends nothing
+```
+
+### Two ways to use it
+
+**Scheduled** — the general case. Run it on its own cadence (cron, Cloud Scheduler, an Airflow DAG) and it reports every execution that has finished and not yet been reported. No integration with whatever ran the pipelines is required.
+
+**Chained** — pass `--execution-id` immediately after a run, when waiting for the next sweep is too slow. An orchestrator that already generates the id for [`saga plan`](#saga-plan) can hand the same one here rather than parsing it back out of container logs.
+
+Both go through the same code, so the digest is identical.
+
+### Scope
+
+A sweep covers one orchestration schema in one database — that is the connection you make, so most of the scoping is implicit. On top of it, executions are filtered by the active target's **environment**.
+
+Not by target *name*. Two targets can describe the same warehouse and differ only in how you authenticate — same `type`, `database` and `location`, one adding `run_as` impersonation — and their executions belong in the same digest. The stored `target` column is not usable either: the orchestrator records the raw `--target` string (`None` when omitted) while a local run records the resolved profile name, so two callers against one warehouse disagree.
+
+Executions with no recorded environment are included rather than dropped — a missing field is not evidence that a run belongs elsewhere.
+
+### Selection is on *unreported*, not *recent*
+
+Executions are claimed via a `notified_at` column on `_saga_executions`, so:
+
+- a **late** sweep misses nothing,
+- **overlapping** schedules duplicate nothing,
+- a run **straddling** a window boundary is reported once, when it finishes.
+
+`--since-days` is only a bound, which is why its exact value barely matters. It stops a first run (or a long outage) from reporting a large backlog — this command reports recent runs that may need handling, not history that no longer does.
+
+> **First run after upgrading.** Nothing has been marked as reported yet, so the first sweep covers everything inside the window. Run it once with a short `--since-days` (or `--dry-run` first) before scheduling it.
+
+An execution with any task still `pending` or `running` is skipped and picked up by a later sweep, so a half-finished run is never reported as though it were done. That judgement is age-bounded: after 24 hours a dangling task is read as a crash rather than as work in progress, and the execution is reported. Otherwise it would wait for [`saga maintenance`](#saga-maintenance) to relabel the row `abandoned`, and would be dropped from every sweep until that ran.
+
+### What gets reported
+
+Pipelines lead, executions are context — the first question is "what is broken", not "which run broke":
+
+```
+:x: 2 pipeline(s) failing · 3 runs in the last 7d · `prod`
+
+failing:
+    • `shop__orders` — failing, 3 of 3 attempts — min_rows=1 not met. …  <@U012ABCDEF>
+    • `crm__accounts` — failing, 1 of 3 attempts — 404 Client Error: Not Found …
+
+recovered:
+    • `shop__events` (1 of 4 attempts failed, latest attempt OK)
+44 of 46 pipeline attempts succeeded
+```
+
+- **The denominator is attempts, not runs.** Consecutive executions may select different pipelines, so "failed in 1 of 3 runs" would imply a pipeline succeeded in two that never attempted it.
+- **Persistence is kept** because *failed 3 of 3 attempts* and *failed once* are the difference between an outage and a blip.
+- **Recovered pipelines are reported too**, as a separate line. A pipeline that fails one run in five and always recovers before the next sweep would otherwise never be reported at all — invisible precisely because it keeps fixing itself.
+- **Per-pipeline mentions still work.** The execution-plan row stores each pipeline's config, so `notifications.slack.mentions` resolves even though no single process ran every pipeline.
+- **Nothing failed, nothing posted.** A clean sweep is silent.
+
+---
+
 ## saga ai-setup
 
 Generate an AI context file for the current project.
