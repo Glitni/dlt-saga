@@ -348,7 +348,7 @@ def dlt_saga_by_tag(tag: str, target: str = "prod") -> None:
 
 ## Notifications
 
-Lifecycle hooks fire from `Session`, and a fan-out worker never goes through it — so on an orchestrated deployment hooks post nothing. [`saga notify`](CLI-Reference#saga-notify) covers that by reading what saga recorded, which means it can describe a run that spanned containers. Nothing running *inside* one of those containers can.
+The per-pipeline hooks fire inside each worker, but `on_run_complete` cannot: no container has a view of a run that was spread across all of them. [`saga notify`](CLI-Reference#saga-notify) covers the summary by reading what saga recorded, which means it can describe a run that spanned containers. Nothing running *inside* one of those containers can.
 
 ### Scheduled (the general case)
 
@@ -441,7 +441,7 @@ The orchestrator's `--workers` is forwarded to each Cloud Run task as
 - **One `Session` per process is enough** — `Session.__init__` validates credentials and applies dlt defaults. For Dagster, share a single `Session` across asset definitions; for Airflow `PythonOperator`, recreate per-task (each task runs in its own process anyway).
 - **Selectors still work**: any selector that works on the CLI (`tag:daily`, `group:google_sheets`, `*sales*`) is valid as a list element passed to `select=[...]`. Use this to keep DAGs/repos focused.
 - **Failures**: every recipe re-raises on `result.has_failures` so the orchestrator marks the task failed. If you'd rather log and continue (e.g. for low-priority pipelines), inspect `result.failures` and decide per-pipeline.
-- **Hooks still fire — when you call `Session`**: every lifecycle hook (`ON_PIPELINE_START`, `ON_PIPELINE_COMPLETE`, `ON_PIPELINE_ERROR`, `ON_RUN_COMPLETE`) fires from `Session.ingest` / `Session.historize`, so the recipes on this page keep your alerting and reporting hooks working unchanged. **saga's own `--orchestrate` path is the exception**: its remote workers run via `run_worker_mode`, which executes pipelines directly rather than through `Session`, so no hooks fire there.
+- **Hooks fire on every path**: the recipes on this page call `Session.ingest` / `Session.historize`, which fire all four lifecycle events. saga's own `--orchestrate` workers fire the three per-pipeline ones (`ON_PIPELINE_START`, `ON_PIPELINE_COMPLETE`, `ON_PIPELINE_ERROR`) from inside each container. `ON_RUN_COMPLETE` is the exception there — see the next point.
 - **Notifications for fan-out runs come from [`saga notify`](CLI-Reference#saga-notify)**, not hooks. It reads what saga recorded, so it describes a run that spanned containers — which nothing running *inside* one of those containers can do. Schedule it, or chain it after a run with `--execution-id`.
 
 ---

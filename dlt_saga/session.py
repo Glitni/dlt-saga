@@ -1077,21 +1077,13 @@ class Session:
     ) -> PipelineResult:
         """Execute a single ingest pipeline, returning a structured result."""
         from dlt_saga.hooks.registry import (
-            ON_PIPELINE_COMPLETE,
-            ON_PIPELINE_ERROR,
-            ON_PIPELINE_START,
-            HookContext,
-            get_hook_registry,
+            fire_pipeline_complete,
+            fire_pipeline_error,
+            fire_pipeline_start,
         )
 
         prefix = f"{log_prefix} " if log_prefix else ""
-        registry = get_hook_registry()
-        registry.fire(
-            ON_PIPELINE_START,
-            HookContext(
-                pipeline_name=config.pipeline_name, config=config, command="ingest"
-            ),
-        )
+        fire_pipeline_start(config, "ingest")
         try:
             load_info = execute_pipeline(config, log_prefix=log_prefix)
             if isinstance(load_info, list):
@@ -1103,15 +1095,7 @@ class Session:
                 # to load).
                 if summary:
                     logger.info("%s%s", prefix, summary)
-            registry.fire(
-                ON_PIPELINE_COMPLETE,
-                HookContext(
-                    pipeline_name=config.pipeline_name,
-                    config=config,
-                    command="ingest",
-                    result=load_info,
-                ),
-            )
+            fire_pipeline_complete(config, "ingest", load_info)
             return PipelineResult(
                 pipeline_name=config.pipeline_name,
                 success=True,
@@ -1144,15 +1128,7 @@ class Session:
                     e,
                     exc_info=True,
                 )
-            registry.fire(
-                ON_PIPELINE_ERROR,
-                HookContext(
-                    pipeline_name=config.pipeline_name,
-                    config=config,
-                    command="ingest",
-                    error=e,
-                ),
-            )
+            fire_pipeline_error(config, "ingest", e)
             return PipelineResult(
                 pipeline_name=config.pipeline_name,
                 success=False,
@@ -1247,21 +1223,13 @@ class Session:
     ) -> PipelineResult:
         """Execute historization for a single pipeline."""
         from dlt_saga.hooks.registry import (
-            ON_PIPELINE_COMPLETE,
-            ON_PIPELINE_ERROR,
-            ON_PIPELINE_START,
-            HookContext,
-            get_hook_registry,
+            fire_pipeline_complete,
+            fire_pipeline_error,
+            fire_pipeline_start,
         )
 
         prefix = f"{log_prefix} " if log_prefix else ""
-        registry = get_hook_registry()
-        registry.fire(
-            ON_PIPELINE_START,
-            HookContext(
-                pipeline_name=config.pipeline_name, config=config, command="historize"
-            ),
-        )
+        fire_pipeline_start(config, "historize")
         try:
             from dlt_saga.historize.factory import build_historize_runner
 
@@ -1292,15 +1260,7 @@ class Session:
                 stats_str = f", {', '.join(stats_parts)}" if stats_parts else ""
                 msg = f"{config.pipeline_name}: {mode} ({detail}{stats_str}, {duration:.1f}s [{timing_parts}])"
                 logger.info("%s%s", prefix, msg)
-                registry.fire(
-                    ON_PIPELINE_COMPLETE,
-                    HookContext(
-                        pipeline_name=config.pipeline_name,
-                        config=config,
-                        command="historize",
-                        result=run_result,
-                    ),
-                )
+                fire_pipeline_complete(config, "historize", run_result)
                 return PipelineResult(
                     pipeline_name=config.pipeline_name,
                     success=True,
@@ -1314,15 +1274,7 @@ class Session:
                 # just returns the structured result. Logging again would duplicate
                 # the message the summary already prints.
                 error = run_result.get("error", "Unknown error")
-                registry.fire(
-                    ON_PIPELINE_ERROR,
-                    HookContext(
-                        pipeline_name=config.pipeline_name,
-                        config=config,
-                        command="historize",
-                        error=RuntimeError(error),
-                    ),
-                )
+                fire_pipeline_error(config, "historize", RuntimeError(error))
                 return PipelineResult(
                     pipeline_name=config.pipeline_name,
                     success=False,
@@ -1339,15 +1291,7 @@ class Session:
                 e,
                 exc_info=True,
             )
-            registry.fire(
-                ON_PIPELINE_ERROR,
-                HookContext(
-                    pipeline_name=config.pipeline_name,
-                    config=config,
-                    command="historize",
-                    error=e,
-                ),
-            )
+            fire_pipeline_error(config, "historize", e)
             return PipelineResult(
                 pipeline_name=config.pipeline_name,
                 success=False,

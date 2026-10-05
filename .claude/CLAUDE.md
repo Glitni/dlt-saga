@@ -103,7 +103,7 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
 
 **Lifecycle Hooks & Notifiers** (`hooks/`)
 - Events: `on_pipeline_start`, `on_pipeline_complete`, `on_pipeline_error` (per pipeline, in the worker thread) and `on_run_complete` (once per command, main thread, carrying a `RunContext`)
-- **All fire from `Session` only** — `run_worker_mode` bypasses it, so an orchestrated fan-out fires nothing; use `saga notify` there
+- The three per-pipeline events fire from both `Session` and `run_worker_mode` (through `hooks/registry.py`'s `fire_pipeline_*`, which also loads hooks on first fire — a worker builds no `Session`, so nothing else would register them). `on_run_complete` fires from `Session` only: no worker container has a view of a fan-out run, so use `saga notify` for the per-run summary
 - `saga run` is two `Session` calls but one command, so `hooks/run_scope.py` coalesces them into a single `on_run_complete`
 - Built-in Slack notifier (`hooks/notifiers/slack.py`), activated by a `notifications.slack` block in `saga_project.yml` — no `hooks:` entry needed. Webhook as a secret URI (never `{{ env_var() }}`, which bakes it into the execution plan). `notifications.slack.mentions` works at project level and on a pipeline's own config
 

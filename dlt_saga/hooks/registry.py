@@ -217,3 +217,76 @@ _registry = HookRegistry()
 def get_hook_registry() -> HookRegistry:
     """Return the process-wide hook registry."""
     return _registry
+
+
+# ---------------------------------------------------------------------------
+# Firing the per-pipeline events
+# ---------------------------------------------------------------------------
+#
+# Every place that executes a pipeline fires through these, rather than
+# assembling a HookContext and calling `registry.fire` itself. The two
+# execution paths — `Session` locally and `run_worker_mode` in a container —
+# are separate code, and when only one of them did the firing, custom handlers
+# silently never ran on fan-out deployments. One shared entry point is what
+# keeps that from drifting apart again.
+
+
+def _fire_pipeline_event(
+    event: str,
+    config: "PipelineConfig",
+    command: str,
+    result: Optional[Any] = None,
+    error: Optional[Exception] = None,
+) -> None:
+    """Fire one per-pipeline event, loading hooks first if nothing has yet.
+
+    Registration used to belong to whoever executed the pipeline, which meant a
+    worker container had an empty registry and fired into nothing. Loading here
+    makes a hook's arrival a property of firing rather than of the caller:
+    ``load_hooks`` is guarded by its own flag, so this costs a boolean check
+    after the first call.
+    """
+    from dlt_saga.hooks.loader import load_hooks
+
+    # One registry object for both halves. `loader` binds `get_hook_registry`
+    # at import while this resolves it per call, so leaving each to find its
+    # own lets hooks be registered into one registry and fired from another.
+    registry = get_hook_registry()
+    try:
+        load_hooks(registry)
+    except Exception:
+        # Loading now sits in the pipeline's own path, so a failure here would
+        # otherwise surface as that pipeline failing. `fire` already protects
+        # the handlers; this protects getting to them. Previously the load ran
+        # in `Session.__init__`, where a failure was a clean startup error.
+        logger.warning("Could not load lifecycle hooks", exc_info=True)
+
+    registry.fire(
+        event,
+        HookContext(
+            pipeline_name=config.pipeline_name,
+            config=config,
+            command=command,
+            result=result,
+            error=error,
+        ),
+    )
+
+
+def fire_pipeline_start(config: "PipelineConfig", command: str) -> None:
+    """Fire ``on_pipeline_start`` for *config*."""
+    _fire_pipeline_event(ON_PIPELINE_START, config, command)
+
+
+def fire_pipeline_complete(
+    config: "PipelineConfig", command: str, result: Any = None
+) -> None:
+    """Fire ``on_pipeline_complete`` for *config*, carrying its result."""
+    _fire_pipeline_event(ON_PIPELINE_COMPLETE, config, command, result=result)
+
+
+def fire_pipeline_error(
+    config: "PipelineConfig", command: str, error: Exception
+) -> None:
+    """Fire ``on_pipeline_error`` for *config*, carrying the failure."""
+    _fire_pipeline_event(ON_PIPELINE_ERROR, config, command, error=error)

@@ -2,6 +2,7 @@
 
 import importlib
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 
 from .registry import HOOK_EVENTS, HookCallable, HookRegistry, get_hook_registry
@@ -9,6 +10,14 @@ from .registry import HOOK_EVENTS, HookCallable, HookRegistry, get_hook_registry
 logger = logging.getLogger(__name__)
 
 _loaded = False
+# Loading is reached from the per-pipeline fire path, which runs in the worker
+# thread executing each pipeline — so several threads can arrive at once on the
+# first event of a run. Without this, each would pass the `_loaded` check before
+# any had set it and register the same handlers again, and a user's
+# `on_pipeline_error` would be called once per racing thread. Re-entrant because
+# loading imports user modules, and an import must not deadlock against a
+# `load_hooks()` reached from inside one.
+_load_lock = threading.RLock()
 
 
 def _resolve_callable(ref: str) -> HookCallable:
@@ -150,19 +159,24 @@ def load_hooks(registry: Optional[HookRegistry] = None) -> None:
     global _loaded
     if _loaded:
         return
-    _loaded = True
 
-    from dlt_saga.project_config import get_project_config
+    with _load_lock:
+        # Re-checked under the lock: whoever held it may have just finished.
+        if _loaded:
+            return
+        _loaded = True
 
-    if registry is None:
-        registry = get_hook_registry()
+        from dlt_saga.project_config import get_project_config
 
-    project_config = get_project_config()
-    if project_config.hooks:
-        load_hooks_from_config(project_config.hooks, registry)
+        if registry is None:
+            registry = get_hook_registry()
 
-    load_notifiers_from_config(project_config, registry)
-    load_hooks_from_entry_points(registry)
+        project_config = get_project_config()
+        if project_config.hooks:
+            load_hooks_from_config(project_config.hooks, registry)
+
+        load_notifiers_from_config(project_config, registry)
+        load_hooks_from_entry_points(registry)
 
 
 def load_notifiers_from_config(
@@ -194,4 +208,5 @@ def load_notifiers_from_config(
 def _reset_loaded() -> None:
     """Reset the loaded flag so :func:`load_hooks` runs again.  For tests only."""
     global _loaded
-    _loaded = False
+    with _load_lock:
+        _loaded = False
