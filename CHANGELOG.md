@@ -1,3 +1,16 @@
+## 0.34.0 — 2026-10-05
+
+### Added
+- Add saga notify for reporting run outcomes from recorded state (#499)
+- Support min_rows on native_load for BigQuery (#497)
+- Add on_run_complete hook and built-in Slack notifier (#492)
+- Add min_rows guard to abandon destructive short loads (#490)
+
+
+### Fixed
+- Fire lifecycle hooks in worker mode (#501)
+- Confirm change-detection skips against the target's state (#498)
+
 ## 0.33.1 — 2026-09-25
 
 ### Fixed
