@@ -623,6 +623,8 @@ or metrics to any pipeline run.
 
 The first three fire **per pipeline**, in the worker thread that ran it, so handlers must be thread-safe and quick. `on_run_complete` fires **once per command** on the main thread, after every pipeline has finished — which is what lets a handler post a single summary instead of one message per pipeline. `saga run` executes ingest and historize as two phases but fires one `on_run_complete` covering both.
 
+**On orchestrated runs**, the per-pipeline events fire inside each worker container, exactly as they do locally. `on_run_complete` does not: no container has a view of a run that was spread across all of them, so one digest per container is the most it could offer. Use [`saga notify`](CLI-Reference#saga-notify) for the per-run summary there — it reads what the whole run recorded, and covers local runs too.
+
 ### Writing a Hook
 
 A hook is a plain callable that accepts a `HookContext`:

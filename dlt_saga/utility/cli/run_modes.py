@@ -151,9 +151,20 @@ def _run_pipeline_safe(
 
     Returns ``None`` on success, or the error message on failure (so callers
     can surface the real cause instead of a generic "failed").
+
+    Fires the per-pipeline lifecycle events, as ``Session`` does for a local
+    run. This is the only path a worker container takes, so without them a
+    custom ``on_pipeline_error`` handler would never run on exactly the
+    deployment it was written for.
     """
+    from dlt_saga.hooks.registry import (
+        fire_pipeline_complete,
+        fire_pipeline_error,
+        fire_pipeline_start,
+    )
     from dlt_saga.pipelines.executor import execute_pipeline
 
+    fire_pipeline_start(pipeline_config, "ingest")
     try:
         result = execute_pipeline(pipeline_config, log_prefix)
         if result:
@@ -166,9 +177,11 @@ def _run_pipeline_safe(
                 logger.info("%s %s", log_prefix, message)
             else:
                 logger.info("%s %s", log_prefix, summarize_load_info(result))
+        fire_pipeline_complete(pipeline_config, "ingest", result)
         return None
     except Exception as e:
         logger.error("%s %s", log_prefix, e)
+        fire_pipeline_error(pipeline_config, "ingest", e)
         return _format_run_error(e)
 
 
@@ -189,8 +202,17 @@ def _run_historize_safe(
 ) -> Optional[str]:
     """Thread-safe wrapper for historizing a single pipeline.
 
-    Returns ``None`` on success, or the error message on failure.
+    Returns ``None`` on success, or the error message on failure. Fires the
+    per-pipeline lifecycle events for the same reason :func:`_run_pipeline_safe`
+    does — a worker is the only path this code takes.
     """
+    from dlt_saga.hooks.registry import (
+        fire_pipeline_complete,
+        fire_pipeline_error,
+        fire_pipeline_start,
+    )
+
+    fire_pipeline_start(pipeline_config, "historize")
     try:
         runner = _build_historize_runner(pipeline_config, full_refresh)
         result = runner.run()
@@ -213,10 +235,14 @@ def _run_historize_safe(
             stats_str = f", {', '.join(stats_parts)}" if stats_parts else ""
             msg = f"{pipeline_config.pipeline_name}: {mode} ({detail}{stats_str}, {duration:.1f}s [{timing_parts}])"
             logger.info("%s %s", log_prefix, msg)
+            fire_pipeline_complete(pipeline_config, "historize", result)
             return None
         else:
             error = str(result.get("error", "Unknown error"))
             logger.error("%s %s: %s", log_prefix, pipeline_config.pipeline_name, error)
+            # A runner that reports a failed status rather than raising is still
+            # a failed pipeline, as it is in `Session`.
+            fire_pipeline_error(pipeline_config, "historize", RuntimeError(error))
             return error
 
     except Exception as e:
@@ -227,6 +253,7 @@ def _run_historize_safe(
             e,
             exc_info=True,
         )
+        fire_pipeline_error(pipeline_config, "historize", e)
         return _format_run_error(e)
 
 

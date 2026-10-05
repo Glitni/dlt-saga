@@ -677,7 +677,7 @@ Transport settings (`webhook_url`, `notify_on`, `timeout_seconds`) are project-l
 
 **Routing to several channels** means several webhooks — a webhook is bound to one channel and the notifier takes one. Post to one operational channel and route from there, or write a custom `on_run_complete` hook.
 
-> **Orchestrated runs need [`saga notify`](CLI-Reference#saga-notify).** This hook fires from `Session`, and fan-out workers execute pipelines without going through it — so a worker deployment posts nothing here. `saga notify` covers that case by reading recorded state instead, and works for every way of running saga.
+> **Orchestrated runs need [`saga notify`](CLI-Reference#saga-notify).** This digest rides `on_run_complete`, which fires once per command — and on a fan-out run no container has a view of the whole thing, so none of them posts it. (The per-pipeline events do fire inside workers.) `saga notify` covers the summary by reading recorded state instead, and works for every way of running saga.
 
 **Linking the report.** `saga report` publishes to a URI you choose (`--output gs://…`), and saga never learns how that bucket is served — so the browsable URL has to be configured:
 

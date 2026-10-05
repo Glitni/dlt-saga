@@ -198,9 +198,10 @@ PAIRS = [
         id="pipeline-config-submodules",
     ),
     pytest.param(
-        # dlt_saga.session imports both of these directly, and the
-        # get_hook_registry() call sits in _execute_single_ingest, i.e. on a
-        # worker thread.
+        # registry.py imports loader lazily from _fire_pipeline_event, and
+        # loader imports registry at module level — a cycle whose deferred half
+        # is now reached from the thread executing each pipeline, in `Session`
+        # and in worker mode alike.
         "dlt_saga.hooks.loader",
         "dlt_saga.hooks.registry",
         "dlt_saga.hooks",
