@@ -37,7 +37,7 @@ Every sweep leaves a trace
 A clean sweep posts nothing, so silence cannot tell "nothing failed" from "the
 notifier stopped running" — and the second is the silence this command exists
 to remove, moved up one layer. Each completed sweep therefore appends one row to
-``_saga_notify_sweeps``, so whether the notifier *ran* is a query something
+``_saga_notify_log``, so whether the notifier *ran* is a query something
 other than the notifier can answer, without adding chat traffic.
 
 The logic here is warehouse-facing and CLI-agnostic (no typer); the command in
@@ -70,7 +70,7 @@ DEFAULT_SINCE_DAYS = 7
 # reason historize batches snapshots by range rather than by value list.
 CLAIM_BATCH_SIZE = 1000
 
-# How a sweep ended, as recorded in the sweep log.
+# How a sweep ended, as recorded in the notify log.
 SWEEP_QUIET = "quiet"  # nothing to report
 SWEEP_DELIVERED = "delivered"  # a digest went out
 SWEEP_UNDELIVERED = "undelivered"  # a digest was due but nothing accepted it
@@ -437,7 +437,7 @@ def mark_reported(manager: Any, execution_ids: List[str]) -> int:
 
 
 def record_sweep(manager: Any, ctx: SweepContext, outcome: str) -> bool:
-    """Append one row to the sweep log, so a silent notifier is detectable.
+    """Append one row to the notify log, so a silent notifier is detectable.
 
     A quiet sweep and a sweep that never ran look the same in the channel.
     This row is what tells them apart: "no sweep in the last N intervals"
@@ -458,10 +458,10 @@ def record_sweep(manager: Any, ctx: SweepContext, outcome: str) -> bool:
     Returns:
         Whether the row was written.
     """
-    from dlt_saga.project_config import get_notify_sweeps_table_name
+    from dlt_saga.project_config import get_notify_log_table_name
 
     d = manager.destination
-    table_name = get_notify_sweeps_table_name()
+    table_name = get_notify_log_table_name()
     table_id = d.get_full_table_id(manager.schema, table_name)
     environment = (
         f"'{d.escape_string_literal(ctx.environment)}'" if ctx.environment else "NULL"
@@ -496,14 +496,14 @@ def record_sweep(manager: Any, ctx: SweepContext, outcome: str) -> bool:
         d.execute_sql(insert_sql, manager.schema)
         return True
     except Exception as insert_error:
-        logger.debug("Sweep log insert failed (%s); creating the table", insert_error)
+        logger.debug("Notify log insert failed (%s); creating the table", insert_error)
         try:
-            _ensure_sweep_log(manager, table_id)
+            _ensure_notify_log(manager, table_id)
         except Exception as init_error:
             # Report the insert error, not this one: a notifier without DDL
             # rights fails here as a matter of course, and "cannot CREATE
             # TABLE" would send you after the wrong permission.
-            logger.debug("Sweep log creation also failed: %s", init_error)
+            logger.debug("Notify log creation also failed: %s", init_error)
             return _warn(insert_error)
 
     # A second insert failure is not "the table was missing", so it is the
@@ -515,8 +515,8 @@ def record_sweep(manager: Any, ctx: SweepContext, outcome: str) -> bool:
         return _warn(exc)
 
 
-def _ensure_sweep_log(manager: Any, table_id: str) -> None:
-    """Create the sweep log if it does not exist yet."""
+def _ensure_notify_log(manager: Any, table_id: str) -> None:
+    """Create the notify log if it does not exist yet."""
     d = manager.destination
 
     def t(logical_type: str) -> str:

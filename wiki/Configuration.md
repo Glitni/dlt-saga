@@ -739,5 +739,5 @@ log_tables:
   execution_plans: "_saga_execution_plans"
   executions: "_saga_executions"
   native_load_log: "_saga_native_load_log"
-  notify_sweeps: "_saga_notify_sweeps"
+  notify_log: "_saga_notify_log"
 ```

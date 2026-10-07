@@ -298,9 +298,9 @@ class LogTablesConfig:
         default="_saga_native_load_log",
         metadata={"description": "Name of the native-load state-log table."},
     )
-    notify_sweeps: str = field(
-        default="_saga_notify_sweeps",
-        metadata={"description": "Name of the `saga notify` sweep log table."},
+    notify_log: str = field(
+        default="_saga_notify_log",
+        metadata={"description": "Name of the `saga notify` log table."},
     )
 
     @property
@@ -322,7 +322,7 @@ class LogTablesConfig:
             execution_plans=data.get("execution_plans", "_saga_execution_plans"),
             executions=data.get("executions", "_saga_executions"),
             native_load_log=data.get("native_load_log", "_saga_native_load_log"),
-            notify_sweeps=data.get("notify_sweeps", "_saga_notify_sweeps"),
+            notify_log=data.get("notify_log", "_saga_notify_log"),
         )
 
 
@@ -790,13 +790,13 @@ def get_native_load_log_table_name() -> str:
     return get_project_config().log_tables.native_load_log
 
 
-def get_notify_sweeps_table_name() -> str:
-    """Return the configured name for the ``saga notify`` sweep log table.
+def get_notify_log_table_name() -> str:
+    """Return the configured name for the ``saga notify`` log table.
 
-    Configured via ``log_tables.notify_sweeps`` in saga_project.yml.
-    Default: ``_saga_notify_sweeps``.
+    Configured via ``log_tables.notify_log`` in saga_project.yml.
+    Default: ``_saga_notify_log``.
     """
-    return get_project_config().log_tables.notify_sweeps
+    return get_project_config().log_tables.notify_log
 
 
 def get_native_load_log_view_name() -> str:

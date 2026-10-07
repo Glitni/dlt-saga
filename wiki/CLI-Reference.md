@@ -415,7 +415,7 @@ recovered:
 
 ### Knowing the notifier ran
 
-Because a clean sweep is silent, silence alone cannot tell "nothing failed" from "the notifier stopped running" — a removed schedule, expired credentials, a broken image. So every sweep appends one row to `_saga_notify_sweeps` in the orchestration schema, whether or not it posted anything:
+Because a clean sweep is silent, silence alone cannot tell "nothing failed" from "the notifier stopped running" — a removed schedule, expired credentials, a broken image. So every sweep appends one row to `_saga_notify_log` in the orchestration schema, whether or not it posted anything:
 
 | Column | Meaning |
 |--------|---------|
@@ -430,10 +430,10 @@ Point whatever monitoring you already have at it — no chat traffic is added:
 
 ```sql
 -- Alert when this is older than a couple of sweep intervals
-SELECT MAX(swept_at) FROM dlt_orchestration._saga_notify_sweeps WHERE environment = 'prod';
+SELECT MAX(swept_at) FROM dlt_orchestration._saga_notify_log WHERE environment = 'prod';
 
 -- Alert on a notifier that runs but cannot reach its channel
-SELECT * FROM dlt_orchestration._saga_notify_sweeps
+SELECT * FROM dlt_orchestration._saga_notify_log
 WHERE outcome = 'undelivered' ORDER BY swept_at DESC;
 ```
 

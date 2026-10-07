@@ -233,16 +233,16 @@ class TestSweepOverRealState:
 
 
 def _sweeps(project):
-    """The sweep log, oldest first; empty when it was never created."""
+    """The notify log, oldest first; empty when it was never created."""
     conn = duckdb.connect(str(project / "local.duckdb"))
     try:
         conn.execute("use dlt_dev")
         tables = {r[0] for r in conn.sql("show tables").fetchall()}
-        if "_saga_notify_sweeps" not in tables:
+        if "_saga_notify_log" not in tables:
             return []
         return conn.sql(
             "select outcome, executions, failing_pipelines, environment "
-            "from _saga_notify_sweeps order by swept_at"
+            "from _saga_notify_log order by swept_at"
         ).fetchall()
     finally:
         conn.close()
@@ -252,7 +252,7 @@ def _sweeps(project):
 class TestEverySweepLeavesATrace:
     """A quiet sweep and a sweep that never ran are both silence in the channel.
 
-    The sweep log is what tells them apart, so a sweep is judged by whether it
+    The notify log is what tells them apart, so a sweep is judged by whether it
     ran rather than by whether it spoke.
     """
 
