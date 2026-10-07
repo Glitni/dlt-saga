@@ -214,6 +214,7 @@ Reports run outcomes to the configured notifier by **reading recorded state**, n
 - Scoped by **environment**, never target *name*: `target` stores whatever string the caller passed, and two targets can describe one warehouse differing only in `run_as`.
 - An execution with non-terminal rows is skipped as in-flight, but only for 24h (`PLANS_STALE_HOURS`); past that a dangling task is a crash, not work in progress, or it would be excluded until `saga maintenance` ran.
 - Quiet when nothing failed. A pipeline that failed and has since recovered is still reported, or one failing a run in five would never surface.
+- Every real sweep appends a row to `_saga_notify_log` (`record_sweep`, outcome `quiet`/`delivered`/`undelivered`) so a notifier that stopped running is detectable as a query — silence alone can't distinguish it from all-green. `--execution-id` and `--dry-run` don't write; a write failure warns rather than failing the command.
 
 ### AI Setup Command
 ```bash

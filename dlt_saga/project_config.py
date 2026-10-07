@@ -298,6 +298,10 @@ class LogTablesConfig:
         default="_saga_native_load_log",
         metadata={"description": "Name of the native-load state-log table."},
     )
+    notify_log: str = field(
+        default="_saga_notify_log",
+        metadata={"description": "Name of the `saga notify` log table."},
+    )
 
     @property
     def execution_plans_current(self) -> str:
@@ -318,6 +322,7 @@ class LogTablesConfig:
             execution_plans=data.get("execution_plans", "_saga_execution_plans"),
             executions=data.get("executions", "_saga_executions"),
             native_load_log=data.get("native_load_log", "_saga_native_load_log"),
+            notify_log=data.get("notify_log", "_saga_notify_log"),
         )
 
 
@@ -783,6 +788,15 @@ def get_native_load_log_table_name() -> str:
     Default: ``_saga_native_load_log``.
     """
     return get_project_config().log_tables.native_load_log
+
+
+def get_notify_log_table_name() -> str:
+    """Return the configured name for the ``saga notify`` log table.
+
+    Configured via ``log_tables.notify_log`` in saga_project.yml.
+    Default: ``_saga_notify_log``.
+    """
+    return get_project_config().log_tables.notify_log
 
 
 def get_native_load_log_view_name() -> str:

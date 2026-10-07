@@ -738,4 +738,6 @@ log_tables:
   historize_log: "_saga_historize_log"
   execution_plans: "_saga_execution_plans"
   executions: "_saga_executions"
+  native_load_log: "_saga_native_load_log"
+  notify_log: "_saga_notify_log"
 ```

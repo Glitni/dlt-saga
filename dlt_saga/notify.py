@@ -32,6 +32,14 @@ run straddling a boundary is reported once — when it finishes. The window only
 stops a first run (or a long outage) from reporting a large backlog: this
 reports recent runs that may need handling, not history that no longer does.
 
+Every sweep leaves a trace
+--------------------------
+A clean sweep posts nothing, so silence cannot tell "nothing failed" from "the
+notifier stopped running" — and the second is the silence this command exists
+to remove, moved up one layer. Each completed sweep therefore appends one row to
+``_saga_notify_log``, so whether the notifier *ran* is a query something
+other than the notifier can answer, without adding chat traffic.
+
 The logic here is warehouse-facing and CLI-agnostic (no typer); the command in
 ``cli.py`` is a thin wrapper.
 """
@@ -61,6 +69,11 @@ DEFAULT_SINCE_DAYS = 7
 # and statement size must not scale with how much a sweep covered — the same
 # reason historize batches snapshots by range rather than by value list.
 CLAIM_BATCH_SIZE = 1000
+
+# How a sweep ended, as recorded in the notify log.
+SWEEP_QUIET = "quiet"  # nothing to report
+SWEEP_DELIVERED = "delivered"  # a digest went out
+SWEEP_UNDELIVERED = "undelivered"  # a digest was due but nothing accepted it
 
 
 @dataclass
@@ -423,6 +436,111 @@ def mark_reported(manager: Any, execution_ids: List[str]) -> int:
     return claimed
 
 
+def record_sweep(manager: Any, ctx: SweepContext, outcome: str) -> bool:
+    """Append one row to the notify log, so a silent notifier is detectable.
+
+    A quiet sweep and a sweep that never ran look the same in the channel.
+    This row is what tells them apart: "no sweep in the last N intervals"
+    becomes a query any external monitor can run.
+
+    Optimistic, like the sweep's own read: the table is created only when the
+    insert fails. Best-effort beyond that — by the time this runs the digest
+    has already gone out, and failing the command would not bring it back. A
+    row that could not be written reads as a missed sweep to whatever watches
+    the table, which is the safe direction to be wrong in.
+
+    Args:
+        manager: An :class:`ExecutionPlanManager` for the orchestration schema.
+        ctx: What the sweep found.
+        outcome: One of :data:`SWEEP_QUIET`, :data:`SWEEP_DELIVERED`,
+            :data:`SWEEP_UNDELIVERED`.
+
+    Returns:
+        Whether the row was written.
+    """
+    from dlt_saga.project_config import get_notify_log_table_name
+
+    d = manager.destination
+    table_name = get_notify_log_table_name()
+    table_id = d.get_full_table_id(manager.schema, table_name)
+    environment = (
+        f"'{d.escape_string_literal(ctx.environment)}'" if ctx.environment else "NULL"
+    )
+    insert_sql = f"""
+        INSERT INTO {table_id}
+        (swept_at, environment, since_days, executions, total_attempts,
+         failed_attempts, failing_pipelines, recovered_pipelines, outcome)
+        VALUES (
+            {d.current_timestamp_expression()},
+            {environment},
+            {int(ctx.since_days)},
+            {len(ctx.execution_ids)},
+            {ctx.total_attempts},
+            {ctx.failed_attempts},
+            {len(ctx.failing)},
+            {len(ctx.recovered)},
+            '{d.escape_string_literal(outcome)}'
+        )
+    """
+
+    def _warn(error: Exception) -> bool:
+        logger.warning(
+            "Could not record this sweep in %s; a monitor watching it will "
+            "read this sweep as missed: %s",
+            table_name,
+            error,
+        )
+        return False
+
+    try:
+        d.execute_sql(insert_sql, manager.schema)
+        return True
+    except Exception as insert_error:
+        logger.debug("Notify log insert failed (%s); creating the table", insert_error)
+        try:
+            _ensure_notify_log(manager, table_id)
+        except Exception as init_error:
+            # Report the insert error, not this one: a notifier without DDL
+            # rights fails here as a matter of course, and "cannot CREATE
+            # TABLE" would send you after the wrong permission.
+            logger.debug("Notify log creation also failed: %s", init_error)
+            return _warn(insert_error)
+
+    # A second insert failure is not "the table was missing", so it is the
+    # error worth showing.
+    try:
+        d.execute_sql(insert_sql, manager.schema)
+        return True
+    except Exception as exc:
+        return _warn(exc)
+
+
+def _ensure_notify_log(manager: Any, table_id: str) -> None:
+    """Create the notify log if it does not exist yet."""
+    d = manager.destination
+
+    def t(logical_type: str) -> str:
+        return d.type_name(logical_type)
+
+    d.ensure_schema_exists(manager.schema)
+    d.execute_sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {table_id} (
+            swept_at {t("timestamp")} NOT NULL,
+            environment {t("string")},
+            since_days {t("int64")} NOT NULL,
+            executions {t("int64")} NOT NULL,
+            total_attempts {t("int64")} NOT NULL,
+            failed_attempts {t("int64")} NOT NULL,
+            failing_pipelines {t("int64")} NOT NULL,
+            recovered_pipelines {t("int64")} NOT NULL,
+            outcome {t("string")} NOT NULL
+        )
+        """,
+        manager.schema,
+    )
+
+
 def _batched(items: List[str], size: int) -> Iterator[List[str]]:
     """Yield *items* in chunks of at most *size*."""
     for start in range(0, len(items), size):
@@ -538,8 +656,15 @@ def run_notify(
         force=force,
     )
 
+    # Only a real sweep moves the marker. A single-execution report is chained
+    # after one run and says nothing about whether the schedule is alive, and
+    # a dry run is a preview.
+    record = not (execution_id or dry_run)
+
     if not ctx.has_anything_to_report:
         logger.info("Nothing to report: no failures across %s", scope)
+        if record:
+            record_sweep(manager, ctx, SWEEP_QUIET)
         return ctx
 
     logger.info(
@@ -562,9 +687,13 @@ def run_notify(
             "next sweep will retry them.",
             len(ctx.execution_ids),
         )
+        if record:
+            record_sweep(manager, ctx, SWEEP_UNDELIVERED)
         return ctx
 
     mark_reported(manager, ctx.execution_ids)
+    if record:
+        record_sweep(manager, ctx, SWEEP_DELIVERED)
     return ctx
 
 

@@ -19,6 +19,7 @@ from dlt_saga.notify import (
     SweepContext,
     collect_unreported,
     mark_reported,
+    record_sweep,
 )
 
 # A Windows-recorded config path. Built from parts so no editing step can
@@ -352,6 +353,97 @@ class TestMarkReported:
             assert mark_reported(manager, ["e1"]) == 0
 
         assert "the next sweep will repeat them" in caplog.text
+
+
+@pytest.mark.unit
+class TestRecordSweep:
+    """Every sweep leaves a row, so "the notifier stopped" is detectable.
+
+    A quiet sweep posts nothing, which is indistinguishable in the channel from
+    a sweep that never ran.
+    """
+
+    def _ctx(self):
+        return SweepContext(
+            environment="prod",
+            since_days=3,
+            execution_ids=["e1", "e2"],
+            outcomes=[
+                PipelineOutcome("a", "a", attempts=2, failures=1),
+                PipelineOutcome(
+                    "b", "b", attempts=1, failures=1, currently_failing=True
+                ),
+            ],
+            total_attempts=5,
+            failed_attempts=2,
+        )
+
+    def _sql(self, manager):
+        return [c.args[0] for c in manager.destination.execute_sql.call_args_list]
+
+    def test_the_row_carries_what_the_sweep_considered(self):
+        manager = _manager([])
+
+        assert record_sweep(manager, self._ctx(), "quiet") is True
+
+        (insert,) = self._sql(manager)
+        assert "INSERT INTO" in insert
+        values = insert.split("VALUES", 1)[1].strip().strip("()")
+        cells = [cell.strip() for cell in values.split(",")]
+        # swept_at, environment, since_days, executions, total_attempts,
+        # failed_attempts, failing_pipelines, recovered_pipelines, outcome
+        assert cells[1:] == ["'prod'", "3", "2", "5", "2", "1", "1", "'quiet'"]
+
+    def test_a_missing_environment_is_null_not_a_string(self):
+        manager = _manager([])
+        ctx = self._ctx()
+        ctx.environment = None
+
+        record_sweep(manager, ctx, "quiet")
+
+        assert "'None'" not in self._sql(manager)[0]
+
+    def test_a_missing_table_is_created_then_written(self):
+        manager = _manager([])
+        manager.destination.execute_sql.side_effect = [
+            RuntimeError("table not found"),
+            None,
+            None,
+        ]
+
+        assert record_sweep(manager, self._ctx(), "delivered") is True
+
+        statements = self._sql(manager)
+        assert "CREATE TABLE IF NOT EXISTS" in statements[1]
+        assert "INSERT INTO" in statements[2]
+
+    def test_a_failed_write_warns_rather_than_raising(self, caplog):
+        """The digest has already gone out; failing the command now would not
+        bring it back, and the missing row reads as a missed sweep.
+        """
+        manager = _manager([])
+        manager.destination.execute_sql.side_effect = RuntimeError("denied")
+
+        with caplog.at_level(logging.WARNING):
+            assert record_sweep(manager, self._ctx(), "delivered") is False
+
+        assert "Could not record this sweep" in caplog.text
+
+    def test_the_insert_error_is_shown_when_creation_also_fails(self, caplog):
+        """A notifier without DDL rights fails creation as a matter of course;
+        showing that error would send you after the wrong permission.
+        """
+        manager = _manager([])
+        manager.destination.execute_sql.side_effect = [
+            RuntimeError("insert denied"),
+            RuntimeError("create denied"),
+        ]
+
+        with caplog.at_level(logging.WARNING):
+            assert record_sweep(manager, self._ctx(), "quiet") is False
+
+        assert "insert denied" in caplog.text
+        assert "create denied" not in caplog.text
 
 
 @pytest.mark.unit
