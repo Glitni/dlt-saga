@@ -413,6 +413,32 @@ recovered:
 - **Per-pipeline mentions still work.** The execution-plan row stores each pipeline's config, so `notifications.slack.mentions` resolves even though no single process ran every pipeline.
 - **Nothing failed, nothing posted.** A clean sweep is silent.
 
+### Knowing the notifier ran
+
+Because a clean sweep is silent, silence alone cannot tell "nothing failed" from "the notifier stopped running" — a removed schedule, expired credentials, a broken image. So every sweep appends one row to `_saga_notify_sweeps` in the orchestration schema, whether or not it posted anything:
+
+| Column | Meaning |
+|--------|---------|
+| `swept_at` | When the sweep ran |
+| `environment` | Environment it was scoped to |
+| `since_days` | The window it looked back over |
+| `executions`, `total_attempts`, `failed_attempts` | What it considered |
+| `failing_pipelines`, `recovered_pipelines` | What it found |
+| `outcome` | `quiet` (nothing to report), `delivered`, or `undelivered` (a digest was due but no notifier accepted it) |
+
+Point whatever monitoring you already have at it — no chat traffic is added:
+
+```sql
+-- Alert when this is older than a couple of sweep intervals
+SELECT MAX(swept_at) FROM dlt_orchestration._saga_notify_sweeps WHERE environment = 'prod';
+
+-- Alert on a notifier that runs but cannot reach its channel
+SELECT * FROM dlt_orchestration._saga_notify_sweeps
+WHERE outcome = 'undelivered' ORDER BY swept_at DESC;
+```
+
+Only real sweeps write a row. `--execution-id` (a single report chained after one run) and `--dry-run` do not, and a sweep that fails to read the execution tables writes nothing — the missing row is what should alert.
+
 ---
 
 ## saga ai-setup

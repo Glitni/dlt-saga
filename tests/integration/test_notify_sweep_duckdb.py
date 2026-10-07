@@ -232,6 +232,88 @@ class TestSweepOverRealState:
         assert "Nothing to report" in _notify(caplog)
 
 
+def _sweeps(project):
+    """The sweep log, oldest first; empty when it was never created."""
+    conn = duckdb.connect(str(project / "local.duckdb"))
+    try:
+        conn.execute("use dlt_dev")
+        tables = {r[0] for r in conn.sql("show tables").fetchall()}
+        if "_saga_notify_sweeps" not in tables:
+            return []
+        return conn.sql(
+            "select outcome, executions, failing_pipelines, environment "
+            "from _saga_notify_sweeps order by swept_at"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+@pytest.mark.integration
+class TestEverySweepLeavesATrace:
+    """A quiet sweep and a sweep that never ran are both silence in the channel.
+
+    The sweep log is what tells them apart, so a sweep is judged by whether it
+    ran rather than by whether it spoke.
+    """
+
+    def test_a_quiet_sweep_is_recorded(self, project, caplog):
+        assert _ingest().exit_code == 0
+
+        assert "Nothing to report" in _notify(caplog)
+
+        ((outcome, executions, failing, environment),) = _sweeps(project)
+        assert outcome == "quiet"
+        assert executions == 1
+        assert failing == 0
+        assert environment == "dev"
+
+    def test_a_delivered_sweep_is_recorded(self, project, caplog):
+        _configure_slack(project)
+        _break_the_source(project)
+        _ingest()
+
+        with _slack():
+            _notify(caplog)
+
+        ((outcome, _, failing, _),) = _sweeps(project)
+        assert (outcome, failing) == ("delivered", 1)
+
+    def test_an_undelivered_sweep_is_recorded_as_such(self, project, caplog):
+        """A notifier that runs but cannot reach its channel is its own alert."""
+        _configure_slack(project)
+        _break_the_source(project)
+        _ingest()
+
+        with _slack(succeeds=False):
+            _notify(caplog)
+
+        assert [row[0] for row in _sweeps(project)] == ["undelivered"]
+
+    def test_each_sweep_appends(self, project, caplog):
+        _ingest()
+
+        _notify(caplog)
+        _notify(caplog)
+
+        assert [row[0] for row in _sweeps(project)] == ["quiet", "quiet"]
+
+    def test_a_dry_run_records_nothing(self, project, caplog):
+        _ingest()
+
+        _notify(caplog, "--dry-run")
+
+        assert _sweeps(project) == []
+
+    def test_a_single_execution_report_records_nothing(self, project, caplog):
+        """Chained after one run, it says nothing about the schedule being alive."""
+        _ingest()
+        ((execution_id, _),) = _executions(project)
+
+        _notify(caplog, "--execution-id", execution_id)
+
+        assert _sweeps(project) == []
+
+
 @pytest.mark.integration
 class TestNotifiedAtColumn:
     def test_column_is_added_to_a_table_that_predates_it(self, project, caplog):
