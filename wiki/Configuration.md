@@ -428,6 +428,8 @@ Selector reference:
 | `endpoint` | string | API endpoint path |
 | `auth_type` | string | Authentication type (`bearer`, `basic`, etc.) |
 | `auth_token` | string | Token or secret reference |
+| `auth_location` | string | Where an `api_key` is sent: `header` (default) or `query` |
+| `auth_param_name` | string | Query parameter for the key (required with `auth_location: query`) |
 
 > API pipelines use polymorphic loading — custom implementations in `pipelines/api/<api_name>/` override the base `ApiPipeline`.
 

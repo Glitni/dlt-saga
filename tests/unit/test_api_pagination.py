@@ -1159,3 +1159,123 @@ class TestAuthHeaders:
         )
         assert isinstance(cfg.auth_username, SecretStr)
         assert isinstance(cfg.auth_password, SecretStr)
+
+
+def _query_auth_config(**overrides):
+    cfg = {
+        "base_url": "https://api.example.com",
+        "endpoint": "/data",
+        "auth_type": "api_key",
+        "auth_token": "k3y+with/base64=",
+        "auth_location": "query",
+        "auth_param_name": "api_key",
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+@pytest.mark.unit
+class TestQueryAuthConfig:
+    def test_defaults_to_header(self):
+        cfg = ApiConfig(base_url="https://api.example.com", endpoint="/data")
+        assert cfg.auth_location == "header"
+
+    def test_valid_query_config(self):
+        cfg = ApiConfig(**_query_auth_config())
+        assert cfg.auth_location == "query"
+        assert cfg.auth_param_name == "api_key"
+
+    def test_invalid_location_raises(self):
+        with pytest.raises(ValueError, match="auth_location must be"):
+            ApiConfig(**_query_auth_config(auth_location="body"))
+
+    def test_query_requires_param_name(self):
+        with pytest.raises(ValueError, match="requires auth_param_name"):
+            ApiConfig(**_query_auth_config(auth_param_name=None))
+
+    @pytest.mark.parametrize("auth_type", ["bearer", "none"])
+    def test_query_only_for_api_key(self, auth_type):
+        with pytest.raises(ValueError, match="only supported for auth_type 'api_key'"):
+            ApiConfig(**_query_auth_config(auth_type=auth_type))
+
+    def test_query_rejects_header_name(self):
+        with pytest.raises(ValueError, match="auth_header_name does not apply"):
+            ApiConfig(**_query_auth_config(auth_header_name="X-Key"))
+
+    def test_param_name_requires_query_location(self):
+        with pytest.raises(ValueError, match="only applies with auth_location: query"):
+            ApiConfig(**_query_auth_config(auth_location="header"))
+
+    def test_param_name_colliding_with_query_params_raises(self):
+        with pytest.raises(ValueError, match="query_params already sets 'api_key'"):
+            ApiConfig(**_query_auth_config(query_params={"api_key": "other"}))
+
+
+@pytest.mark.unit
+class TestQueryAuthRequest:
+    @pytest.fixture(autouse=True)
+    def _clean_redaction_registry(self):
+        redaction._reset_for_testing()
+        yield
+        redaction._reset_for_testing()
+
+    def _request(self, pipeline, **kwargs):
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"data": []}
+        with patch(
+            "dlt_saga.pipelines.api.base.requests.request", return_value=ok
+        ) as req:
+            pipeline._make_request(**kwargs)
+        return req.call_args.kwargs
+
+    def test_key_sent_as_query_param_not_header(self):
+        pipeline = RetryApiPipeline(**_query_auth_config(query_params={"limit": 10}))
+        sent = self._request(pipeline)
+        assert sent["params"] == {"limit": 10, "api_key": "k3y+with/base64="}
+        assert "X-API-Key" not in sent["headers"]
+
+    def test_key_added_to_pagination_override_params(self):
+        pipeline = RetryApiPipeline(**_query_auth_config())
+        sent = self._request(pipeline, query_params={"offset": 100})
+        assert sent["params"] == {"offset": 100, "api_key": "k3y+with/base64="}
+
+    def test_config_query_params_not_mutated(self):
+        pipeline = RetryApiPipeline(**_query_auth_config(query_params={"limit": 10}))
+        self._request(pipeline)
+        assert pipeline.api_config.query_params == {"limit": 10}
+
+    def test_next_url_already_carrying_key_not_duplicated(self):
+        pipeline = RetryApiPipeline(**_query_auth_config())
+        sent = self._request(
+            pipeline,
+            url="https://api.example.com/data?page=2&api_key=k3y",
+            query_params={},
+        )
+        assert sent["params"] == {}
+
+    def test_next_url_without_key_gets_it(self):
+        pipeline = RetryApiPipeline(**_query_auth_config())
+        sent = self._request(
+            pipeline, url="https://api.example.com/data?page=2", query_params={}
+        )
+        assert sent["params"] == {"api_key": "k3y+with/base64="}
+
+    def test_header_location_sends_no_auth_params(self):
+        pipeline = RetryApiPipeline(auth_type="api_key", auth_token="tok-value")
+        sent = self._request(pipeline)
+        assert sent["params"] is None
+        assert sent["headers"]["X-API-Key"] == "tok-value"
+
+    def test_key_registered_raw_and_url_encoded(self):
+        """A plain-value key is not registered by the secret resolver, and
+        requests embeds the URL-encoded form in its exception messages, so both
+        forms must be masked."""
+        pipeline = RetryApiPipeline(**_query_auth_config())
+        sent = self._request(pipeline)
+        # The URL exactly as requests encodes it, so a drift between its
+        # encoding and the registered form fails here.
+        prepared_url = (
+            requests.Request("GET", sent["url"], params=sent["params"]).prepare().url
+        )
+        masked = redaction.redact(f"params={sent['params']} url: {prepared_url}")
+        assert "k3y" not in masked

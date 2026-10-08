@@ -77,6 +77,21 @@ class ApiConfig(BaseConfig):
             "description": "Custom header name for authentication (default: Authorization for bearer, X-API-Key for api_key)"
         },
     )
+    auth_location: str = field(
+        default="header",
+        metadata={
+            "description": "Where an api_key credential is sent: 'header' (default) "
+            "or 'query' (as the query parameter named by auth_param_name)",
+            "enum": ["header", "query"],
+        },
+    )
+    auth_param_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": "Query parameter name for the API key "
+            "(required with auth_location: query, e.g. 'api_key')"
+        },
+    )
     auth_username: Optional[SecretStr] = field(
         default=None,
         metadata={
@@ -205,6 +220,43 @@ class ApiConfig(BaseConfig):
         ):
             raise ValueError(
                 "auth_type 'basic' requires both auth_username and auth_password"
+            )
+
+        self._validate_auth_location()
+
+    def _validate_auth_location(self) -> None:
+        """Validate api_key placement (header vs. query parameter)."""
+        if self.auth_location not in ("header", "query"):
+            raise ValueError(
+                f"auth_location must be 'header' or 'query', got '{self.auth_location}'"
+            )
+        if self.auth_location == "header":
+            if self.auth_param_name:
+                raise ValueError(
+                    "auth_param_name only applies with auth_location: query "
+                    "(the API key is otherwise sent as a header)"
+                )
+            return
+
+        if self.auth_type != "api_key":
+            raise ValueError(
+                "auth_location: query is only supported for auth_type 'api_key' "
+                f"(got '{self.auth_type}')"
+            )
+        if not self.auth_param_name:
+            raise ValueError(
+                "auth_location: query requires auth_param_name "
+                "(the query parameter the API reads the key from, e.g. 'api_key')"
+            )
+        if self.auth_header_name:
+            raise ValueError(
+                "auth_header_name does not apply with auth_location: query; "
+                "use auth_param_name for the query parameter name"
+            )
+        if self.query_params and self.auth_param_name in self.query_params:
+            raise ValueError(
+                f"query_params already sets '{self.auth_param_name}', which "
+                "auth_param_name reserves for the API key; remove it from query_params"
             )
 
 
