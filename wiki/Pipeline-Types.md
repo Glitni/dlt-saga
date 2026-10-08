@@ -37,7 +37,7 @@ plain value or a secret URI (`googlesecretmanager::…`, `azurekeyvault::…`,
 | `auth_type` | Fields | Header sent |
 |-------------|--------|-------------|
 | `none` (default) | — | none |
-| `api_key` | `auth_token`, optional `auth_header_name` (default `X-API-Key`) | `<header_name>: <token>` |
+| `api_key` | `auth_token`, optional `auth_header_name` (default `X-API-Key`) | `<header_name>: <token>` (or `?<auth_param_name>=<token>` with `auth_location: query`) |
 | `bearer` | `auth_token` | `Authorization: Bearer <token>` |
 | `basic` | `auth_username`, `auth_password` | `Authorization: Basic <base64(user:pass)>` |
 
@@ -48,8 +48,29 @@ auth_username: "env_secret::API_USER"
 auth_password: "azurekeyvault::https://my-vault.vault.azure.net::api-password"
 ```
 
-For auth schemes not covered here, override `_get_auth_headers()` in a custom
-adapter (see [Plugin Development](Plugin-Development)).
+For APIs that read the key from the query string instead of a header, set
+`auth_location: query` and name the parameter with `auth_param_name`:
+
+```yaml
+# Sends ?api_key=<token> on every request, including paginated ones
+auth_type: "api_key"
+auth_token: "googlesecretmanager::project::api-key"
+auth_location: "query"          # header (default) | query
+auth_param_name: "api_key"
+```
+
+Prefer the header when the API accepts both: a URL can end up in proxy and
+server access logs outside saga's control.
+
+The key is added to every request's query parameters, alongside pagination and
+incremental params. A `next_url` link that already carries the parameter is left
+as-is. Because a query-string key is part of the request URL, it is masked in
+log output in both raw and URL-encoded form. Keep the key out of `query_params`
+itself — a `{{ env_var() }}` there renders the key into the execution plan.
+
+For auth schemes not covered here, override `_get_auth_headers()` (or
+`_get_auth_params()` for query-string credentials) in a custom adapter (see
+[Plugin Development](Plugin-Development)).
 
 ### With pagination
 

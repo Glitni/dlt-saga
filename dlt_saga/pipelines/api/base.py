@@ -15,7 +15,7 @@ from typing import (
     Tuple,
     Union,
 )
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, quote_plus, urljoin, urlsplit
 
 if TYPE_CHECKING:
     from dlt_saga.utility.secrets.secret_str import SecretStr
@@ -115,6 +115,8 @@ class BaseApiPipeline(BasePipeline):
         headers = {}
 
         if self.api_config.auth_type == "api_key":
+            if self.api_config.auth_location == "query":
+                return {}  # sent as a query parameter by _get_auth_params
             # API key in custom header
             header_name = self.api_config.auth_header_name or "X-API-Key"
             token = self._resolve_token(self.api_config.auth_token)
@@ -134,6 +136,31 @@ class BaseApiPipeline(BasePipeline):
             headers["Authorization"] = f"Basic {credentials}"
 
         return headers
+
+    def _get_auth_params(self) -> Dict[str, str]:
+        """Get authentication query parameters based on auth config.
+
+        Non-empty only for ``auth_type: api_key`` with ``auth_location: query``.
+        A query-string credential ends up in the request URL, which ``requests``
+        embeds (URL-encoded) in its exception messages, so the key is registered
+        for log redaction in both raw and encoded form. Request headers are
+        never logged, so the header path needs no equivalent.
+
+        Returns:
+            Dictionary of query parameters to add to request
+        """
+        cfg = self.api_config
+        if cfg.auth_type != "api_key" or cfg.auth_location != "query":
+            return {}
+        if not cfg.auth_param_name:
+            raise ValueError("auth_location: query requires auth_param_name")
+
+        from dlt_saga.utility.secrets import register_secret
+
+        token = self._resolve_token(cfg.auth_token)
+        register_secret(token)
+        register_secret(quote_plus(token))
+        return {cfg.auth_param_name: token}
 
     def _resolve_token(self, token: Union[str, "SecretStr", None]) -> str:
         """Resolve a token value.
@@ -238,6 +265,14 @@ class BaseApiPipeline(BasePipeline):
         # Add authentication headers
         auth_headers = self._get_auth_headers()
         headers.update(auth_headers)
+
+        # Add authentication query parameters, unless the URL already carries
+        # them (a next_url link that echoes the key back).
+        auth_params = self._get_auth_params()
+        if auth_params:
+            in_url = parse_qs(urlsplit(url).query, keep_blank_values=True)
+            missing = {k: v for k, v in auth_params.items() if k not in in_url}
+            query_params = {**(query_params or {}), **missing}
 
         # Retry loop with exponential backoff
         max_retries = self.api_config.max_retries
