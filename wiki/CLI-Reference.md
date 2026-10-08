@@ -426,16 +426,31 @@ Because a clean sweep is silent, silence alone cannot tell "nothing failed" from
 | `failing_pipelines`, `recovered_pipelines` | What it found |
 | `outcome` | `quiet` (nothing to report), `delivered`, or `undelivered` (a digest was due but no notifier accepted it) |
 
-Point whatever monitoring you already have at it — no chat traffic is added:
+Point whatever monitoring you already have at it — no chat traffic is added. A monitor has to tell three states apart, and only one of them is healthy:
+
+| State | What the monitor sees | Means |
+|-------|-----------------------|-------|
+| **Absent** | The query fails: the table does not exist | Never swept — the table is created by the first sweep |
+| **Empty** | `MAX(swept_at)` is `NULL` | Never swept for this environment |
+| **Stale** | An old `MAX(swept_at)` | Stopped sweeping |
+
+Absent and empty are the *worst* cases — a sweep that was never scheduled — so they must alert, not pass. A threshold written the obvious way, `MAX(swept_at) < now - 2h`, does neither: comparing `NULL` is not true, so it stays green on an empty table. Ask for a verdict instead, and treat a query error as a failed check:
 
 ```sql
--- Alert when this is older than a couple of sweep intervals
-SELECT MAX(swept_at) FROM dlt_orchestration._saga_notify_log WHERE environment = 'prod';
+-- One row, always. overdue is TRUE when the last sweep is too old, or when
+-- there has never been one. A "table not found" error means the same thing.
+SELECT
+  MAX(swept_at) AS last_sweep,
+  COALESCE(MAX(swept_at) < CURRENT_TIMESTAMP - INTERVAL 2 HOUR, TRUE) AS overdue
+FROM <orchestration_schema>._saga_notify_log
+WHERE environment = 'prod';
 
--- Alert on a notifier that runs but cannot reach its channel
-SELECT * FROM dlt_orchestration._saga_notify_log
+-- A notifier that runs but cannot reach its channel
+SELECT * FROM <orchestration_schema>._saga_notify_log
 WHERE outcome = 'undelivered' ORDER BY swept_at DESC;
 ```
+
+Set the interval to a couple of sweep intervals, so one late sweep is not an alert.
 
 Only real sweeps write a row. `--execution-id` (a single report chained after one run) and `--dry-run` do not, and a sweep that fails to read the execution tables writes nothing — the missing row is what should alert.
 
