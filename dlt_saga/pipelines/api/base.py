@@ -242,8 +242,12 @@ class BaseApiPipeline(BasePipeline):
         # Retry loop with exponential backoff
         max_retries = self.api_config.max_retries
         for attempt in range(max_retries + 1):
+            # Params are logged as the unencoded dict, not the prepared URL:
+            # the log redaction filter matches resolved secrets verbatim, and
+            # URL-encoding (e.g. '+' -> '%2B') would let one slip through.
             self.logger.debug(
                 f"Making API request: {self.api_config.method} {url} "
+                f"params={query_params or {}} "
                 f"(attempt {attempt + 1}/{max_retries + 1})"
             )
 

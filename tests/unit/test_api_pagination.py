@@ -8,6 +8,7 @@ import requests
 
 from dlt_saga.pipelines.api.base import ApiRequestError, BaseApiPipeline
 from dlt_saga.pipelines.api.config import ApiConfig
+from dlt_saga.utility.secrets import redaction
 
 # ---------------------------------------------------------------------------
 # Config validation
@@ -1006,6 +1007,84 @@ class TestMaxPagesSafety:
         with caplog.at_level(logging.WARNING):
             list(pipeline._fetch_all_pages())
         assert "max_pages" not in caplog.text
+
+
+@pytest.mark.unit
+class TestRequestLogging:
+    @pytest.fixture(autouse=True)
+    def _clean_redaction_registry(self):
+        redaction._reset_for_testing()
+        yield
+        redaction._reset_for_testing()
+
+    def _request_log_messages(self, caplog):
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("Making API request")
+        ]
+
+    def test_query_params_logged_per_attempt(self, caplog):
+        pipeline = RetryApiPipeline(query_params={"offset": 200, "limit": 100})
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"data": []}
+        transient = MagicMock(status_code=503, reason="Service Unavailable")
+        with (
+            patch(
+                "dlt_saga.pipelines.api.base.requests.request",
+                side_effect=[transient, ok],
+            ),
+            patch("dlt_saga.pipelines.api.base.time.sleep"),
+            caplog.at_level(logging.DEBUG, logger="test"),
+        ):
+            pipeline._make_request()
+        messages = self._request_log_messages(caplog)
+        assert len(messages) == 2
+        assert all("params={'offset': 200, 'limit': 100}" in m for m in messages)
+
+    def test_override_params_logged(self, caplog):
+        pipeline = RetryApiPipeline(query_params={"limit": 100})
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"data": []}
+        with (
+            patch("dlt_saga.pipelines.api.base.requests.request", return_value=ok),
+            caplog.at_level(logging.DEBUG, logger="test"),
+        ):
+            pipeline._make_request(query_params={"cursor": "abc"})
+        assert "params={'cursor': 'abc'}" in self._request_log_messages(caplog)[0]
+
+    def test_no_params_logged_as_empty(self, caplog):
+        pipeline = RetryApiPipeline()
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"data": []}
+        with (
+            patch("dlt_saga.pipelines.api.base.requests.request", return_value=ok),
+            caplog.at_level(logging.DEBUG, logger="test"),
+        ):
+            pipeline._make_request()
+        assert "params={}" in self._request_log_messages(caplog)[0]
+
+    def test_resolved_secret_in_params_is_redacted(self, caplog):
+        """A provider-resolved secret passed as a query param (an adapter
+        putting an API key in the query string) is masked by the handler-level
+        redaction filter, including characters URL-encoding would rewrite."""
+        secret = "k3y+with/base64="
+        redaction.register_secret(secret)
+        pipeline = RetryApiPipeline()
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"data": []}
+        with (
+            patch("dlt_saga.pipelines.api.base.requests.request", return_value=ok),
+            caplog.at_level(logging.DEBUG, logger="test"),
+        ):
+            pipeline._make_request(query_params={"api_key": secret})
+        (record,) = [
+            r for r in caplog.records if r.getMessage().startswith("Making API request")
+        ]
+        redaction.SecretRedactingFilter().filter(record)
+        message = record.getMessage()
+        assert secret not in message
+        assert f"'api_key': '{redaction.REDACTION_MASK}'" in message
 
 
 @pytest.mark.unit
