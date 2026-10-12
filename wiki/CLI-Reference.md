@@ -261,6 +261,8 @@ saga report [OPTIONS]
 
 The **Executions** tab shows one row per run recorded in `_saga_executions` (both orchestrated and local), including its command, selector, and — when the run was a backfill — the `--start-value-override` / `--end-value-override` window.
 
+The Dashboard's *Longest execution per day* chart shows how long the biggest run of each day took (first task start → last task completion), so a schedule that is getting slower is visible at a glance; the tooltip names the execution's command and selector, and clicking a bar opens that day's executions. Only orchestrated executions have a measured duration — a local run records its outcomes when it finishes, not per-task timings — and backfills are left out as one-off windows.
+
 ---
 
 ## saga info

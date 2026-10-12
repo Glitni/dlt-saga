@@ -113,8 +113,11 @@
     const timestamps = tasks.map(t => t.log_timestamp).filter(Boolean).sort();
     const startTimes = tasks.map(t => t.started_at).filter(Boolean).sort();
     const endTimes = tasks.map(t => t.completed_at).filter(Boolean).sort();
+    // A local run records its tasks after the fact with started_at == completed_at,
+    // so its span is unknown rather than zero.
+    const isLocal = tasks.every(t => t.is_orchestrated === false);
     let duration = null;
-    if (startTimes.length && endTimes.length) {
+    if (!isLocal && startTimes.length && endTimes.length) {
       duration = (new Date(endTimes[endTimes.length - 1]) - new Date(startTimes[0])) / 1000;
     }
     return { execution_id: id, total: tasks.length, completed, failed, pending, running,
@@ -386,8 +389,9 @@
   }
 
   // Single-series bar chart (e.g. rows loaded per day).
-  // fmtVal formats the tooltip value; labelEvery controls x-axis label density.
-  function buildBarChart(label, days, values, color, fmtVal, labelEvery) {
+  // fmtVal(value, dayIndex) formats the tooltip value; labelEvery controls x-axis
+  // label density; onBarClick(dateStr), when given, makes non-empty bars clickable.
+  function buildBarChart(label, days, values, color, fmtVal, labelEvery, onBarClick) {
     const every = labelEvery || 2;
     const max = Math.max(...values, 1);
     const chart = h('div', { className: 'mini-chart' });
@@ -396,11 +400,13 @@
     const labels = h('div', { className: 'bar-labels' });
     values.forEach((v, i) => {
       const pct = (v / max) * 100;
-      const bar = h('div', { className: 'bar' });
+      const clickable = onBarClick && v > 0;
+      const bar = h('div', { className: 'bar' + (clickable ? ' bar-clickable' : '') });
       bar.style.height = Math.max(pct, 2) + '%';
       bar.style.background = color;
+      if (clickable) bar.addEventListener('click', () => onBarClick(localDateStr(days[i])));
       bar.appendChild(h('div', { className: 'bar-tooltip' },
-        fmtDateShort(days[i].toISOString()) + ': ' + (fmtVal ? fmtVal(v) : v)));
+        fmtDateShort(days[i].toISOString()) + ': ' + (fmtVal ? fmtVal(v, i) : v)));
       bars.appendChild(bar);
       labels.appendChild(h('span', null, i % every === 0 ? fmtDateShort(days[i].toISOString()) : ''));
     });
@@ -980,6 +986,35 @@
           showTab('orchestration');
           renderOrchestration();
         }));
+
+      // Longest execution per day. Max rather than median: a day mixing hourly
+      // ingests with a daily run is best summed up by its biggest run, the one
+      // whose growth matters. Executions without a measured span (local,
+      // in-flight) and backfills (one-off windows) are left out.
+      const longestByDay = new Array(numDays).fill(null);
+      execList.forEach(e => {
+        if (e.duration == null || e.pending > 0 || e.running > 0) return;
+        if (e.meta && (e.meta.start_value_override || e.meta.end_value_override)) return;
+        const ts = e.meta ? e.meta.created_at : e.timestamp;
+        if (!ts) return;
+        const rd = new Date(ts);
+        rd.setHours(0, 0, 0, 0);
+        const idx = dayBuckets.findIndex(d => d.getTime() === rd.getTime());
+        if (idx >= 0 && (!longestByDay[idx] || e.duration > longestByDay[idx].duration)) longestByDay[idx] = e;
+      });
+      if (longestByDay.some(Boolean)) {
+        chartContainer.appendChild(buildBarChart('Longest execution per day', dayBuckets,
+          longestByDay.map(e => e ? e.duration : 0), 'var(--info)', (v, i) => {
+            const e = longestByDay[i];
+            if (!e) return 'no executions';
+            const what = e.meta ? ' (' + e.meta.command + ' ' + (e.meta.select_criteria || 'all') + ')' : '';
+            return fmtDuration(v) + what;
+          }, labelEvery, date => {
+            pendingOrchDateFilter = date;
+            showTab('orchestration');
+            renderOrchestration();
+          }));
+      }
     }
 
     // Ingest: success vs failed (+ rows per day) — only when there are ingest runs
