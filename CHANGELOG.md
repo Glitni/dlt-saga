@@ -1,3 +1,11 @@
+## 0.35.0 — 2026-10-12
+
+### Added
+- Chart the longest execution per day on the report dashboard (#514)
+- Support sending api_key auth as a query parameter (#512)
+- Log query params in API request debug output (#511)
+- Record each saga notify sweep so a silent notifier is detectable (#506)
+
 ## 0.34.0 — 2026-10-05
 
 ### Added
