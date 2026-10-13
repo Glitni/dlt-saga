@@ -1,3 +1,8 @@
+## 0.36.0 — 2026-10-13
+
+### Breaking Changes
+- Cluster historized tables by validity columns instead of partitioning by valid_from (#521)
+
 ## 0.35.1 — 2026-10-13
 
 ### Fixed
