@@ -1976,13 +1976,10 @@ def doctor(
     For interactive OAuth (Databricks U2M), the browser will open during the
     connection check, establishing credentials before any pipeline work.
     """
-    from importlib.metadata import entry_points
-
-    from dlt_saga.pipelines.registry import _NAMESPACE_REGISTRY, _ensure_packages_loaded
     from dlt_saga.utility.cli.doctor import (
-        _doctor_check,
         _doctor_check_configs,
         _doctor_check_destination,
+        _doctor_check_namespaces,
         _doctor_check_profile,
         _doctor_check_project,
         _doctor_check_stray_project_config,
@@ -2011,20 +2008,7 @@ def doctor(
         and ok
     )
 
-    _ensure_packages_loaded()
-    external_ns = {
-        ns: base for ns, base in _NAMESPACE_REGISTRY.items() if ns != "dlt_saga"
-    }
-    pip_eps = list(entry_points(group="dlt_saga.pipelines"))
-    if external_ns or pip_eps:
-        typer.echo("")
-        for ns, base in sorted(external_ns.items()):
-            if not _doctor_check(f"  {ns} → {base} (packages.yml)", base):
-                ok = False
-        for ep in pip_eps:
-            base_module = ep.value.split(":")[0]
-            if not _doctor_check(f"  {ep.name} ({base_module})", base_module):
-                ok = False
+    ok = _doctor_check_namespaces(_emit) and ok
 
     # AI context staleness check (non-blocking)
     try:

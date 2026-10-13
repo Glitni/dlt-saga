@@ -18,7 +18,7 @@ import importlib
 import logging
 import threading
 import types
-from typing import Dict, Optional, Type
+from typing import Dict, Optional, Tuple, Type
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,12 @@ _NAMESPACE_SOURCES: Dict[str, str] = {
     "dlt_saga": "built-in",
 }
 
+# Registrations overridden by a later one from a different source that maps the
+# namespace to a different module (last registration wins). Keyed by namespace;
+# value is the overridden (base_module, source). Warned at registration and
+# surfaced by saga doctor.
+_SHADOWED_NAMESPACES: Dict[str, Tuple[str, str]] = {}
+
 _DEFAULT_NAMESPACE = "dlt_saga"
 
 _ep_loaded = False
@@ -54,6 +60,25 @@ def register_namespace(
         base_module: Python module path the namespace maps to
         source: Where this registration came from ('built-in', 'packages.yml', 'entry-point')
     """
+    prior_base = _NAMESPACE_REGISTRY.get(namespace)
+    prior_source = _NAMESPACE_SOURCES.get(namespace)
+    if (
+        prior_base is not None
+        and prior_source is not None
+        and prior_source != source
+        and prior_base != base_module
+    ):
+        _SHADOWED_NAMESPACES[namespace] = (prior_base, prior_source)
+        logger.warning(
+            "Pipeline namespace '%s' is registered by both %s ('%s') and %s ('%s'); "
+            "adapters resolve to '%s'. Rename or remove one of them.",
+            namespace,
+            prior_source,
+            prior_base,
+            source,
+            base_module,
+            base_module,
+        )
     _NAMESPACE_REGISTRY[namespace] = base_module
     _NAMESPACE_SOURCES[namespace] = source
 

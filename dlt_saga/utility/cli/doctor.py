@@ -46,6 +46,44 @@ def _doctor_check(label: str, module_path: str) -> bool:
         return False
 
 
+def _doctor_check_namespaces(emit: Callable[..., None]) -> bool:
+    """Import-check every external pipeline namespace, labelled with its origin.
+
+    Also warns (non-blocking) when one source's registration overrode another's
+    with a different module, e.g. an installed entry point shadowing a
+    packages.yml namespace of the same name — only the winner is resolvable.
+    Returns False if any namespace fails to import.
+    """
+    from dlt_saga.pipelines.registry import (
+        _NAMESPACE_REGISTRY,
+        _NAMESPACE_SOURCES,
+        _SHADOWED_NAMESPACES,
+        _ensure_packages_loaded,
+    )
+
+    _ensure_packages_loaded()
+    external_ns = sorted(ns for ns in _NAMESPACE_REGISTRY if ns != "dlt_saga")
+    if not external_ns:
+        return True
+
+    typer.echo("")
+    ok = True
+    for ns in external_ns:
+        base = _NAMESPACE_REGISTRY[ns]
+        source = _NAMESPACE_SOURCES.get(ns, "unknown")
+        if not _doctor_check(f"  {ns} → {base} ({source})", base):
+            ok = False
+        if ns in _SHADOWED_NAMESPACES:
+            shadowed_base, shadowed_source = _SHADOWED_NAMESPACES[ns]
+            emit(
+                "!",
+                f"Namespace '{ns}' conflict",
+                f"{source} → {base} overrides {shadowed_source} → {shadowed_base}; "
+                f"rename or remove one of them",
+            )
+    return ok
+
+
 def _doctor_check_profile(
     profile: Optional[str],
     target: Optional[str],
