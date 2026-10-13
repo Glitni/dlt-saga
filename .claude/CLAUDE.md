@@ -293,8 +293,7 @@ historize:
   # snapshot_column: _dlt_ingested_at   # default
   # primary_key: inherited from top level
   ignore_columns: [updated_by]
-  partition_column: "_dlt_valid_from"
-  cluster_columns: [id]
+  cluster_columns: [_dlt_valid_to, _dlt_valid_from, id]  # default: the two validity columns
   track_deletions: true
 ```
 

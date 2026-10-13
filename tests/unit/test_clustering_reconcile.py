@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from dlt_saga.destinations.base import Destination
+from dlt_saga.destinations.base import Destination, TableLayout
 from dlt_saga.utility.internal_tables import (
     clustering_state,
     resolve_internal_log_tables,
@@ -109,6 +109,26 @@ class TestReconcileClusteringOrchestrator:
 
 
 @pytest.mark.unit
+class TestGetClusteringColumnsDelegatesToLayout:
+    def test_absent_table(self):
+        fake = MagicMock()
+        fake.get_table_layout.return_value = None
+        assert Destination.get_clustering_columns(fake, "ds", "t") is None
+
+    def test_returns_layout_clustering(self):
+        fake = MagicMock()
+        fake.get_table_layout.return_value = TableLayout(
+            partition_column="d", cluster_columns=["a", "b"]
+        )
+        assert Destination.get_clustering_columns(fake, "ds", "t") == ["a", "b"]
+
+    def test_base_allows_clustering_on_partitioned_table(self):
+        from tests.unit.test_destinations_base import _ConcreteDestination
+
+        assert _ConcreteDestination().supports_clustering_on_partitioned_table()
+
+
+@pytest.mark.unit
 class TestBigQueryClusteringReconcile:
     def _dest(self, client):
         from dlt_saga.destinations.bigquery.destination import BigQueryDestination
@@ -117,19 +137,62 @@ class TestBigQueryClusteringReconcile:
         dest._description_client_and_ref.return_value = (client, "proj.ds.t")
         return dest, BigQueryDestination
 
-    def test_get_clustering_columns_absent(self):
+    def test_get_table_layout_absent(self):
         from google.cloud.exceptions import NotFound
 
         client = MagicMock()
         client.get_table.side_effect = NotFound("nope")
         dest, cls = self._dest(client)
-        assert cls.get_clustering_columns(dest, "ds", "t") is None
+        assert cls.get_table_layout(dest, "ds", "t") is None
 
-    def test_get_clustering_columns_unclustered(self):
+    def test_get_table_layout_plain_table(self):
         client = MagicMock()
-        client.get_table.return_value = MagicMock(clustering_fields=None)
+        client.get_table.return_value = MagicMock(
+            clustering_fields=None, time_partitioning=None, range_partitioning=None
+        )
         dest, cls = self._dest(client)
-        assert cls.get_clustering_columns(dest, "ds", "t") == []
+        assert cls.get_table_layout(dest, "ds", "t") == TableLayout()
+
+    def test_get_table_layout_time_partitioned_and_clustered(self):
+        client = MagicMock()
+        client.get_table.return_value = MagicMock(
+            clustering_fields=["a"],
+            time_partitioning=MagicMock(field="_dlt_valid_from"),
+            range_partitioning=None,
+        )
+        dest, cls = self._dest(client)
+        assert cls.get_table_layout(dest, "ds", "t") == TableLayout(
+            partition_column="_dlt_valid_from", cluster_columns=["a"]
+        )
+
+    def test_get_table_layout_range_partitioned(self):
+        client = MagicMock()
+        client.get_table.return_value = MagicMock(
+            clustering_fields=None,
+            time_partitioning=None,
+            range_partitioning=MagicMock(field="bucket"),
+        )
+        dest, cls = self._dest(client)
+        assert cls.get_table_layout(dest, "ds", "t").partition_column == "bucket"
+
+    def test_set_clustering_columns_updates_table(self):
+        client = MagicMock()
+        tbl = MagicMock(clustering_fields=None)
+        client.get_table.return_value = tbl
+        dest, cls = self._dest(client)
+        cls.set_clustering_columns(dest, "ds", "t", ["a", "b"])
+        assert tbl.clustering_fields == ["a", "b"]
+        client.update_table.assert_called_once_with(tbl, ["clustering_fields"])
+
+    def test_set_clustering_columns_empty_unsets(self):
+        # The API unsets clustering through None, not an empty field list.
+        client = MagicMock()
+        tbl = MagicMock(clustering_fields=["a"])
+        client.get_table.return_value = tbl
+        dest, cls = self._dest(client)
+        cls.set_clustering_columns(dest, "ds", "t", [])
+        assert tbl.clustering_fields is None
+        client.update_table.assert_called_once_with(tbl, ["clustering_fields"])
 
     def test_reconcile_absent(self):
         from google.cloud.exceptions import NotFound
@@ -169,49 +232,53 @@ class TestDatabricksClusteringPrimitives:
         dest.quote_identifier.side_effect = lambda c: f"`{c}`"
         return dest, DatabricksDestination
 
-    def test_get_clustering_columns_returns_list(self):
-        dest, cls = self._dest()
-        dest.execute_sql.return_value = [MagicMock(clusteringColumns=["pipeline_name"])]
-        assert cls.get_clustering_columns(dest, "ds", "t") == ["pipeline_name"]
+    @staticmethod
+    def _detail(clustering=None, partition=None):
+        return [MagicMock(clusteringColumns=clustering, partitionColumns=partition)]
 
-    def test_get_clustering_columns_unclustered(self):
+    def test_get_table_layout_clustered(self):
         dest, cls = self._dest()
-        dest.execute_sql.return_value = [MagicMock(clusteringColumns=None)]
-        assert cls.get_clustering_columns(dest, "ds", "t") == []
+        dest.execute_sql.return_value = self._detail(clustering=["pipeline_name"])
+        assert cls.get_table_layout(dest, "ds", "t") == TableLayout(
+            cluster_columns=["pipeline_name"]
+        )
 
-    def test_get_clustering_columns_numpy_array(self):
-        # The connector returns clusteringColumns as a numpy array, whose truth
+    def test_get_table_layout_plain_table(self):
+        dest, cls = self._dest()
+        dest.execute_sql.return_value = self._detail()
+        assert cls.get_table_layout(dest, "ds", "t") == TableLayout()
+
+    def test_get_table_layout_partitioned(self):
+        dest, cls = self._dest()
+        dest.execute_sql.return_value = self._detail(partition=["_dlt_valid_from"])
+        assert cls.get_table_layout(dest, "ds", "t") == TableLayout(
+            partition_column="_dlt_valid_from"
+        )
+
+    def test_get_table_layout_numpy_arrays(self):
+        # The connector returns the array columns as numpy arrays, whose truth
         # value is ambiguous — the parse must not branch on the array itself.
         import numpy as np
 
         dest, cls = self._dest()
-        dest.execute_sql.return_value = [
-            MagicMock(clusteringColumns=np.array(["pipeline_name", "cursor_value"]))
-        ]
-        assert cls.get_clustering_columns(dest, "ds", "t") == [
-            "pipeline_name",
-            "cursor_value",
-        ]
+        dest.execute_sql.return_value = self._detail(
+            clustering=np.array(["pipeline_name", "cursor_value"]),
+            partition=np.array([], dtype=object),
+        )
+        assert cls.get_table_layout(dest, "ds", "t") == TableLayout(
+            cluster_columns=["pipeline_name", "cursor_value"]
+        )
 
-    def test_get_clustering_columns_empty_numpy_array(self):
-        import numpy as np
-
-        dest, cls = self._dest()
-        dest.execute_sql.return_value = [
-            MagicMock(clusteringColumns=np.array([], dtype=object))
-        ]
-        assert cls.get_clustering_columns(dest, "ds", "t") == []
-
-    def test_get_clustering_columns_missing_table_is_none(self):
+    def test_get_table_layout_missing_table_is_none(self):
         dest, cls = self._dest()
         dest.execute_sql.side_effect = Exception("TABLE_OR_VIEW_NOT_FOUND: cat.ds.t")
-        assert cls.get_clustering_columns(dest, "ds", "t") is None
+        assert cls.get_table_layout(dest, "ds", "t") is None
 
-    def test_get_clustering_columns_reraises_other_errors(self):
+    def test_get_table_layout_reraises_other_errors(self):
         dest, cls = self._dest()
         dest.execute_sql.side_effect = Exception("PERMISSION_DENIED")
         with pytest.raises(Exception, match="PERMISSION_DENIED"):
-            cls.get_clustering_columns(dest, "ds", "t")
+            cls.get_table_layout(dest, "ds", "t")
 
     def test_set_clustering_columns_emits_alter(self):
         dest, cls = self._dest()
@@ -219,6 +286,22 @@ class TestDatabricksClusteringPrimitives:
         sql = dest.execute_sql.call_args[0][0]
         assert (
             sql == "ALTER TABLE cat.ds.t CLUSTER BY (`pipeline_name`, `cursor_value`)"
+        )
+
+    def test_set_clustering_columns_empty_emits_none(self):
+        dest, cls = self._dest()
+        cls.set_clustering_columns(dest, "ds", "t", [])
+        assert (
+            dest.execute_sql.call_args[0][0] == "ALTER TABLE cat.ds.t CLUSTER BY NONE"
+        )
+
+    def test_no_clustering_on_partitioned_table(self):
+        from dlt_saga.destinations.databricks.destination import DatabricksDestination
+
+        dest = MagicMock(spec=DatabricksDestination)
+        assert (
+            DatabricksDestination.supports_clustering_on_partitioned_table(dest)
+            is False
         )
 
 

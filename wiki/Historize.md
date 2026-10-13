@@ -77,8 +77,6 @@ write_disposition: "append+historize"
 primary_key: [company_id]
 
 historize:
-  partition_column: "_dlt_valid_from"
-  cluster_columns: [company_id]
   track_deletions: true
 ```
 
@@ -105,8 +103,8 @@ saga historize --select "filesystem__snapshots__companies"
 | `snapshot_column` | `historize:` | `_dlt_ingested_at` | Column used as the snapshot timestamp |
 | `track_columns` | `historize:` | — | Opt-in allowlist: only these columns drive change detection (all columns still appear in output) |
 | `ignore_columns` | `historize:` | `[]` | Columns excluded from change detection (still appear in output) |
-| `partition_column` | `historize:` | `valid_from_column` | Partition the SCD2 output table |
-| `cluster_columns` | `historize:` | — | Cluster the SCD2 output table |
+| `partition_column` | `historize:` | — | Partition the SCD2 output table. Unset by default — see [Table layout](#table-layout) |
+| `cluster_columns` | `historize:` | `[valid_to, valid_from]` at create | Cluster the SCD2 output table. Explicit values are enforced on existing tables; `[]` removes clustering — see [Table layout](#table-layout) |
 | `track_deletions` | `historize:` | `false` | Emit deletion marker rows when a key disappears |
 | `merge_key` | `historize:` | — | Subset of `primary_key` that scopes deletion / reappearance detection. See [Scoping deletion detection (`merge_key`)](#scoping-deletion-detection-merge_key) |
 | `detect_late_arrivals` | `historize:` | unset | Late snapshots below the watermark: unset = detect + warn, `true` = detect + rewind-and-replay, `false` = skip detection. See [Late-arriving snapshots](#late-arriving-snapshots) |
@@ -174,7 +172,7 @@ historize:
 ```
 
 The output table then carries `valid_from` / `valid_to` / `is_deleted` instead of the `_dlt_*`
-names. `partition_column` follows `valid_from_column` unless set explicitly. All four names are
+names. The default clustering follows the renamed columns. All three names are
 validated as SQL identifiers. Existing tables are unaffected: the defaults are unchanged, so
 pipelines that don't set these keys keep emitting `_dlt_*`. Changing a name after a historized
 table exists requires a full refresh (`saga historize --full-refresh`) — it's part of the config
@@ -377,6 +375,48 @@ Changing `table_format` is treated as a config change — historize detects it v
 
 ---
 
+## Table layout
+
+How the historized table is partitioned and clustered. Both are physical layout, not
+semantics: changing them never triggers the config-fingerprint rebuild prompt.
+
+**Defaults.** The table is created unpartitioned and clustered by
+`[valid_to_column, valid_from_column]` — the key every SCD2 read filters on:
+`_dlt_valid_to IS NULL` for current state, `_dlt_valid_from <= T AND (_dlt_valid_to > T OR
+_dlt_valid_to IS NULL)` for as-of. The validity columns don't make good partition keys: the
+open rows are spread across every `valid_from` partition, so current-state reads touch all of
+them, and on Databricks a timestamp partition key produces one Delta partition per distinct
+snapshot value. Destinations without clustering (DuckDB, Databricks Iceberg) get a plain table.
+
+**Explicit settings.** `partition_column` and `cluster_columns` under `historize:` replace the
+defaults. `cluster_columns: []` creates an unclustered table.
+
+```yaml
+historize:
+  cluster_columns: [_dlt_valid_to, _dlt_valid_from, customer_id]  # add the key for per-key lookups
+```
+
+**Existing tables.** `CREATE TABLE` applies the layout only when the table is created, so after
+each incremental run historize compares the table against the *explicit* settings:
+
+- `cluster_columns` set and different from the table's → clustering is reconciled in place
+  (metadata-only; BigQuery and Databricks recluster lazily). `[]` removes it.
+- `partition_column` set and different from the table's → a warning. Partitioning can't be
+  changed in place; run `saga historize -s "<pipeline>" --full-refresh` to rebuild.
+- Unset → the table is left as it is. The defaults apply at create time only, so upgrading never
+  changes the layout of a table nobody asked to change.
+
+On Databricks, partitioning and liquid clustering are mutually exclusive: an explicit
+`cluster_columns` on a partitioned table warns and points to a full refresh, and when both keys
+are set the table is created clustered only.
+
+> **Upgrading from 0.35 or earlier.** Those versions partitioned every historized table by
+> `valid_from_column`. Existing tables keep that layout until their next full refresh, which
+> rebuilds with the defaults above. To keep the old layout through a full refresh, set
+> `partition_column: _dlt_valid_from` explicitly.
+
+---
+
 ## Per-layer access
 
 `historize_schema_access` is an overlay on top of `schema_access` that applies only to the historize schema. It exists for the case where the historize schema is distinct from the ingest schema — either because `placement: schema_suffix` is set or because a custom `naming_module` returns a different schema for `layer="historize"` — and you want different grants on each side.
@@ -496,7 +536,6 @@ snapshot_date_format: "%Y-%m-%d"
 historize:
   # snapshot_column: _dlt_ingested_at  # default
   ignore_columns: [updated_by]
-  partition_column: "_dlt_valid_from"
-  cluster_columns: [orgnr]
+  cluster_columns: [_dlt_valid_to, _dlt_valid_from, orgnr]
   track_deletions: true
 ```

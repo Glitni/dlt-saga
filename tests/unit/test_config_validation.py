@@ -333,9 +333,9 @@ class TestHistorizeConfigColumnValidation:
 
         return HistorizeConfig(**overrides)
 
-    def test_default_partition_column_accepted(self):
+    def test_unset_partition_column_accepted(self):
         config = self._make()
-        assert config.partition_column == "_dlt_valid_from"
+        assert config.partition_column is None
 
     def test_invalid_partition_column_rejected(self):
         with pytest.raises(

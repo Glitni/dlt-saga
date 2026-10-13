@@ -2,7 +2,7 @@
 
 Covers:
 - HistorizeConfig defaults and overrides for valid_from/valid_to/is_deleted columns
-- partition_column falling back to the valid_from column
+- partition_column staying unset unless configured
 - HistorizeSqlBuilder emitting the configured names in full-reprocess, incremental,
   and create-table SQL (and the defaults when not overridden)
 - SQL-identifier validation of the new column-name fields
@@ -102,9 +102,9 @@ class TestHistorizeConfigColumnNames:
         assert c.valid_to_column == "zyx_ErGyldigTilDato"
         assert c.is_deleted_column == "zyx_ErSlettetFlagg"
 
-    def test_partition_column_defaults_to_valid_from(self):
+    def test_partition_column_defaults_to_none(self):
         c = HistorizeConfig.from_dict(dict(CUSTOM), top_level_primary_key=["id"])
-        assert c.partition_column == "zyx_ErGyldigFraDato"
+        assert c.partition_column is None
 
     def test_explicit_partition_column_preserved(self):
         c = HistorizeConfig.from_dict(
@@ -256,13 +256,16 @@ class TestColumnNamesInFingerprint:
     def test_changes_when_is_deleted_renamed(self):
         assert self._fp() != self._fp(is_deleted_column="is_deleted")
 
-    def test_changes_when_partition_renamed(self):
-        assert self._fp() != self._fp(partition_column="snapshot_dt")
-
     def test_stable_for_unrelated_change(self):
         # table_name is not part of the fingerprint — renaming it must not
         # trigger a full refresh.
         assert self._fp() == self._fp(table_name="custom_name")
+
+    def test_stable_for_layout_change(self):
+        # Partitioning and clustering are physical layout, not semantics: a
+        # change is reported/reconciled by the runner, never a forced rebuild.
+        assert self._fp() == self._fp(partition_column="snapshot_dt")
+        assert self._fp() == self._fp(cluster_columns=["id"])
 
 
 @pytest.mark.unit

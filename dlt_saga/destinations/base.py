@@ -85,6 +85,24 @@ class NativeLoadResult:
 
 
 # ---------------------------------------------------------------------------
+# Table layout
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TableLayout:
+    """A table's current physical layout, as read from the destination.
+
+    ``partition_column`` is the single column the table is partitioned by
+    (``None`` when unpartitioned). ``cluster_columns`` is the ordered
+    clustering key, empty when unclustered.
+    """
+
+    partition_column: Optional[str] = None
+    cluster_columns: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Historize materialization contract
 # ---------------------------------------------------------------------------
 
@@ -1128,20 +1146,40 @@ class Destination(ABC):
                 logger.debug("Reconciled table description on %s.%s", dataset, table)
 
     # =========================================================================
-    # Clustering reconciliation
+    # Table layout (partitioning / clustering) reconciliation
     #
-    # ``CREATE TABLE IF NOT EXISTS`` never re-clusters an existing table, so
-    # tables created before clustering-at-CREATE stay unclustered. These
-    # primitives let ``saga maintenance`` reconcile the physical clustering of
-    # saga's internal bookkeeping tables (a one-time migration; a no-op once
-    # done) and let ``saga doctor`` report drift read-only via
-    # ``get_clustering_columns``. Reconcile is spec-only where possible — no data
-    # rewrite; the warehouse re-clusters lazily in the background.
+    # ``CREATE TABLE IF NOT EXISTS`` never re-lays-out an existing table, so a
+    # table created with one layout keeps it however the config changes. These
+    # primitives let ``saga maintenance`` reconcile the clustering of saga's
+    # internal bookkeeping tables and let the historize runner enforce an
+    # explicit ``cluster_columns`` on its target after each run. Reconcile is
+    # spec-only — no data rewrite; the warehouse re-clusters lazily in the
+    # background. Partitioning is read-only here: it cannot be changed in place
+    # on any supported destination, so callers can only report a mismatch.
     # =========================================================================
 
     def supports_clustering_reconcile(self) -> bool:
-        """Whether this destination can read and reconcile table clustering."""
+        """Whether this destination can read table layout and reconcile clustering."""
         return False
+
+    def supports_clustering_on_partitioned_table(self) -> bool:
+        """Whether clustering can be set in place on a table that is partitioned.
+
+        Destinations where partitioning and clustering are mutually exclusive
+        (Databricks) return ``False``; the reconcile then reports the mismatch
+        instead of attempting an ALTER that would fail.
+        """
+        return True
+
+    def get_table_layout(self, dataset: str, table: str) -> Optional["TableLayout"]:
+        """Return the table's current partitioning and clustering.
+
+        Returns ``None`` when the table does not exist, so callers can
+        distinguish "unpartitioned and unclustered" from "not created yet".
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_table_layout"
+        )
 
     def supports_log_compaction(self) -> bool:
         """Whether ``saga maintenance`` can compact this destination's logs.
@@ -1161,14 +1199,13 @@ class Destination(ABC):
         ``None`` when the table does not exist — so callers can distinguish
         "not clustered" from "not created yet".
         """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement get_clustering_columns"
-        )
+        layout = self.get_table_layout(dataset, table)
+        return None if layout is None else list(layout.cluster_columns)
 
     def set_clustering_columns(
         self, dataset: str, table: str, cluster_columns: list
     ) -> None:
-        """Set the table's clustering to ``cluster_columns``."""
+        """Set the table's clustering to ``cluster_columns``; empty removes it."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement set_clustering_columns"
         )

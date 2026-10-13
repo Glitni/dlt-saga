@@ -192,14 +192,16 @@ class TestHistorizeRunnerCapabilityValidation:
         with pytest.raises(ValueError, match="does not support clustering"):
             runner._validate_destination_capabilities()
 
-    def test_default_partition_column_not_checked(self):
-        """partition_column='_dlt_valid_from' (default) should NOT raise even when
-        destination reports supports_partitioning=False — the default value is a
-        no-op sentinel on destinations that don't support partitioning."""
+    def test_unset_partition_column_not_checked(self):
+        runner = self._make_runner()
+        runner._validate_destination_capabilities()  # should not raise
+
+    def test_explicit_valid_from_partition_checked_like_any_column(self):
         runner = self._make_runner(
             config_overrides={"partition_column": "_dlt_valid_from"},
         )
-        runner._validate_destination_capabilities()  # should not raise
+        with pytest.raises(ValueError, match="does not support partitioning"):
+            runner._validate_destination_capabilities()
 
     def test_supported_partition_accepted(self):
         runner = self._make_runner(

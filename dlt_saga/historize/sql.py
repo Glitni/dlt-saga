@@ -341,12 +341,22 @@ class HistorizeSqlBuilder:
         return f"DROP TABLE IF EXISTS {self.target_table_id}"
 
     def build_create_target_table_sql(
-        self, value_columns: List[str], replace: bool = False
+        self,
+        value_columns: List[str],
+        replace: bool = False,
+        cluster_columns: Optional[List[str]] = None,
     ) -> str:
         """SQL to create the historized target table.
 
         Delegates to destination.build_historize_create_table_sql so each
         destination can emit format-specific DDL (Iceberg OPTIONS, USING DELTA, etc.).
+
+        Args:
+            value_columns: Non-key source columns carried into the target.
+            replace: Emit ``CREATE OR REPLACE`` instead of ``IF NOT EXISTS``.
+            cluster_columns: Clustering for the new table, already resolved by
+                the runner (explicit config or the layout default); ``None``
+                or empty creates an unclustered table.
         """
         all_data_cols = list(self.primary_key) + list(value_columns)
         create_stmt = (
@@ -369,7 +379,7 @@ class HistorizeSqlBuilder:
 
         hints = MaterializationHints(
             partition_column=self.config.partition_column,
-            cluster_columns=self.config.cluster_columns,
+            cluster_columns=list(cluster_columns) if cluster_columns else None,
             table_format=self.config.table_format or "native",
             table_name=self.target_table_name,
             schema=self.target_schema,

@@ -10,6 +10,7 @@ import pytest
 class TestCreateTargetTableFullRefresh:
     def _make_runner_with_mocks(self):
         """Build a HistorizeRunner with all deps mocked to avoid DB calls."""
+        from dlt_saga.historize.config import HistorizeConfig
         from dlt_saga.historize.runner import HistorizeRunner
 
         dest = MagicMock()
@@ -22,6 +23,7 @@ class TestCreateTargetTableFullRefresh:
         runner = object.__new__(HistorizeRunner)
         runner.logger = logging.getLogger(__name__)
         runner.destination = dest
+        runner.config = HistorizeConfig(primary_key=["id"])
         runner.schema = "schema"
         runner.target_schema = "schema"
         runner.target_table_id = "schema.hist_table"

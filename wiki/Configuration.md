@@ -344,8 +344,7 @@ insert_api: "zerobus"
 primary_key: [id]
 
 historize:
-  partition_column: "_dlt_valid_from"
-  cluster_columns: [id]
+  track_deletions: true
 ```
 
 Ignored on BigQuery and DuckDB destinations (a warning is logged).
@@ -502,8 +501,7 @@ primary_key: [orgnr]
 historize:
   snapshot_column: "_dlt_ingested_at"  # Default — column identifying snapshots
   ignore_columns: [updated_by]
-  partition_column: "_dlt_valid_from"
-  cluster_columns: [orgnr]
+  cluster_columns: [_dlt_valid_to, _dlt_valid_from, orgnr]  # Default is the two validity columns
   track_deletions: true                # Detect deleted rows between snapshots
   table_format: iceberg                # Override table format for this pipeline only
   schema_name: "my_historized"         # Write to a different schema (optional)

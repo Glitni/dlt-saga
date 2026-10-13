@@ -7,7 +7,7 @@ raw snapshot data into SCD2 historized tables.
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.sql import HistorizeSqlBuilder, snapshot_range_filter
@@ -21,6 +21,9 @@ from dlt_saga.pipeline_config.base_config import resolve_write_disposition
 from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
 from dlt_saga.utility.filters import and_filter, filter_where_clause
 from dlt_saga.utility.sql import looks_like_missing_table
+
+if TYPE_CHECKING:
+    from dlt_saga.destinations.base import TableLayout
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +326,7 @@ class HistorizeRunner:
         try:
             stats = self._execute_run(started_at, run_start)
             self._reconcile_descriptions()
+            self._reconcile_layout()
             stats["duration"] = time.time() - run_start
             stats["status"] = "completed"
             return stats
@@ -891,11 +895,9 @@ class HistorizeRunner:
     def _validate_destination_capabilities(self) -> None:
         """Validate that the destination supports the configured historize options."""
         dest_type = type(self.destination).__name__
-        table_format = self.config.table_format or "native"
 
         if (
             self.config.partition_column
-            and self.config.partition_column != self.config.valid_from_column
             and not self.destination.supports_partitioning()
         ):
             raise ValueError(
@@ -909,19 +911,132 @@ class HistorizeRunner:
                 f"Remove 'cluster_columns' from the historize section of "
                 f"pipeline '{self.pipeline_name}'."
             )
-
-        # Databricks Iceberg does not support cluster_columns
-        if (
-            table_format == "iceberg"
-            and dest_type == "DatabricksDestination"
-            and self.config.cluster_columns
-        ):
+        if self.config.cluster_columns and self._is_databricks_iceberg():
             raise ValueError(
                 f"Databricks Iceberg tables do not support cluster_columns. "
                 f"Remove 'cluster_columns' from the historize section of "
                 f"pipeline '{self.pipeline_name}', or use table_format: delta_uniform "
                 f"if you need both Delta and Iceberg compatibility."
             )
+
+    def _is_databricks_iceberg(self) -> bool:
+        table_format = self.config.table_format or "native"
+        return (
+            table_format == "iceberg"
+            and type(self.destination).__name__ == "DatabricksDestination"
+        )
+
+    def _create_cluster_columns(self) -> Optional[List[str]]:
+        """Clustering for a newly created target: explicit config, else the default.
+
+        The default, ``[valid_to, valid_from]``, is the key every SCD2 read
+        filters on — ``valid_to IS NULL`` for current state, ``valid_from <= T
+        < valid_to`` for as-of — and the one the incremental MERGE matches
+        open rows by. It applies at create time only; an existing table keeps
+        its clustering unless ``cluster_columns`` is set explicitly (see
+        ``_reconcile_layout``). An explicit empty list creates an unclustered
+        table.
+        """
+        if self.config.cluster_columns is not None:
+            return list(self.config.cluster_columns) or None
+        if not self.destination.supports_clustering() or self._is_databricks_iceberg():
+            return None
+        return [self.config.valid_to_column, self.config.valid_from_column]
+
+    @property
+    def _rebuild_command(self) -> str:
+        # Scoped to THIS pipeline — a bare `saga historize --full-refresh` (no
+        # selector) would reprocess every historized table.
+        return f'saga historize -s "{self.pipeline_name}" --full-refresh'
+
+    def _reconcile_layout(self) -> None:
+        """Enforce an explicit partition/cluster config on the existing target.
+
+        ``CREATE TABLE`` applies the layout only when the table is created, so
+        a config edit after the first run would otherwise never reach the
+        table. Only *explicit* settings are enforced: an unset
+        ``cluster_columns`` leaves whatever the table has (the create-time
+        default never re-lays-out a table nobody asked to change). Clustering
+        is reconciled in place — spec-only, the warehouse reclusters lazily.
+        Partitioning can't be, so a mismatch is reported and left for a full
+        refresh. Best-effort — never fails the historize run.
+        """
+        cfg = self.config
+        if cfg.partition_column is None and cfg.cluster_columns is None:
+            return
+        # A full refresh just created the table with the configured layout.
+        if self.full_refresh or not self.destination.supports_clustering_reconcile():
+            return
+        try:
+            layout = self.destination.get_table_layout(
+                self.target_schema, self.target_table_name
+            )
+            if layout is None:
+                return
+            self._check_partitioning(layout)
+            self._reconcile_clustering(layout)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to reconcile layout of %s.%s: %s",
+                self.target_schema,
+                self.target_table_name,
+                exc,
+            )
+
+    def _check_partitioning(self, layout: "TableLayout") -> None:
+        desired = self.config.partition_column
+        if not desired:
+            return
+        # Destinations that can't combine the two create the table clustered
+        # and unpartitioned when both are set, so that's not a mismatch.
+        if (
+            self.config.cluster_columns
+            and not self.destination.supports_clustering_on_partitioned_table()
+        ):
+            return
+        current = layout.partition_column
+        if current is not None and current.lower() == desired.lower():
+            return
+        self.logger.warning(
+            "Historized table %s is partitioned by %s but historize.partition_column "
+            "is '%s'. Partitioning can't be changed in place — run '%s' to rebuild "
+            "with the configured layout.",
+            self._target_display,
+            f"'{current}'" if current else "nothing",
+            desired,
+            self._rebuild_command,
+        )
+
+    def _reconcile_clustering(self, layout: "TableLayout") -> None:
+        desired = self.config.cluster_columns
+        if desired is None:
+            return
+        current = layout.cluster_columns
+        if [c.lower() for c in current] == [c.lower() for c in desired]:
+            return
+        if (
+            layout.partition_column
+            and not self.destination.supports_clustering_on_partitioned_table()
+        ):
+            self.logger.warning(
+                "Historized table %s is partitioned by '%s', so historize."
+                "cluster_columns %s can't be applied in place — run '%s' to rebuild "
+                "with the configured layout.",
+                self._target_display,
+                layout.partition_column,
+                list(desired),
+                self._rebuild_command,
+            )
+            return
+        self.destination.set_clustering_columns(
+            self.target_schema, self.target_table_name, list(desired)
+        )
+        self.logger.info(
+            "Reconciled clustering on %s: %s → %s",
+            self._target_display,
+            current or "none",
+            list(desired) or "none",
+        )
 
     def _raise_config_changed_error(self, state) -> None:
         """Raise a ValueError with a human-readable diff of config changes."""
@@ -936,10 +1051,7 @@ class HistorizeRunner:
             if key in previous and previous[key] != current[key]:
                 changes.append(f"  {key}: {previous[key]} → {current[key]}")
         diff = "\n".join(changes)
-        # Scope the suggested rebuild to THIS pipeline — a bare
-        # `saga historize --full-refresh` (no selector) would reprocess every
-        # historized table, not just the one whose config changed.
-        rebuild_cmd = f"Run 'saga historize -s \"{self.pipeline_name}\" --full-refresh' to rebuild."
+        rebuild_cmd = f"Run '{self._rebuild_command}' to rebuild."
         is_partial = self.partial_refresh or self.historize_from is not None
         if is_partial:
             suffix = (
@@ -1011,7 +1123,9 @@ class HistorizeRunner:
                 self.destination.ensure_schema_exists(self.target_schema)
 
         sql = self.sql_builder.build_create_target_table_sql(
-            value_columns, replace=replace
+            value_columns,
+            replace=replace,
+            cluster_columns=self._create_cluster_columns(),
         )
         self.destination.execute_sql(sql, self.schema)
         action = "Replaced" if replace else "Created"

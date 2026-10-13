@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
+from dlt_saga.destinations.base import TableLayout
 from dlt_saga.destinations.bigquery.base import BigQueryBaseDestination
 from dlt_saga.destinations.bigquery.config import BigQueryDestinationConfig
 from dlt_saga.utility.naming import normalize_identifier
@@ -1187,7 +1188,7 @@ class BigQueryDestination(BigQueryBaseDestination):
     def supports_clustering_reconcile(self) -> bool:
         return True
 
-    def get_clustering_columns(self, dataset: str, table: str) -> Optional[List[str]]:
+    def get_table_layout(self, dataset: str, table: str) -> Optional[TableLayout]:
         from google.cloud.exceptions import NotFound
 
         client, table_ref = self._description_client_and_ref(dataset, table)
@@ -1195,7 +1196,20 @@ class BigQueryDestination(BigQueryBaseDestination):
             tbl = client.get_table(table_ref)
         except NotFound:
             return None
-        return list(tbl.clustering_fields or [])
+        partitioning = tbl.time_partitioning or tbl.range_partitioning
+        return TableLayout(
+            partition_column=partitioning.field if partitioning else None,
+            cluster_columns=list(tbl.clustering_fields or []),
+        )
+
+    def set_clustering_columns(
+        self, dataset: str, table: str, cluster_columns: List[str]
+    ) -> None:
+        client, table_ref = self._description_client_and_ref(dataset, table)
+        tbl = client.get_table(table_ref)
+        # None (not []) is what unsets clustering through the API.
+        tbl.clustering_fields = list(cluster_columns) or None
+        client.update_table(tbl, ["clustering_fields"])
 
     def reconcile_clustering(
         self, dataset: str, table: str, cluster_columns: List[str]
@@ -1218,7 +1232,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         if [c.lower() for c in current] == [c.lower() for c in cluster_columns]:
             return "unchanged"
 
-        tbl.clustering_fields = list(cluster_columns)
+        tbl.clustering_fields = list(cluster_columns) or None
         client.update_table(tbl, ["clustering_fields"])
         logger.debug(
             "Reconciled clustering on %s.%s: %s -> %s",
