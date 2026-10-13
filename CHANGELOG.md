@@ -1,3 +1,8 @@
+## 0.35.1 — 2026-10-13
+
+### Fixed
+- Label doctor namespaces by source and warn on namespace conflicts (#517)
+
 ## 0.35.0 — 2026-10-12
 
 ### Added
