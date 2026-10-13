@@ -485,9 +485,15 @@ class BigQueryBaseDestination(Destination):
                 schema_access, dataset_name
             )
 
-            # Step 1: Ensure dataset exists; create if missing
+            # Step 1: Ensure dataset exists; create if missing. Qualify the
+            # lookup with the data project: a bare name resolves against the
+            # client's default project, and the client may be built for the
+            # billing project (prepare_for_execution), where the dataset never
+            # lives — a NotFound there would route an existing dataset through
+            # the create path, where exists_ok turns the access sync into a
+            # silent no-op.
             try:
-                existing_dataset = client.get_dataset(dataset_name)
+                existing_dataset = client.get_dataset(f"{project_id}.{dataset_name}")
                 logger.debug(f"BigQuery dataset {dataset_name} exists")
             except NotFound:
                 BigQueryBaseDestination._create_dataset_with_access(
