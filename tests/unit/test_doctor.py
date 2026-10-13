@@ -221,3 +221,80 @@ def test_doctor_command_exposes_select_option():
     doctor_cmd = command.commands["doctor"]
     opt_names = {opt.name for opt in doctor_cmd.params}
     assert "select" in opt_names
+
+
+@pytest.mark.unit
+class TestDoctorCheckNamespaces:
+    @pytest.fixture(autouse=True)
+    def _isolated_registry(self):
+        from dlt_saga.pipelines import registry
+
+        saved = (
+            dict(registry._NAMESPACE_REGISTRY),
+            dict(registry._NAMESPACE_SOURCES),
+            dict(registry._SHADOWED_NAMESPACES),
+        )
+        with patch.object(registry, "_ensure_packages_loaded"):
+            yield registry
+        for live, snapshot in zip(
+            (
+                registry._NAMESPACE_REGISTRY,
+                registry._NAMESPACE_SOURCES,
+                registry._SHADOWED_NAMESPACES,
+            ),
+            saved,
+        ):
+            live.clear()
+            live.update(snapshot)
+
+    def _run(self):
+        emit = _CaptureEmit()
+        with patch.object(doctor, "_doctor_check", return_value=True) as check:
+            ok = doctor._doctor_check_namespaces(emit)
+        labels = [c.args[0] for c in check.call_args_list]
+        return ok, labels, emit.calls
+
+    def test_each_namespace_checked_once_with_its_source(self, _isolated_registry):
+        _isolated_registry.register_namespace("local", "my_pipelines")
+        _isolated_registry.register_namespace(
+            "acme", "acme_pipelines.pipelines", source="entry-point"
+        )
+
+        ok, labels, calls = self._run()
+
+        assert ok
+        assert labels == [
+            "  acme → acme_pipelines.pipelines (entry-point)",
+            "  local → my_pipelines (packages.yml)",
+        ]
+        assert calls == []
+
+    def test_entry_point_shadowing_packages_yml_is_flagged(self, _isolated_registry):
+        _isolated_registry.register_namespace("acme", "acme_local")
+        _isolated_registry.register_namespace(
+            "acme", "acme_pipelines.pipelines", source="entry-point"
+        )
+
+        _, labels, calls = self._run()
+
+        assert labels == ["  acme → acme_pipelines.pipelines (entry-point)"]
+        assert len(calls) == 1
+        symbol, label, detail = calls[0]
+        assert symbol == "!"
+        assert "acme" in label
+        assert "packages.yml → acme_local" in detail
+
+    def test_same_module_from_both_sources_is_not_a_conflict(self, _isolated_registry):
+        _isolated_registry.register_namespace("acme", "acme_pipelines")
+        _isolated_registry.register_namespace(
+            "acme", "acme_pipelines", source="entry-point"
+        )
+
+        _, _, calls = self._run()
+
+        assert calls == []
+
+    def test_failed_import_fails_the_check(self, _isolated_registry):
+        _isolated_registry.register_namespace("local", "my_pipelines")
+        with patch.object(doctor, "_doctor_check", return_value=False):
+            assert doctor._doctor_check_namespaces(_CaptureEmit()) is False

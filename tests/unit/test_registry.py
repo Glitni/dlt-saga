@@ -1,5 +1,7 @@
 """Unit tests for pipeline registry."""
 
+from unittest.mock import patch
+
 import pytest
 
 from dlt_saga.pipelines.registry import (
@@ -142,3 +144,44 @@ class TestDiscoverImplementations:
     def test_default_namespace_registered(self):
         """dlt_saga namespace is always registered."""
         assert "dlt_saga" in _NAMESPACE_REGISTRY
+
+
+@pytest.mark.unit
+class TestNamespaceShadowing:
+    @pytest.fixture(autouse=True)
+    def _isolated_registry(self):
+        from dlt_saga.pipelines import registry
+
+        live = (
+            registry._NAMESPACE_REGISTRY,
+            registry._NAMESPACE_SOURCES,
+            registry._SHADOWED_NAMESPACES,
+        )
+        saved = [dict(d) for d in live]
+        yield registry
+        for d, snapshot in zip(live, saved):
+            d.clear()
+            d.update(snapshot)
+
+    def test_cross_source_override_warns(self, _isolated_registry):
+        _isolated_registry.register_namespace("acme", "acme_local")
+        with patch.object(_isolated_registry.logger, "warning") as warning:
+            _isolated_registry.register_namespace(
+                "acme", "acme_pipelines", source="entry-point"
+            )
+
+        assert _isolated_registry._SHADOWED_NAMESPACES["acme"] == (
+            "acme_local",
+            "packages.yml",
+        )
+        warning.assert_called_once()
+
+    def test_same_module_from_both_sources_is_silent(self, _isolated_registry):
+        _isolated_registry.register_namespace("acme", "acme_pipelines")
+        with patch.object(_isolated_registry.logger, "warning") as warning:
+            _isolated_registry.register_namespace(
+                "acme", "acme_pipelines", source="entry-point"
+            )
+
+        assert "acme" not in _isolated_registry._SHADOWED_NAMESPACES
+        warning.assert_not_called()

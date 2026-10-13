@@ -334,6 +334,11 @@ auto-discovers the `BasePipeline` subclass inside it.
 Use `saga info` to confirm the namespace is registered, and `saga doctor` to
 verify the base module is importable.
 
+If an entry point and a `packages.yml` entry claim the same namespace with
+different modules, the entry point wins and the `packages.yml` entry is
+ignored. saga logs a warning when this happens, and `saga doctor` reports it;
+rename or remove one of the two.
+
 ### Registering a local package (`packages.yml`)
 
 For adapters that live in your own project (not a separately-installed package),
