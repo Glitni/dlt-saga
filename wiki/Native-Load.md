@@ -250,8 +250,6 @@ write_disposition: append+historize
 primary_key: [customer_id]
 
 historize:
-  partition_column: _dlt_valid_from
-  cluster_columns: [customer_id]
   track_deletions: true
 ```
 
@@ -403,8 +401,6 @@ table_format: delta                    # or iceberg / delta_uniform
 cluster_columns: [order_id, order_date]
 
 historize:
-  partition_column: _dlt_valid_from
-  cluster_columns: [order_id]
   track_deletions: true
 ```
 

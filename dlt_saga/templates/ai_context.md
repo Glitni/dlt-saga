@@ -342,8 +342,7 @@ primary_key: [id]
 historize:
   snapshot_column: _dlt_ingested_at   # default
   ignore_columns: [updated_by]
-  partition_column: "_dlt_valid_from" # defaults to valid_from_column (see below)
-  cluster_columns: [id]
+  cluster_columns: [_dlt_valid_to, _dlt_valid_from, id]  # default: the two validity columns; unpartitioned
   track_deletions: true
 
   # Optional: rename the SCD2 output columns. Defaults are _dlt_valid_from /

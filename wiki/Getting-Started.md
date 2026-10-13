@@ -193,8 +193,6 @@ write_disposition: append+historize
 primary_key: [company_id]
 
 historize:
-  partition_column: _dlt_valid_from
-  cluster_columns: [company_id]
   track_deletions: true
 ```
 

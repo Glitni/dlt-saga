@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from dlt_saga.destinations.base import Destination
+from dlt_saga.destinations.base import Destination, TableLayout
 from dlt_saga.destinations.databricks.config import DatabricksDestinationConfig
 from dlt_saga.utility.sql import looks_like_missing_table
 
@@ -61,6 +61,13 @@ def _install_thrift_noise_filter() -> None:
         for name in _THRIFT_LOGGER_NAMES:
             logging.getLogger(name).addFilter(noise_filter)
         _thrift_noise_filter_installed = True
+
+
+def _array_to_list(value: Any) -> List[str]:
+    """Coerce a DESCRIBE DETAIL array column (numpy array or None) to a list."""
+    if value is None:
+        return []
+    return [str(c) for c in value]
 
 
 def _resolve_partition_cluster(spec: Any) -> tuple[bool, bool]:
@@ -751,7 +758,12 @@ class DatabricksDestination(Destination):
     def supports_clustering_reconcile(self) -> bool:
         return True
 
-    def get_clustering_columns(self, dataset: str, table: str) -> Optional[list]:
+    def supports_clustering_on_partitioned_table(self) -> bool:
+        # Liquid clustering is incompatible with partitioning; a partitioned
+        # table can't be ALTERed to CLUSTER BY, it has to be rewritten.
+        return False
+
+    def get_table_layout(self, dataset: str, table: str) -> Optional[TableLayout]:
         fqn = self.get_full_table_id(dataset, table)
         try:
             rows = list(self.execute_sql(f"DESCRIBE DETAIL {fqn}"))
@@ -761,13 +773,15 @@ class DatabricksDestination(Destination):
             raise
         if not rows:
             return None
-        # DESCRIBE DETAIL returns clusteringColumns as array<string>; the
-        # connector surfaces it as a numpy array, whose truth value is ambiguous
-        # — so branch on None, never on the array itself. None/empty → [].
-        cols = rows[0].clusteringColumns
-        if cols is None:
-            return []
-        return [str(c) for c in cols]
+        # DESCRIBE DETAIL returns partitionColumns / clusteringColumns as
+        # array<string>; the connector surfaces them as numpy arrays, whose
+        # truth value is ambiguous — so branch on None, never on the array
+        # itself. None/empty → unpartitioned / unclustered.
+        partition_cols = _array_to_list(rows[0].partitionColumns)
+        return TableLayout(
+            partition_column=partition_cols[0] if partition_cols else None,
+            cluster_columns=_array_to_list(rows[0].clusteringColumns),
+        )
 
     def set_clustering_columns(
         self, dataset: str, table: str, cluster_columns: list
@@ -775,6 +789,9 @@ class DatabricksDestination(Destination):
         # ALTER ... CLUSTER BY switches the table to Liquid Clustering; a
         # metadata change, existing data reclusters lazily on subsequent writes.
         fqn = self.get_full_table_id(dataset, table)
+        if not cluster_columns:
+            self.execute_sql(f"ALTER TABLE {fqn} CLUSTER BY NONE")
+            return
         cols = ", ".join(self.quote_identifier(c) for c in cluster_columns)
         self.execute_sql(f"ALTER TABLE {fqn} CLUSTER BY ({cols})")
 

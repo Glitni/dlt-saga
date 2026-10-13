@@ -214,7 +214,6 @@ class HistorizeStateManager:
             "valid_from_column": config.valid_from_column,
             "valid_to_column": config.valid_to_column,
             "is_deleted_column": config.is_deleted_column,
-            "partition_column": config.partition_column,
             # merge_key scopes deletion / reappearance detection. Changing it
             # changes which historical rows would be marked as deleted vs. open
             # for any historical replay, so it mandates a full refresh.

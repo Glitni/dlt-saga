@@ -140,15 +140,27 @@ class HistorizeConfig:
         default=None,
         metadata={
             "description": (
-                "Column to partition the historized table by. "
-                "Defaults to the valid_from_column."
+                "Column to partition the historized table by. Unset by default: "
+                "the SCD2 validity columns don't make good partition keys "
+                "(current-state reads touch every partition), so the layout "
+                "default is clustering instead. Partitioning can't be changed "
+                "in place; a mismatch against an existing table is reported "
+                "and requires a full refresh."
             )
         },
     )
 
     cluster_columns: Optional[List[str]] = field(
         default=None,
-        metadata={"description": "Columns to cluster the historized table by (max 4)."},
+        metadata={
+            "description": (
+                "Columns to cluster the historized table by (max 4). Unset "
+                "(the default) clusters a newly created table by "
+                "[valid_to_column, valid_from_column] and leaves an existing "
+                "table's clustering alone. Set explicitly to enforce clustering "
+                "on every run — an empty list removes clustering."
+            )
+        },
     )
 
     track_deletions: bool = field(
@@ -317,9 +329,6 @@ class HistorizeConfig:
             self.cluster_columns = [self.cluster_columns]
         if isinstance(self.merge_key, str):
             self.merge_key = [self.merge_key]
-        # partition_column defaults to the SCD2 valid-from column when not set.
-        if not self.partition_column:
-            self.partition_column = self.valid_from_column
         if (
             self.late_arrival_window_days is not None
             and self.late_arrival_window_days < 1
@@ -346,7 +355,7 @@ class HistorizeConfig:
             "partition_column",
         ):
             value = getattr(self, attr)
-            if not _SQL_IDENT.match(value):
+            if value is not None and not _SQL_IDENT.match(value):
                 raise ValueError(
                     f"{attr} must be a valid SQL identifier, got '{value}'"
                 )

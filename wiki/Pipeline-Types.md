@@ -502,8 +502,6 @@ write_disposition: append+historize
 primary_key: [order_id]
 
 historize:
-  partition_column: _dlt_valid_from
-  cluster_columns: [order_id]
   track_deletions: true
 ```
 
