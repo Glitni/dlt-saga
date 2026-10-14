@@ -449,7 +449,16 @@ Extracts data from Google Sheets using the Drive API, with change detection to a
 
 **Requires:** `pip install "dlt-saga[google-sheets]"` (also included in `dlt-saga[gcp]`)
 
-Grant Viewer access to the service account configured in `providers.google_secrets` in `saga_project.yml`.
+Set `credentials` to the service account, typically once as a group default in `saga_project.yml`, and grant that service account Viewer access to the spreadsheets. `credentials` takes service account JSON — as an object, a JSON string, or a secret URI holding it — or a key file path. Without it, Application Default Credentials are used.
+
+```yaml
+# saga_project.yml
+pipelines:
+  google_sheets:
+    credentials: "googlesecretmanager::my-project::sheets-reader"
+```
+
+`secret_id` (a bare Secret Manager secret name, resolved against `providers.google_secrets.project_id`) and the project-level `providers.google_secrets.sheets_secret_name` default are deprecated but still work. To migrate, replace `secret_id: <secret>` with `credentials: "googlesecretmanager::<project>::<secret>"`.
 
 ```yaml
 # configs/google_sheets/my_sheet.yml

@@ -147,7 +147,14 @@ class GoogleSecretsConfig:
     )
     sheets_secret_name: Optional[str] = field(
         default=None,
-        metadata={"description": "Secret name for Google Sheets credentials"},
+        metadata={
+            "description": (
+                "Deprecated: set credentials: "
+                "'googlesecretmanager::<project>::<secret>' on the google_sheets "
+                "pipelines instead (e.g. as a group default). Secret name for "
+                "Google Sheets credentials"
+            ),
+        },
     )
 
     @classmethod

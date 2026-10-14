@@ -471,6 +471,8 @@ Selector reference:
 | `sheet_name` | string | Specific sheet/tab name (set this or `sheet_id`) |
 | `sheet_id` | int | Tab's numeric ID, the `gid` in the URL; survives renames (set this or `sheet_name`) |
 | `range` | string | Cell range in A1 notation |
+| `credentials` | object/string | Service account JSON (object, JSON string or secret URI) or key file path |
+| `secret_id` | string | **Deprecated** — use `credentials: "googlesecretmanager::<project>::<secret>"` |
 
 ### SharePoint
 
@@ -576,7 +578,7 @@ Credentials for secret managers and external APIs:
 providers:
   google_secrets:
     project_id: your-gcp-project           # GCP project containing the secrets
-    sheets_secret_name: google-sheets-sa   # Secret name for Google Sheets credentials
+    sheets_secret_name: google-sheets-sa   # Deprecated: set credentials on the google_sheets pipelines instead
 ```
 
 ### Orchestration

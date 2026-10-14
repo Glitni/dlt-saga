@@ -428,7 +428,7 @@ historize:
 
 ### Project Config (`saga_project.yml`)
 - `config_source:` — where pipeline configs are discovered (type, path)
-- `providers:` — provider credentials (e.g. `google_secrets.project_id`, `google_secrets.sheets_secret_name`)
+- `providers:` — provider credentials (e.g. `google_secrets.project_id`; `google_secrets.sheets_secret_name` is deprecated in favour of `credentials` on google_sheets pipelines)
 - `pipelines:` — pipeline-level settings (dataset_access, adapter, etc.)
 
 ### dlt Performance Defaults (`dlt_saga/defaults.py`)
