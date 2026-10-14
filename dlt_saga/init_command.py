@@ -238,7 +238,7 @@ def _sample_pipeline_config_template() -> str:
 # --- Google Sheets example ---
 # adapter: dlt_saga.google_sheets
 # spreadsheet_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
-# sheet_name: "Sheet1"
+# sheet_name: "Sheet1"   # or sheet_id: 0 (the gid in the URL; survives renames)
 #
 # --- Filesystem (GCS) example ---
 # adapter: dlt_saga.filesystem

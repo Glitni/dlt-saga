@@ -1,6 +1,6 @@
 from datetime import datetime
 from itertools import zip_longest
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 from dlt_saga.pipelines.google_sheets.config import GSheetsConfig
 from dlt_saga.utility.tabular import dedupe_headers
@@ -88,10 +88,28 @@ class GSheetsClient:
         """Backward compatibility - returns sheets service."""
         return self.get_sheets_service()
 
-    def get_spreadsheet_title(self, spreadsheet_id: str) -> str:
+    def get_spreadsheet_info(self, spreadsheet_id: str) -> Tuple[str, Dict[int, str]]:
+        """Return the spreadsheet title and its tabs as ``{sheet_id: name}``.
+
+        One metadata call limited to these fields; no cell data is fetched.
+        """
         service = self.get_service()
-        result = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-        return result["properties"]["title"]
+        result = (
+            service.spreadsheets()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                fields="properties.title,sheets.properties(sheetId,title)",
+            )
+            .execute()
+        )
+        sheets = {
+            sheet["properties"]["sheetId"]: sheet["properties"]["title"]
+            for sheet in result.get("sheets", [])
+        }
+        return result["properties"]["title"], sheets
+
+    def get_spreadsheet_title(self, spreadsheet_id: str) -> str:
+        return self.get_spreadsheet_info(spreadsheet_id)[0]
 
     def get_last_modified_time(self, spreadsheet_id: str) -> datetime:
         """Get the last modified timestamp of the spreadsheet from Drive API.
@@ -131,7 +149,9 @@ class GSheetsClient:
         service = self.get_service()
         # No range → request the bare sheet name, which returns the entire grid
         # (all columns/rows). A fixed range like 'A:Z' truncates wider sheets.
-        range_name = f"'{sheet_name}'!{range}" if range else f"'{sheet_name}'"
+        # A1 notation quotes the sheet name; a literal ' inside it is doubled
+        quoted = "'" + sheet_name.replace("'", "''") + "'"
+        range_name = f"{quoted}!{range}" if range else quoted
         result = (
             service.spreadsheets()
             .values()

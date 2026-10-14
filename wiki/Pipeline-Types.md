@@ -461,6 +461,15 @@ write_disposition: "replace"
 tags: ["daily"]
 ```
 
+Each config reads one tab, picked by `sheet_name` or `sheet_id` (set one). `sheet_id` is the tab's numeric ID — the `gid` in the URL (`.../edit#gid=0`) — and keeps working when someone renames the tab, where `sheet_name` would break the pipeline:
+
+```yaml
+spreadsheet_id: "YOUR_SPREADSHEET_ID"
+sheet_id: 0  # gid of the first tab
+```
+
+The current tab name is looked up in the same metadata call that fetches the spreadsheet title, so `sheet_id` costs no extra API call. An unknown `sheet_id` fails with the available IDs and names.
+
 ---
 
 ## SharePoint

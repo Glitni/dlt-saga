@@ -26,22 +26,46 @@ class GSheetsConfig(BaseConfig):
         # Validate required fields
         if not self.spreadsheet_id:
             raise ValueError("spreadsheet_id is required for Google Sheets pipelines")
-        if not self.sheet_name:
+        # sheet_id 0 is valid (the first tab's gid), so compare against None
+        if not self.sheet_name and self.sheet_id is None:
             raise ValueError(
-                "sheet_name is required for Google Sheets pipelines. Each config maps "
-                "to exactly one sheet/tab (one destination table); for a spreadsheet "
-                "with several sheets, create one config per sheet."
+                "sheet_name or sheet_id is required for Google Sheets pipelines. Each "
+                "config maps to exactly one sheet/tab (one destination table); for a "
+                "spreadsheet with several sheets, create one config per sheet."
+            )
+        if self.sheet_name and self.sheet_id is not None:
+            raise ValueError(
+                "Set either sheet_name or sheet_id for Google Sheets pipelines, not both"
+            )
+        if self.sheet_id is not None and (
+            isinstance(self.sheet_id, bool)
+            or not isinstance(self.sheet_id, int)
+            or self.sheet_id < 0
+        ):
+            raise ValueError(
+                f"sheet_id must be a non-negative integer (the gid in the sheet URL), "
+                f"got {self.sheet_id!r}"
             )
 
-    # Required (has default for dataclass inheritance, validated in __post_init__)
+    # One of sheet_name / sheet_id is required (validated in __post_init__)
     sheet_name: Optional[str] = field(
         default=None,
         metadata={
             "description": (
-                "Name of the sheet/tab to read. Required — each config maps to "
-                "exactly one sheet (one destination table)."
+                "Name of the sheet/tab to read. Each config maps to exactly one "
+                "sheet (one destination table). Set this or sheet_id."
             ),
-            "required": True,
+        },
+    )
+    sheet_id: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Numeric ID of the sheet/tab to read: the gid in the sheet URL "
+                "(#gid=<ID>). Unlike sheet_name it survives renaming the tab. "
+                "Set this or sheet_name."
+            ),
+            "minimum": 0,
         },
     )
     range: Optional[str] = field(

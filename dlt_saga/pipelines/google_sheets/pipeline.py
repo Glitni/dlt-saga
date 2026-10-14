@@ -90,17 +90,33 @@ class GoogleSheetsPipeline(BasePipeline):
             )
             return False
 
+    def _resolve_sheet_name(self, sheets: Dict[int, str]) -> str:
+        """The configured tab's current name, looked up by sheet_id when set."""
+        sheet_id = self.source_config.sheet_id
+        if sheet_id is None:
+            return self.source_config.sheet_name  # type: ignore[return-value]
+        if sheet_id not in sheets:
+            available = ", ".join(
+                f"{gid} ('{name}')" for gid, name in sorted(sheets.items())
+            )
+            raise ValueError(
+                f"sheet_id {sheet_id} not found in spreadsheet "
+                f"{self.source_config.spreadsheet_id}. Available sheet_ids: {available}"
+            )
+        self.logger.debug(f"Resolved sheet_id {sheet_id} to sheet '{sheets[sheet_id]}'")
+        return sheets[sheet_id]
+
     def extract_data(self) -> List[Tuple[Any, str]]:
         # Check if we should skip extraction
         if self._should_skip_extraction():
             return []  # Return empty list to skip processing
 
         # One config maps to exactly one sheet → one destination table
-        # (sheet_name is required; validated in GSheetsConfig).
-        spreadsheet_title = self.client.get_spreadsheet_title(
+        # (sheet_name or sheet_id is required; validated in GSheetsConfig).
+        spreadsheet_title, sheets = self.client.get_spreadsheet_info(
             self.source_config.spreadsheet_id
         )
-        sheet_name = self.source_config.sheet_name
+        sheet_name = self._resolve_sheet_name(sheets)
         data = self.client.get_sheet_data(
             self.source_config.spreadsheet_id,
             sheet_name,
