@@ -127,7 +127,6 @@ def _saga_project_yml(
 # providers:
 #   google_secrets:
 #     project_id: {project_placeholder}
-#     sheets_secret_name: my-sheets-credentials
 """
         orchestration_block = """\
 # Uncomment to configure distributed orchestration (Cloud Run):

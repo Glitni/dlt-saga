@@ -86,3 +86,44 @@ class TestGetSheetData:
         with patch.object(client, "get_service", return_value=service):
             rows = list(client.get_sheet_data("sheet-1", "Sheet1"))
         assert rows == []
+
+
+@pytest.mark.unit
+class TestGSheetsCredentialArgs:
+    """credentials (preferred) resolves secret URIs by value; secret_id and the
+    sheets_secret_name project default keep working as deprecated fallbacks."""
+
+    def _args(self, **config):
+        client = GSheetsClient(
+            GSheetsConfig(spreadsheet_id="sheet-1", sheet_name="Sheet1", **config)
+        )
+        with patch(
+            "dlt_saga.utility.gcp.client_pool._get_google_secrets_value",
+            return_value="project-default-secret",
+        ):
+            args = client._prepare_credentials_args()
+        assert args.pop("scopes")
+        return args
+
+    def test_credentials_secret_uri_resolves_to_service_account_json(self, monkeypatch):
+        monkeypatch.setenv("SAGA_TEST_SHEETS_SA", '{"type": "service_account"}')
+        args = self._args(credentials="env_secret::SAGA_TEST_SHEETS_SA")
+        assert args == {"credentials_dict": {"type": "service_account"}}
+
+    def test_credentials_dict_and_path_still_work(self):
+        assert self._args(credentials={"type": "service_account"}) == {
+            "credentials_dict": {"type": "service_account"}
+        }
+        assert self._args(credentials="/keys/sa.json") == {
+            "credentials_path": "/keys/sa.json"
+        }
+
+    def test_credentials_take_precedence_over_secret_id(self):
+        args = self._args(credentials="/keys/sa.json", secret_id="legacy")
+        assert args == {"credentials_path": "/keys/sa.json"}
+
+    def test_deprecated_secret_id_still_works(self):
+        assert self._args(secret_id="legacy") == {"secret_id": "legacy"}
+
+    def test_deprecated_project_default_still_works(self):
+        assert self._args() == {"secret_id": "project-default-secret"}

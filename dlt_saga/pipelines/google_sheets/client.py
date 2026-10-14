@@ -32,32 +32,24 @@ class GSheetsClient:
         """Prepare credentials arguments for the connection pool.
 
         Returns:
-            Dict with keys: secret_id, credentials_path, credentials_dict, scopes
+            ``google_api_pool.get_credentials`` arguments: one credential
+            source (none means Application Default Credentials) plus scopes
         """
-        # Determine which credential source to use
-        secret_id = None
-        credentials_path = None
-        credentials_dict = None
+        from dlt_saga.utility.gcp.client_pool import _get_google_secrets_value
+        from dlt_saga.utility.gcp.credentials import service_account_credential_args
 
-        # 1. Check for direct credentials in source config
-        if isinstance(self.config.credentials, dict):
-            credentials_dict = self.config.credentials
-        elif isinstance(self.config.credentials, str):
-            credentials_path = self.config.credentials
-        else:
-            # 2. Check for secret manager config
-            from dlt_saga.utility.gcp.client_pool import _get_google_secrets_value
-
-            secret_id = self.config.secret_id or _get_google_secrets_value(
-                "sheets_secret_name"
-            )
-
-        return {
-            "secret_id": secret_id,
-            "credentials_path": credentials_path,
-            "credentials_dict": credentials_dict,
-            "scopes": SCOPES,
-        }
+        # 1. credentials: object, JSON string, key path or secret URI (preferred)
+        if self.config.credentials is not None:
+            return {
+                **service_account_credential_args(self.config.credentials),
+                "scopes": SCOPES,
+            }
+        # 2. Deprecated: a bare Secret Manager secret name, from the config or the
+        #    providers.google_secrets.sheets_secret_name project default
+        secret_id = self.config.secret_id or _get_google_secrets_value(
+            "sheets_secret_name"
+        )
+        return {"secret_id": secret_id, "scopes": SCOPES}
 
     def get_sheets_service(self):
         """Get Google Sheets API service, reused for this client's lifetime."""

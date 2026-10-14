@@ -80,14 +80,14 @@ class GSheetsConfig(BaseConfig):
     )
 
     # Credentials
-    secret_id: Optional[str] = field(
-        default=None,
-        metadata={"description": "Google Secret Manager secret ID for credentials"},
-    )
     credentials: Optional[Union[Dict[str, Any], str]] = field(
         default=None,
         metadata={
-            "description": "Google service account credentials (alternative to secret_id)",
+            "description": (
+                "Google service account credentials. Without credentials (or the "
+                "deprecated secret_id), Application Default Credentials are used"
+            ),
+            "secret": True,
             "oneOf": [
                 {
                     "type": "object",
@@ -95,8 +95,21 @@ class GSheetsConfig(BaseConfig):
                 },
                 {
                     "type": "string",
-                    "description": "Path to credentials file or credentials JSON string",
+                    "description": (
+                        "Service account JSON (plain or a secret URI), or a path "
+                        "to a credentials file"
+                    ),
                 },
             ],
+        },
+    )
+    secret_id: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Deprecated: use credentials: "
+                "'googlesecretmanager::<project>::<secret>'. Google Secret Manager "
+                "secret name for credentials"
+            ),
         },
     )

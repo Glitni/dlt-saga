@@ -239,27 +239,14 @@ class FilesystemClient:
     def _gdrive_credential_args(self) -> Dict[str, Any]:
         """google_api_pool arguments for the configured ``credentials``.
 
-        Secret URIs are resolved wherever they appear (the whole value, or
-        values inside a JSON object), so whether credentials are secret is
-        decided by the value, not the field. A string that resolves to JSON is
-        service account content; any other string is a key file path. No
-        credentials falls through to Application Default Credentials.
+        No credentials falls through to Application Default Credentials.
         """
-        import json
+        from dlt_saga.utility.gcp.credentials import service_account_credential_args
 
-        from dlt_saga.utility.secrets.resolver import SecretResolver
-
-        args: Dict[str, Any] = {"scopes": _GDRIVE_SCOPES}
-        creds = self.config.credentials
-        if isinstance(creds, dict):
-            args["credentials_dict"] = SecretResolver.resolve_dict(creds)
-        elif isinstance(creds, str):
-            resolved = SecretResolver.resolve(creds)
-            if resolved.lstrip().startswith("{"):
-                args["credentials_dict"] = json.loads(resolved)
-            else:
-                args["credentials_path"] = resolved
-        return args
+        return {
+            **service_account_credential_args(self.config.credentials),
+            "scopes": _GDRIVE_SCOPES,
+        }
 
     def _get_gdrive_service(self) -> Any:
         """Drive v3 ``files()`` service for file_id reads, reused per client."""
