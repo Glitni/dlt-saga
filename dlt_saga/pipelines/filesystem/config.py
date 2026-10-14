@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Dict, Optional, Union
 
 from dlt_saga.pipelines.base_config import BaseConfig
 from dlt_saga.utility.secrets.secret_str import SecretStr, coerce_secret
@@ -13,16 +13,15 @@ class FilesystemConfig(BaseConfig):
     filesystem_type: str = field(
         default="",
         metadata={
-            "description": "Filesystem type (gs=Google Cloud Storage, s3=AWS S3, azure=Azure Blob, file=local, sftp=SFTP)",
-            "enum": ["gs", "s3", "azure", "file", "sftp"],
+            "description": "Filesystem type (gs=Google Cloud Storage, s3=AWS S3, azure=Azure Blob, file=local, sftp=SFTP, gdrive=Google Drive)",
+            "enum": ["gs", "s3", "azure", "file", "sftp", "gdrive"],
             "required": True,
         },
     )
     bucket_name: str = field(
         default="",
         metadata={
-            "description": "Bucket or container name (for cloud storage) or base path (for local files)",
-            "required": True,
+            "description": "Bucket or container name (for cloud storage), base path (for local files) or folder ID (for gdrive, from the URL: /folders/<ID>). Required unless file_id is set",
         },
     )
     file_type: str = field(
@@ -40,12 +39,34 @@ class FilesystemConfig(BaseConfig):
     file_glob: Optional[str] = field(
         default=None,
         metadata={
-            "description": "Glob pattern for file selection (e.g., 'data/*.csv', 'exports/**/*.parquet')"
+            "description": "Glob pattern for file selection (e.g., 'data/*.csv', 'exports/**/*.parquet'). Required unless file_id is set"
         },
     )
-    credentials: Optional[str] = field(
+    file_id: Optional[str] = field(
         default=None,
-        metadata={"description": "Path to credentials file"},
+        metadata={
+            "description": "Google Drive file ID (from the URL: /file/d/<ID>/). "
+            "gdrive only; reads that one file instead of bucket_name + file_glob, "
+            "so only the file needs to be shared",
+            "pattern": "^[a-zA-Z0-9-_]+$",
+        },
+    )
+    credentials: Optional[Union[Dict[str, Any], str]] = field(
+        default=None,
+        metadata={
+            "description": "Credentials (path to a credentials file, or a service account JSON object)",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "description": "Service account credentials as JSON object",
+                },
+                {
+                    "type": "string",
+                    "description": "Path to credentials file. For gdrive also "
+                    "service account JSON, as a plain value or a secret URI",
+                },
+            ],
+        },
     )
 
     # CSV parsing configuration
@@ -169,14 +190,30 @@ class FilesystemConfig(BaseConfig):
         # Validate required fields
         if not self.filesystem_type:
             raise ValueError("filesystem_type is required for filesystem sources")
-        if not self.bucket_name:
-            raise ValueError("bucket_name is required for filesystem sources")
         if not self.file_type:
             raise ValueError("file_type is required for filesystem sources")
-        if not self.file_glob:
-            raise ValueError("file_glob is required for filesystem sources")
+        if self.file_id:
+            self._validate_file_id_config()
+        else:
+            if not self.bucket_name:
+                raise ValueError("bucket_name is required for filesystem sources")
+            if not self.file_glob:
+                raise ValueError("file_glob is required for filesystem sources")
 
         self._validate_snapshot_config()
+
+    def _validate_file_id_config(self) -> None:
+        """file_id selects one Drive file, replacing bucket_name + file_glob."""
+        if self.filesystem_type != "gdrive":
+            raise ValueError(
+                "file_id is only supported for filesystem_type 'gdrive'; "
+                "use bucket_name + file_glob for other filesystem types"
+            )
+        if self.bucket_name or self.file_glob:
+            raise ValueError(
+                "file_id replaces bucket_name and file_glob; set either file_id "
+                "or bucket_name + file_glob, not both"
+            )
 
     def _validate_snapshot_config(self) -> None:
         """Validate snapshot date format and regex configuration."""

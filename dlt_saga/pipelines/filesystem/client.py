@@ -1,9 +1,17 @@
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import dlt
-from dlt.sources.filesystem import FileItemDict, filesystem, readers
+from dlt.common.storages.fsspec_filesystem import FileItem
+from dlt.sources.filesystem import (
+    FileItemDict,
+    filesystem,
+    read_csv,
+    read_csv_duckdb,
+    read_jsonl,
+    read_parquet,
+)
 
 from dlt_saga.pipelines.filesystem.config import FilesystemConfig
 from dlt_saga.utility.naming import normalize_identifier
@@ -14,6 +22,33 @@ logger = logging.getLogger(__name__)
 # peak memory to one chunk instead of materializing the whole file (+ a dict copy)
 # regardless of file size.
 _CSV_METADATA_CHUNK_SIZE = 50_000
+
+# Read-only Drive scope for gdrive sources. The service account must also be
+# shared into the source folder (or file, with file_id): the scope alone grants
+# no access to files.
+_GDRIVE_SCOPES = ("https://www.googleapis.com/auth/drive.readonly",)
+_GDRIVE_FILE_FIELDS = "id, name, mimeType, modifiedTime, size"
+# Native Google files (Sheets, Docs, ...) have no binary content to download
+_GDRIVE_NATIVE_MIME_PREFIX = "application/vnd.google-apps."
+
+
+class _GdriveFileItem(FileItemDict):
+    """A Drive file addressed by ID, downloaded on first open().
+
+    dlt's ``FileItemDict.open()`` serves ``file_content`` from memory when
+    present, so every reader and transformer works unchanged; listing-only
+    callers (change detection, test_connection) never download the file.
+    """
+
+    def __init__(self, item: FileItem, file_id: str, download: Any):
+        super().__init__(item)
+        self._file_id = file_id
+        self._download = download
+
+    def open(self, *args: Any, **kwargs: Any) -> Any:  # noqa: A003
+        if "file_content" not in self:
+            self["file_content"] = self._download(self._file_id)
+        return super().open(*args, **kwargs)
 
 
 def _iter_csv_records_with_metadata(
@@ -63,6 +98,8 @@ class FilesystemClient:
         self._column_name_mapping_cache: Optional[Dict[str, str]] = (
             None  # Lazy-loaded cache
         )
+        self._gdrive_credentials: Any = None  # Lazy-loaded, see _get_gdrive_credentials
+        self._gdrive_service: Any = None  # Lazy-loaded, see _get_gdrive_service
         # GCS without explicit credentials uses Application Default Credentials
         # (gcloud / metadata server / profile `run_as` impersonation) — the same
         # resolution as the BigQuery destination. Credential selection is left to
@@ -86,6 +123,10 @@ class FilesystemClient:
                 raise ValueError("hostname is required for SFTP filesystem")
             # Build SFTP URL: sftp://hostname/path
             return f"sftp://{self.config.hostname}/{self.config.bucket_name}"
+        elif self.config.filesystem_type == "gdrive":
+            # gdrive://<folder_id>; file_glob is matched against names below it.
+            # With file_id the file is fetched by ID (see _gdrive_file_resource)
+            return f"gdrive://{self.config.file_id or self.config.bucket_name}"
         raise ValueError(f"Unsupported filesystem type: {self.config.filesystem_type}")
 
     def _get_sftp_credentials(self) -> Optional[Dict[str, Any]]:
@@ -163,6 +204,137 @@ class FilesystemClient:
 
         return credentials if credentials else None
 
+    def _get_gdrive_credentials(self) -> Any:
+        """Build Drive credentials for dlt's gdrive filesystem, cached per client.
+
+        ``credentials`` when set (see ``_gdrive_credential_args``), otherwise
+        Application Default Credentials — always scoped to ``drive.readonly``.
+        dlt's ``GcpServiceAccountCredentials`` accepts the resolved native
+        credentials as-is, so the scope survives into the Drive client.
+        """
+        if self._gdrive_credentials is None:
+            from dlt.common.configuration.specs import GcpServiceAccountCredentials
+            from dlt.common.configuration.specs.exceptions import (
+                InvalidGoogleNativeCredentialsType,
+            )
+
+            from dlt_saga.utility.gcp.client_pool import google_api_pool
+            from dlt_saga.utility.optional_deps import require_optional
+
+            require_optional("googleapiclient", "Google Drive filesystem pipelines")
+
+            native = google_api_pool.get_credentials(**self._gdrive_credential_args())
+            dlt_creds = GcpServiceAccountCredentials()
+            try:
+                dlt_creds.parse_native_representation(native)
+            except InvalidGoogleNativeCredentialsType:
+                # Non service-account credentials (ADC user credentials,
+                # metadata server, impersonation) are taken as default
+                # credentials before the service-account parse rejects them
+                if not dlt_creds.has_default_credentials():
+                    raise
+            self._gdrive_credentials = dlt_creds
+        return self._gdrive_credentials
+
+    def _gdrive_credential_args(self) -> Dict[str, Any]:
+        """google_api_pool arguments for the configured ``credentials``.
+
+        Secret URIs are resolved wherever they appear (the whole value, or
+        values inside a JSON object), so whether credentials are secret is
+        decided by the value, not the field. A string that resolves to JSON is
+        service account content; any other string is a key file path. No
+        credentials falls through to Application Default Credentials.
+        """
+        import json
+
+        from dlt_saga.utility.secrets.resolver import SecretResolver
+
+        args: Dict[str, Any] = {"scopes": _GDRIVE_SCOPES}
+        creds = self.config.credentials
+        if isinstance(creds, dict):
+            args["credentials_dict"] = SecretResolver.resolve_dict(creds)
+        elif isinstance(creds, str):
+            resolved = SecretResolver.resolve(creds)
+            if resolved.lstrip().startswith("{"):
+                args["credentials_dict"] = json.loads(resolved)
+            else:
+                args["credentials_path"] = resolved
+        return args
+
+    def _get_gdrive_service(self) -> Any:
+        """Drive v3 ``files()`` service for file_id reads, reused per client."""
+        if self._gdrive_service is None:
+            from dlt_saga.utility.gcp.client_pool import google_api_pool
+            from dlt_saga.utility.optional_deps import require_optional
+
+            require_optional("googleapiclient", "Google Drive filesystem pipelines")
+            self._gdrive_service = google_api_pool.get_client(
+                "drive", "v3", cache_client=False, **self._gdrive_credential_args()
+            ).files()
+        return self._gdrive_service
+
+    def _download_gdrive_file(self, file_id: str) -> bytes:
+        """Download a Drive file's binary content."""
+        import io
+
+        from googleapiclient.http import MediaIoBaseDownload
+
+        buffer = io.BytesIO()
+        downloader = MediaIoBaseDownload(
+            buffer, self._get_gdrive_service().get_media(fileId=file_id)
+        )
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        return buffer.getvalue()
+
+    def _gdrive_file_resource(self) -> Any:
+        """Resource yielding the single Drive file named by ``file_id``.
+
+        Fetching by ID needs access to the file only (not its folder) and is
+        immune to Drive's eventually consistent listings and duplicate names.
+        """
+        from dlt.common.storages.fsspec_filesystem import MTIME_DISPATCH
+
+        file_id = self.config.file_id
+
+        @dlt.resource(name="filesystem", standalone=True)
+        def gdrive_file() -> Iterator[List[FileItemDict]]:
+            meta = (
+                self._get_gdrive_service()
+                .get(fileId=file_id, fields=_GDRIVE_FILE_FIELDS, supportsAllDrives=True)
+                .execute()
+            )
+            mime_type = meta.get("mimeType", "")
+            if mime_type.startswith(_GDRIVE_NATIVE_MIME_PREFIX):
+                raise ValueError(
+                    f"Drive file {file_id} ('{meta.get('name')}') is a native "
+                    f"Google file ({mime_type}) with no downloadable content; "
+                    "load Google Sheets with the google_sheets adapter"
+                )
+            item = FileItem(
+                file_url=self.fs_url,
+                file_name=meta["name"],
+                relative_path=meta["name"],
+                mime_type=mime_type,
+                modification_date=MTIME_DISPATCH["gdrive"](meta),
+                size_in_bytes=int(meta.get("size", 0)),
+            )
+            # a one-item page, matching the pages dlt's filesystem resource yields
+            yield [_GdriveFileItem(item, file_id, self._download_gdrive_file)]
+
+        return gdrive_file()
+
+    def _file_source(self) -> Any:
+        """Resource listing the files to read, as ``FileItemDict`` items.
+
+        dlt's filesystem resource, except for a gdrive ``file_id`` source,
+        which reads the one file by ID.
+        """
+        if self.config.file_id:
+            return self._gdrive_file_resource()
+        return filesystem(**self.get_filesystem_kwargs())
+
     def _read_csv_headers(self) -> Optional[list]:
         """Read CSV headers from the file without loading data.
 
@@ -173,10 +345,7 @@ class FilesystemClient:
             import csv
             import io
 
-            from dlt.sources.filesystem import filesystem
-
-            fs_kwargs = self.get_filesystem_kwargs()
-            fs = filesystem(**fs_kwargs)
+            fs = self._file_source()
 
             # Get first file from filesystem
             file_items = list(fs)
@@ -310,6 +479,12 @@ class FilesystemClient:
             else:
                 logger.warning("SFTP filesystem_type but no credentials retrieved!")
 
+        # Google Drive: resolved credentials replace the raw config value, and
+        # the filesystem is opened read-only
+        if self.config.filesystem_type == "gdrive":
+            kwargs["credentials"] = self._get_gdrive_credentials()
+            kwargs["kwargs"] = {"access": "read_only"}
+
         return kwargs
 
     def _parse_incremental_dates(
@@ -387,7 +562,7 @@ class FilesystemClient:
                 incremental=dlt.sources.incremental(incremental_column)
             )
 
-    def _create_csv_reader(self, fs, fs_kwargs: dict, **kwargs):
+    def _create_csv_reader(self, fs, **kwargs):
         """Create CSV reader (DuckDB or pandas based on encoding).
 
         When include_file_metadata is enabled, uses a custom transformer that
@@ -407,8 +582,8 @@ class FilesystemClient:
 
         encoding = self.config.encoding or "utf-8"
         if encoding.lower() in ("utf-8", "utf8"):
-            return fs | readers(**fs_kwargs).read_csv_duckdb(
-                **csv_kwargs, parallel=True
+            return fs | read_csv_duckdb(**csv_kwargs, parallel=True).with_name(
+                "read_csv_duckdb"
             )
         else:
             logger.debug(
@@ -421,18 +596,18 @@ class FilesystemClient:
                 logger.debug(
                     f"Using dtype hints for {len(dtype_map)} columns to skip type inference"
                 )
-            return fs | readers(**fs_kwargs).read_csv(**csv_kwargs)
+            return fs | read_csv(**csv_kwargs).with_name("read_csv")
 
-    def _create_file_reader(self, fs, fs_kwargs: dict, **kwargs):
+    def _create_file_reader(self, fs, **kwargs):
         """Create appropriate file reader based on file type."""
         file_type = self.config.file_type.lower() if self.config.file_type else "csv"
 
         if file_type == "csv":
-            return self._create_csv_reader(fs, fs_kwargs, **kwargs)
+            return self._create_csv_reader(fs, **kwargs)
         elif file_type == "parquet":
-            return fs | readers(**fs_kwargs).read_parquet(**kwargs)
+            return fs | read_parquet(**kwargs).with_name("read_parquet")
         elif file_type == "jsonl":
-            return fs | readers(**fs_kwargs).read_jsonl(**kwargs)
+            return fs | read_jsonl(**kwargs).with_name("read_jsonl")
         elif file_type == "json":
             return fs | self._get_json_array_transformer()
         else:
@@ -458,9 +633,7 @@ class FilesystemClient:
         # Parse dates and create filesystem resource
         initial_datetime, end_datetime = self._parse_incremental_dates(initial_value)
 
-        fs_kwargs = self.get_filesystem_kwargs()
-        fs_kwargs["file_glob"] = self.config.file_glob
-        fs = filesystem(**fs_kwargs)
+        fs = self._file_source()
 
         # Apply incremental hints
         fs = self._apply_incremental_hints(
@@ -468,14 +641,14 @@ class FilesystemClient:
         )
 
         # Create and return appropriate reader
-        return self._create_file_reader(fs, fs_kwargs, **kwargs)
+        return self._create_file_reader(fs, **kwargs)
 
     def read_csv(self, **kwargs) -> Any:
         """Read CSV files, optionally with file metadata injection."""
         # Use metadata-injecting transformer if enabled
         if self.config.csv_include_file_metadata:
             logger.debug("Using CSV reader with file metadata injection")
-            fs = filesystem(**self.get_filesystem_kwargs())
+            fs = self._file_source()
             return fs | self._get_csv_with_metadata_transformer()
 
         csv_kwargs: Dict[str, Any] = {}
@@ -492,9 +665,9 @@ class FilesystemClient:
         if encoding.lower() in ("utf-8", "utf8"):
             # Use DuckDB reader for better performance with UTF-8 files
             # parallel=True enables parallel CSV parsing for faster reads
-            return readers(**self.get_filesystem_kwargs()).read_csv_duckdb(
+            return self._file_source() | read_csv_duckdb(
                 **csv_kwargs, parallel=True
-            )
+            ).with_name("read_csv_duckdb")
         else:
             # Use pandas for non-UTF-8 encoded files (no chunking)
             logger.debug(
@@ -510,13 +683,13 @@ class FilesystemClient:
                     f"Using dtype hints for {len(dtype_map)} columns to skip type inference"
                 )
 
-            return readers(**self.get_filesystem_kwargs()).read_csv(**csv_kwargs)
+            return self._file_source() | read_csv(**csv_kwargs).with_name("read_csv")
 
     def read_parquet(self, **kwargs) -> Any:
-        return readers(**self.get_filesystem_kwargs()).read_parquet(**kwargs)
+        return self._file_source() | read_parquet(**kwargs).with_name("read_parquet")
 
     def read_jsonl(self, **kwargs) -> Any:
-        return readers(**self.get_filesystem_kwargs()).read_jsonl(**kwargs)
+        return self._file_source() | read_jsonl(**kwargs).with_name("read_jsonl")
 
     def _get_json_array_transformer(self):
         """Get transformer for parsing JSON array files.
@@ -567,10 +740,7 @@ class FilesystemClient:
 
     def read_json(self) -> Any:
         """Read JSON files (array format) using a custom transformer."""
-        return (
-            filesystem(**self.get_filesystem_kwargs())
-            | self._get_json_array_transformer()
-        )
+        return self._file_source() | self._get_json_array_transformer()
 
     def _get_parquet_with_metadata_transformer(self):
         """Get transformer for reading Parquet files with file metadata injection."""
@@ -680,7 +850,7 @@ class FilesystemClient:
 
         return read_json_with_metadata
 
-    def _create_file_reader_with_metadata(self, fs, fs_kwargs: dict, **kwargs):
+    def _create_file_reader_with_metadata(self, fs, **kwargs):
         """Create a file reader that always injects file metadata columns.
 
         For append-mode pipelines, this ensures _dlt_source_file_name and
@@ -714,9 +884,7 @@ class FilesystemClient:
         Always injects _dlt_source_file_name and _dlt_source_modification_date
         into each output row, regardless of file type.
         """
-        fs = filesystem(**self.get_filesystem_kwargs())
-        fs_kwargs = self.get_filesystem_kwargs()
-        return self._create_file_reader_with_metadata(fs, fs_kwargs, **kwargs)
+        return self._create_file_reader_with_metadata(self._file_source(), **kwargs)
 
     def read_incremental_with_metadata(
         self,
@@ -727,15 +895,11 @@ class FilesystemClient:
         """Read files incrementally with metadata injection."""
         initial_datetime, end_datetime = self._parse_incremental_dates(initial_value)
 
-        fs_kwargs = self.get_filesystem_kwargs()
-        fs_kwargs["file_glob"] = self.config.file_glob
-        fs = filesystem(**fs_kwargs)
-
         fs = self._apply_incremental_hints(
-            fs, incremental_column, initial_datetime, end_datetime
+            self._file_source(), incremental_column, initial_datetime, end_datetime
         )
 
-        return self._create_file_reader_with_metadata(fs, fs_kwargs, **kwargs)
+        return self._create_file_reader_with_metadata(fs, **kwargs)
 
     def _get_csv_with_metadata_transformer(self):
         """Get transformer for reading CSV files with file metadata injection.
@@ -813,13 +977,11 @@ class FilesystemClient:
         Returns:
             dlt resource yielding records with 'name' and 'geojson' columns
         """
-        return (
-            filesystem(**self.get_filesystem_kwargs()) | self._get_geojson_transformer()
-        )
+        return self._file_source() | self._get_geojson_transformer()
 
     def get_files(self, limit: Optional[int] = None) -> Iterator[FileItemDict]:
         """Get file items from filesystem with optional limit."""
-        fs = filesystem(**self.get_filesystem_kwargs())
+        fs = self._file_source()
         count = 0
         for file_item in fs:
             if limit and count >= limit:
@@ -842,8 +1004,7 @@ class FilesystemClient:
             None if modification check is not possible (e.g., no files, error)
         """
         try:
-            fs_kwargs = self.get_filesystem_kwargs()
-            fs = filesystem(**fs_kwargs)
+            fs = self._file_source()
 
             files_checked = 0
             for file_item in fs:
