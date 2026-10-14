@@ -127,3 +127,56 @@ class TestGSheetsCredentialArgs:
 
     def test_deprecated_project_default_still_works(self):
         assert self._args() == {"secret_id": "project-default-secret"}
+
+    def test_no_credentials_falls_back_to_adc_without_warning(self, caplog):
+        client = GSheetsClient(
+            GSheetsConfig(spreadsheet_id="sheet-1", sheet_name="Sheet1")
+        )
+        with patch(
+            "dlt_saga.utility.gcp.client_pool._get_google_secrets_value",
+            return_value=None,
+        ):
+            args = client._prepare_credentials_args()
+        assert args["secret_id"] is None
+        assert not caplog.records
+
+
+@pytest.mark.unit
+class TestGSheetsCredentialWarnings:
+    """Deprecated credential sources warn, once per client; credentials
+    silently overriding a pipeline's own secret_id is surfaced."""
+
+    def _warnings(self, caplog, project_default=None, **config):
+        client = GSheetsClient(
+            GSheetsConfig(spreadsheet_id="sheet-1", sheet_name="Sheet1", **config)
+        )
+        with (
+            caplog.at_level(
+                "WARNING", logger="dlt_saga.pipelines.google_sheets.client"
+            ),
+            patch(
+                "dlt_saga.utility.gcp.client_pool._get_google_secrets_value",
+                return_value=project_default,
+            ),
+        ):
+            # both the Sheets and the Drive service resolve credentials
+            client._prepare_credentials_args()
+            client._prepare_credentials_args()
+        return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+
+    def test_secret_id_warns_deprecated_once(self, caplog):
+        (message,) = self._warnings(caplog, secret_id="legacy")
+        assert "secret_id is deprecated" in message
+
+    def test_project_default_warns_deprecated(self, caplog):
+        (message,) = self._warnings(caplog, project_default="project-default")
+        assert "sheets_secret_name is deprecated" in message
+
+    def test_credentials_with_secret_id_warns_secret_id_ignored(self, caplog):
+        (message,) = self._warnings(
+            caplog, credentials="/keys/sa.json", secret_id="legacy"
+        )
+        assert "secret_id is ignored" in message
+
+    def test_credentials_alone_does_not_warn(self, caplog):
+        assert self._warnings(caplog, credentials="/keys/sa.json") == []

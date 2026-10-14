@@ -51,6 +51,17 @@ class _GdriveFileItem(FileItemDict):
         return super().open(*args, **kwargs)
 
 
+def _resolve_secret_uris(credentials: Any) -> Any:
+    """Resolve secret URIs in a ``credentials`` value (string or object)."""
+    from dlt_saga.utility.secrets.resolver import SecretResolver
+
+    if isinstance(credentials, dict):
+        return SecretResolver.resolve_dict(credentials)
+    if isinstance(credentials, str):
+        return SecretResolver.resolve(credentials)
+    return credentials
+
+
 def _iter_csv_records_with_metadata(
     file_obj: FileItemDict,
     separator: str,
@@ -100,6 +111,9 @@ class FilesystemClient:
         )
         self._gdrive_credentials: Any = None  # Lazy-loaded, see _get_gdrive_credentials
         self._gdrive_service: Any = None  # Lazy-loaded, see _get_gdrive_service
+        # file_id content by ID, so the header read and the data read share one
+        # download (each _file_source() call builds a fresh, empty file item)
+        self._gdrive_content: Dict[str, bytes] = {}
         # GCS without explicit credentials uses Application Default Credentials
         # (gcloud / metadata server / profile `run_as` impersonation) — the same
         # resolution as the BigQuery destination. Credential selection is left to
@@ -261,7 +275,13 @@ class FilesystemClient:
         return self._gdrive_service
 
     def _download_gdrive_file(self, file_id: str) -> bytes:
-        """Download a Drive file's binary content."""
+        """Download a Drive file's binary content, once per client."""
+        if file_id not in self._gdrive_content:
+            self._gdrive_content[file_id] = self._fetch_gdrive_file(file_id)
+        return self._gdrive_content[file_id]
+
+    def _fetch_gdrive_file(self, file_id: str) -> bytes:
+        """Fetch a Drive file's binary content from the Drive API."""
         import io
 
         from googleapiclient.http import MediaIoBaseDownload
@@ -448,9 +468,10 @@ class FilesystemClient:
         if self.config.file_glob is not None:
             kwargs["file_glob"] = self.config.file_glob
 
-        # Only add credentials if explicitly provided
+        # Only add credentials if explicitly provided; secret URIs are resolved
+        # by value, whole or inside an object
         if self.config.credentials is not None:
-            kwargs["credentials"] = self.config.credentials
+            kwargs["credentials"] = _resolve_secret_uris(self.config.credentials)
 
         # Special handling for S3 endpoints
         if self.config.filesystem_type == "s3" and self.config.endpoint_url:

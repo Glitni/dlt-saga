@@ -193,3 +193,18 @@ class TestIdempotency:
         file_handlers = [h for h in handlers if isinstance(h, logging.FileHandler)]
         assert len(stream_handlers) == 1
         assert len(file_handlers) == 1
+
+
+@pytest.mark.unit
+class TestColoredFormatter:
+    def test_does_not_leak_color_into_shared_record(self):
+        # Handlers share one LogRecord: the console's color codes must not reach
+        # the file handler (or any other handler) formatting it afterwards
+        record = logging.LogRecord(
+            "dlt_saga.test", logging.WARNING, __file__, 1, "careful", None, None
+        )
+        colored = cli_logging._ColoredFormatter("%(levelname)s %(message)s")
+
+        assert colored.format(record) != "WARNING careful"
+        assert record.levelname == "WARNING"
+        assert logging.Formatter("%(levelname)s").format(record) == "WARNING"

@@ -58,9 +58,16 @@ class _ColoredFormatter(logging.Formatter):
 
     def format(self, record):
         color = self.LEVEL_COLORS.get(record.levelno)
-        if color:
-            record.levelname = f"{color}{record.levelname}{RESET}"
-        return super().format(record)
+        if not color:
+            return super().format(record)
+        # The record is shared by every handler: restore levelname so the file
+        # handler (and any host handler) doesn't inherit the color codes
+        levelname = record.levelname
+        record.levelname = f"{color}{levelname}{RESET}"
+        try:
+            return super().format(record)
+        finally:
+            record.levelname = levelname
 
 
 class _OAuth2ClientFilter(logging.Filter):
