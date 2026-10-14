@@ -453,13 +453,15 @@ Selector reference:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `filesystem_type` | string | `gs`, `sftp`, `file` |
-| `bucket_name` | string | Bucket or container name |
+| `filesystem_type` | string | `gs`, `s3`, `azure`, `sftp`, `gdrive`, `file` |
+| `bucket_name` | string | Bucket or container name (folder ID for `gdrive`) |
+| `file_id` | string | Google Drive file ID; replaces `bucket_name` + `file_glob` (`gdrive` only) |
 | `file_glob` | string | Glob pattern (`data/*.csv`) |
 | `file_type` | string | `csv`, `json`, `jsonl`, `parquet` |
 | `csv_separator` | string | CSV delimiter (default: `,`) |
 | `snapshot_date_regex` | string | Regex to extract dates from file paths |
 | `snapshot_date_format` | string | Date format for extracted dates (e.g., `%Y-%m-%d`) |
+| `credentials` | object/string | Service account JSON object or key file path; for `gdrive` also service account JSON as a string or secret URI |
 
 ### Google Sheets
 

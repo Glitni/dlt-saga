@@ -318,13 +318,13 @@ tags: ["daily"]
 
 ---
 
-## Filesystem (GCS, SFTP, local)
+## Filesystem (GCS, SFTP, Google Drive, local)
 
 Extracts files from cloud storage or local paths. Supports CSV, JSON, JSONL, and Parquet.
 
 ```yaml
 # configs/filesystem/mybucket/events.yml
-filesystem_type: "gs"  # gs (GCS), sftp, file (local)
+filesystem_type: "gs"  # gs (GCS), sftp, gdrive (Google Drive), file (local)
 bucket_name: "my-bucket"
 file_glob: "data/events/*.parquet"
 file_type: "parquet"   # csv, json, jsonl, parquet
@@ -401,6 +401,45 @@ credentials:
 
 This bypasses the GAC clearing and gives the resource the exact credentials
 you specify.
+
+### Google Drive
+
+`filesystem_type: gdrive` reads files from Google Drive. Point it at either one file or a folder:
+
+- **One file — `file_id`** (from the URL: `/file/d/<ID>/`). The file is fetched by ID, so only the file needs to be shared, and renaming or moving it doesn't break the pipeline. Leave out `bucket_name` and `file_glob`.
+- **A folder — `bucket_name` + `file_glob`.** `bucket_name` is the folder ID (from the URL: `/folders/<ID>`) and `file_glob` is matched against file names below it (`**/` descends into sub-folders), through dlt's built-in Drive filesystem. The folder must be shared.
+
+Shared Drives work. Everything else — CSV options, file metadata, incremental loading, change detection on the Drive `modifiedTime` — behaves as for any other filesystem.
+
+**Requires:** `pip install "dlt-saga[google-sheets]"` (also included in `dlt-saga[gcp]`)
+
+```yaml
+# configs/filesystem/finance/budget_traffic.yml
+filesystem_type: "gdrive"
+file_id: "1K3inwXnusgjfDz9RQhqgziCuVUtmEx0O"
+file_type: "csv"
+csv_separator: "\t"
+credentials: "googlesecretmanager::my-project::drive-reader-credentials"
+write_disposition: "replace"
+```
+
+```yaml
+# configs/filesystem/partner_drops/orders.yml
+filesystem_type: "gdrive"
+bucket_name: "1AbCdEfGhIjKlMnOpQrStUvWxYz"  # Drive folder ID
+file_glob: "orders_*.csv"
+file_type: "csv"
+credentials: "googlesecretmanager::my-project::drive-reader-credentials"
+incremental: true
+write_disposition: "append"
+```
+
+Credentials always use the `drive.readonly` scope. `credentials` takes service account JSON — as an object, a JSON string, or a secret URI holding it — or a key file path; secret URIs are resolved wherever they appear, including inside the object. Without `credentials`, Application Default Credentials are used (including `run_as` impersonation). Share the file or folder with that identity — the scope alone grants no access to files.
+
+Things to know:
+
+- **Only binary files can be read.** Native Google files (Sheets, Docs) have no downloadable content; load Sheets with the [Google Sheets](#google-sheets) adapter. A `file_id` pointing at one fails with that advice; a glob with an extension (`*.csv`) skips them naturally.
+- **Folder paths are resolved by name.** Drive allows several files with the same name in one folder; a path that matches more than one fails instead of picking one. Use `file_id` when a single file is all you need.
 
 ---
 
