@@ -1,3 +1,14 @@
+## 0.37.0 — 2026-10-14
+
+### Added
+- Accept secret URIs in google_sheets credentials and deprecate secret_id (#531)
+- Address Google Sheets tabs by stable sheet_id (#529)
+- Add Google Drive (gdrive) support to the filesystem adapter (#526)
+
+
+### Fixed
+- Warn on deprecated and overridden Sheets credentials, share Drive downloads, resolve filesystem secret URIs, stop color codes leaking into log records (#533)
+
 ## 0.36.0 — 2026-10-13
 
 ### Breaking Changes
