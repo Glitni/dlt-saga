@@ -468,7 +468,8 @@ Selector reference:
 | Field | Type | Description |
 |-------|------|-------------|
 | `spreadsheet_id` | string | From the spreadsheet URL |
-| `sheet_name` | string | Specific sheet/tab name |
+| `sheet_name` | string | Specific sheet/tab name (set this or `sheet_id`) |
+| `sheet_id` | int | Tab's numeric ID, the `gid` in the URL; survives renames (set this or `sheet_name`) |
 | `range` | string | Cell range in A1 notation |
 
 ### SharePoint
