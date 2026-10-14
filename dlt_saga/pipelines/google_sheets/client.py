@@ -1,9 +1,12 @@
+import logging
 from datetime import datetime
 from itertools import zip_longest
 from typing import Any, Dict, Iterator, Optional, Tuple
 
 from dlt_saga.pipelines.google_sheets.config import GSheetsConfig
 from dlt_saga.utility.tabular import dedupe_headers
+
+logger = logging.getLogger(__name__)
 
 # OAuth scopes needed for Sheets and Drive API access
 # Must be tuple to match client_pool type hints
@@ -27,29 +30,64 @@ class GSheetsClient:
         # stale-SSL problem that motivated the pool-level cache_client=False.
         self._sheets_service: Any = None
         self._drive_service: Any = None
+        self._credentials_args: Optional[Dict[str, Any]] = None
 
-    def _prepare_credentials_args(self) -> Dict:
-        """Prepare credentials arguments for the connection pool.
+    def _prepare_credentials_args(self) -> Dict[str, Any]:
+        """Prepare credentials arguments for the connection pool, once per client.
+
+        Resolved once so secret URIs are fetched and deprecation warnings
+        logged once per run, though both the Sheets and Drive services use them.
 
         Returns:
             ``google_api_pool.get_credentials`` arguments: one credential
             source (none means Application Default Credentials) plus scopes
         """
+        if self._credentials_args is None:
+            self._credentials_args = {
+                **self._resolve_credential_source(),
+                "scopes": SCOPES,
+            }
+        return self._credentials_args
+
+    def _resolve_credential_source(self) -> Dict[str, Any]:
+        """The one credential source to use, warning on deprecated ones."""
         from dlt_saga.utility.gcp.client_pool import _get_google_secrets_value
         from dlt_saga.utility.gcp.credentials import service_account_credential_args
 
         # 1. credentials: object, JSON string, key path or secret URI (preferred)
         if self.config.credentials is not None:
-            return {
-                **service_account_credential_args(self.config.credentials),
-                "scopes": SCOPES,
-            }
+            if self.config.secret_id:
+                # Typically credentials inherited as a group default over a
+                # pipeline's own secret_id, which would otherwise switch identity
+                # without notice
+                logger.warning(
+                    f"Both credentials and the deprecated secret_id "
+                    f"('{self.config.secret_id}') are set for spreadsheet "
+                    f"{self.config.spreadsheet_id}; credentials is used and "
+                    "secret_id is ignored. Remove secret_id, or replace it with "
+                    "credentials: 'googlesecretmanager::<project>::<secret>' on "
+                    "this pipeline to keep its own service account."
+                )
+            return service_account_credential_args(self.config.credentials)
+
         # 2. Deprecated: a bare Secret Manager secret name, from the config or the
         #    providers.google_secrets.sheets_secret_name project default
-        secret_id = self.config.secret_id or _get_google_secrets_value(
-            "sheets_secret_name"
-        )
-        return {"secret_id": secret_id, "scopes": SCOPES}
+        if self.config.secret_id:
+            logger.warning(
+                "google_sheets secret_id is deprecated; replace "
+                f"secret_id: '{self.config.secret_id}' with "
+                "credentials: 'googlesecretmanager::<project>::<secret>'."
+            )
+            return {"secret_id": self.config.secret_id}
+        secret_id = _get_google_secrets_value("sheets_secret_name")
+        if secret_id:
+            logger.warning(
+                "providers.google_secrets.sheets_secret_name is deprecated; set "
+                "credentials: 'googlesecretmanager::<project>::<secret>' on the "
+                "google_sheets pipelines instead (e.g. as a group default in "
+                "saga_project.yml)."
+            )
+        return {"secret_id": secret_id}
 
     def get_sheets_service(self):
         """Get Google Sheets API service, reused for this client's lifetime."""

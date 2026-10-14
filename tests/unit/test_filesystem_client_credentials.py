@@ -33,3 +33,43 @@ class TestNoGlobalEnvMutation:
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         FilesystemClient(self._gcs_config())
         assert "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ
+
+
+@pytest.mark.unit
+class TestCredentialSecretUris:
+    """Secret URIs in ``credentials`` are resolved by value for every
+    filesystem type, whole or inside an object; plain values pass through."""
+
+    def _kwargs(self, filesystem_type, credentials):
+        return FilesystemClient(
+            FilesystemConfig(
+                bucket_name="my-bucket",
+                filesystem_type=filesystem_type,
+                file_type="csv",
+                file_glob="*",
+                credentials=credentials,
+            )
+        ).get_filesystem_kwargs()
+
+    def test_resolves_secret_uri_string(self, monkeypatch):
+        monkeypatch.setenv("SAGA_TEST_GCS_SA", '{"type": "service_account"}')
+        kwargs = self._kwargs("gs", "env_secret::SAGA_TEST_GCS_SA")
+        assert kwargs["credentials"] == '{"type": "service_account"}'
+
+    def test_resolves_secret_uris_inside_object(self, monkeypatch):
+        monkeypatch.setenv("SAGA_TEST_S3_SECRET", "s3cr3t")
+        kwargs = self._kwargs(
+            "s3",
+            {
+                "aws_access_key_id": "AKIA",
+                "aws_secret_access_key": "env_secret::SAGA_TEST_S3_SECRET",
+            },
+        )
+        assert kwargs["credentials"] == {
+            "aws_access_key_id": "AKIA",
+            "aws_secret_access_key": "s3cr3t",
+        }
+
+    def test_plain_path_passes_through(self):
+        kwargs = self._kwargs("gs", "/keys/sa.json")
+        assert kwargs["credentials"] == "/keys/sa.json"

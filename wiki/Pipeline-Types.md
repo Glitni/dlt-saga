@@ -458,7 +458,7 @@ pipelines:
     credentials: "googlesecretmanager::my-project::sheets-reader"
 ```
 
-`secret_id` (a bare Secret Manager secret name, resolved against `providers.google_secrets.project_id`) and the project-level `providers.google_secrets.sheets_secret_name` default are deprecated but still work. To migrate, replace `secret_id: <secret>` with `credentials: "googlesecretmanager::<project>::<secret>"`.
+`secret_id` (a bare Secret Manager secret name, resolved against `providers.google_secrets.project_id`) and the project-level `providers.google_secrets.sheets_secret_name` default are deprecated but still work, with a warning on each run. To migrate, replace `secret_id: <secret>` with `credentials: "googlesecretmanager::<project>::<secret>"`. A pipeline that has both uses `credentials` and ignores `secret_id`, with a warning — so a `credentials` group default overrides any per-pipeline `secret_id` left behind; give such a pipeline its own `credentials` instead.
 
 ```yaml
 # configs/google_sheets/my_sheet.yml

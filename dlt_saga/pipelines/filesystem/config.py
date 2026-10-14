@@ -55,15 +55,17 @@ class FilesystemConfig(BaseConfig):
         default=None,
         metadata={
             "description": "Credentials (path to a credentials file, or a service account JSON object)",
+            "secret": True,
             "oneOf": [
                 {
                     "type": "object",
-                    "description": "Service account credentials as JSON object",
+                    "description": "Credentials as a JSON object (e.g. service "
+                    "account JSON); secret URIs in its values are resolved",
                 },
                 {
                     "type": "string",
-                    "description": "Path to credentials file. For gdrive also "
-                    "service account JSON, as a plain value or a secret URI",
+                    "description": "Path to credentials file, or service account "
+                    "JSON (gs, gdrive); either as a plain value or a secret URI",
                 },
             ],
         },

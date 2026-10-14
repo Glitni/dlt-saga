@@ -330,6 +330,16 @@ class TestGdriveFileId:
         assert {r["_dlt_source_file_name"] for r in rows} == {"orders.csv"}
         assert _FakeMediaIoBaseDownload.downloads == 1
 
+    def test_header_read_and_data_read_share_one_download(self, fake_drive):
+        # column defaults / pandas dtype hints read the CSV header first; the
+        # data read must not download the file a second time
+        client = FilesystemClient(_file_id_config(csv_separator="	"))
+        assert client._read_csv_headers() == ["order_id", "amount"]
+        rows = list(client.read_with_metadata())
+
+        assert len(rows) == 2
+        assert _FakeMediaIoBaseDownload.downloads == 1
+
     def test_reads_rows_with_duckdb_csv_reader(self, fake_drive):
         # replace-mode path: no metadata injection, DuckDB CSV reader
         client = FilesystemClient(_file_id_config(csv_separator="\t"))

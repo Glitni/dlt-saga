@@ -461,7 +461,7 @@ Selector reference:
 | `csv_separator` | string | CSV delimiter (default: `,`) |
 | `snapshot_date_regex` | string | Regex to extract dates from file paths |
 | `snapshot_date_format` | string | Date format for extracted dates (e.g., `%Y-%m-%d`) |
-| `credentials` | object/string | Service account JSON object or key file path; for `gdrive` also service account JSON as a string or secret URI |
+| `credentials` | object/string | Credentials object (e.g. service account JSON), key file path, or service account JSON as a string (`gs`, `gdrive`); secret URIs are resolved, whole or inside the object |
 
 ### Google Sheets
 
