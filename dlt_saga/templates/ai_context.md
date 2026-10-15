@@ -113,7 +113,8 @@ Key rules:
 - Credential fields: type as `SecretStr`, `coerce_secret()` them, and let the value be a
   plain string or a secret URI (`googlesecretmanager::`/`azurekeyvault::`/`env_secret::VAR`). Never
   hardcode credentials, and never name a field `*_secret` — secrecy is a property of the
-  value, not the field.
+  value, not the field. The exception is a protocol-defined name where "secret" *is* the
+  content, e.g. OAuth2 `client_secret`.
 - Keep source-identifying fields (URLs, table names) with an empty default and validate them
   in `__post_init__` so they must be set in the YAML — don't bury real values as class defaults.
 - For incremental loading, reuse the inherited `BaseConfig` fields `incremental` /
@@ -256,7 +257,7 @@ First-time adapters tend to repeat the same mistakes. Each below is a DON'T → 
 |---|---|
 | Bury source-identifying values (URLs, table names) as class defaults, leaving the YAML empty | Empty default + validate in `__post_init__`; set real values in the pipeline config so the source is obvious |
 | Invent a new config name (`overlap_days`, `start_dt`) for a standard concept | Reuse the inherited vocabulary: `incremental`, `incremental_column`, `initial_value`, `primary_key`, `partition_column`, `cluster_columns`, `write_disposition` |
-| Name a field `*_secret` / `*_plaintext` | Name by content (`api_token`, `connection_string`); any field already accepts a plain value or a secret URI (`env_secret::VAR`, `googlesecretmanager::…`) |
+| Name a field `*_secret` / `*_plaintext` | Name by content (`api_token`, `connection_string`; OAuth2 `client_secret` is fine); any field already accepts a plain value or a secret URI (`env_secret::VAR`, `googlesecretmanager::…`) |
 | Hardcode "always load yesterday" / `datetime.now() - 1d` | Look up the max loaded value with `destination.get_max_column_value(...)` and fall back to `initial_value` — idempotent and self-healing |
 | Re-fetch everything every run for an incremental source | Push the resolved cursor into the source query/filter so only new rows return |
 | Hardcode credentials, or read `os.environ` directly | Type credentials as `SecretStr`, `coerce_secret()` in config, `resolve_secret()` at use |

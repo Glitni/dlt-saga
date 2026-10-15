@@ -210,7 +210,9 @@ Any string config field accepts a plain value or a secret URI
 non-secret environment variables can also be injected in any field with `{{ env_var('VAR') }}`
 templating. So **name credential fields by what they hold, never by
 secrecy**. `api_token` and `password` are good; `auth_secret` / `*_plaintext`
-are not (the name guarantees nothing, and `saga lint` flags it).
+are not (the name guarantees nothing, and `saga lint` flags it). Protocol-defined
+names where "secret" is the content itself, such as OAuth2 `client_secret`, are
+fine and not flagged.
 
 Type credential fields as `SecretStr`, coerce them in `__post_init__`, and
 resolve them lazily at use:

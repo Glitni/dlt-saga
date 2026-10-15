@@ -28,6 +28,9 @@ _INSTALLED_DIR_MARKERS = {"site-packages", "dist-packages"}
 # Suffixes/names that describe secrecy rather than content.
 _SECRET_NAME_SUFFIXES = ("_secret", "_plaintext")
 _SECRET_NAME_EXACT = {"secret", "plaintext"}
+# Protocol-defined names where "secret" is the content itself (OAuth2 client
+# credentials), not a sensitivity label.
+_SECRET_NAME_ALLOWED = {"client_secret"}
 
 # Similarity threshold for "did you mean a standard field?". Tuned empirically to
 # catch abbreviations/pluralisations of standard fields (incremental_col→
@@ -92,6 +95,8 @@ def check_secret_field_names(target: AdapterTarget) -> Iterable[Finding]:
     if target.config_class is None:
         return
     for name in _config_field_names(target.config_class):
+        if name in _SECRET_NAME_ALLOWED:
+            continue
         if name.endswith(_SECRET_NAME_SUFFIXES) or name in _SECRET_NAME_EXACT:
             yield Finding(
                 adapter=target.adapter,

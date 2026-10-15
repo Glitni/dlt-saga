@@ -30,6 +30,7 @@ class _BadNamingConfig:
 class _CleanConfig:
     base_url: str = ""
     api_token: str = ""
+    client_secret: str = ""  # OAuth2 protocol name, not a secrecy label
     partition_on: str = ""
     partition_num: int = 0
 
