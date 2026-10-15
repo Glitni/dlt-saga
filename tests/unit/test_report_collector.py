@@ -14,8 +14,10 @@ import pytest
 from dlt_saga.report.collector import (
     _as_str_list,
     _query_load_runs,
+    _query_orchestration_runs,
     _sortable_ts,
     collect_pipeline_metadata,
+    collect_report_data,
 )
 
 
@@ -120,3 +122,44 @@ class TestSortableTs:
         ordered = sorted(items, key=_sortable_ts, reverse=True)
         assert ordered[0] == datetime(2026, 3, 1, tzinfo=timezone.utc)
         assert ordered[-1] is None
+
+
+@pytest.mark.unit
+class TestOrchestrationCompleteness:
+    """The plans table is the only record of failed attempts, so an unreadable
+    one must be distinguishable from an empty history."""
+
+    def test_missing_plans_table_is_an_empty_history(self):
+        dest = _dest_raising(RuntimeError("Table cat.schema.tbl does not exist"))
+        assert _query_orchestration_runs(dest, "schema", 30) == []
+
+    def test_unreadable_plans_table_is_none(self):
+        dest = _dest_raising(RuntimeError("PERMISSION_DENIED"))
+        assert _query_orchestration_runs(dest, "schema", 30) is None
+
+    def test_collect_flags_incomplete_history(self):
+        dest = _dest_raising(RuntimeError("PERMISSION_DENIED"))
+        data = collect_report_data(
+            {"api": [_fake_config()]}, dest, "dlt_api", orchestration_schema="orch"
+        )
+        assert data.orchestration_complete is False
+        assert data.orchestration_runs == []
+
+    def test_collect_missing_tables_is_complete(self):
+        dest = _dest_raising(RuntimeError("Table cat.schema.tbl does not exist"))
+        data = collect_report_data(
+            {"api": [_fake_config()]}, dest, "dlt_api", orchestration_schema="orch"
+        )
+        assert data.orchestration_complete is True
+
+    def test_collect_carries_disabled_pipelines(self):
+        dest = _dest_raising(RuntimeError("Table cat.schema.tbl does not exist"))
+        data = collect_report_data(
+            {"api": [_fake_config()]},
+            dest,
+            "dlt_api",
+            orchestration_schema="orch",
+            disabled_configs={"api": [_fake_config()]},
+        )
+        assert [p.pipeline_name for p in data.disabled_pipelines] == ["api__orders"]
+        assert len(data.pipelines) == 1

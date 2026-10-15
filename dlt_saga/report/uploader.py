@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 # URI schemes recognised as remote destinations.
 REMOTE_SCHEMES = ("gs://", "s3://", "az://", "slack://")
 
+# Object name used when a gs:// URI names only a bucket.
+DEFAULT_REPORT_OBJECT = "saga_report.html"
+
 
 def is_remote_uri(output: str) -> bool:
     """Return True if *output* is a remote storage URI rather than a local path."""
@@ -20,6 +23,9 @@ def is_remote_uri(output: str) -> bool:
 
 def upload_report(local_path: str, destination_uri: str) -> str:
     """Upload a local report file to a remote URI and return the canonical URI.
+
+    The content type follows the object name: ``.json`` (the status summary)
+    is served as JSON, anything else as HTML.
 
     Dispatches to the appropriate backend based on the URI scheme:
 
@@ -42,7 +48,7 @@ def upload_report(local_path: str, destination_uri: str) -> str:
         remainder = destination_uri[len("gs://") :]
         bucket_name, _, object_name = remainder.partition("/")
         if not object_name:
-            object_name = "saga_report.html"
+            object_name = DEFAULT_REPORT_OBJECT
         return _upload_to_gcs(local_path, bucket_name, object_name)
 
     if destination_uri.startswith("s3://"):
@@ -101,9 +107,13 @@ def _upload_to_gcs(
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(object_name)
 
-    blob.content_type = "text/html; charset=utf-8"
+    blob.content_type = (
+        "application/json; charset=utf-8"
+        if object_name.lower().endswith(".json")
+        else "text/html; charset=utf-8"
+    )
     blob.upload_from_filename(local_path)
 
     gcs_uri = f"gs://{bucket_name}/{object_name}"
-    logger.info(f"Report uploaded to {gcs_uri}")
+    logger.info(f"Uploaded to {gcs_uri}")
     return gcs_uri

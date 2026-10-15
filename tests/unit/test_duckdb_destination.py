@@ -206,3 +206,35 @@ class TestDuckDBSaveLoadInfo:
             assert isinstance(records[0]["started_at"], datetime)
         finally:
             dest.close()
+
+
+@pytest.mark.unit
+class TestDuckDBConcurrentExecuteSql:
+    """`saga report` queries from a thread pool over one shared connection.
+
+    Each call switches search_path and reads its own result; unserialized, the
+    calls interleave and return another schema's rows (or fail outright).
+    """
+
+    def test_parallel_queries_each_see_their_own_schema(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from dlt_saga.testing import make_destination
+
+        dest = make_destination()
+        try:
+            for schema in ("a", "b"):
+                dest.execute_sql(f"CREATE TABLE t AS SELECT '{schema}' AS v", schema)
+
+            def query(i):
+                schema = "ab"[i % 2]
+                return schema, [
+                    row.v for row in dest.execute_sql("SELECT v FROM t", schema)
+                ]
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(query, range(400)))
+        finally:
+            dest.close()
+
+        assert all(rows == [schema] for schema, rows in results)

@@ -7,6 +7,7 @@ to a tmp_path so we catch packaging mistakes (missing asset files).
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -18,7 +19,13 @@ from dlt_saga.report.collector import (
     PipelineInfo,
     ReportData,
 )
-from dlt_saga.report.generator import _serialize_report_data, generate_report
+from dlt_saga.report.generator import (
+    _serialize_report_data,
+    generate_report,
+    generate_status_summary,
+    summary_location,
+)
+from dlt_saga.report.status import compute_status
 
 
 def _empty_report() -> ReportData:
@@ -264,3 +271,68 @@ class TestScriptInjectionEscaping:
         end = html.index(";\n", start)
         embedded = json.loads(html[start:end])
         assert embedded["orchestration_runs"][0]["error_message"] == payload
+
+
+@pytest.mark.unit
+class TestEmbeddedStatus:
+    def test_report_data_carries_verdicts(self):
+        data = _populated_report()
+        data.orchestration_runs[0].status = "abandoned"
+        parsed = json.loads(_serialize_report_data(data))
+        assert parsed["status"]["complete"] is True
+        assert parsed["status"]["pipelines"] == [
+            {
+                "pipeline_name": "filesystem__sample",
+                "state": "failing",
+                "is_overdue": None,
+            }
+        ]
+
+    def test_incomplete_history_is_flagged(self):
+        data = _populated_report()
+        data.orchestration_complete = False
+        parsed = json.loads(_serialize_report_data(data))
+        assert parsed["status"]["complete"] is False
+        assert parsed["status"]["pipelines"][0]["state"] == "unknown"
+
+
+@pytest.mark.unit
+class TestStatusSummaryFile:
+    def test_writes_versioned_json(self, tmp_path):
+        out = tmp_path / "report.json"
+        status = compute_status(_populated_report())
+        result = generate_status_summary(
+            status, str(out), stale_after_minutes=90, report_file="report.html"
+        )
+        assert result == str(out.resolve())
+        text = out.read_text(encoding="utf-8")
+        assert "\n" not in text, "summary should be written compact"
+        payload = json.loads(text)
+        assert payload["schema_version"] == 1
+        assert payload["stale_after_minutes"] == 90
+        assert payload["report_file"] == "report.html"
+        # No attempt in the window → listed under no_runs.
+        assert payload["needs_attention"] == []
+        (pipeline,) = payload["no_runs"]
+        assert pipeline["pipeline_name"] == "filesystem__sample"
+
+
+@pytest.mark.unit
+class TestSummaryLocation:
+    @pytest.mark.parametrize(
+        "report, expected",
+        [
+            ("saga_report.html", "saga_report.json"),
+            ("reports/weekly.html", str(Path("reports/weekly.json"))),
+            ("report", "report.json"),
+            ("gs://bucket/reports/saga.html", "gs://bucket/reports/saga.json"),
+            ("gs://bucket/saga.html", "gs://bucket/saga.json"),
+            ("gs://bucket", "gs://bucket/saga_report.json"),
+        ],
+    )
+    def test_sits_beside_the_report(self, report, expected):
+        assert summary_location(report) == expected
+
+    def test_refuses_to_overwrite_a_json_report(self):
+        with pytest.raises(ValueError, match="overwrite"):
+            summary_location("gs://bucket/report.json")

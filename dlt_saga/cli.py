@@ -1219,6 +1219,23 @@ def report(
         "--open/--no-open",
         help="Open the report in a browser after generating (local output only)",
     ),
+    summary: bool = typer.Option(
+        False,
+        "--summary",
+        help=(
+            "Also write a machine-readable status summary (JSON) beside the "
+            "report: same location, .json extension."
+        ),
+    ),
+    stale_after_minutes: Optional[int] = typer.Option(
+        None,
+        "--stale-after-minutes",
+        min=1,
+        help=(
+            "How long consumers should treat the summary as current, matching "
+            "how often you regenerate it. Default: 1440 (daily)."
+        ),
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="Profile to use from profiles.yml"
@@ -1235,12 +1252,18 @@ def report(
     By default the report is saved locally and opened in a browser.
     Pass a remote URI to upload it instead:
 
+    With --summary, a JSON status summary is written beside the report: one
+    verdict per pipeline (ok, failing, recovered, no_runs, disabled), when it
+    last ran and succeeded, and whether it is overdue against its usual
+    cadence. For status pages and monitors that should not parse the HTML.
+
     Examples:
         saga report                                              # Local, open browser
         saga report --days 7 --output weekly.html               # Local, open browser
         saga report --no-open --output report.html              # Local, no browser
         saga report --output gs://my-bucket/reports/saga.html    # Upload to GCS
         saga report --output gs://my-bucket/reports/saga.html --target prod
+        saga report -o gs://my-bucket/reports/saga.html --summary  # + saga.json
     """
     from dlt_saga.report.uploader import is_remote_uri
     from dlt_saga.session import Session
@@ -1258,6 +1281,8 @@ def report(
             select=list(select) if select else None,
             output=output,
             days=days,
+            summary=summary,
+            stale_after_minutes=stale_after_minutes,
         )
     except ValueError as e:
         logger.error(str(e))

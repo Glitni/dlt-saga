@@ -51,9 +51,12 @@
     const d = new Date(iso);
     return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
   }
+  // An abandoned task (a worker that never reported back) is a failed attempt,
+  // as it is for state:failed and saga notify.
+  function isFailedStatus(status) { return status === 'failed' || status === 'abandoned'; }
   function statusBadge(status) {
     const cls = status === 'success' || status === 'completed' ? 'badge-success'
-      : status === 'failed' ? 'badge-danger'
+      : isFailedStatus(status) ? 'badge-danger'
       : status === 'skipped' ? 'badge-neutral'
       : 'badge-warning';
     return '<span class="badge ' + cls + '">' + status + '</span>';
@@ -106,7 +109,7 @@
     execMap[r.execution_id].push(r);
   });
   const execList = Object.entries(execMap).map(([id, tasks]) => {
-    const failed = tasks.filter(t => t.status === 'failed').length;
+    const failed = tasks.filter(t => isFailedStatus(t.status)).length;
     const completed = tasks.filter(t => t.status === 'completed').length;
     const pending = tasks.filter(t => t.status === 'pending').length;
     const running = tasks.filter(t => t.status === 'running').length;
@@ -180,7 +183,7 @@
     return ingestSuccessKeys.has(r.execution_id + '|' + r.table_name) ? 'historize' : 'ingest';
   }
 
-  const failedOrch = orchRuns.filter(r => r.status === 'failed');
+  const failedOrch = orchRuns.filter(r => isFailedStatus(r.status));
 
   // Failed tasks whose failing phase is ingest → synthesized failed ingest runs.
   const failedOrchIngest = failedOrch
@@ -868,10 +871,12 @@
     // Currently failed pipelines (last run was a failure)
     const currentIngestFails = getCurrentlyFailed(allIngestRuns);
     const currentHistFails = getCurrentlyFailed(allHistorizeRuns);
-    const failingNames = [...new Set([
-      ...currentIngestFails.map(r => r.pipeline_name),
-      ...currentHistFails.map(r => r.pipeline_name),
-    ])];
+    // The headline reads the verdicts computed in Python (report/status.py), the
+    // same ones the status summary publishes, so the two can't disagree. The
+    // per-phase sections below are the drill-down.
+    const status = D.status || { complete: true, pipelines: [] };
+    const failingNames = status.pipelines
+      .filter(p => p.state === 'failing').map(p => p.pipeline_name);
     const currentlyFailedCount = failingNames.length;
     const healthyCount = totalPipelines - currentlyFailedCount;
 
@@ -880,7 +885,12 @@
 
     // Persistent health strip — same slot whether healthy or failing, so the
     // layout never shifts; the headline status is always visible without scrolling.
-    if (currentlyFailedCount === 0) {
+    if (!status.complete) {
+      const strip = h('div', { className: 'health-strip failing' },
+        h('span', { className: 'health-dot' }),
+        h('span', null, h('strong', null, 'Run status unavailable: the execution history could not be read')));
+      panel.appendChild(strip);
+    } else if (currentlyFailedCount === 0) {
       const strip = h('div', { className: 'health-strip healthy' },
         h('span', { className: 'health-dot' }),
         h('span', null, h('strong', null, 'All ' + totalPipelines + ' pipelines healthy')));
@@ -959,12 +969,14 @@
     chartSection.appendChild(h('div', { className: 'section-header' }, 'Activity — last ' + numDays + ' days'));
     const chartContainer = h('div', { className: 'chart-container' });
 
-    // Pipeline state donut chart
-    chartContainer.appendChild(buildDonutChart('Pipeline state', [
-      { value: healthyCount, color: 'var(--success)', label: 'passing' },
-      { value: currentlyFailedCount, color: 'var(--danger)', label: 'failing' },
-    ], currentlyFailedCount > 0 ? currentlyFailedCount : totalPipelines,
-       currentlyFailedCount > 0 ? 'failing' : 'all passing'));
+    // Pipeline state donut chart — omitted when there is no state to show.
+    if (status.complete) {
+      chartContainer.appendChild(buildDonutChart('Pipeline state', [
+        { value: healthyCount, color: 'var(--success)', label: 'passing' },
+        { value: currentlyFailedCount, color: 'var(--danger)', label: 'failing' },
+      ], currentlyFailedCount > 0 ? currentlyFailedCount : totalPipelines,
+         currentlyFailedCount > 0 ? 'failing' : 'all passing'));
+    }
 
     // Orchestration: clean vs failed executions per day
     if (totalExecs > 0) {

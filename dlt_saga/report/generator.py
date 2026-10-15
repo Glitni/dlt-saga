@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from dlt_saga.report.collector import ReportData
+from dlt_saga.report.status import StatusSummary, compute_status, summary_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +26,16 @@ def _read_asset(filename: str) -> str:
     return (_ASSETS_DIR / filename).read_text(encoding="utf-8")
 
 
-def _serialize_report_data(data: ReportData) -> str:
-    """Serialize ReportData to JSON for embedding in HTML."""
+def _serialize_report_data(
+    data: ReportData, status: Optional[StatusSummary] = None
+) -> str:
+    """Serialize ReportData to JSON for embedding in HTML.
+
+    ``status`` is the verdict set the dashboard's health headline reads, so the
+    page and the status summary judge pipelines identically. Computed from
+    ``data`` when not given.
+    """
+    status = status or compute_status(data)
 
     def _dt(v: Optional[datetime]) -> Optional[str]:
         return v.isoformat() if v else None
@@ -136,22 +145,37 @@ def _serialize_report_data(data: ReportData) -> str:
             "historize_runs": historize_runs,
             "orchestration_runs": orchestration_runs,
             "executions": executions,
+            "status": {
+                "complete": status.complete,
+                "pipelines": [
+                    {
+                        "pipeline_name": p.pipeline_name,
+                        "state": p.state,
+                        "is_overdue": p.is_overdue,
+                    }
+                    for p in status.pipelines
+                ],
+            },
         },
         indent=None,
     )
 
 
-def generate_report(data: ReportData, output_path: str) -> str:
+def generate_report(
+    data: ReportData, output_path: str, status: Optional[StatusSummary] = None
+) -> str:
     """Generate a standalone HTML report file.
 
     Args:
         data: Collected report data
         output_path: Path to write the HTML file
+        status: Precomputed verdicts, so a summary written alongside judges
+            from the same instant. Computed from ``data`` when not given.
 
     Returns:
         Absolute path of the generated file
     """
-    json_data = _serialize_report_data(data)
+    json_data = _serialize_report_data(data, status)
     css = _read_asset("report.css")
     js = _read_asset("report.js")
     favicon_svg = _read_asset("favicon.svg")
@@ -162,6 +186,72 @@ def generate_report(data: ReportData, output_path: str) -> str:
 
     abs_path = str(path.resolve())
     logger.debug(f"Report written to {abs_path}")
+    return abs_path
+
+
+def summary_location(report_output: str) -> str:
+    """Where the status summary goes for a given report output.
+
+    Beside the report, with ``.json`` for its extension, so it inherits the
+    report's location and access rules. A ``gs://`` URI naming only a bucket
+    gets the summary beside the default report object.
+
+    Raises:
+        ValueError: If the report itself is a ``.json`` path, which the summary
+            would overwrite.
+    """
+    from dlt_saga.report.uploader import DEFAULT_REPORT_OBJECT, is_remote_uri
+
+    if is_remote_uri(report_output):
+        scheme, _, remainder = report_output.partition("://")
+        bucket, _, object_name = remainder.partition("/")
+        prefix, _, name = (object_name or DEFAULT_REPORT_OBJECT).rpartition("/")
+        directory = f"{bucket}/{prefix}/" if prefix else f"{bucket}/"
+        location = f"{scheme}://{directory}{_json_name(name)}"
+    else:
+        path = Path(report_output)
+        location = str(path.with_name(_json_name(path.name)))
+    if location == report_output:
+        raise ValueError(
+            f"The report output '{report_output}' is already a .json path, so the "
+            "status summary would overwrite it. Give the report an .html name."
+        )
+    return location
+
+
+def _json_name(name: str) -> str:
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    return f"{stem}.json"
+
+
+def generate_status_summary(
+    status: StatusSummary,
+    output_path: str,
+    *,
+    stale_after_minutes: int,
+    report_file: Optional[str],
+) -> str:
+    """Write the machine-readable status summary as JSON.
+
+    Args:
+        status: The verdicts to publish.
+        output_path: Path to write the JSON file.
+        stale_after_minutes: How long the summary stays current.
+        report_file: File name of the HTML report it sits beside.
+
+    Returns:
+        Absolute path of the generated file.
+    """
+    payload = summary_to_dict(
+        status, stale_after_minutes=stale_after_minutes, report_file=report_file
+    )
+    path = Path(output_path)
+    # Compact: the file is polled by machines, and indentation alone is a
+    # quarter of its size. Pipe it through `jq` to read it.
+    path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+
+    abs_path = str(path.resolve())
+    logger.debug(f"Status summary written to {abs_path}")
     return abs_path
 
 

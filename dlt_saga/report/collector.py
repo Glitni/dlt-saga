@@ -155,6 +155,13 @@ class ReportData:
     historize_runs: List[HistorizeRun] = field(default_factory=list)
     orchestration_runs: List[OrchestrationRun] = field(default_factory=list)
     executions: List[ExecutionInfo] = field(default_factory=list)
+    # Disabled pipelines in the selection. Not shown in the HTML report; the
+    # status summary lists them so a consumer can tell "off" from "missing".
+    disabled_pipelines: List[PipelineInfo] = field(default_factory=list)
+    # False when the execution plans could not be read for a reason other than
+    # the table not existing yet. Status verdicts are then unknown rather than
+    # "nothing failed".
+    orchestration_complete: bool = True
 
 
 def collect_pipeline_metadata(
@@ -293,11 +300,16 @@ def _query_historize_runs(
 
 def _query_orchestration_runs(
     destination: Any, schema: str, days: int
-) -> List[OrchestrationRun]:
+) -> Optional[List[OrchestrationRun]]:
     """Query the execution plans table for orchestration run data.
 
     Uses QUALIFY to get the latest status per pipeline per execution
     (the table is append-only with status updates as new rows).
+
+    Returns:
+        The runs, empty when the table does not exist yet, or None when it
+        could not be read — the one source of failed attempts, so an
+        unreadable table must not pass for a clean history.
     """
     from dlt_saga.project_config import get_execution_plans_table_name
 
@@ -342,7 +354,7 @@ def _query_orchestration_runs(
         return runs
     except Exception as e:
         _log_report_query_failure("execution plans", schema, e)
-        return []
+        return [] if looks_like_missing_table(e) else None
 
 
 def _query_executions(destination: Any, schema: str, days: int) -> List[ExecutionInfo]:
@@ -402,16 +414,20 @@ def _sortable_ts(dt: Optional[datetime]) -> datetime:
 def _run_queries_parallel(
     tasks: List[Tuple[str, Any]],
 ) -> Tuple[
-    List[LoadRun], List[HistorizeRun], List[OrchestrationRun], List[ExecutionInfo]
+    List[LoadRun],
+    List[HistorizeRun],
+    Optional[List[OrchestrationRun]],
+    List[ExecutionInfo],
 ]:
     """Execute tagged query tasks in parallel and route results by tag.
 
     Tags: "load", "historize", "orch", "exec".
-    Returns merged lists sorted by started_at/created_at descending.
+    Returns merged lists sorted by started_at/created_at descending. The
+    orchestration runs are None when there was no "orch" task or it failed.
     """
     all_load_runs: List[LoadRun] = []
     all_historize_runs: List[HistorizeRun] = []
-    orchestration_runs: List[OrchestrationRun] = []
+    orchestration_runs: Optional[List[OrchestrationRun]] = None
     executions: List[ExecutionInfo] = []
 
     with ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as executor:
@@ -446,6 +462,7 @@ def collect_report_data(
     environment: str = "",
     project: str = "",
     orchestration_schema: Optional[str] = None,
+    disabled_configs: Optional[Dict[str, List[PipelineConfig]]] = None,
 ) -> ReportData:
     """Collect all data needed for the report.
 
@@ -457,6 +474,8 @@ def collect_report_data(
         environment: Environment name (dev/prod)
         project: Project identifier
         orchestration_schema: Dataset containing _saga_execution_plans table
+        disabled_configs: Disabled pipeline configs in the selection, carried
+            for the status summary only (no run history is queried for them)
 
     Returns:
         ReportData with all collected information
@@ -497,13 +516,15 @@ def collect_report_data(
     )
 
     return ReportData(
-        generated_at=datetime.now(),
+        generated_at=datetime.now(timezone.utc),
         environment=environment,
         project=project,
         days=days,
         pipelines=pipelines,
         load_runs=all_load_runs,
         historize_runs=all_historize_runs,
-        orchestration_runs=orchestration_runs,
+        orchestration_runs=orchestration_runs or [],
         executions=executions,
+        disabled_pipelines=collect_pipeline_metadata(disabled_configs or {}),
+        orchestration_complete=orchestration_runs is not None,
     )

@@ -102,3 +102,16 @@ class TestUploadToGcs:
         assert mock_blob.content_type == "text/html; charset=utf-8"
         mock_blob.upload_from_filename.assert_called_once_with(str(report_file))
         assert result == "gs://my-bucket/reports/r.html"
+
+    def test_json_object_is_served_as_json(self, tmp_path):
+        summary_file = tmp_path / "report.json"
+        summary_file.write_text("{}")
+
+        mock_client = MagicMock()
+        mock_blob = MagicMock()
+        mock_client.bucket.return_value.blob.return_value = mock_blob
+
+        with patch("google.cloud.storage.Client", return_value=mock_client):
+            _upload_to_gcs(str(summary_file), "my-bucket", "reports/r.json")
+
+        assert mock_blob.content_type == "application/json; charset=utf-8"
