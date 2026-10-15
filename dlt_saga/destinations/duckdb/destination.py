@@ -5,6 +5,7 @@ and development without requiring cloud credentials.
 """
 
 import logging
+import threading
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -56,6 +57,12 @@ class DuckDBDestination(Destination):
     def __init__(self, config: DuckDBDestinationConfig):
         super().__init__(config)
         self._connection: Optional[duckdb.DuckDBPyConnection] = None
+        # One connection is shared by every caller, and a DuckDB connection is
+        # not safe for concurrent use: `saga report` runs its queries from a
+        # thread pool, and unserialized they interleave — one query's result
+        # read from another's cursor, one call's search_path applied to the
+        # next. Reentrant, since helpers here call execute_sql themselves.
+        self._lock = threading.RLock()
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
@@ -64,10 +71,11 @@ class DuckDBDestination(Destination):
         Uses a persistent connection for the lifetime of the destination
         to ensure in-memory databases maintain state across queries.
         """
-        if self._connection is None:
-            self._connection = duckdb.connect(self.config.database_path)
-            logger.debug(f"Connected to DuckDB: {self.config.database_path}")
-        return self._connection
+        with self._lock:
+            if self._connection is None:
+                self._connection = duckdb.connect(self.config.database_path)
+                logger.debug(f"Connected to DuckDB: {self.config.database_path}")
+            return self._connection
 
     def close(self):
         """Close the DuckDB connection."""
@@ -228,7 +236,14 @@ class DuckDBDestination(Destination):
         statement individually and returns the result of the last one. Uses a
         literal/comment-aware splitter so a ``;`` inside a string literal (e.g. a
         COMMENT body) or a comment doesn't truncate the statement.
+
+        Serialized across threads: the search_path switch and the result fetch
+        must not interleave with another call on the shared connection.
         """
+        with self._lock:
+            return self._execute_sql(sql, schema_name)
+
+    def _execute_sql(self, sql: str, schema_name: Optional[str]) -> Any:
         from dlt_saga.utility.sql import split_sql_statements
 
         conn = self.connection

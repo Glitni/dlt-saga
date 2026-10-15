@@ -39,6 +39,7 @@ from dlt_saga.utility.cli.selectors import PipelineSelector
 from dlt_saga.utility.collisions import check_target_collisions
 
 if TYPE_CHECKING:
+    from dlt_saga.report.status import StatusSummary
     from dlt_saga.validate import ValidationResult
 
 logger = logging.getLogger(__name__)
@@ -587,6 +588,8 @@ class Session:
         select: Optional[List[str]] = None,
         output: str = "saga_report.html",
         days: int = 14,
+        summary: bool = False,
+        stale_after_minutes: Optional[int] = None,
     ) -> str:
         """Generate a standalone HTML observability report.
 
@@ -601,33 +604,62 @@ class Session:
             select: Selector expressions. None = all.
             output: Local file path or remote storage URI.
             days: Days of run history to include (must be >= 1).
+            summary: Also write a machine-readable status summary (JSON) beside
+                the report — same location, ``.json`` extension.
+            stale_after_minutes: How long the summary should be considered
+                current; defaults to ``DEFAULT_STALE_AFTER_MINUTES``. Only
+                meaningful with ``summary``.
 
         Returns:
             The resolved report location: the absolute local path, or the
             remote URI when ``output`` is a storage URI.
 
         Raises:
-            ValueError: If ``days`` < 1, or no config matches the selectors.
+            ValueError: If ``days`` < 1, ``stale_after_minutes`` < 1, no config
+                matches the selectors, or the summary would overwrite the
+                report.
         """
         if days < 1:
             raise ValueError(f"days must be >= 1 (got {days})")
+        if stale_after_minutes is not None and stale_after_minutes < 1:
+            raise ValueError(
+                f"stale_after_minutes must be >= 1 (got {stale_after_minutes})"
+            )
         with execution_context_scope(self._profile_target):
             return self._execute_with_auth(
-                lambda: self._run_report(select, output, days)
+                lambda: self._run_report(
+                    select,
+                    output,
+                    days,
+                    summary=summary,
+                    stale_after_minutes=stale_after_minutes,
+                )
             )
 
-    def _run_report(self, select: Optional[List[str]], output: str, days: int) -> str:
+    def _run_report(
+        self,
+        select: Optional[List[str]],
+        output: str,
+        days: int,
+        *,
+        summary: bool = False,
+        stale_after_minutes: Optional[int] = None,
+    ) -> str:
         import os
         import tempfile
 
         from dlt_saga.destinations.factory import DestinationFactory
         from dlt_saga.report.collector import collect_report_data
-        from dlt_saga.report.generator import generate_report
+        from dlt_saga.report.generator import generate_report, summary_location
         from dlt_saga.report.uploader import is_remote_uri, upload_report
         from dlt_saga.utility.cli.context import get_execution_context
         from dlt_saga.utility.naming import get_environment, get_execution_plan_schema
 
-        selected_configs, _ = self._discover_and_select(select)
+        # Resolved before any warehouse work, so a summary that would
+        # overwrite the report fails fast.
+        summary_output = summary_location(output) if summary else None
+
+        selected_configs, disabled_configs = self._discover_and_select(select)
         if not selected_configs:
             raise ValueError("No pipeline configs found matching selectors")
 
@@ -662,21 +694,76 @@ class Session:
                 environment=environment,
                 project=project,
                 orchestration_schema=get_execution_plan_schema(),
+                disabled_configs=disabled_configs,
             )
-            if is_remote_uri(output):
-                with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
-                    tmp_path = tmp.name
-                try:
-                    generate_report(report_data, tmp_path)
-                    return upload_report(tmp_path, output)
-                finally:
-                    os.unlink(tmp_path)
-            abs_path = generate_report(report_data, output)
-            logger.info("Report generated: %s", abs_path)
-            return abs_path
         finally:
-            # Always release the connection, even if collection/generation raises.
+            # Always release the connection, even if collection raises.
             destination.close()
+
+        from dlt_saga.report.status import compute_status
+
+        status = compute_status(report_data)
+        if is_remote_uri(output):
+            with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                generate_report(report_data, tmp_path, status)
+                location = upload_report(tmp_path, output)
+            finally:
+                os.unlink(tmp_path)
+        else:
+            location = generate_report(report_data, output, status)
+            logger.info("Report generated: %s", location)
+
+        if summary_output is not None:
+            self._write_status_summary(
+                status, summary_output, location, stale_after_minutes
+            )
+        return location
+
+    @staticmethod
+    def _write_status_summary(
+        status: "StatusSummary",
+        summary_output: str,
+        report_location: str,
+        stale_after_minutes: Optional[int],
+    ) -> None:
+        """Write (or upload) the status summary beside the report."""
+        import os
+        import tempfile
+
+        from dlt_saga.report.generator import generate_status_summary
+        from dlt_saga.report.status import DEFAULT_STALE_AFTER_MINUTES
+        from dlt_saga.report.uploader import is_remote_uri, upload_report
+
+        stale_after = stale_after_minutes or DEFAULT_STALE_AFTER_MINUTES
+        report_file = report_location.replace("\\", "/").rsplit("/", 1)[-1]
+        if not status.complete:
+            logger.warning(
+                "Run history could not be read; the status summary marks every "
+                "pipeline as unknown"
+            )
+        if is_remote_uri(summary_output):
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                generate_status_summary(
+                    status,
+                    tmp_path,
+                    stale_after_minutes=stale_after,
+                    report_file=report_file,
+                )
+                upload_report(tmp_path, summary_output)
+            finally:
+                os.unlink(tmp_path)
+        else:
+            path = generate_status_summary(
+                status,
+                summary_output,
+                stale_after_minutes=stale_after,
+                report_file=report_file,
+            )
+            logger.info("Status summary generated: %s", path)
 
     # -------------------------------------------------------------------
     # Internal: initialization helpers

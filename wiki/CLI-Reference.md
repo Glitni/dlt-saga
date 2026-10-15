@@ -255,6 +255,8 @@ saga report [OPTIONS]
 | `-o, --output TEXT` | `saga_report.html` | Output path: local file or remote URI (`gs://`, `s3://`, `az://`) |
 | `-d, --days INT` | `14` | Days of run history to include |
 | `--open / --no-open` | open | Open in browser after generating (local output only) |
+| `--summary` | off | Also write a machine-readable [status summary](#status-summary) beside the report |
+| `--stale-after-minutes INT` | `1440` | How long consumers should treat the summary as current |
 | `-v, --verbose` | off | Enable debug logging |
 | `--profile TEXT` | `default` | Profile name |
 | `--target TEXT` | — | Target within profile |
@@ -262,6 +264,80 @@ saga report [OPTIONS]
 The **Executions** tab shows one row per run recorded in `_saga_executions` (both orchestrated and local), including its command, selector, and — when the run was a backfill — the `--start-value-override` / `--end-value-override` window.
 
 The Dashboard's *Longest execution per day* chart shows how long the biggest run of each day took (first task start → last task completion), so a schedule that is getting slower is visible at a glance; the tooltip names the execution's command and selector, and clicking a bar opens that day's executions. Only orchestrated executions have a measured duration — a local run records its outcomes when it finishes, not per-task timings — and backfills are left out as one-off windows.
+
+The Dashboard's health headline counts a pipeline as failing when its most recent attempt failed or was abandoned (a worker that never reported back) — the same judgement as [`state:failed`](#selectors) and [`saga notify`](#saga-notify).
+
+### Status summary
+
+`--summary` writes a small JSON file beside the report: the `--output` path with `.html` replaced by `.json` (`gs://bucket/reports/saga.html` → `gs://bucket/reports/saga.json`). A status page, uptime check, deploy gate or script can then ask *"is ingestion healthy, and has anything stopped running?"* without parsing the HTML. It goes through the same upload path, so whoever can read the report can read the summary. The HTML report's own health headline reads the same verdicts, so the two never disagree.
+
+Every pipeline in the selection is counted in `counts`, but only three kinds are listed: `needs_attention` (failing first, then overdue — a non-empty list always means a problem *now*), `recovered` (failed in the window, fine now; most recent recovery first, so judge each by `recovered_at` and let it fade) and `no_runs` (enabled, but no attempt in the window — config that has quietly stopped being used: worth knowing, not urgent). `recovered` and `no_runs` are named after the state they hold, and match their entries in `counts`. A recovered pipeline that has since gone overdue is listed in `needs_attention`, not `recovered`. Healthy and disabled pipelines are counted only, so the file grows with the number of problems rather than the number of pipelines. Per-pipeline detail for healthy ones stays in the HTML report. The file is written compact; pipe it through `jq` to read it.
+
+```bash
+saga report --output gs://my-bucket/reports/saga.html --summary --stale-after-minutes 90
+```
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-15T07:15:02+00:00",
+  "stale_after_minutes": 90,
+  "environment": "prod",
+  "project": "my-project",
+  "window_days": 14,
+  "report_file": "saga.html",
+  "complete": true,
+  "last_attempt_at": "2026-10-15T07:00:03+00:00",
+  "next_overdue_at": "2026-10-15T08:30:01+00:00",
+  "counts": {"pipelines": 42, "ok": 36, "failing": 1, "recovered": 1, "no_runs": 1,
+             "disabled": 3, "unknown": 0, "overdue": 0},
+  "needs_attention": [
+    {
+      "pipeline_name": "api__orders",
+      "pipeline_group": "api",
+      "table_name": "orders",
+      "state": "failing",
+      "attempts": 24,
+      "failures": 6,
+      "consecutive_failures": 6,
+      "failing_since": "2026-10-15T01:00:04+00:00",
+      "recovered_at": null,
+      "last_attempt_at": "2026-10-15T07:00:03+00:00",
+      "last_success_at": "2026-10-15T00:00:05+00:00",
+      "last_error": "first line of the latest error",
+      "usual_gap_minutes": 60,
+      "overdue_at": "2026-10-15T08:30:03+00:00",
+      "is_overdue": false
+    }
+  ],
+  "recovered": [],
+  "no_runs": []
+}
+```
+
+**About the summary**
+
+| Field | Meaning |
+|-------|---------|
+| `stale_after_minutes` | When a consumer should consider the summary itself out of date. saga cannot know how often you regenerate the report, so set it to match your schedule — e.g. `90` for an hourly report, `1560` for a daily one. Default `1440` |
+| `complete` | `false` when saga could not read the execution history at all (e.g. a permission error) — not "some numbers are partial". No pipeline could be judged: every enabled one is counted as `unknown` and nothing is listed. Show the summary as unavailable, not as healthy |
+| `last_attempt_at` | The most recent attempt at any pipeline — "ingestion last ran 12 minutes ago" |
+| `next_overdue_at` | The earliest `overdue_at` among pipelines *not* in `needs_attention`. A pipeline that is fine when the summary is written but stops running afterwards isn't in `needs_attention`, so past this moment the summary may be missing a newly overdue pipeline, however fresh `stale_after_minutes` says it is. `null` when no such pipeline has a usual gap |
+| `report_file` | File name of the HTML report beside it, for linking relative to the summary's URL |
+
+**Per listed pipeline** (the same fields in all three lists)
+
+| Field | Meaning |
+|-------|---------|
+| `state` | `failing` — the latest attempt failed or was abandoned · `recovered` — failed in the window, latest attempt succeeded · `no_runs` — enabled, no attempt in the window. `counts` also covers `ok`, `disabled`, and `unknown` (only ever when `complete` is `false`) |
+| `consecutive_failures`, `failing_since` | The current failure streak: failed attempts since the last success, and when the first of them started. Bounded by `--days` |
+| `recovered_at` | For `recovered`: the first success after the last failure. Unlike `last_success_at` it doesn't move on every run, so a consumer can show "recovered 2h ago" and let it fade — the pipeline otherwise stays `recovered` for the whole window |
+| `last_error` | First line of the latest failure's error, truncated to 300 characters. The full message is in the report |
+| `usual_gap_minutes` | The longest the pipeline normally goes without an attempt, in whole minutes: the 90th percentile of the gaps between its attempts in the window. A percentile rather than the median, so a pipeline run twice a morning an hour apart learns its ~23h overnight gap rather than the hour. `null` with fewer than four attempts in the window |
+| `overdue_at` | When the pipeline becomes overdue unless it is attempted again: 1.5 usual gaps after its last attempt. Absolute, so a consumer can compare it against its own clock while a page stays open, without knowing the rule. A long gap rarer than one in ten (an hourly job that skips weekends) still reads as overdue across it |
+| `is_overdue` | Whether `overdue_at` had passed when the summary was generated — the pipeline that silently stopped being run, which failure alerts can't catch |
+
+Verdicts come from `_saga_execution_plans`, which every way of running saga writes — local runs, `saga plan` + workers, `--orchestrate`. `schema_version` changes whenever a consumer would notice: a renamed or removed key, or a changed meaning.
 
 ---
 

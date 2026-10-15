@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from dlt_saga.project_config import ConfigSourceConfig
+from dlt_saga.report.collector import ReportData
 from dlt_saga.session import PipelineResult, Session, SessionResult
 from dlt_saga.utility.auth.providers import AuthenticationError
 
@@ -1222,8 +1223,10 @@ class TestSessionReport:
                 return_value=dest,
             ),
             "collect": p(
-                "dlt_saga.report.collector.collect_report_data", return_value={}
+                "dlt_saga.report.collector.collect_report_data",
+                return_value=ReportData(),
             ),
+            "summary": p("dlt_saga.report.generator.generate_status_summary"),
             "generate": p(
                 "dlt_saga.report.generator.generate_report",
                 return_value=generate_return,
@@ -1293,3 +1296,62 @@ class TestSessionReport:
             result = session.report(output="r.html", days=5)
         assert result == "/abs/r.html"
         session._execute_with_auth.assert_called_once()
+
+    def test_no_summary_by_default(self):
+        session = self._session()
+        session._discover_and_select = MagicMock(
+            return_value=({"g": [self._config()]}, {})
+        )
+        with ExitStack() as stack:
+            mocks = self._enter_report_patches(
+                stack, MagicMock(), remote=False, generate_return="/abs/r.html"
+            )
+            session._run_report(None, "r.html", 14)
+        mocks["summary"].assert_not_called()
+
+    def test_summary_written_beside_local_report(self):
+        session = self._session()
+        session._discover_and_select = MagicMock(
+            return_value=({"g": [self._config()]}, {"g": [self._config()]})
+        )
+        with ExitStack() as stack:
+            mocks = self._enter_report_patches(
+                stack, MagicMock(), remote=False, generate_return="/abs/r.html"
+            )
+            session._run_report(
+                None, "r.html", 14, summary=True, stale_after_minutes=90
+            )
+        args, kwargs = mocks["summary"].call_args
+        assert args[1] == "r.json"
+        assert kwargs == {"stale_after_minutes": 90, "report_file": "r.html"}
+        assert mocks["collect"].call_args.kwargs["disabled_configs"] == {
+            "g": [session._discover_and_select.return_value[1]["g"][0]]
+        }
+
+    def test_summary_uploaded_beside_remote_report(self):
+        session = self._session()
+        session._discover_and_select = MagicMock(
+            return_value=({"g": [self._config()]}, {})
+        )
+        with ExitStack() as stack:
+            mocks = self._enter_report_patches(
+                stack, MagicMock(), remote=True, upload_return="gs://b/r.html"
+            )
+            session._run_report(None, "gs://b/r.html", 14, summary=True)
+        uploaded_to = [c.args[1] for c in mocks["upload"].call_args_list]
+        assert uploaded_to == ["gs://b/r.html", "gs://b/r.json"]
+        assert mocks["summary"].call_args.kwargs["report_file"] == "r.html"
+
+    def test_summary_that_would_overwrite_report_fails_before_queries(self):
+        session = self._session()
+        session._discover_and_select = MagicMock()
+        with pytest.raises(ValueError, match="overwrite"):
+            session._run_report(None, "r.json", 14, summary=True)
+        session._discover_and_select.assert_not_called()
+
+    def test_rejects_stale_after_below_one_before_auth(self):
+        session = self._session()
+        session._execute_with_auth = MagicMock()
+        with pytest.raises(ValueError, match="stale_after_minutes"):
+            session.report(summary=True, stale_after_minutes=0)
+        session._execute_with_auth.assert_not_called()

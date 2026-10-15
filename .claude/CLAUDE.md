@@ -197,7 +197,10 @@ saga report                                         # Default report (30 days)
 saga report --days 7 --output weekly.html           # Last 7 days
 saga report --select "tag:daily" --target prod      # Filtered by selector
 saga report --select "group:google_sheets" -o gs.html  # Single group
+saga report -o gs://bucket/r.html --summary --stale-after-minutes 90  # + r.json
 ```
+
+`--summary` (opt-in) writes a compact machine-readable status summary beside the report (`.html` → `.json`, same upload path). It counts every pipeline but lists only `needs_attention` (failing or overdue — non-empty always means a problem now), `recovered` (with `recovered_at`, so a consumer lets it fade) and `no_runs` (informational; list names match their state and `counts` key), so its size tracks problems, not pipeline count. `overdue_at` per entry and top-level `next_overdue_at` (earliest among pipelines not in `needs_attention`) are absolute, so consumers check overdue live without re-implementing the rule. Verdicts per pipeline (`ok`/`failing`/`recovered`/`no_runs`/`disabled`/`unknown`, failure streak, last success, `is_overdue` against the usual gap — the 90th-percentile gap between attempts, not the median, which makes a pipeline run twice a morning "overdue" every afternoon) are computed once in `report/status.py` from the execution-plan rows the collector already reads — no extra query — and the HTML dashboard's health headline reads the same verdicts, so page and summary can't disagree. Failed statuses are `pipeline_state.FAILED_STATUSES` (`abandoned` counts), keyed by `(pipeline_type, table_name)`. An unreadable plans table (anything but missing) sets `complete: false` and every pipeline `unknown` — never `ok`.
 
 ### Notify Command
 ```bash
