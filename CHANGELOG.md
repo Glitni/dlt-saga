@@ -1,3 +1,12 @@
+## 0.38.0 — 2026-10-15
+
+### Added
+- Add machine-readable status summary to saga report (#538)
+
+
+### Fixed
+- Stop saga lint flagging OAuth2 client_secret as named by secrecy (#536)
+
 ## 0.37.0 — 2026-10-14
 
 ### Added
