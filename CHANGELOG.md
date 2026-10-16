@@ -1,3 +1,8 @@
+## 0.40.0 — 2026-10-16
+
+### Breaking Changes
+- Give package config schemas namespace-qualified filenames (#544)
+
 ## 0.39.0 — 2026-10-16
 
 ### Added
