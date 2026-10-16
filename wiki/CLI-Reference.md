@@ -575,6 +575,10 @@ saga generate-schemas [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-o, --output-dir TEXT` | `schemas` | Directory to write schemas to |
+| `--link / --no-link` | `--link` | Add/update the `# yaml-language-server: $schema=...` modeline in each config file. Use `--no-link` to only write schema files (e.g. in CI) |
+| `--sync` | off | Delete every other `.json` file in the output directory, such as schemas left behind by a removed adapter or a renamed config class. Skipped if any schema fails to generate |
+
+Schema files are named after the config class: `ApiConfig` → `api_config.json`. Classes from a package namespace (`packages.yml` or an entry point) are prefixed with the namespace, e.g. `local__my_source_config.json`, so packages can't overwrite each other's schemas. Two classes that would still share a file (same class name in one namespace) fail the command instead of one silently replacing the other.
 
 ---
 
