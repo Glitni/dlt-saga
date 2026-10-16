@@ -363,7 +363,7 @@ def collisions_for_selection(
         check_ingest: Check the ingest layer.
         check_historize: Check the historize layer.
     """
-    project_configs = _discover_enabled_configs(source)
+    project_configs = discover_enabled_configs(source)
     if project_configs is None:
         # Discovery failed — fall back to checking the selection against itself
         # rather than skipping the check entirely.
@@ -412,7 +412,7 @@ def check_target_collisions(
         raise TargetCollisionError(format_collisions(relevant))
 
 
-def _discover_enabled_configs(
+def discover_enabled_configs(
     source: ConfigSource,
 ) -> Optional[List[PipelineConfig]]:
     """Flatten the source's enabled configs, or None if discovery fails.
@@ -423,6 +423,6 @@ def _discover_enabled_configs(
     try:
         enabled, _ = source.discover()
     except Exception as exc:  # best-effort — don't block the guard on discovery
-        logger.debug("Could not discover project configs for collision check: %s", exc)
+        logger.debug("Could not discover project configs: %s", exc)
         return None
     return [config for group_configs in enabled.values() for config in group_configs]

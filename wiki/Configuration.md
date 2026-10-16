@@ -79,6 +79,7 @@ Other ways to avoid repeating yourself: [`dev:` override blocks](#dev-overrides)
 | `dev_row_limit` | int | — | Consumer-side row cap (set on the profile target). Only shortens extraction for resources that stream lazily; for windowed/incremental sources use `dev:` instead — see [Dev Overrides](#dev-overrides) |
 | `dev` | dict | — | Override block applied only in the `dev` environment (and stripped elsewhere) — see [Dev Overrides](#dev-overrides) |
 | `task_group` | string | — | Group pipelines to run together in orchestration mode |
+| `task_concurrency` | int | — | Most pipelines of this `task_group` running at once, in local and orchestrated runs — see [Limiting concurrency within a task group](#limiting-concurrency-within-a-task-group) |
 | `adapter` | string | — | Explicit pipeline implementation binding (e.g., `dlt_saga.api.myservice`) |
 | `filters` | list | — | Row-level filters applied during ingest — see [Row Filters](#row-filters) |
 | `meta` | dict | — | Free-form user metadata for documentation/governance — see [Custom Metadata](#custom-metadata) |
@@ -416,6 +417,25 @@ Selector reference:
 | `tag:daily` | Configs whose daily tag matches current `(day, weekday)` |
 | `tag:daily:monday` | Configs that include Monday in their daily tag |
 | `tag:critical` | Configs with the `critical` tag (no time constraint) |
+
+### Limiting concurrency within a task group
+
+Some sources limit concurrent requests across what are otherwise independent pipelines — an API that rejects a second request while one is in flight, say. Put those pipelines in one `task_group` and cap it with `task_concurrency`:
+
+```yaml
+# saga_project.yml
+pipelines:
+  api:                             # = configs/api/
+    limited_api:                   # = configs/api/limited_api/
+      task_group: limited_api
+      task_concurrency: 1
+```
+
+At most `task_concurrency` of the group's pipelines run at the same time, in every execution mode: a local run (inside the global `--workers` pool, which other pipelines keep using while the group waits) and the worker task an orchestrated run assigns the group to. The cap applies to ingest and historize alike. Without `task_concurrency`, a `task_group` keeps its existing behavior.
+
+Every member of a group must set the same value, so set it once through folder defaults as above. Members that disagree — including one that leaves it unset — are a configuration error in `saga validate` and before any run starts; so is `task_concurrency` without a `task_group`. The check is project-wide: running one member alone still fails if its group disagrees elsewhere.
+
+The cap coordinates pipelines within one saga process. Two separate runs (overlapping schedules, a dev run beside prod) don't see each other's pipelines.
 
 ## Source-Specific Fields
 

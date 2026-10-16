@@ -3,7 +3,8 @@
 Validates pipeline configs early and offline (no warehouse connection). Per
 config: write_disposition, adapter resolution, source config instantiation, and
 historize config (:func:`validate_pipeline_config`). Across a selection:
-target collisions and deprecated config keys (:func:`validate_pipeline_configs`).
+target collisions, task_concurrency agreement and deprecated config keys
+(:func:`validate_pipeline_configs`).
 
 This is the config-correctness gate behind ``saga validate`` and
 ``Session.validate`` — the counterpart to ``saga doctor``, which covers
@@ -377,6 +378,25 @@ def _validate_collisions(
     return []
 
 
+def _validate_task_concurrency(
+    configs: List[PipelineConfig],
+    source: ConfigSource,
+    by_name: Dict[str, ValidationResult],
+) -> None:
+    """Attach ``task_concurrency`` problems to each affected selected config.
+
+    Group agreement is checked project-wide, the same check the run-time guard
+    applies, so a selected pipeline is flagged even when the disagreeing member
+    isn't selected.
+    """
+    from dlt_saga.utility.task_groups import task_concurrency_problems
+
+    for name, messages in task_concurrency_problems(configs, source).items():
+        result = by_name.get(name)
+        if result is not None:
+            result.errors.extend(messages)
+
+
 def _validate_legacy_keys(
     configs: List[PipelineConfig],
     source: ConfigSource,
@@ -420,10 +440,12 @@ def validate_pipeline_configs(
     """Validate a selection of pipeline configs as a set.
 
     Runs the per-config offline checks (:func:`validate_pipeline_config`) plus
-    two project-wide checks a single config can't see on its own:
+    the project-wide checks a single config can't see on its own:
 
     * **Target collisions** — two pipelines resolving to the same destination
       table (errors, attached to each involved config in the selection).
+    * **Task concurrency** — an invalid ``task_concurrency``, or members of one
+      ``task_group`` disagreeing on it (errors, attached to each affected config).
     * **Deprecated config keys** — legacy alias keys in the selected config files
       and in ``saga_project.yml`` / ``profiles.yml`` (warnings; aliases still
       resolve).
@@ -451,6 +473,7 @@ def validate_pipeline_configs(
 
     by_name = {r.pipeline_name: r for r in results}
     collision_results = _validate_collisions(configs, source, environments, by_name)
+    _validate_task_concurrency(configs, source, by_name)
     project_results = _validate_legacy_keys(configs, source, by_name)
 
     return results + collision_results + project_results

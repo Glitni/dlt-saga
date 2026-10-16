@@ -753,6 +753,14 @@ def _patch_pipelines_section(
                             "in the same Cloud Run task"
                         ),
                     },
+                    "task_concurrency": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Maximum number of the task_group's pipelines that "
+                            "run at the same time, in local and orchestrated runs"
+                        ),
+                    },
                     "adapter": adapter_prop,
                 },
                 "additionalProperties": {

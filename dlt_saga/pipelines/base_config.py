@@ -49,6 +49,14 @@ class BaseConfig:
         },
     )
 
+    task_concurrency: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": "Maximum number of this pipeline's task_group that run at the same time, in local and orchestrated runs (e.g. 1 for a source that allows one request at a time). Every member of the group must set the same value — set it once through folder defaults in saga_project.yml. Requires task_group.",
+            "minimum": 1,
+        },
+    )
+
     adapter: Optional[str] = field(
         default=None,
         metadata={

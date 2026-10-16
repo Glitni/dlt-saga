@@ -16,6 +16,7 @@ Extracted from ``cli.py`` (module-boundary cleanup); behavior unchanged.
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import typer
@@ -27,6 +28,12 @@ from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.collisions import TargetCollisionError, check_target_collisions
 from dlt_saga.utility.env import get_env
 from dlt_saga.utility.naming import get_environment
+from dlt_saga.utility.task_groups import (
+    TaskConcurrencyError,
+    check_task_concurrency,
+    parallel_slots,
+    submit_with_group_caps,
+)
 
 if TYPE_CHECKING:
     from dlt_saga.utility.orchestration.providers import OrchestrationProvider
@@ -392,13 +399,15 @@ def run_orchestrator_mode(
     # Fail the whole plan before any worker is triggered if two pipelines
     # resolve to the same target (both layers — the plan spans ingest+historize).
     try:
+        config_source = get_config_source()
         check_target_collisions(
             all_configs,
-            get_config_source(),
+            config_source,
             check_ingest=True,
             check_historize=True,
         )
-    except TargetCollisionError as e:
+        check_task_concurrency(all_configs, config_source)
+    except (TargetCollisionError, TaskConcurrencyError) as e:
         logger.error(str(e))
         raise typer.Exit(1)
 
@@ -497,7 +506,7 @@ def _log_assigned_pipelines(pipeline_configs: List[PipelineConfig]):
     else:
         task_group = pipeline_configs[0].config_dict.get("task_group", "unknown")
         logger.info(
-            "Assigned %d pipelines in task group '%s' to run in parallel",
+            "Assigned %d pipelines in task group '%s'",
             len(pipeline_configs),
             task_group,
         )
@@ -528,10 +537,11 @@ def _execute_worker_parallel(
         run_fn: Callable(config, log_prefix) -> Optional[str], returning ``None``
             on success or the error message on failure.
         max_workers: Cap on concurrent threads inside this worker. Capped
-            again at ``len(configs)`` since there's no point spawning more
-            threads than pipelines. Defaults to ``_DEFAULT_WORKER_CONCURRENCY``
-            so a large ``task_group`` can't OOM the worker container by
-            spawning one thread per pipeline.
+            again at the most pipelines that can run at once — one per
+            pipeline, or the group's ``task_concurrency`` — since there's no
+            point spawning idle threads. Defaults to
+            ``_DEFAULT_WORKER_CONCURRENCY`` so a large ``task_group`` can't OOM
+            the worker container by spawning one thread per pipeline.
 
     Returns:
         List of (table_name, error_message) tuples for failed pipelines, carrying
@@ -540,7 +550,7 @@ def _execute_worker_parallel(
     if not configs:
         return []
 
-    effective_workers = max(1, min(len(configs), max_workers))
+    effective_workers = max(1, min(parallel_slots(configs), max_workers))
 
     if len(configs) > 1:
         logger.info(
@@ -553,11 +563,18 @@ def _execute_worker_parallel(
 
     failed_pipelines: List[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-        future_to_config = {}
-        for i, config in enumerate(configs, 1):
-            log_prefix = _worker_log_prefix(task_index, i, len(configs))
-            future = executor.submit(run_fn, config, log_prefix)
-            future_to_config[future] = config
+        future_to_config = submit_with_group_caps(
+            executor,
+            [
+                (
+                    config,
+                    partial(
+                        run_fn, config, _worker_log_prefix(task_index, i, len(configs))
+                    ),
+                )
+                for i, config in enumerate(configs, 1)
+            ],
+        )
 
         for future in as_completed(future_to_config):
             config = future_to_config[future]

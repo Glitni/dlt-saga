@@ -427,6 +427,10 @@ Precedence (highest first):
 The orchestrator's `--workers` is forwarded to each Cloud Run task as
 `SAGA_WORKER_CONCURRENCY`, so a single flag on the trigger reaches every worker.
 
+A group's own `task_concurrency` caps it further — for a source that allows only
+so many concurrent requests — and applies in local runs too. See
+[Limiting concurrency within a task group](Configuration#limiting-concurrency-within-a-task-group).
+
 `saga update-access` applies these entries to the orchestration schema alongside the per-pipeline `pipelines.schema_access` grants. Same string format. Applied in prod only — matches the per-pipeline behaviour. Without this, an external orchestrator querying the execution plan tables will see `PERMISSION_DENIED` even though saga creates the schema itself.
 
 > **Legacy alias.** The pre-0.4 key `dataset_access:` is still accepted as a silent read-time alias for `schema_access:` (`pipelines.`, `pipelines.<group>.`, and `orchestration.` levels). Prefer the canonical spelling in new configs.

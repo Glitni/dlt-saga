@@ -19,6 +19,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar
 
 from dlt_saga.pipeline_config import ConfigSource, PipelineConfig
@@ -37,6 +38,10 @@ from dlt_saga.utility.cli.profiles import ProfileTarget, get_profiles_config
 from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.cli.selectors import PipelineSelector
 from dlt_saga.utility.collisions import check_target_collisions
+from dlt_saga.utility.task_groups import (
+    check_task_concurrency,
+    submit_with_group_caps,
+)
 
 if TYPE_CHECKING:
     from dlt_saga.report.status import StatusSummary
@@ -1059,6 +1064,7 @@ class Session:
             check_ingest=True,
             check_historize=False,
         )
+        check_task_concurrency(all_configs, self._config_source)
 
         # `_run_ingest` is also used by `update_access` — only the destination
         # access sync runs in that mode, not the actual extract/load. Pick the
@@ -1097,13 +1103,18 @@ class Session:
         total = len(configs)
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_config = {}
-            for idx, config in enumerate(configs, 1):
-                log_prefix = f"[{idx}/{total}]"
-                future = executor.submit(
-                    self._execute_single_ingest, config, log_prefix
-                )
-                future_to_config[future] = config
+            future_to_config = submit_with_group_caps(
+                executor,
+                [
+                    (
+                        config,
+                        partial(
+                            self._execute_single_ingest, config, f"[{idx}/{total}]"
+                        ),
+                    )
+                    for idx, config in enumerate(configs, 1)
+                ],
+            )
 
             for future in as_completed(future_to_config):
                 results.append(future.result())
@@ -1254,6 +1265,7 @@ class Session:
             check_ingest=False,
             check_historize=True,
         )
+        check_task_concurrency(all_configs, self._config_source)
 
         logger.info(
             "Historizing %d pipeline(s) with %d worker(s)", len(all_configs), workers
@@ -1275,18 +1287,23 @@ class Session:
         total = len(configs)
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_config = {}
-            for idx, config in enumerate(configs, 1):
-                log_prefix = f"[{idx}/{total}]"
-                future = executor.submit(
-                    self._execute_single_historize,
-                    config,
-                    full_refresh,
-                    log_prefix,
-                    partial_refresh,
-                    historize_from,
-                )
-                future_to_config[future] = config
+            future_to_config = submit_with_group_caps(
+                executor,
+                [
+                    (
+                        config,
+                        partial(
+                            self._execute_single_historize,
+                            config,
+                            full_refresh,
+                            f"[{idx}/{total}]",
+                            partial_refresh,
+                            historize_from,
+                        ),
+                    )
+                    for idx, config in enumerate(configs, 1)
+                ],
+            )
 
             for future in as_completed(future_to_config):
                 results.append(future.result())
@@ -1418,6 +1435,7 @@ class Session:
             check_ingest=True,
             check_historize=False,
         )
+        check_task_concurrency(ingest_list, self._config_source)
 
         if ingest_list:
             logger.info("Running %d ingest pipeline(s)", len(ingest_list))
@@ -1440,6 +1458,7 @@ class Session:
             check_ingest=False,
             check_historize=True,
         )
+        check_task_concurrency(historize_list, self._config_source)
 
         # Skip historize for pipelines whose ingest failed during full refresh
         if full_refresh and failed_names:
