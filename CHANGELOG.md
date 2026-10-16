@@ -1,3 +1,8 @@
+## 0.39.0 — 2026-10-16
+
+### Added
+- Add task_concurrency to cap parallel pipelines within a task_group (#541)
+
 ## 0.38.0 — 2026-10-15
 
 ### Added
