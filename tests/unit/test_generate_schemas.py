@@ -1,6 +1,8 @@
 """Unit tests for generate_schemas pure-function helpers."""
 
+import importlib
 import json
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
@@ -192,14 +194,114 @@ class TestSharedPropsViaDefs:
 
 @pytest.mark.unit
 class TestSchemaFilenameForConfigClass:
-    def test_camel_case_to_snake(self):
+    def test_builtin_classes_unprefixed(self):
+        from dlt_saga.pipelines.api.config import ApiConfig
+        from dlt_saga.pipelines.native_load.config import NativeLoadConfig
         from dlt_saga.utility.generate_schemas import schema_filename_for_config_class
 
         assert (
-            schema_filename_for_config_class("NativeLoadConfig")
+            schema_filename_for_config_class(NativeLoadConfig)
             == "native_load_config.json"
         )
-        assert schema_filename_for_config_class("ApiConfig") == "api_config.json"
+        assert schema_filename_for_config_class(ApiConfig) == "api_config.json"
+
+    def test_package_classes_prefixed_with_namespace(self, tmp_path, monkeypatch):
+        from dlt_saga.utility.generate_schemas import schema_filename_for_config_class
+
+        base_a, base_b = _make_packages(
+            tmp_path,
+            monkeypatch,
+            {
+                "a": {"api/gam": _GAM_CONFIG},
+                "b": {"api/gam/rest": _GAM_CONFIG},
+            },
+        )
+        cls_a = importlib.import_module(f"{base_a}.api.gam.config")
+        cls_b = importlib.import_module(f"{base_b}.api.gam.rest.config")
+
+        assert (
+            schema_filename_for_config_class(cls_a.GoogleAdManagerConfig)
+            == "a__google_ad_manager_config.json"
+        )
+        assert (
+            schema_filename_for_config_class(cls_b.GoogleAdManagerConfig)
+            == "b__google_ad_manager_config.json"
+        )
+
+
+_GAM_CONFIG = """
+from dataclasses import dataclass
+
+
+@dataclass
+class GoogleAdManagerConfig:
+    network_code: str = ""
+"""
+
+
+def _make_packages(tmp_path, monkeypatch, packages):
+    """Create importable packages under *tmp_path* and register them as namespaces.
+
+    *packages* maps namespace -> {relative package dir: config.py source}.
+    Returns the generated base module names, in order.
+    """
+    from dlt_saga.pipelines import registry
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    bases = []
+    for namespace, modules in packages.items():
+        base = f"pkg_{namespace}_{uuid.uuid4().hex[:8]}"
+        root = tmp_path / base
+        root.mkdir()
+        (root / "__init__.py").write_text("")
+        for rel_dir, source in modules.items():
+            pkg_dir = root
+            for part in rel_dir.split("/"):
+                pkg_dir = pkg_dir / part
+                pkg_dir.mkdir(exist_ok=True)
+                (pkg_dir / "__init__.py").write_text("")
+            (pkg_dir / "config.py").write_text(source)
+        monkeypatch.setitem(registry._NAMESPACE_REGISTRY, namespace, base)
+        bases.append(base)
+    return bases
+
+
+@pytest.mark.unit
+class TestNamespaceSchemaCollisions:
+    def test_same_class_name_in_two_packages_gets_two_files(
+        self, tmp_path, monkeypatch
+    ):
+        from dlt_saga.utility.generate_schemas import _discover_namespace_schemas
+
+        base_a, base_b = _make_packages(
+            tmp_path,
+            monkeypatch,
+            {"a": {"api/gam": _GAM_CONFIG}, "b": {"api/gam/rest": _GAM_CONFIG}},
+        )
+
+        schemas, had_error = _discover_namespace_schemas({"a": base_a, "b": base_b})
+
+        assert not had_error
+        assert {
+            "a__google_ad_manager_config.json",
+            "b__google_ad_manager_config.json",
+        } <= set(schemas)
+
+    def test_clash_within_namespace_is_an_error_not_an_overwrite(
+        self, tmp_path, monkeypatch
+    ):
+        from dlt_saga.utility.generate_schemas import _discover_namespace_schemas
+
+        (base,) = _make_packages(
+            tmp_path,
+            monkeypatch,
+            {"a": {"api/gam/rest": _GAM_CONFIG, "api/gam/soap": _GAM_CONFIG}},
+        )
+
+        schemas, had_error = _discover_namespace_schemas({"a": base})
+
+        assert had_error
+        assert list(schemas) == ["a__google_ad_manager_config.json"]
 
 
 @pytest.mark.unit
@@ -246,6 +348,39 @@ class TestSchemaFilenameForAdapter:
 
 @pytest.mark.unit
 class TestGenerateSchemasOutput:
+    def test_sync_deletes_stale_json_only(self, tmp_path):
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        (tmp_path / "stale_config.json").write_text("{}")
+        (tmp_path / "notes.md").write_text("keep")
+
+        assert generate_schemas(tmp_path, sync=True) == 0
+        assert not (tmp_path / "stale_config.json").exists()
+        assert (tmp_path / "notes.md").exists()
+        assert (tmp_path / "api_config.json").exists()
+
+    def test_stale_json_kept_without_sync(self, tmp_path):
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        (tmp_path / "stale_config.json").write_text("{}")
+
+        generate_schemas(tmp_path)
+        assert (tmp_path / "stale_config.json").exists()
+
+    def test_sync_skipped_after_errors(self, tmp_path, monkeypatch):
+        from dlt_saga.utility import generate_schemas as gs
+
+        original = gs._discover_namespace_schemas
+        monkeypatch.setattr(
+            gs,
+            "_discover_namespace_schemas",
+            lambda registry: (original(registry)[0], True),
+        )
+        (tmp_path / "stale_config.json").write_text("{}")
+
+        assert gs.generate_schemas(tmp_path, sync=True) == 1
+        assert (tmp_path / "stale_config.json").exists()
+
     def test_creates_json_files(self, tmp_path):
         from dlt_saga.utility.generate_schemas import generate_schemas
 

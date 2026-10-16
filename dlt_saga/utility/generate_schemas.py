@@ -1013,7 +1013,9 @@ _SKIP_MODULE_SUFFIXES = {
 }
 
 
-def _process_config_module(modname: str, base_module: str) -> Dict[str, Dict[str, Any]]:
+def _process_config_module(
+    modname: str, base_module: str
+) -> List[tuple[str, type, Dict[str, Any]]]:
     """Import *modname* and generate schemas for all Config dataclasses in it.
 
     Args:
@@ -1021,9 +1023,9 @@ def _process_config_module(modname: str, base_module: str) -> Dict[str, Dict[str
         base_module: The namespace base (e.g., 'dlt_saga.pipelines') for relative naming
 
     Returns:
-        Dict mapping schema filenames to schema dicts
+        ``(schema filename, config class, schema)`` per Config dataclass defined
+        in the module.
     """
-    schemas: dict[str, dict] = {}
     config_module = importlib.import_module(modname)
 
     config_classes = [
@@ -1035,7 +1037,7 @@ def _process_config_module(modname: str, base_module: str) -> Dict[str, Dict[str
     ]
 
     if not config_classes:
-        return schemas
+        return []
 
     # Derive human-readable name from the relative module path.
     # e.g., 'dlt_saga.pipelines.api.genesyscloud.config' with base 'dlt_saga.pipelines'
@@ -1047,24 +1049,48 @@ def _process_config_module(modname: str, base_module: str) -> Dict[str, Dict[str
     else:
         human_name = f"{parts[-1].replace('_', ' ').title()} {parts[0].upper()}"
 
-    for config_class in config_classes:
-        config_class_name = config_class.__name__
-        schema_filename = schema_filename_for_config_class(config_class_name)
+    return [
+        (
+            schema_filename_for_config_class(config_class),
+            config_class,
+            generate_schema_for_pipeline(human_name, config_class),
+        )
+        for config_class in config_classes
+    ]
 
-        schema = generate_schema_for_pipeline(human_name, config_class)
-        schemas[schema_filename] = schema
-        print(f"  [OK] Generated {schema_filename} ({config_class_name})")
 
-    return schemas
+def _namespace_for_module(modname: str) -> Optional[str]:
+    """Return the registered namespace whose base module contains *modname*.
 
-
-def schema_filename_for_config_class(config_class_name: str) -> str:
-    """Derive the generated schema filename for a config dataclass name.
-
-    e.g. ``NativeLoadConfig`` -> ``native_load_config.json``.
+    The most specific (longest) base module wins, so a namespace nested inside
+    another resolves to itself.
     """
-    stem = config_class_name.replace("Config", "")
+    from dlt_saga.pipelines.registry import _NAMESPACE_REGISTRY
+
+    matches = [
+        (len(base), namespace)
+        for namespace, base in _NAMESPACE_REGISTRY.items()
+        if modname == base or modname.startswith(f"{base}.")
+    ]
+    return max(matches)[1] if matches else None
+
+
+def schema_filename_for_config_class(config_class: type) -> str:
+    """Derive the generated schema filename for a config dataclass.
+
+    The stem is the snake_cased class name minus ``Config``. Classes from a
+    package namespace are prefixed with the namespace (``<namespace>__``), so
+    same-named config classes in different packages — or a package class named
+    like a built-in one — get distinct files. Built-in ``dlt_saga`` classes
+    carry no prefix.
+    """
+    from dlt_saga.pipelines.registry import _DEFAULT_NAMESPACE
+
+    stem = config_class.__name__.replace("Config", "")
     stem = re.sub(r"(?<!^)(?=[A-Z])", "_", stem).lower()
+    namespace = _namespace_for_module(config_class.__module__)
+    if namespace and namespace != _DEFAULT_NAMESPACE:
+        stem = f"{namespace}__{stem}"
     return f"{stem}_config.json"
 
 
@@ -1135,7 +1161,7 @@ def schema_filename_for_adapter(
     class can be resolved (e.g. an unresolvable adapter).
     """
     cls = config_class_for_adapter(adapter, pipeline_group, config_path)
-    return schema_filename_for_config_class(cls.__name__) if cls is not None else None
+    return schema_filename_for_config_class(cls) if cls is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -1154,6 +1180,7 @@ def _discover_namespace_schemas(
     import pkgutil
 
     schemas: Dict[str, Dict[str, Any]] = {}
+    origins: Dict[str, type] = {}
     had_error = False
 
     for _namespace, base_module in namespace_registry.items():
@@ -1176,12 +1203,47 @@ def _discover_namespace_schemas(
                 continue
 
             try:
-                schemas.update(_process_config_module(modname, base_module))
+                generated = _process_config_module(modname, base_module)
             except Exception as e:
                 print(f"  [ERROR] {modname}: {e}")
                 had_error = True
+                continue
+
+            if not _add_generated(generated, schemas, origins):
+                had_error = True
 
     return schemas, had_error
+
+
+def _add_generated(
+    generated: List[tuple[str, type, Dict[str, Any]]],
+    schemas: Dict[str, Dict[str, Any]],
+    origins: Dict[str, type],
+) -> bool:
+    """Add *generated* schemas, refusing any file another class already produced.
+
+    Returns False if a clash was found. The first class keeps the file.
+    """
+    ok = True
+    for filename, config_class, schema in generated:
+        prior = origins.get(filename)
+        if prior is not None and prior is not config_class:
+            print(
+                f"  [ERROR] {filename}: both {_qualname(prior)} and "
+                f"{_qualname(config_class)} map to this schema file. "
+                f"Rename one of the config classes."
+            )
+            ok = False
+            continue
+        if prior is None:
+            print(f"  [OK] Generated {filename} ({config_class.__name__})")
+        origins[filename] = config_class
+        schemas[filename] = schema
+    return ok
+
+
+def _qualname(cls: type) -> str:
+    return f"{cls.__module__}.{cls.__qualname__}"
 
 
 def _write_schemas(schemas: Dict[str, Dict[str, Any]], output_dir: Path) -> None:
@@ -1193,7 +1255,15 @@ def _write_schemas(schemas: Dict[str, Dict[str, Any]], output_dir: Path) -> None
             f.write("\n")
 
 
-def generate_schemas(output_dir: Path) -> int:
+def _prune_stale_schemas(output_dir: Path, keep: set[str]) -> None:
+    """Delete ``*.json`` files in *output_dir* that are not in *keep*."""
+    for path in sorted(output_dir.glob("*.json")):
+        if path.name not in keep:
+            path.unlink()
+            print(f"  [DELETE] {path.name}")
+
+
+def generate_schemas(output_dir: Path, sync: bool = False) -> int:
     """Generate JSON schemas from all registered pipeline namespaces.
 
     Copies static schemas from ``dlt_saga/schemas/``, then generates schemas
@@ -1203,6 +1273,9 @@ def generate_schemas(output_dir: Path) -> int:
 
     Args:
         output_dir: Directory to write generated schemas to.
+        sync: Delete every other ``*.json`` file in *output_dir*, so it holds
+            exactly this run's output. Skipped when any schema failed, since a
+            failed module's previous schema would otherwise be deleted.
 
     Returns:
         Exit code: 0 on full success, 1 if any schema failed.
@@ -1218,9 +1291,11 @@ def generate_schemas(output_dir: Path) -> int:
 
     adapter_examples = [impl["adapter"] for impl in discover_implementations()]
 
+    written: set[str] = set()
     if _STATIC_SCHEMAS_DIR.is_dir():
         for src in sorted(_STATIC_SCHEMAS_DIR.glob("*.json")):
             shutil.copy2(src, output_dir / src.name)
+            written.add(src.name)
             print(f"  [OK] Copied {src.name}")
 
     all_schemas, had_error = _discover_namespace_schemas(_NAMESPACE_REGISTRY)
@@ -1241,5 +1316,12 @@ def generate_schemas(output_dir: Path) -> int:
     _inject_adapter_examples(all_schemas, adapter_examples)
 
     _write_schemas(all_schemas, output_dir)
+    written.update(all_schemas)
+
+    if sync:
+        if had_error:
+            print("Skipping --sync: not deleting stale schemas after errors.")
+        else:
+            _prune_stale_schemas(output_dir, written)
 
     return 1 if had_error else 0

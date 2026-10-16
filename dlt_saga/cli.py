@@ -1771,6 +1771,15 @@ def generate_schemas_cmd(
             "write schema files (e.g. in CI)."
         ),
     ),
+    sync: bool = typer.Option(
+        False,
+        "--sync",
+        help=(
+            "Delete every other .json file in the output directory, e.g. schemas "
+            "left behind by a removed adapter or a renamed config class. Skipped "
+            "if any schema fails to generate."
+        ),
+    ),
 ):
     """Generate JSON schemas for pipeline configs and project files, and link configs to them.
 
@@ -1792,11 +1801,12 @@ def generate_schemas_cmd(
         saga generate-schemas                  # Generate + link configs
         saga generate-schemas --no-link        # Only write schema files
         saga generate-schemas -o my_schemas/   # Write to custom directory
+        saga generate-schemas --sync           # Also delete stale schema files
     """
     from dlt_saga.utility.generate_schemas import generate_schemas
 
     print(f"Generating schemas to {output_dir}/...")
-    exit_code = generate_schemas(output_dir)
+    exit_code = generate_schemas(output_dir, sync=sync)
     if exit_code == 0:
         print(f"Done. Schemas written to {output_dir}/")
     else:

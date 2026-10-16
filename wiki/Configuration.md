@@ -570,7 +570,7 @@ historize:
 
 JSON schema files in `schemas/` provide IDE autocomplete and validation. VS Code applies them automatically via `.vscode/settings.json`.
 
-Run `saga generate-schemas` to regenerate them after upgrading dlt-saga.
+Run `saga generate-schemas` to regenerate them after upgrading dlt-saga. Add `--sync` to also delete schema files that are no longer generated (see [CLI Reference](CLI-Reference#saga-generate-schemas)).
 
 ---
 
