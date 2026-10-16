@@ -77,6 +77,11 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
 2. Orchestrator mode: Create execution plan and trigger remote workers (e.g. Cloud Run Jobs)
 3. Worker mode: Execute assigned tasks from an execution plan
 
+**Task-group concurrency** (`utility/task_groups.py`)
+- `task_group` co-locates pipelines in one orchestrated task; `task_concurrency` caps how many of a group's pipelines run at once (for sources limiting concurrent requests), in local runs (`Session`) and worker mode alike, for ingest and historize
+- Scheduled as `cap` lanes draining the group's queue (`submit_with_group_caps`), so waiting members never hold a pool slot other pipelines could use
+- Members must agree on the value (unset counts as a value), checked project-wide like target collisions: `TaskConcurrencyError` (a `ValueError`) at run time in `Session`/`run_orchestrator_mode`, errors in `saga validate`. Only coordinates within one saga process
+
 **Environment-Aware Naming** (`utility/naming.py`)
 - Production: Separate dataset per pipeline group (`dlt_google_sheets`, `dlt_filesystem`)
 - Development: Developer-specific dataset (from `SAGA_SCHEMA_NAME` or profile)

@@ -668,6 +668,37 @@ class TestExecuteWorkerParallel:
         assert failed == []
         assert active_count["peak"] <= 2
 
+    def test_honors_task_concurrency_below_max_workers(self):
+        """A group's task_concurrency caps it even when max_workers is larger."""
+        import threading
+        import time
+
+        from dlt_saga.utility.cli.run_modes import _execute_worker_parallel
+
+        configs = [_make_config(f"t{i}", task_group="limited") for i in range(4)]
+        for config in configs:
+            config.config_dict["task_concurrency"] = 1
+        active_lock = threading.Lock()
+        active_count = {"current": 0, "peak": 0}
+
+        def run_fn(config, log_prefix):
+            with active_lock:
+                active_count["current"] += 1
+                active_count["peak"] = max(
+                    active_count["peak"], active_count["current"]
+                )
+            time.sleep(0.02)
+            with active_lock:
+                active_count["current"] -= 1
+            return None
+
+        failed = _execute_worker_parallel(
+            configs, task_index=0, label="ingest", run_fn=run_fn, max_workers=4
+        )
+
+        assert failed == []
+        assert active_count["peak"] == 1
+
     def test_caps_at_len_configs_when_max_workers_larger(self):
         """max_workers larger than len(configs) means len(configs) threads, no idle ones."""
         from dlt_saga.utility.cli.run_modes import _execute_worker_parallel

@@ -488,3 +488,48 @@ class TestValidateConfigsLegacyKeys:
             "dataset_access" in w and "schema_access" in w
             for w in synthetic[0].warnings
         )
+
+
+@pytest.mark.unit
+class TestValidateConfigsTaskConcurrency:
+    """task_concurrency agreement within a task_group."""
+
+    def _grouped(self, name, concurrency):
+        config = _gs_config(name, name.split("__")[-1])
+        config.config_dict["task_group"] = "limited_api"
+        if concurrency is not None:
+            config.config_dict["task_concurrency"] = concurrency
+        return config
+
+    def _errors(self, results, name):
+        result = next(r for r in results if r.pipeline_name == name)
+        return [e for e in result.errors if "task_concurrency" in e]
+
+    def test_agreeing_group_is_valid(self):
+        configs = [
+            self._grouped("google_sheets__a", 1),
+            self._grouped("google_sheets__b", 1),
+        ]
+        results = validate_pipeline_configs(
+            configs, _collision_source(configs), environments=["dev"]
+        )
+        assert all(r.is_valid for r in results)
+
+    def test_disagreement_errors_every_selected_member(self):
+        configs = [
+            self._grouped("google_sheets__a", 1),
+            self._grouped("google_sheets__b", None),
+        ]
+        results = validate_pipeline_configs(
+            configs, _collision_source(configs), environments=["dev"]
+        )
+        assert self._errors(results, "google_sheets__a")
+        assert self._errors(results, "google_sheets__b")
+
+    def test_disagreement_with_unselected_member_is_flagged(self):
+        selected = self._grouped("google_sheets__a", 1)
+        project = [selected, self._grouped("google_sheets__b", 2)]
+        results = validate_pipeline_configs(
+            [selected], _collision_source(project), environments=["dev"]
+        )
+        assert self._errors(results, "google_sheets__a")
