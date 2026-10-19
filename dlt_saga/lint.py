@@ -157,6 +157,34 @@ def _references_timedelta(tree: ast.AST) -> bool:
     return False
 
 
+_WATERMARK_MARKERS = frozenset(
+    {
+        "get_max_column_value",
+        "get_last_load_timestamp",
+        "initial_value",
+        "read_destination_watermark",
+        "resolve_window",
+    }
+)
+
+
+def _code_identifiers(tree: ast.AST) -> set:
+    """Names the code actually uses: identifiers, attributes, keyword arguments
+    and string keys (``config["initial_value"]``). Comments and prose in
+    docstrings don't count, so mentioning a helper doesn't pass for using it."""
+    names: set = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.keyword) and node.arg:
+            names.add(node.arg)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            names.add(node.value)
+    return names
+
+
 def check_hardcoded_window(target: AdapterTarget) -> Iterable[Finding]:
     """Heuristic: flag a pipeline that derives a date window from "now" with no
     warehouse watermark — i.e. "always load yesterday", which can't catch up
@@ -175,9 +203,10 @@ def check_hardcoded_window(target: AdapterTarget) -> Iterable[Finding]:
         return
 
     # Resuming from the warehouse high-water mark is the idempotent pattern; if
-    # any of these appear, assume the date math is a fallback, not the cursor.
-    watermark_markers = ("get_max_column_value", "initial_value", "get_last_load")
-    if any(marker in src for marker in watermark_markers):
+    # the code uses any of these, assume the date math is a fallback or a label,
+    # not the cursor. resolve_window() is DateWindowResolver's watermark-based
+    # window.
+    if _code_identifiers(tree) & _WATERMARK_MARKERS:
         return
 
     yield Finding(
@@ -186,12 +215,15 @@ def check_hardcoded_window(target: AdapterTarget) -> Iterable[Finding]:
         message=(
             "Pipeline derives a date window from the current date (datetime.now/"
             "date.today + timedelta) with no warehouse watermark "
-            "(get_max_column_value / initial_value). This loads a fixed window (e.g. "
+            "(resolve_window / get_max_column_value / initial_value). This loads a fixed window (e.g. "
             "'yesterday') and won't catch up after a missed or failed run — resume "
             "from the high-water mark instead. (Heuristic — ignore if intentional.)"
         ),
         location=f"{pf}:{now_line}",
-        suggestion="seed from get_max_column_value(...) or initial_value",
+        suggestion=(
+            "use DateWindowResolver.resolve_window(), or seed from "
+            "get_max_column_value(...) / initial_value"
+        ),
     )
 
 
