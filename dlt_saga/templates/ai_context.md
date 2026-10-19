@@ -210,6 +210,13 @@ for a request), then `_make_request()` / `_extract_data_from_response()`. **Don'
 `extract_data()` on an API pipeline** — you'd lose the built-in pagination. For most REST APIs you
 override nothing and configure auth + pagination + `response_path` in YAML.
 
+Multi-step APIs (create → poll → download reports, POST-body paging, OAuth2 token fetch, CSV
+responses): call `self._send_request(method, url, **requests_kwargs)` from `fetch_data`. It returns
+the `requests.Response` with saga's retries (429/5xx/timeouts, any method, `Retry-After`) and
+`ApiRequestError` on failure. Auth is not added implicitly — pass
+`headers=self._get_auth_headers()` where needed. Decode CSV via `response.content.decode("utf-8")`.
+**Don't build your own `requests.Session` / urllib3 `Retry`.**
+
 Incremental, single cursor: set `incremental: true` + `incremental_column` and put a
 `{incremental_value}` placeholder in a `query_params` value — the base substitutes the resolved
 cursor (watermark or `initial_value`) before the request. No Python needed.

@@ -138,13 +138,16 @@ class ApiConfig(BaseConfig):
     max_retries: int = field(
         default=3,
         metadata={
-            "description": "Maximum number of retry attempts for transient errors (429, 503)"
+            "description": "Maximum number of retries for transient failures (HTTP 429 "
+            "and 5xx, timeouts, connection errors, incomplete responses)"
         },
     )
     retry_backoff_base: int = field(
         default=2,
         metadata={
-            "description": "Base for exponential backoff (seconds = base^attempt: 1s, 2s, 4s)"
+            "description": "Exponential backoff between retries: waits are "
+            "base/2 * 2^n seconds (1s, 2s, 4s at the default of 2). A Retry-After "
+            "header from the server takes precedence (capped at 300s)."
         },
     )
     page_delay: float = field(

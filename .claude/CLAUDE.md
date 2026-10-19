@@ -122,7 +122,7 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
 - **google_sheets**: Extract data from Google Sheets with change detection
 - **filesystem**: Extract files from GCS/S3/Azure/SFTP/Google Drive/local filesystem with incremental loading. `filesystem_type: gdrive` uses dlt's built-in Drive fsspec (`bucket_name` = folder ID), or with `file_id` fetches one file by ID (`FilesystemClient._file_source` → `_gdrive_file_resource`, lazy-download `FileItemDict` pages; all readers go through `_file_source`, never `readers()`); credentials resolve via `google_api_pool` (`credentials` — dict/JSON string/key path, secret URIs resolved by value — else ADC; `drive.readonly`) and are wrapped as dlt `GcpServiceAccountCredentials`
 - **database**: Extract from SQL databases via dlt's `sql_database` source
-- **api**: Base HTTP API pipeline with pagination support
+- **api**: Base HTTP API pipeline with pagination support. Transport is dlt's retrying `requests` `Client` (`dlt.sources.helpers.requests`), built per pipeline from `max_retries`/`timeout`/`retry_backoff_base` with `_is_transient` as the sole retry predicate (so every retry is logged). `_make_request` = the one configured JSON call; `_send_request(method, url, **requests_kwargs)` = the same transport for multi-step adapters (no implicit auth — credentials only go where an adapter attaches them), raising `ApiRequestError`
 - **sharepoint**: Extract files from SharePoint
 
 ### Bulk loaders

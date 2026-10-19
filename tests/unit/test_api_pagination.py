@@ -1,10 +1,14 @@
 """Unit tests for API pipeline pagination."""
 
+import json
 import logging
-from unittest.mock import MagicMock, patch
+from contextlib import contextmanager
+from unittest.mock import patch
 
 import pytest
 import requests
+from requests.adapters import HTTPAdapter
+from requests.exceptions import ChunkedEncodingError
 
 from dlt_saga.pipelines.api.base import ApiRequestError, BaseApiPipeline
 from dlt_saga.pipelines.api.config import ApiConfig
@@ -834,108 +838,209 @@ class TestExtractDataIncrementalGating:
 
 
 class RetryApiPipeline(BaseApiPipeline):
-    """Drives the REAL _make_request retry loop (requests.request is mocked)."""
+    """Drives the REAL request path; tests stub the transport underneath it."""
 
     def __init__(self, **overrides):
         cfg = {
             "base_url": "https://api.example.com",
             "endpoint": "/data",
             "max_retries": 2,
-            "retry_backoff_base": 1,
+            "retry_backoff_base": 2,
         }
         cfg.update(overrides)
         self.api_config = self._create_api_config(cfg)
         self.logger = logging.getLogger("test")
 
 
+def _response(status=200, json_body=None, *, content=None, headers=None, reason=""):
+    """A real ``requests.Response``, as an HTTP adapter would return it."""
+    resp = requests.Response()
+    resp.status_code = status
+    resp.reason = reason
+    resp.headers.update(headers or {})
+    if content is None:
+        content = json.dumps({} if json_body is None else json_body).encode()
+    resp._content = content
+    resp.url = "https://api.example.com/data"
+    return resp
+
+
+@contextmanager
+def _transport(*outcomes):
+    """Stub the HTTP adapter below the retry layer; sleeps are recorded, not taken.
+
+    Each request gets the next outcome: a response is returned, an exception raised.
+    """
+    with (
+        patch.object(HTTPAdapter, "send", side_effect=list(outcomes)) as send,
+        patch("tenacity.nap.time.sleep") as sleep,
+    ):
+        yield send, sleep
+
+
+@contextmanager
+def _sent_requests(*responses):
+    """Capture the arguments each request reaches ``requests.Session.request`` with."""
+    sent = []
+    queue = list(responses) or [_response(200, {"data": []})]
+
+    def _fake(method, url, **kwargs):
+        sent.append({"method": method, "url": url, **kwargs})
+        return queue.pop(0)
+
+    with patch.object(requests.Session, "request", side_effect=_fake):
+        yield sent
+
+
 @pytest.mark.unit
 class TestMakeRequestRetry:
     def test_connection_error_retried_then_succeeds(self):
         pipeline = RetryApiPipeline()
-        ok = MagicMock(status_code=200)
-        ok.json.return_value = {"data": [{"id": 1}]}
-        with (
-            patch(
-                "dlt_saga.pipelines.api.base.requests.request",
-                side_effect=[requests.ConnectionError("connection reset"), ok],
-            ) as req,
-            patch("dlt_saga.pipelines.api.base.time.sleep"),
-        ):
+        ok = _response(200, {"data": [{"id": 1}]})
+        with _transport(requests.ConnectionError("connection reset"), ok) as (send, _):
             result = pipeline._make_request()
         assert result == {"data": [{"id": 1}]}
-        assert req.call_count == 2  # retried once, then succeeded
+        assert send.call_count == 2  # retried once, then succeeded
 
     def test_connection_error_exhausts_retries(self):
         pipeline = RetryApiPipeline()
-        with (
-            patch(
-                "dlt_saga.pipelines.api.base.requests.request",
-                side_effect=requests.ConnectionError("connection reset"),
-            ) as req,
-            patch("dlt_saga.pipelines.api.base.time.sleep"),
+        with _transport(*[requests.ConnectionError("connection reset")] * 3) as (
+            send,
+            _,
         ):
             with pytest.raises(ValueError, match="connection error"):
                 pipeline._make_request()
-        assert req.call_count == 3  # initial + 2 retries
+        assert send.call_count == 3  # initial + 2 retries
+
+    def test_incomplete_response_retried(self):
+        pipeline = RetryApiPipeline()
+        ok = _response(200, {"data": []})
+        with _transport(ChunkedEncodingError("body cut off"), ok) as (send, _):
+            pipeline._make_request()
+        assert send.call_count == 2
 
     def test_non_transient_request_error_not_retried(self):
         pipeline = RetryApiPipeline()
-        with (
-            patch(
-                "dlt_saga.pipelines.api.base.requests.request",
-                side_effect=requests.exceptions.InvalidURL("bad url"),
-            ) as req,
-            patch("dlt_saga.pipelines.api.base.time.sleep"),
-        ):
+        with _transport(requests.exceptions.InvalidURL("bad url")) as (send, _):
             with pytest.raises(ValueError, match="API request failed"):
                 pipeline._make_request()
-        assert req.call_count == 1  # fail fast, no retry
+        assert send.call_count == 1  # fail fast, no retry
 
     def test_non_retryable_4xx_carries_status_code(self):
         """A 404 raises ApiRequestError with the status code and URL attached,
         so a caller can tell it apart from other failures without message parsing.
         Still a ValueError, so existing handling is unaffected."""
         pipeline = RetryApiPipeline()
-        resp = MagicMock(status_code=404, text="not found")
-        with patch(
-            "dlt_saga.pipelines.api.base.requests.request", return_value=resp
-        ) as req:
+        with _transport(_response(404, content=b"not found")) as (send, _):
             with pytest.raises(ApiRequestError) as exc_info:
                 pipeline._make_request()
         assert isinstance(exc_info.value, ValueError)
         assert exc_info.value.status_code == 404
         assert exc_info.value.url == "https://api.example.com/data"
-        assert req.call_count == 1  # 4xx (non-429) is not retried
+        assert send.call_count == 1  # 4xx (non-429) is not retried
 
     def test_retries_exhausted_5xx_carries_status_code(self):
         pipeline = RetryApiPipeline()
-        resp = MagicMock(status_code=503, reason="Service Unavailable", text="down")
-        with (
-            patch(
-                "dlt_saga.pipelines.api.base.requests.request", return_value=resp
-            ) as req,
-            patch("dlt_saga.pipelines.api.base.time.sleep"),
-        ):
-            with pytest.raises(ApiRequestError) as exc_info:
+        down = _response(503, content=b"down", reason="Service Unavailable")
+        with _transport(*[down] * 3) as (send, _):
+            with pytest.raises(ApiRequestError, match="after 2 retries") as exc_info:
                 pipeline._make_request()
         assert exc_info.value.status_code == 503
-        assert req.call_count == 3  # initial + 2 retries
+        assert send.call_count == 3  # initial + 2 retries
+
+    def test_zero_retries_sends_once(self):
+        pipeline = RetryApiPipeline(max_retries=0)
+        with _transport(_response(503, content=b"down")) as (send, _):
+            with pytest.raises(ApiRequestError, match="with status 503"):
+                pipeline._make_request()
+        assert send.call_count == 1
 
     def test_connection_error_has_no_status_code(self):
         """Non-HTTP failures carry status_code=None — the signal that no HTTP
         status was returned."""
         pipeline = RetryApiPipeline()
-        with (
-            patch(
-                "dlt_saga.pipelines.api.base.requests.request",
-                side_effect=requests.ConnectionError("connection reset"),
-            ),
-            patch("dlt_saga.pipelines.api.base.time.sleep"),
-        ):
+        with _transport(*[requests.ConnectionError("connection reset")] * 3):
             with pytest.raises(ApiRequestError) as exc_info:
                 pipeline._make_request()
         assert exc_info.value.status_code is None
         assert exc_info.value.url == "https://api.example.com/data"
+
+    def test_default_backoff_waits_one_then_two_seconds(self):
+        pipeline = RetryApiPipeline()
+        down = _response(503, content=b"down")
+        with _transport(down, down, _response(200)) as (_, sleep):
+            pipeline._make_request()
+        assert [c.args[0] for c in sleep.call_args_list] == [1, 2]
+
+    def test_retry_after_header_sets_the_wait(self):
+        pipeline = RetryApiPipeline()
+        limited = _response(429, headers={"Retry-After": "7"})
+        with _transport(limited, _response(200)) as (_, sleep):
+            pipeline._make_request()
+        assert [c.args[0] for c in sleep.call_args_list] == [7]
+
+    def test_post_is_retried(self):
+        pipeline = RetryApiPipeline(method="POST", body={"report": "daily"})
+        with _transport(_response(502), _response(200)) as (send, _):
+            pipeline._make_request()
+        assert send.call_count == 2
+        assert send.call_args.args[0].method == "POST"
+
+    def test_transient_status_logged_without_query_string(self, caplog):
+        pipeline = RetryApiPipeline()
+        limited = _response(429, reason="Too Many Requests")
+        limited.url = "https://api.example.com/data?api_key=k3y"
+        with (
+            _transport(limited, _response(200)),
+            caplog.at_level(logging.DEBUG, logger="test"),
+        ):
+            pipeline._make_request()
+        (message,) = [m for m in caplog.messages if "transient error" in m]
+        assert "HTTP 429 (Too Many Requests)" in message
+        assert "k3y" not in message
+
+
+@pytest.mark.unit
+class TestSendRequest:
+    def test_form_post_to_another_host_carries_no_configured_auth(self):
+        pipeline = RetryApiPipeline(auth_type="bearer", auth_token="tok")
+        with _transport(_response(200, {"access_token": "abc"})) as (send, _):
+            response = pipeline._send_request(
+                "POST",
+                "https://auth.example.org/token",
+                data={"grant_type": "client_credentials"},
+            )
+        prepared = send.call_args.args[0]
+        assert prepared.url == "https://auth.example.org/token"
+        assert prepared.body == "grant_type=client_credentials"
+        assert prepared.headers["Content-Type"] == "application/x-www-form-urlencoded"
+        assert "Authorization" not in prepared.headers
+        assert response.json() == {"access_token": "abc"}
+
+    def test_returns_raw_bytes_for_non_json_bodies(self):
+        pipeline = RetryApiPipeline()
+        csv = "name,city\nÅse,Tromsø\n".encode()
+        with _transport(
+            _response(200, content=csv, headers={"Content-Type": "text/csv"})
+        ):
+            response = pipeline._send_request("GET", "https://api.example.com/export")
+        assert response.content.decode("utf-8") == "name,city\nÅse,Tromsø\n"
+
+    def test_error_status_raises_api_request_error(self):
+        pipeline = RetryApiPipeline()
+        with _transport(_response(401, content=b"unauthorized")):
+            with pytest.raises(ApiRequestError) as exc_info:
+                pipeline._send_request("GET", "https://api.example.com/report")
+        assert exc_info.value.status_code == 401
+        assert exc_info.value.url == "https://api.example.com/report"
+
+    def test_session_reused_across_requests(self):
+        pipeline = RetryApiPipeline()
+        with _transport(_response(200), _response(200)):
+            pipeline._send_request("GET", "https://api.example.com/a")
+            first = pipeline._http_session()
+            pipeline._send_request("GET", "https://api.example.com/b")
+        assert pipeline._http_session() is first
 
 
 @pytest.mark.unit
@@ -1024,43 +1129,25 @@ class TestRequestLogging:
             if r.getMessage().startswith("Making API request")
         ]
 
-    def test_query_params_logged_per_attempt(self, caplog):
+    def test_query_params_logged(self, caplog):
         pipeline = RetryApiPipeline(query_params={"offset": 200, "limit": 100})
-        ok = MagicMock(status_code=200)
-        ok.json.return_value = {"data": []}
-        transient = MagicMock(status_code=503, reason="Service Unavailable")
         with (
-            patch(
-                "dlt_saga.pipelines.api.base.requests.request",
-                side_effect=[transient, ok],
-            ),
-            patch("dlt_saga.pipelines.api.base.time.sleep"),
+            _transport(_response(503), _response(200)),
             caplog.at_level(logging.DEBUG, logger="test"),
         ):
             pipeline._make_request()
-        messages = self._request_log_messages(caplog)
-        assert len(messages) == 2
-        assert all("params={'offset': 200, 'limit': 100}" in m for m in messages)
+        (message,) = self._request_log_messages(caplog)
+        assert "params={'offset': 200, 'limit': 100}" in message
 
     def test_override_params_logged(self, caplog):
         pipeline = RetryApiPipeline(query_params={"limit": 100})
-        ok = MagicMock(status_code=200)
-        ok.json.return_value = {"data": []}
-        with (
-            patch("dlt_saga.pipelines.api.base.requests.request", return_value=ok),
-            caplog.at_level(logging.DEBUG, logger="test"),
-        ):
+        with _sent_requests(), caplog.at_level(logging.DEBUG, logger="test"):
             pipeline._make_request(query_params={"cursor": "abc"})
         assert "params={'cursor': 'abc'}" in self._request_log_messages(caplog)[0]
 
     def test_no_params_logged_as_empty(self, caplog):
         pipeline = RetryApiPipeline()
-        ok = MagicMock(status_code=200)
-        ok.json.return_value = {"data": []}
-        with (
-            patch("dlt_saga.pipelines.api.base.requests.request", return_value=ok),
-            caplog.at_level(logging.DEBUG, logger="test"),
-        ):
+        with _sent_requests(), caplog.at_level(logging.DEBUG, logger="test"):
             pipeline._make_request()
         assert "params={}" in self._request_log_messages(caplog)[0]
 
@@ -1071,12 +1158,7 @@ class TestRequestLogging:
         secret = "k3y+with/base64="
         redaction.register_secret(secret)
         pipeline = RetryApiPipeline()
-        ok = MagicMock(status_code=200)
-        ok.json.return_value = {"data": []}
-        with (
-            patch("dlt_saga.pipelines.api.base.requests.request", return_value=ok),
-            caplog.at_level(logging.DEBUG, logger="test"),
-        ):
+        with _sent_requests(), caplog.at_level(logging.DEBUG, logger="test"):
             pipeline._make_request(query_params={"api_key": secret})
         (record,) = [
             r for r in caplog.records if r.getMessage().startswith("Making API request")
@@ -1091,24 +1173,16 @@ class TestRequestLogging:
 class TestRequestBody:
     def test_body_sent_as_json_payload(self):
         pipeline = RetryApiPipeline(method="POST", body={"query": "select 1"})
-        ok = MagicMock(status_code=200)
-        ok.json.return_value = {"data": []}
-        with patch(
-            "dlt_saga.pipelines.api.base.requests.request", return_value=ok
-        ) as req:
+        with _sent_requests() as sent:
             pipeline._make_request()
-        assert req.call_args.kwargs["json"] == {"query": "select 1"}
-        assert req.call_args.kwargs["method"] == "POST"
+        assert sent[0]["json"] == {"query": "select 1"}
+        assert sent[0]["method"] == "POST"
 
     def test_no_body_omits_json_kwarg(self):
         pipeline = RetryApiPipeline()
-        ok = MagicMock(status_code=200)
-        ok.json.return_value = {"data": []}
-        with patch(
-            "dlt_saga.pipelines.api.base.requests.request", return_value=ok
-        ) as req:
+        with _sent_requests() as sent:
             pipeline._make_request()
-        assert "json" not in req.call_args.kwargs
+        assert "json" not in sent[0]
 
 
 @pytest.mark.unit
@@ -1220,13 +1294,9 @@ class TestQueryAuthRequest:
         redaction._reset_for_testing()
 
     def _request(self, pipeline, **kwargs):
-        ok = MagicMock(status_code=200)
-        ok.json.return_value = {"data": []}
-        with patch(
-            "dlt_saga.pipelines.api.base.requests.request", return_value=ok
-        ) as req:
+        with _sent_requests() as sent:
             pipeline._make_request(**kwargs)
-        return req.call_args.kwargs
+        return sent[0]
 
     def test_key_sent_as_query_param_not_header(self):
         pipeline = RetryApiPipeline(**_query_auth_config(query_params={"limit": 10}))

@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
 import dlt
 import requests
+from dlt.sources.helpers.requests import Client
+from requests.exceptions import ChunkedEncodingError
 
 from dlt_saga.pipelines.api.config import ApiConfig
 from dlt_saga.pipelines.base_pipeline import BasePipeline
@@ -29,9 +31,17 @@ from dlt_saga.pipelines.watermark import read_destination_watermark
 
 logger = logging.getLogger(__name__)
 
+# Rate limiting and server-side errors.
+_RETRY_STATUSES = frozenset({429, *range(500, 600)})
+# Timeout covers connect and read timeouts; ConnectionError covers DNS failures
+# and reset/refused connections; ChunkedEncodingError a body cut off mid-transfer.
+_RETRY_EXCEPTIONS = (requests.Timeout, requests.ConnectionError, ChunkedEncodingError)
+# Upper bound on one wait, including a server's Retry-After.
+_MAX_RETRY_DELAY_SECONDS = 300
+
 
 class ApiRequestError(ValueError):
-    """Raised when an API request fails in :meth:`BaseApiPipeline._make_request`.
+    """Raised when an API request fails in :meth:`BaseApiPipeline._send_request`.
 
     Subclasses ``ValueError`` so existing ``except ValueError`` handling still
     catches it, while carrying the HTTP ``status_code`` (and request ``url``) so a
@@ -223,17 +233,16 @@ class BaseApiPipeline(BasePipeline):
 
         return current
 
-    def _make_request(  # noqa: C901
+    def _make_request(
         self,
         url: Optional[str] = None,
         query_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Make HTTP request to API with retry logic for transient errors.
+        """Make the configured API request and return the parsed JSON response.
 
-        Automatically retries transient errors (429, 5xx) with exponential backoff.
-        The retry behavior is controlled by config parameters:
-        - max_retries: Number of retry attempts (default: 3)
-        - retry_backoff_base: Base for exponential backoff (default: 2, gives 1s, 2s, 4s)
+        Sends ``api_config.method`` / ``api_config.body`` with the configured
+        headers and authentication, through :meth:`_send_request` (which retries
+        transient failures).
 
         Args:
             url: Override URL (used by next_url pagination). Defaults to
@@ -255,16 +264,10 @@ class BaseApiPipeline(BasePipeline):
         if query_params is None:
             query_params = self.api_config.query_params
 
-        # Build headers
         headers = {"Content-Type": "application/json"}
-
-        # Add custom headers if specified
         if self.api_config.headers:
             headers.update(self.api_config.headers)
-
-        # Add authentication headers
-        auth_headers = self._get_auth_headers()
-        headers.update(auth_headers)
+        headers.update(self._get_auth_headers())
 
         # Add authentication query parameters, unless the URL already carries
         # them (a next_url link that echoes the key back).
@@ -274,107 +277,141 @@ class BaseApiPipeline(BasePipeline):
             missing = {k: v for k, v in auth_params.items() if k not in in_url}
             query_params = {**(query_params or {}), **missing}
 
-        # Retry loop with exponential backoff
-        max_retries = self.api_config.max_retries
-        for attempt in range(max_retries + 1):
-            # Params are logged as the unencoded dict, not the prepared URL:
-            # the log redaction filter matches resolved secrets verbatim, and
-            # URL-encoding (e.g. '+' -> '%2B') would let one slip through.
-            self.logger.debug(
-                f"Making API request: {self.api_config.method} {url} "
-                f"params={query_params or {}} "
-                f"(attempt {attempt + 1}/{max_retries + 1})"
+        # Params are logged as the unencoded dict, not the prepared URL: the log
+        # redaction filter matches resolved secrets verbatim, and URL-encoding
+        # (e.g. '+' -> '%2B') would let one slip through.
+        self.logger.debug(
+            f"Making API request: {self.api_config.method} {url} "
+            f"params={query_params or {}}"
+        )
+
+        request_kwargs: Dict[str, Any] = {"params": query_params, "headers": headers}
+        if self.api_config.body is not None:
+            request_kwargs["json"] = self.api_config.body
+
+        response = self._send_request(self.api_config.method, url, **request_kwargs)
+        return response.json()
+
+    def _send_request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        """Send one HTTP request, retrying transient failures.
+
+        The transport behind :meth:`_make_request`, for adapters whose requests
+        don't fit the single configured call: a different method or body per
+        call, form-encoded data, another host (e.g. an OAuth2 token endpoint), or
+        a non-JSON response. ``kwargs`` go to ``requests.Session.request``
+        unchanged (``params``, ``json``, ``data``, ``headers``, ``stream``, ...).
+
+        Nothing from the config is added: authentication is attached explicitly
+        per call (``headers=self._get_auth_headers()``,
+        ``params=self._get_auth_params()``), so credentials only reach the hosts
+        an adapter sends them to.
+
+        429, 5xx, timeouts, connection errors and incomplete responses are
+        retried up to ``max_retries`` times, for every HTTP method, honouring a
+        ``Retry-After`` header. A request that changes state on the server is
+        therefore repeated if a transient failure hides whether it succeeded.
+
+        Returns:
+            The ``requests.Response`` (2xx). Decode non-JSON bodies from
+            ``response.content`` explicitly — ``response.text`` falls back to
+            ISO-8859-1 when the server sends no charset.
+
+        Raises:
+            ApiRequestError: On a non-2xx response or a transport failure, after
+                any retries.
+        """
+        try:
+            response = self._http_session().request(method, url, **kwargs)
+        except requests.RequestException as e:
+            raise self._transport_error(e, url) from e
+
+        if 200 <= response.status_code <= 299:
+            return response
+
+        status = response.status_code
+        if status in _RETRY_STATUSES and self.api_config.max_retries:
+            message = (
+                f"API request failed after {self.api_config.max_retries} retries "
+                f"(HTTP {status}): {response.text}"
             )
+        else:
+            message = f"API request failed with status {status}: {response.text}"
+        raise ApiRequestError(message, status_code=status, url=url)
 
-            request_kwargs: Dict[str, Any] = {
-                "method": self.api_config.method,
-                "url": url,
-                "params": query_params,
-                "headers": headers,
-                "timeout": self.api_config.timeout,
-            }
-            # Send a JSON body when configured (POST/PUT/PATCH). requests
-            # serializes it and the Content-Type: application/json header is
-            # already set above.
-            if self.api_config.body is not None:
-                request_kwargs["json"] = self.api_config.body
+    def _transport_error(
+        self, error: requests.RequestException, url: str
+    ) -> ApiRequestError:
+        """Translate a ``requests`` exception into an ``ApiRequestError``."""
+        retries = self.api_config.max_retries
+        if isinstance(error, requests.Timeout):
+            message = (
+                f"API request timed out after {retries} retries "
+                f"(timeout: {self.api_config.timeout}s): {error}"
+            )
+        elif isinstance(error, requests.ConnectionError):
+            message = f"API request failed after {retries} retries (connection error): {error}"
+        elif isinstance(error, ChunkedEncodingError):
+            message = f"API request failed after {retries} retries (incomplete response): {error}"
+        else:
+            # Invalid URL, too many redirects, etc. — not retried.
+            message = f"API request failed: {error}"
+        return ApiRequestError(message, url=url)
 
-            try:
-                response = requests.request(**request_kwargs)
+    def _http_session(self) -> requests.Session:
+        """Return this pipeline's retrying session, built on first use.
 
-                # Success case
-                if 200 <= response.status_code <= 299:
-                    if attempt > 0:
-                        self.logger.debug(f"Request succeeded after {attempt} retries")
-                    return response.json()
+        dlt's ``Client`` keeps one session per thread, so connections are
+        reused across a run's requests.
+        """
+        client = getattr(self, "_http_client", None)
+        if client is None:
+            cfg = self.api_config
+            client = Client(
+                request_timeout=cfg.timeout,
+                raise_for_status=False,
+                # The retry decision is made by _is_transient (status_codes and
+                # exceptions left empty) so every retried failure is logged.
+                status_codes=(),
+                exceptions=(),
+                retry_condition=self._is_transient,
+                request_max_attempts=cfg.max_retries + 1,
+                # dlt waits factor * 2^n seconds; base/2 keeps the default of 2
+                # at 1s, 2s, 4s.
+                request_backoff_factor=cfg.retry_backoff_base / 2,
+                request_max_retry_delay=_MAX_RETRY_DELAY_SECONDS,
+                respect_retry_after_header=True,
+            )
+            self._http_client = client
+        return client.session
 
-                # Transient errors - retry with exponential backoff
-                # 429: rate limited; 5xx: server-side errors (transient blips, overload, etc.)
-                if response.status_code == 429 or 500 <= response.status_code < 600:
-                    if attempt < max_retries:
-                        wait_seconds = self.api_config.retry_backoff_base**attempt
-                        self.logger.debug(
-                            f"HTTP {response.status_code} ({response.reason}): Transient error. "
-                            f"Retrying in {wait_seconds}s (attempt {attempt + 1}/{max_retries})..."
-                        )
-                        time.sleep(wait_seconds)
-                        continue
-                    else:
-                        # Max retries exceeded
-                        raise ApiRequestError(
-                            f"API request failed after {max_retries} retries "
-                            f"(HTTP {response.status_code}): {response.text}",
-                            status_code=response.status_code,
-                            url=url,
-                        )
-
-                # Non-retryable error (4xx except 429)
-                raise ApiRequestError(
-                    f"API request failed with status {response.status_code}: {response.text}",
-                    status_code=response.status_code,
-                    url=url,
+    def _is_transient(
+        self,
+        response: Optional[requests.Response],
+        exception: Optional[BaseException],
+    ) -> bool:
+        """Retry predicate: log and return True for a retryable failure."""
+        if exception is not None:
+            if not isinstance(exception, _RETRY_EXCEPTIONS):
+                return False
+            if isinstance(exception, requests.Timeout):
+                self.logger.info(
+                    f"Request timeout after {self.api_config.timeout}s: {exception}"
                 )
+            else:
+                self.logger.warning(f"Transient request failure: {exception}")
+            return True
 
-            except requests.Timeout as e:
-                # Timeout - always retry if we have attempts left
-                if attempt < max_retries:
-                    wait_seconds = self.api_config.retry_backoff_base**attempt
-                    self.logger.info(
-                        f"Request timeout after {self.api_config.timeout}s: {e}. "
-                        f"Retrying in {wait_seconds}s (attempt {attempt + 1}/{max_retries})..."
-                    )
-                    time.sleep(wait_seconds)
-                    continue
-                raise ApiRequestError(
-                    f"API request timed out after {max_retries} retries "
-                    f"(timeout: {self.api_config.timeout}s): {e}",
-                    url=url,
-                )
-            except requests.ConnectionError as e:
-                # Transient network error (DNS failure, connection reset/refused).
-                # Retryable — retryable HTTP statuses (429/5xx) are handled above
-                # by status code, so this branch is genuinely a connection-level
-                # failure, not a status carried in the exception string.
-                if attempt < max_retries:
-                    wait_seconds = self.api_config.retry_backoff_base**attempt
-                    self.logger.warning(
-                        f"Connection error: {e}. "
-                        f"Retrying in {wait_seconds}s (attempt {attempt + 1}/{max_retries})..."
-                    )
-                    time.sleep(wait_seconds)
-                    continue
-                raise ApiRequestError(
-                    f"API request failed after {max_retries} retries "
-                    f"(connection error): {e}",
-                    url=url,
-                )
-            except requests.RequestException as e:
-                # Other request errors (invalid URL, too many redirects, etc.) are
-                # not transient — fail fast.
-                raise ApiRequestError(f"API request failed: {e}", url=url)
-
-        # Should never reach here
-        raise ValueError("Unexpected: _make_request loop completed without return")
+        if response is None or response.status_code not in _RETRY_STATUSES:
+            return False
+        request = response.request
+        # Query string dropped: it may carry a credential.
+        url = urlsplit(response.url or "")._replace(query="").geturl()
+        method = request.method if request is not None else ""
+        self.logger.debug(
+            f"HTTP {response.status_code} ({response.reason}) from {method} {url}: "
+            "transient error"
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Pagination
