@@ -250,8 +250,42 @@ slip degrades to `***` rather than a leaked secret. Redaction only covers
 provider-resolved values, so keep secrets in `SecretStr` / secret URIs rather
 than plain config.
 
+**Requests beyond the configured call.** `_make_request` sends the one request the
+config describes (`method`, `body`, `query_params`) and parses JSON. APIs that need
+more per run — create a report then poll and download it, page through a POST body,
+fetch an OAuth2 token from another host, or return CSV — use `_send_request(method,
+url, **kwargs)`, the same transport without the config defaults. `kwargs` go to
+`requests` unchanged (`params`, `json`, `data`, `headers`, `stream`, ...), and it
+returns the `requests.Response`:
+
+```python
+token = self._send_request(
+    "POST", token_url, data={"grant_type": "client_credentials", ...}
+).json()["access_token"]
+
+report_id = self._send_request(
+    "POST", create_url, json=report_spec, headers=self._get_auth_headers()
+).json()["id"]
+
+csv_text = self._send_request(
+    "GET", download_url, headers=self._get_auth_headers()
+).content.decode("utf-8")
+```
+
+Authentication is never added implicitly: pass `headers=self._get_auth_headers()`
+(and `params=self._get_auth_params()` for a query-string key) on the calls that
+should carry it, so credentials only reach the hosts you send them to. Decode
+non-JSON bodies from `response.content` explicitly — `response.text` falls back
+to ISO-8859-1 when the server sends no charset.
+
+Both methods retry HTTP 429 and 5xx, timeouts, connection errors and incomplete
+responses up to `max_retries` times, for every HTTP method, honouring a server's
+`Retry-After`. A POST that creates something on the server is repeated when a
+transient failure hides whether it succeeded, so make such calls safe to repeat.
+
 **Branching on request failures.** When a request fails after all retries,
-`_make_request` raises `ApiRequestError` (importable from `dlt_saga.pipelines.api`).
+`_make_request` / `_send_request` raise `ApiRequestError` (importable from
+`dlt_saga.pipelines.api`).
 It subclasses `ValueError` — so any existing `except ValueError` still catches it —
 and carries the HTTP `status_code` and request `url`, letting an adapter tell one
 failure from another without parsing the message string. The common case is an

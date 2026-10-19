@@ -385,6 +385,12 @@ class {class_name}Pipeline(BaseApiPipeline):
     #   _make_request(self) / _extract_data_from_response(self, data)
     #       Finer control over the HTTP call or response unwrapping.
     #
+    #   self._send_request(method, url, **requests_kwargs) -> requests.Response
+    #       Not an override: call it from fetch_data when one configured request
+    #       isn't enough (per-call method/body, form data, another host, CSV).
+    #       Retries and ApiRequestError included; pass
+    #       headers=self._get_auth_headers() yourself where auth is needed.
+    #
     # Do NOT override extract_data() here: BaseApiPipeline already implements it
     # (pagination + dlt.resource + description). Overriding it means
     # reimplementing pagination yourself.
