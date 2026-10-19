@@ -7,6 +7,8 @@ import pytest
 
 from dlt_saga.utility.cli import logging as cli_logging
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def _isolate_logging(monkeypatch, tmp_path):
@@ -102,6 +104,23 @@ class TestFileHandlerLifecycle:
         cli_logging.set_console_verbose(False)
         assert cli_logging._console_handler.level == logging.INFO
 
+    def test_file_only_record_skips_the_console(self, monkeypatch, capsys):
+        _force_enable(monkeypatch)
+        cli_logging.configure_cli_logging()
+
+        logger = logging.getLogger("dlt_saga.test.file_only")
+        logger.error("file-only-marker", extra=cli_logging.FILE_ONLY)
+        logger.error("both-marker")
+        for h in logging.getLogger().handlers:
+            h.flush()
+
+        console = capsys.readouterr().err
+        assert "both-marker" in console
+        assert "file-only-marker" not in console
+        contents = cli_logging.get_log_file_path().read_text(encoding="utf-8")
+        assert "file-only-marker" in contents
+        assert "both-marker" in contents
+
 
 class TestFileLoggingGating:
     def test_disabled_in_cloud_run(self, monkeypatch):
@@ -154,6 +173,42 @@ class TestRetention:
         # The 5 newest (highest mtime) should survive.
         assert {p.name for p in remaining} == {
             f"saga-old-{i:02d}.log" for i in range(10, 15)
+        }
+
+    def test_current_file_survives_an_mtime_tie(self, tmp_path):
+        """Coarse filesystem timestamps can tie this run's file with files
+        written just before it; it must survive regardless of listing order."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        paths = [log_dir / f"saga-{name}.log" for name in ("a", "b", "c", "z")]
+        for path in paths:
+            path.write_text("x")
+            os.utime(path, (1_700_000_000, 1_700_000_000))
+
+        for current in paths:
+            cli_logging._cleanup_old_log_files(log_dir, retention=1, current=current)
+            assert list(log_dir.glob("saga-*.log")) == [current]
+            for path in paths:
+                path.write_text("x")
+                os.utime(path, (1_700_000_000, 1_700_000_000))
+
+    def test_retention_counts_the_current_file(self, tmp_path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        for i in range(5):
+            path = log_dir / f"saga-old-{i}.log"
+            path.write_text("stale")
+            os.utime(path, (1_700_000_000 + i, 1_700_000_000 + i))
+        current = log_dir / "saga-current.log"
+        current.write_text("x")
+        os.utime(current, (1_600_000_000, 1_600_000_000))  # oldest mtime
+
+        cli_logging._cleanup_old_log_files(log_dir, retention=3, current=current)
+
+        assert {p.name for p in log_dir.glob("saga-*.log")} == {
+            "saga-current.log",
+            "saga-old-4.log",
+            "saga-old-3.log",
         }
 
     def test_retention_via_env_var(self, monkeypatch, tmp_path):

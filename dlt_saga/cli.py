@@ -32,6 +32,7 @@ from dlt_saga.utility.cli.common import (
 )
 from dlt_saga.utility.cli.context import get_execution_context
 from dlt_saga.utility.cli.logging import (
+    FILE_ONLY,
     configure_cli_logging,
     ensure_utf8_streams,
     reenable_saga_loggers,
@@ -231,17 +232,23 @@ def _exit_if_failures(result: "SessionResult", command_name: str) -> None:
 
     Also runs the broader saga-logger rescue here as a defense in depth
     so subsequent shutdown logging isn't silently dropped.
+
+    Each failure is also logged ``FILE_ONLY``: many are deliberately never
+    logged as they happen (no traceback adds anything to their message), so
+    without this the log file records a failed run but not why it failed.
     """
     if not result.has_failures:
         return
     reenable_saga_loggers()
-    typer.echo(
+    headline = (
         f"{command_name} failed: {result.failed}/{len(result.pipeline_results)} "
-        "pipeline(s) failed",
-        err=True,
+        "pipeline(s) failed"
     )
+    typer.echo(headline, err=True)
+    logger.error(headline, extra=FILE_ONLY)
     for failure in result.failures:
         error = failure.error or "(no error message)"
+        logger.error("%s: %s", failure.pipeline_name, error, extra=FILE_ONLY)
         # Put each failure's (possibly multi-line) error in its own block, indented
         # under the pipeline name and preceded by a blank line, so several failures
         # stay visually distinct instead of running together — and each keeps its

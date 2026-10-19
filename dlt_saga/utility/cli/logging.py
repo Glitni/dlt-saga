@@ -99,6 +99,17 @@ _DEFAULT_RETENTION = 10
 _log_file_path: Optional[Path] = None
 _console_handler: Optional[logging.Handler] = None
 
+# ``extra=FILE_ONLY`` marks a record for the log file only, for text that
+# already reaches the terminal another way (e.g. the stderr failure summary).
+FILE_ONLY = {"file_only": True}
+
+
+class _FileOnlyFilter(logging.Filter):
+    """Keep records marked with :data:`FILE_ONLY` off the console."""
+
+    def filter(self, record):
+        return not getattr(record, "file_only", False)
+
 
 def get_log_file_path() -> Optional[Path]:
     """Return the active debug-log file path, or None if file logging is disabled."""
@@ -144,18 +155,28 @@ def _resolve_retention() -> int:
     return max(value, 1)
 
 
-def _cleanup_old_log_files(log_dir: Path, retention: int) -> None:
-    """Keep only the ``retention`` most recent saga-*.log files."""
+def _cleanup_old_log_files(
+    log_dir: Path, retention: int, current: Optional[Path] = None
+) -> None:
+    """Keep only the ``retention`` most recent saga-*.log files.
+
+    ``current`` (this run's file) is always kept and counts toward
+    ``retention``. It can't be found by mtime alone: filesystem timestamps can
+    be coarse enough (a few ms on Linux) to tie it with files written just
+    before, and a tie would leave its survival to directory order.
+    """
     try:
         existing = sorted(
-            log_dir.glob("saga-*.log"),
+            (p for p in log_dir.glob("saga-*.log") if p != current),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
     except OSError:
         return
+    if current is not None:
+        retention -= 1
 
-    for stale in existing[retention:]:
+    for stale in existing[max(retention, 0) :]:
         try:
             stale.unlink()
         except OSError:
@@ -248,6 +269,7 @@ def configure_cli_logging() -> None:
     for f in noise_filters:
         console.addFilter(f)
     console.addFilter(redaction_filter)
+    console.addFilter(_FileOnlyFilter())
 
     root.addHandler(console)
     _console_handler = console
@@ -261,7 +283,7 @@ def configure_cli_logging() -> None:
                 file_handler.addFilter(f)
             file_handler.addFilter(redaction_filter)
             root.addHandler(file_handler)
-            _cleanup_old_log_files(log_dir, _resolve_retention())
+            _cleanup_old_log_files(log_dir, _resolve_retention(), _log_file_path)
 
     # Root must allow DEBUG records through when a file handler is attached;
     # the console handler stays at INFO so terminal output remains narrow.
