@@ -1,3 +1,9 @@
+## 0.41.1 — 2026-10-19
+
+### Fixed
+- Match hardcoded-window markers in code and recognize date-window helpers (#560)
+- Scope adapter examples to each adapter's own schema (#558)
+
 ## 0.41.0 — 2026-10-19
 
 ### Added
