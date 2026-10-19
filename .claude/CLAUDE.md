@@ -478,6 +478,7 @@ historize:
 ## Security
 - Never include secrets in code or examples.
 - Use placeholders like `<API_KEY>` in examples; in configs reference secrets via a secret URI (`env_secret::API_KEY`, `googlesecretmanager::…`, `azurekeyvault::…`) — not `{{ env_var() }}`, which renders at load time and would bake the value into the execution plan
+- Redaction is a log-handler filter, so text that leaves the process any other way must call `redact()` itself — before truncating, or a secret cut in half no longer matches. Failure messages do so at `PipelineResult.error`, `_format_run_error`, the plans-table writes (`ExecutionPlanManager`) and the Slack notifier; a new outbound channel (stderr echo, warehouse column, notifier) needs the same
 - Identity impersonation: Always use the `AuthProvider.impersonate()` context manager
 - Credentials: Load from environment, profiles, or cloud metadata service — never hardcode
 

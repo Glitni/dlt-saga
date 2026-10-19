@@ -31,6 +31,8 @@ the warning names Slack rather than surfacing as a generic hook failure.
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
+from dlt_saga.utility.secrets.redaction import redact
+
 if TYPE_CHECKING:
     from dlt_saga.hooks.registry import HookContext, HookRegistry, RunContext
     from dlt_saga.notify import SweepContext
@@ -492,7 +494,13 @@ class SlackNotifier:
 
     def _build_pipeline_payload(self, ctx: "HookContext") -> Dict[str, Any]:
         """Build the Slack payload for a single failed pipeline."""
-        error = _truncate(str(ctx.error), _MAX_ERROR_CHARS) if ctx.error else "failed"
+        # ctx.error is the raw exception: mask secrets before truncating, or a
+        # secret cut in half no longer matches and its prefix is posted.
+        error = (
+            _truncate(redact(str(ctx.error)), _MAX_ERROR_CHARS)
+            if ctx.error
+            else "failed"
+        )
         mentions = self._pipeline_mentions(getattr(ctx, "config", None))
         line = f":x: `{ctx.pipeline_name}` ({ctx.command}) — {error}"
         if mentions:

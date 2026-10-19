@@ -673,19 +673,23 @@ A hook is a plain callable that accepts a `HookContext`:
 ```python
 # mypackage/hooks.py
 from dlt_saga.hooks import HookContext
+from dlt_saga.utility.secrets import redact
 
 
 def on_failure(ctx: HookContext) -> None:
     """Send a Slack alert when any pipeline fails."""
     send_slack(
         channel="#data-alerts",
-        text=f"Pipeline `{ctx.pipeline_name}` failed ({ctx.command}): {ctx.error}",
+        text=f"Pipeline `{ctx.pipeline_name}` failed ({ctx.command}): "
+        f"{redact(str(ctx.error))}",
     )
 
 
 # Limit to specific events (default: all events)
 on_failure.saga_hook_events = ["on_pipeline_error"]
 ```
+
+`ctx.error` is the raw exception, and its message can contain a resolved secret, such as a request URL carrying an API key. Pass the text through `redact()` before sending it anywhere, and redact before truncating, or a secret cut in half no longer matches. Saga's own outputs (logs, the end-of-run summary, run records, the built-in Slack notifier) are already redacted, and so is `RunContext`'s per-pipeline `error` text.
 
 `HookContext` fields:
 

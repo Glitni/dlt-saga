@@ -28,6 +28,7 @@ from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.collisions import TargetCollisionError, check_target_collisions
 from dlt_saga.utility.env import get_env
 from dlt_saga.utility.naming import get_environment
+from dlt_saga.utility.secrets.redaction import redact
 from dlt_saga.utility.task_groups import (
     TaskConcurrencyError,
     check_task_concurrency,
@@ -144,7 +145,8 @@ def _format_run_error(exc: Exception) -> str:
     Includes the exception type so the cause is identifiable (e.g.
     ``NotFound: 404 Not found: Table ...``) rather than a bare message.
     """
-    message = f"{type(exc).__name__}: {exc}".strip()
+    # Secrets masked before truncating: a secret cut in half no longer matches.
+    message = redact(f"{type(exc).__name__}: {exc}".strip())
     if len(message) > _MAX_ERROR_MESSAGE_LEN:
         message = message[: _MAX_ERROR_MESSAGE_LEN - 1] + "…"
     return message
