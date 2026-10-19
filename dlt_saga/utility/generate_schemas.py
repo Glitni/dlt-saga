@@ -782,14 +782,28 @@ def _patch_pipelines_section(
     )
 
 
+def _adapters_by_schema_file(adapters: List[str]) -> Dict[str, List[str]]:
+    """Group *adapters* by the schema file their configs validate against."""
+    grouped: Dict[str, List[str]] = {}
+    for adapter in adapters:
+        filename = schema_filename_for_adapter(adapter)
+        if filename is not None:
+            grouped.setdefault(filename, []).append(adapter)
+    return {filename: sorted(values) for filename, values in grouped.items()}
+
+
 def _inject_adapter_examples(
-    schemas: Dict[str, Dict[str, Any]], examples: List[str]
+    schemas: Dict[str, Dict[str, Any]], adapters: List[str]
 ) -> None:
-    """Inject discovered adapter values as examples into all schemas with an 'adapter' property."""
-    if not examples:
-        return
-    for schema in schemas.values():
-        props = schema.get("properties", {})
+    """Set each schema's ``adapter`` examples to the adapters that resolve to it.
+
+    A config file is linked to the schema of its own adapter, so only those
+    adapter values are useful suggestions there. Scoping them per schema also
+    keeps the output stable: adding an adapter touches its own schema (and the
+    project schema, which lists every adapter), not every schema file.
+    """
+    for filename, examples in _adapters_by_schema_file(adapters).items():
+        props = schemas.get(filename, {}).get("properties", {})
         if "adapter" in props:
             props["adapter"]["examples"] = examples
 

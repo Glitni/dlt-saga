@@ -409,6 +409,21 @@ class TestGenerateSchemasOutput:
         assert "saga_project_config.json" in file_names
         assert "packages_config.json" in file_names
 
+    def test_adapter_examples_scoped_to_own_schema(self, tmp_path):
+        """A new adapter must not rewrite every other adapter's schema file."""
+        from dlt_saga.utility.generate_schemas import generate_schemas
+
+        generate_schemas(tmp_path)
+        api = json.loads((tmp_path / "api_config.json").read_text(encoding="utf-8"))
+        assert api["properties"]["adapter"]["examples"] == ["dlt_saga.api"]
+
+        project = json.loads(
+            (tmp_path / "saga_project_config.json").read_text(encoding="utf-8")
+        )
+        project_examples = json.dumps(project)
+        assert "dlt_saga.api.date_window" in project_examples
+        assert "dlt_saga.sharepoint" in project_examples
+
     def test_partition_expiration_days_in_pipeline_schemas(self, tmp_path):
         """Pipeline-level override surfaces on every per-pipeline schema (mirrors
         partition_column / cluster_columns, which also live on TargetConfig)."""
