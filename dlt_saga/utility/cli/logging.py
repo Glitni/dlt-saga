@@ -99,6 +99,17 @@ _DEFAULT_RETENTION = 10
 _log_file_path: Optional[Path] = None
 _console_handler: Optional[logging.Handler] = None
 
+# ``extra=FILE_ONLY`` marks a record for the log file only, for text that
+# already reaches the terminal another way (e.g. the stderr failure summary).
+FILE_ONLY = {"file_only": True}
+
+
+class _FileOnlyFilter(logging.Filter):
+    """Keep records marked with :data:`FILE_ONLY` off the console."""
+
+    def filter(self, record):
+        return not getattr(record, "file_only", False)
+
 
 def get_log_file_path() -> Optional[Path]:
     """Return the active debug-log file path, or None if file logging is disabled."""
@@ -248,6 +259,7 @@ def configure_cli_logging() -> None:
     for f in noise_filters:
         console.addFilter(f)
     console.addFilter(redaction_filter)
+    console.addFilter(_FileOnlyFilter())
 
     root.addHandler(console)
     _console_handler = console

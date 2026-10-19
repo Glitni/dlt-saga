@@ -7,6 +7,8 @@ import pytest
 
 from dlt_saga.utility.cli import logging as cli_logging
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def _isolate_logging(monkeypatch, tmp_path):
@@ -101,6 +103,23 @@ class TestFileHandlerLifecycle:
 
         cli_logging.set_console_verbose(False)
         assert cli_logging._console_handler.level == logging.INFO
+
+    def test_file_only_record_skips_the_console(self, monkeypatch, capsys):
+        _force_enable(monkeypatch)
+        cli_logging.configure_cli_logging()
+
+        logger = logging.getLogger("dlt_saga.test.file_only")
+        logger.error("file-only-marker", extra=cli_logging.FILE_ONLY)
+        logger.error("both-marker")
+        for h in logging.getLogger().handlers:
+            h.flush()
+
+        console = capsys.readouterr().err
+        assert "both-marker" in console
+        assert "file-only-marker" not in console
+        contents = cli_logging.get_log_file_path().read_text(encoding="utf-8")
+        assert "file-only-marker" in contents
+        assert "both-marker" in contents
 
 
 class TestFileLoggingGating:

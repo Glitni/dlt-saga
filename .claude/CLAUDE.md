@@ -474,6 +474,7 @@ historize:
   - ERROR: Operation failures, configuration errors
 - Include context in log messages: identifiers, counts, timing
 - Format timing as: `{duration:.1f}s` (one decimal place)
+- `extra=FILE_ONLY` (`utility/cli/logging.py`) sends a record to the log file but not the console — for text the terminal already shows another way. The end-of-run failure summary uses it: it's echoed to stderr (immune to hosts silencing loggers) and logged `FILE_ONLY`, so the log file says why a run failed even for failures deliberately not logged inline
 
 ## Security
 - Never include secrets in code or examples.

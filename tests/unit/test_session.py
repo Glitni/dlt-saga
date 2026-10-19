@@ -1047,6 +1047,34 @@ class TestExitIfFailures:
         )
         assert "  p2:\n      connection reset" in err
 
+    def test_each_failure_logged_for_the_file_only(self, caplog):
+        """Failures without a traceback are never logged as they happen, so the
+        summary is what puts their message in the log file — kept off the
+        console, which already shows it on stderr."""
+        import typer
+
+        import dlt_saga.cli as cli
+
+        result = SessionResult(
+            pipeline_results=[
+                PipelineResult(
+                    pipeline_name="p1", success=False, error="status 404: not found"
+                ),
+            ]
+        )
+        with (
+            caplog.at_level(logging.ERROR, logger="dlt_saga.cli"),
+            pytest.raises(typer.Exit),
+        ):
+            cli._exit_if_failures(result, "Ingest")
+
+        records = [r for r in caplog.records if r.name == "dlt_saga.cli"]
+        assert [r.getMessage() for r in records] == [
+            "Ingest failed: 1/1 pipeline(s) failed",
+            "p1: status 404: not found",
+        ]
+        assert all(getattr(r, "file_only", False) for r in records)
+
     def test_no_output_when_all_succeed(self, capsys):
         import dlt_saga.cli as cli
 
