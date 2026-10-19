@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from dlt_saga.report.collector import PipelineInfo, ReportData
+from dlt_saga.report.collector import PipelineInfo, ReportData, pipeline_key
 
 #: Version of the summary contract. Bump on any change a consumer would notice:
 #: a renamed or removed key, or a changed meaning.
@@ -225,12 +225,6 @@ def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
-def _key(pipeline_group: str, table_name: str) -> Tuple[str, str]:
-    from dlt_saga.utility.naming import normalize_identifier
-
-    return (pipeline_group or "", normalize_identifier(table_name or ""))
-
-
 def _first_line(message: Optional[str]) -> Optional[str]:
     """The first non-empty line of an error, truncated to :data:`ERROR_MAX_CHARS`."""
     if not message:
@@ -275,7 +269,9 @@ def _attempts_by_pipeline(
             continue
         failed = status in FAILED_STATUSES
 
-        per_execution = grouped.setdefault(_key(run.pipeline_group, run.table_name), {})
+        per_execution = grouped.setdefault(
+            pipeline_key(run.pipeline_group, run.table_name), {}
+        )
         attempt = per_execution.get(run.execution_id)
         if attempt is None:
             per_execution[run.execution_id] = _Attempt(
@@ -380,7 +376,9 @@ def compute_status(data: ReportData, now: Optional[datetime] = None) -> StatusSu
     attempts = _attempts_by_pipeline(data, now) if summary.complete else {}
     for info in data.pipelines:
         if summary.complete:
-            pipeline_attempts = attempts.get(_key(info.pipeline_group, info.table_name))
+            pipeline_attempts = attempts.get(
+                pipeline_key(info.pipeline_group, info.table_name)
+            )
             summary.pipelines.append(_judge(info, pipeline_attempts or [], now))
         else:
             summary.pipelines.append(

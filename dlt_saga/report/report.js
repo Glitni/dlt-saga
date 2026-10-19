@@ -191,7 +191,7 @@
     .map(r => ({
       pipeline_name: r.pipeline_name,
       table_name: r.table_name,
-      dataset_name: 'dlt_' + r.pipeline_group,
+      dataset_name: r.schema_name,
       destination_name: '',
       destination_type: '',
       row_count: 0,
@@ -246,7 +246,7 @@
     .map(r => ({
       pipeline_name: r.pipeline_name,
       table_name: r.table_name,
-      dataset_name: 'dlt_' + r.pipeline_group,
+      dataset_name: r.schema_name,
       destination_name: '',
       destination_type: '',
       row_count: 0,

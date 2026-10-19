@@ -112,6 +112,7 @@ def _serialize_report_data(
                 "error_message": o.error_message,
                 "duration_seconds": o.duration_seconds,
                 "is_orchestrated": o.is_orchestrated,
+                "schema_name": o.schema_name,
             }
         )
 

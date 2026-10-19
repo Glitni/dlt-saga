@@ -163,3 +163,97 @@ class TestOrchestrationCompleteness:
         )
         assert [p.pipeline_name for p in data.disabled_pipelines] == ["api__orders"]
         assert len(data.pipelines) == 1
+
+
+def _named_config(pipeline_name, pipeline_group, table_name, schema_name):
+    config = _fake_config()
+    config.pipeline_name = pipeline_name
+    config.pipeline_group = pipeline_group
+    config.table_name = table_name
+    config.schema_name = schema_name
+    return config
+
+
+def _plan_row(pipeline_type, table_name):
+    return SimpleNamespace(
+        execution_id="exec-1",
+        task_index=0,
+        pipeline_type=pipeline_type,
+        table_name=table_name,
+        status="failed",
+        log_timestamp=None,
+        started_at=None,
+        completed_at=None,
+        error_message="boom",
+        is_orchestrated=False,
+    )
+
+
+def _dest_with_plans(*rows):
+    """Serves ``rows`` from the plans query; every other table is missing."""
+    dest = MagicMock()
+    dest.get_full_table_id.return_value = "cat.schema.tbl"
+    dest.timestamp_n_days_ago.return_value = "TS"
+
+    def _execute(sql, schema):
+        if "QUALIFY" in sql:
+            return list(rows)
+        raise RuntimeError("Table cat.schema.tbl does not exist")
+
+    dest.execute_sql.side_effect = _execute
+    return dest
+
+
+def _collect(dest, configs, **kwargs):
+    return collect_report_data(
+        configs, dest, "dlt_dev", orchestration_schema="orch", **kwargs
+    )
+
+
+@pytest.mark.unit
+class TestOrchestrationRunNaming:
+    """Plan rows store no pipeline name; it is resolved from the configs by
+    (pipeline_type, table_name), never rebuilt from naming conventions."""
+
+    def test_dev_table_prefix_is_not_doubled(self):
+        config = _named_config("sales__orders", "sales", "sales__orders", "dlt_dev")
+        dest = _dest_with_plans(_plan_row("sales", "sales__orders"))
+        (run,) = _collect(dest, {"sales": [config]}).orchestration_runs
+        assert run.pipeline_name == "sales__orders"
+        assert run.schema_name == "dlt_dev"
+
+    def test_custom_table_name_resolves_to_the_pipeline(self):
+        config = _named_config("sales__orders", "sales", "orders_v2", "analytics")
+        dest = _dest_with_plans(_plan_row("sales", "orders_v2"))
+        (run,) = _collect(dest, {"sales": [config]}).orchestration_runs
+        assert run.pipeline_name == "sales__orders"
+        assert run.schema_name == "analytics"
+
+    def test_pipeline_outside_the_selection_resolves_from_known_configs(self):
+        selected = _named_config("sales__orders", "sales", "sales__orders", "dlt_dev")
+        other = _named_config("crm__accounts", "crm", "crm__accounts", "dlt_dev")
+        dest = _dest_with_plans(_plan_row("crm", "crm__accounts"))
+        data = _collect(
+            dest,
+            {"sales": [selected]},
+            known_configs=[{"sales": [selected], "crm": [other]}, {}],
+        )
+        (run,) = data.orchestration_runs
+        assert run.pipeline_name == "crm__accounts"
+
+    def test_disabled_pipeline_resolves_by_default(self):
+        enabled = _named_config("sales__orders", "sales", "sales__orders", "dlt_dev")
+        disabled = _named_config("crm__accounts", "crm", "crm__accounts", "dlt_dev")
+        dest = _dest_with_plans(_plan_row("crm", "crm__accounts"))
+        data = _collect(
+            dest, {"sales": [enabled]}, disabled_configs={"crm": [disabled]}
+        )
+        (run,) = data.orchestration_runs
+        assert run.pipeline_name == "crm__accounts"
+
+    def test_unconfigured_pipeline_keeps_its_table_name(self):
+        config = _named_config("sales__orders", "sales", "sales__orders", "dlt_dev")
+        dest = _dest_with_plans(_plan_row("sales", "sales__removed"))
+        (run,) = _collect(dest, {"sales": [config]}).orchestration_runs
+        assert run.pipeline_name == "sales__removed"
+        assert run.schema_name == ""
