@@ -1261,10 +1261,14 @@ def _qualname(cls: type) -> str:
 
 
 def _write_schemas(schemas: Dict[str, Dict[str, Any]], output_dir: Path) -> None:
-    """Write schema dicts to JSON files in output_dir."""
+    """Write schema dicts to JSON files in output_dir.
+
+    Always LF: text mode would otherwise write ``os.linesep`` (CRLF on
+    Windows), so the output would differ by platform.
+    """
     for filename, schema in schemas.items():
         output_path = output_dir / filename
-        with open(output_path, "w", encoding="utf-8") as f:
+        with open(output_path, "w", encoding="utf-8", newline="\n") as f:
             json.dump(schema, f, indent=2, ensure_ascii=False)
             f.write("\n")
 

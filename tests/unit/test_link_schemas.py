@@ -85,6 +85,20 @@ class TestApplyModeline:
         assert lines[0] == f"{MODELINE_PREFIX}../../schemas/filesystem_config.json"
         assert "tags: [daily]" in lines
 
+    def test_crlf_config_rewritten_as_lf(self, tmp_path):
+        cfg = tmp_path / "configs" / "filesystem" / "sample.yml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_bytes(b"tags: [daily]\r\nwrite_disposition: append\r\n")
+
+        changed = apply_modeline(
+            str(cfg), str(tmp_path / "schemas"), "filesystem_config.json"
+        )
+
+        assert changed is True
+        raw = cfg.read_bytes()
+        assert b"\r" not in raw
+        assert raw.endswith(b"write_disposition: append\n")
+
     def test_idempotent_when_correct(self, tmp_path):
         cfg = self._write(
             tmp_path,
