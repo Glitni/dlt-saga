@@ -47,12 +47,9 @@ logger = logging.getLogger(__name__)
 class MinRowsNotMetError(RuntimeError):
     """Raised when a load carries fewer rows than the configured ``min_rows``.
 
-    Deliberately *not* a :class:`ValueError`: the project reads a ``ValueError``
-    from a pipeline as a pre-run configuration error and skips recording it as a
-    run outcome, which would keep a tripped guard out of ``saga report`` and
-    ``--select "state:failed"`` — the very channels that are meant to surface
-    it. This is a genuine run failure and is recorded as one; the callers that
-    print tracebacks special-case it, since the message is self-explanatory.
+    A genuine run failure, recorded as one so it reaches ``saga report`` and
+    ``--select "state:failed"``. The callers that print tracebacks special-case
+    it, since the message is self-explanatory.
     """
 
 

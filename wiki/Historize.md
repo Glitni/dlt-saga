@@ -127,7 +127,7 @@ saga historize --select "filesystem__snapshots__companies"
 
 The primary key *is* the SCD2 identity, and SQL equality is never true for NULL. Change detection partitions by the key — where `NULL` groups with `NULL`, so change rows are produced — but the MERGE that closes the previously-open row (`ON t.pk = n.pk`) never matches, and neither do the deletion-marker joins. A NULL-keyed row therefore gains another permanently-open history row on every run, breaking the "exactly one open row per key" guarantee the historized table exists to provide.
 
-There is no correct NULL-safe answer to *which entity is this*, so historize refuses to start instead. Before any work, each run checks the rows it is about to read and fails as a config error if any primary-key column is NULL:
+There is no correct NULL-safe answer to *which entity is this*, so historize refuses to write instead. Before any work, each run checks the rows it is about to read and fails if any primary-key column is NULL. The failure is recorded like any failed run, so it shows in `saga report`, `--select "state:failed"` and `saga notify`:
 
 ```
 Primary key column(s) 'company_id' contain NULL in project.dataset.raw_companies (snapshot 2026-01-02). ...

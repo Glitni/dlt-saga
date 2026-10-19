@@ -1,5 +1,5 @@
 """Historize failures write a status='failed' log entry so they show up in
-`saga report` (config errors do not — they aren't run outcomes)."""
+`saga report`. An invalid config does not — the run never started."""
 
 import logging
 from unittest.mock import MagicMock
@@ -23,6 +23,7 @@ def _runner():
     runner.config = MagicMock()
     runner.state_manager = MagicMock()
     runner.state_manager.compute_fingerprint.return_value = "fp"
+    runner._validate_config = MagicMock()
     return runner
 
 
@@ -46,12 +47,30 @@ class TestHistorizeFailureLogging:
 
     def test_config_error_does_not_write_log_entry(self):
         runner = _runner()
-        runner._execute_run = MagicMock(side_effect=ValueError("no primary_key"))
+        runner._validate_config.side_effect = ValueError("no primary_key")
+        runner._execute_run = MagicMock()
 
         result = runner.run()
 
+        assert result["status"] == "failed"
         assert result["config_error"] is True
+        runner._execute_run.assert_not_called()
         runner.state_manager.write_log_entry.assert_not_called()
+
+    def test_valueerror_during_run_is_recorded_without_traceback(self, caplog):
+        """A check against source/target state failing (NULL keys, a missing
+        table) is a failed run, not a config error."""
+        runner = _runner()
+        runner._execute_run = MagicMock(side_effect=ValueError("NULL primary key"))
+
+        with caplog.at_level(logging.ERROR):
+            result = runner.run()
+
+        assert result["status"] == "failed"
+        assert "config_error" not in result
+        entry = runner.state_manager.write_log_entry.call_args.args[0]
+        assert entry.status == "failed"
+        assert not [r for r in caplog.records if r.exc_info]
 
     def test_log_write_failure_is_swallowed(self):
         runner = _runner()

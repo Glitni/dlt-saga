@@ -766,9 +766,7 @@ class NativeLoadPipeline(BasePipeline):
         chunk 2 — after the target had already been rewritten.
 
         The count runs only when ``min_rows`` is configured, so an unguarded
-        pipeline pays nothing. See
-        :class:`~dlt_saga.pipelines.row_guard.MinRowsNotMetError` for why this
-        is not a ``ValueError``.
+        pipeline pays nothing.
 
         Args:
             files_by_cursor: Discovered files, keyed by cursor value.

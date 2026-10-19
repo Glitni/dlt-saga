@@ -16,6 +16,16 @@ from dlt_saga.pipelines.registry import get_pipeline_class
 logger = logging.getLogger(__name__)
 
 
+class PipelineConfigError(ValueError):
+    """A ``ValueError`` raised while preparing a pipeline, before it ran.
+
+    Raised by :func:`execute_pipeline` around adapter resolution and pipeline
+    construction (config validation). A ``ValueError`` from the run itself is a
+    failure of a run that started and propagates unchanged, so callers tell the
+    two apart by phase rather than by exception type.
+    """
+
+
 def execute_pipeline(
     pipeline_config: PipelineConfig,
     log_prefix: Optional[str] = None,
@@ -30,33 +40,38 @@ def execute_pipeline(
         List of load info dictionaries with timing metadata
 
     Raises:
-        Exception: Propagates any error raised by pipeline construction or
-            ``pipeline.run()`` — this function adds timing but does not catch or
-            translate failures.
+        PipelineConfigError: A ``ValueError`` from adapter resolution or pipeline
+            construction — the run never started.
+        Exception: Anything raised by ``pipeline.run()``, unchanged.
     """
-    pipeline_class = get_pipeline_class(
-        pipeline_config.pipeline_group,
-        config_path=pipeline_config.identifier,
-        adapter=pipeline_config.adapter,
-    )
-
-    # Add log prefix manually since pipeline hasn't been initialized yet
-    if log_prefix:
-        logger.debug(
-            f"{log_prefix} Initializing {pipeline_config.pipeline_group} pipeline"
+    try:
+        pipeline_class = get_pipeline_class(
+            pipeline_config.pipeline_group,
+            config_path=pipeline_config.identifier,
+            adapter=pipeline_config.adapter,
         )
 
-    # Start comprehensive timing. Use tz-aware UTC for the wall-clock stamps so
-    # they're consistent with the timestamps recorded elsewhere (load info,
-    # historize log) rather than naive local time.
-    pipeline_start_time = time.time()
-    pipeline_start_datetime = datetime.now(timezone.utc)
+        # Add log prefix manually since pipeline hasn't been initialized yet
+        if log_prefix:
+            logger.debug(
+                f"{log_prefix} Initializing {pipeline_config.pipeline_group} pipeline"
+            )
 
-    # Prepare config dict with environment-aware fields
-    config_dict = ConfigSource.prepare_for_execution(pipeline_config)
+        # Start comprehensive timing. Use tz-aware UTC for the wall-clock stamps
+        # so they're consistent with the timestamps recorded elsewhere (load
+        # info, historize log) rather than naive local time.
+        pipeline_start_time = time.time()
+        pipeline_start_datetime = datetime.now(timezone.utc)
 
-    # Initialize pipeline with optional log prefix
-    pipeline = pipeline_class(config_dict, log_prefix=log_prefix)
+        # Prepare config dict with environment-aware fields
+        config_dict = ConfigSource.prepare_for_execution(pipeline_config)
+
+        # Initialize pipeline with optional log prefix
+        pipeline = pipeline_class(config_dict, log_prefix=log_prefix)
+    except PipelineConfigError:
+        raise
+    except ValueError as e:
+        raise PipelineConfigError(str(e)) from e
 
     # Record initialization time
     init_time = time.time()
