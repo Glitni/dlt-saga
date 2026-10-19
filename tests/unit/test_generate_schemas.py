@@ -400,6 +400,15 @@ class TestGenerateSchemasOutput:
             assert isinstance(parsed, dict), f"{json_file.name} is not a JSON object"
             assert "$schema" in parsed, f"{json_file.name} missing $schema key"
 
+    def test_output_files_use_lf_line_endings(self, tmp_path):
+        from dlt_saga.utility.generate_schemas import _write_schemas
+
+        _write_schemas({"sample_config.json": {"a": {"b": 1}}}, tmp_path)
+
+        raw = (tmp_path / "sample_config.json").read_bytes()
+        assert b"\r" not in raw
+        assert raw.endswith(b"}\n")
+
     def test_project_level_schemas_generated(self, tmp_path):
         from dlt_saga.utility.generate_schemas import generate_schemas
 
