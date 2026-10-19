@@ -1,3 +1,15 @@
+## 0.41.0 — 2026-10-19
+
+### Added
+- Back API pipelines with dlt's retrying client and add _send_request (#548)
+
+
+### Fixed
+- Write the end-of-run failure summary to the log file (#555)
+- Redact secrets in failure messages outside the log handlers (#553)
+- Resolve pipeline names for execution-plan rows in saga report (#551)
+- Record ValueErrors raised during a run as failed runs (#549)
+
 ## 0.40.0 — 2026-10-16
 
 ### Breaking Changes
