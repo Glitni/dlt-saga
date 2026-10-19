@@ -324,6 +324,14 @@ class HistorizeRunner:
         started_at = datetime.now(timezone.utc)
         run_start = time.time()
         try:
+            self._validate_config()
+        except ValueError as e:
+            # Invalid config — the run never started. Developer feedback, not a
+            # run outcome: config_error keeps it out of the run records and the
+            # historize log, and the CLI summary displays it (no traceback).
+            return {**self._failed_stats(e, run_start), "config_error": True}
+
+        try:
             stats = self._execute_run(started_at, run_start)
             self._reconcile_descriptions()
             self._reconcile_layout()
@@ -331,34 +339,40 @@ class HistorizeRunner:
             stats["status"] = "completed"
             return stats
         except ValueError as e:
-            # Configuration errors — no traceback, let CLI handle display. The
-            # run never started, so this is developer feedback, not a run outcome
-            # (config_error flags it so it isn't recorded in `saga report`).
-            return {
-                "mode": "failed",
-                "snapshots_processed": 0,
-                "new_or_changed_rows": 0,
-                "deleted_rows": 0,
-                "duration": time.time() - run_start,
-                "status": "failed",
-                "error": str(e),
-                "config_error": True,
-            }
+            # Raised by a check against source/target state (NULL keys, a missing
+            # table, a config change needing --full-refresh): a failed run,
+            # recorded, whose message already says what to do — no traceback.
+            self._record_failure(started_at, e)
+            return self._failed_stats(e, run_start)
         except Exception as e:
             # Unexpected errors — include traceback for debugging
             self.logger.error(
                 f"Historization failed for {self.pipeline_name}: {e}", exc_info=True
             )
             self._record_failure(started_at, e)
-            return {
-                "mode": "failed",
-                "snapshots_processed": 0,
-                "new_or_changed_rows": 0,
-                "deleted_rows": 0,
-                "duration": time.time() - run_start,
-                "status": "failed",
-                "error": str(e),
-            }
+            return self._failed_stats(e, run_start)
+
+    @staticmethod
+    def _failed_stats(error: Exception, run_start: float) -> Dict[str, Any]:
+        """Result dict for a failed run."""
+        return {
+            "mode": "failed",
+            "snapshots_processed": 0,
+            "new_or_changed_rows": 0,
+            "deleted_rows": 0,
+            "duration": time.time() - run_start,
+            "status": "failed",
+            "error": str(error),
+        }
+
+    def _validate_config(self) -> None:
+        """Validate the config and the destination's support for it.
+
+        Reads no source or target state, so a ``ValueError`` here means the run
+        never started.
+        """
+        self.config.validate(self.config_dict)
+        self._validate_destination_capabilities()
 
     def _record_failure(self, started_at: datetime, error: Exception) -> None:
         """Write a ``status='failed'`` log entry so the failure shows in reports.
@@ -402,13 +416,12 @@ class HistorizeRunner:
     def _execute_run(self, started_at: datetime, run_start: float) -> Dict[str, Any]:
         """Core historization logic: state check, mode selection, execution.
 
-        Separated from run() to keep cyclomatic complexity within limits.
-        Raises ValueError for config errors, Exception for unexpected failures.
+        Separated from run() to keep cyclomatic complexity within limits. Runs
+        after :meth:`_validate_config`. Raises ValueError for a failed check
+        against source/target state, Exception for unexpected failures.
         """
         timings = {}
 
-        self.config.validate(self.config_dict)
-        self._validate_destination_capabilities()
         self._guard_source_columns()
 
         # Init phase: fetch state (creates log table on first access if needed)

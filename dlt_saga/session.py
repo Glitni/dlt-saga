@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar
 
 from dlt_saga.pipeline_config import ConfigSource, PipelineConfig
 from dlt_saga.pipeline_config.file_config import FilePipelineConfig
-from dlt_saga.pipelines.executor import execute_pipeline
+from dlt_saga.pipelines.executor import PipelineConfigError, execute_pipeline
 from dlt_saga.project_config import get_config_source_settings
 from dlt_saga.utility.auth.providers import get_auth_provider
 from dlt_saga.utility.cli.common import flatten_configs
@@ -1201,24 +1201,24 @@ class Session:
                 config=config,
             )
         except Exception as e:
-            # ValueError is the project's convention for a configuration/validation
-            # error — the run never started, so flag it as developer feedback that
-            # must not be recorded as a run outcome. Any other exception is a
-            # genuine run failure (recorded).
+            # Classified by phase, not type: a ValueError while preparing the
+            # pipeline (PipelineConfigError) means the run never started —
+            # developer feedback, not recorded as a run outcome. Anything raised
+            # by the run itself is a run failure and is recorded, ValueError
+            # included (an API error, undecodable data, a source-state check).
             from dlt_saga.pipelines.row_guard import MinRowsNotMetError
 
-            config_error = isinstance(e, ValueError)
-            # A tripped row guard is a real, recorded run failure (so it reaches
-            # `saga report` and `state:failed`) whose message already says what
-            # happened and what to check — a traceback would only add noise.
-            expected_failure = isinstance(e, MinRowsNotMetError)
+            config_error = isinstance(e, PipelineConfigError)
+            # A ValueError's message is written to be actionable, and a tripped
+            # row guard's says what happened and what to check — a traceback
+            # would only add noise.
+            expected_failure = isinstance(e, (ValueError, MinRowsNotMetError))
             # Failure display is single-sourced through the CLI end-of-run summary
             # (_exit_if_failures), which lists every failure on stderr. The inline
             # log here exists for the *traceback* on a genuine failure; anything
             # whose message stands on its own is left to the summary alone, or the
-            # same sentence prints twice. That covers config errors (clean
-            # developer feedback) and expected failures like a tripped row guard.
-            if not config_error and not expected_failure:
+            # same sentence prints twice.
+            if not expected_failure:
                 logger.error(
                     "%sPipeline %s failed: %s",
                     prefix,
@@ -1337,13 +1337,25 @@ class Session:
         try:
             from dlt_saga.historize.factory import build_historize_runner
 
-            runner = build_historize_runner(
-                config,
-                full_refresh,
-                partial_refresh,
-                historize_from,
-                log_prefix=log_prefix,
-            )
+            try:
+                runner = build_historize_runner(
+                    config,
+                    full_refresh,
+                    partial_refresh,
+                    historize_from,
+                    log_prefix=log_prefix,
+                )
+            except ValueError as e:
+                # Config resolution failed — the run never started. Left to the
+                # end-of-run summary, unrecorded (as an ingest PipelineConfigError).
+                fire_pipeline_error(config, "historize", e)
+                return PipelineResult(
+                    pipeline_name=config.pipeline_name,
+                    success=False,
+                    error=str(e),
+                    config=config,
+                    config_error=True,
+                )
             run_result = runner.run()
 
             if run_result["status"] == "completed":

@@ -3,8 +3,9 @@
 A NULL primary key has no SCD2 identity: change detection partitions by the PK
 (NULL groups with NULL, so change rows are produced) but the MERGE closing the
 previous open row never matches, so every run leaves another permanently-open
-row for the same key. The guard rejects the run as a config error — and does so
-before a full refresh has dropped the existing history.
+row for the same key. The guard fails the run — a recorded failure, since it
+depends on the data — and does so before a full refresh has dropped the
+existing history.
 """
 
 from tests.integration.conftest import (
@@ -31,14 +32,14 @@ def _insert_null_key_row(destination, snapshot_date, city="Nowhere"):
 
 
 class TestNullPrimaryKeyRejected:
-    def test_full_reprocess_fails_as_config_error(self, duckdb_destination):
+    def test_full_reprocess_fails_as_recorded_run_failure(self, duckdb_destination):
         seed_raw_table(duckdb_destination, [SNAPSHOT_1])
         _insert_null_key_row(duckdb_destination, SNAPSHOT_1["date"])
 
         result = make_historize_runner(duckdb_destination, full_refresh=True).run()
 
         assert result["status"] == "failed"
-        assert result["config_error"] is True
+        assert "config_error" not in result
         assert "company_id" in result["error"]
 
     def test_incremental_fails_when_a_new_snapshot_has_a_null_key(
@@ -51,7 +52,7 @@ class TestNullPrimaryKeyRejected:
         result = make_historize_runner(duckdb_destination).run()
 
         assert result["status"] == "failed"
-        assert result["config_error"] is True
+        assert "config_error" not in result
 
     def test_existing_history_survives_a_rejected_full_refresh(
         self, duckdb_destination

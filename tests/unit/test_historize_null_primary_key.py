@@ -183,7 +183,7 @@ class TestGuardNullPrimaryKeysFullRefresh:
         runner._guard_null_primary_keys(None)  # must not raise
         dest.execute_sql.assert_called_once()
 
-    def test_null_key_raises_config_error_naming_the_column(self):
+    def test_null_key_raises_naming_the_column(self):
         row = MagicMock(_null_pk_0=1)
         runner, _ = _make_runner(probe_rows=[row])
         with pytest.raises(ValueError) as excinfo:

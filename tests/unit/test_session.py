@@ -6,6 +6,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dlt_saga.pipelines.api.base import ApiRequestError
+from dlt_saga.pipelines.executor import PipelineConfigError
+from dlt_saga.pipelines.row_guard import MinRowsNotMetError
 from dlt_saga.project_config import ConfigSourceConfig
 from dlt_saga.report.collector import ReportData
 from dlt_saga.session import PipelineResult, Session, SessionResult
@@ -131,7 +134,7 @@ class TestFailureDisplaySingleSourced:
         with (
             patch(
                 "dlt_saga.session.execute_pipeline",
-                side_effect=ValueError("bad config"),
+                side_effect=PipelineConfigError("bad config"),
             ),
             caplog.at_level(logging.ERROR, logger="dlt_saga.session"),
         ):
@@ -293,15 +296,50 @@ class TestRecordRunSkipsConfigErrors:
 
 @pytest.mark.unit
 class TestConfigErrorClassification:
-    """ValueError (config/validation) marks config_error=True (run never
-    started); any other exception is a genuine run failure."""
+    """Classified by phase: a ValueError while preparing the pipeline marks
+    config_error=True (run never started); anything raised by the run itself is
+    a run failure, ValueError included."""
 
-    def test_ingest_valueerror_flags_config_error(self):
+    def test_ingest_preparation_error_flags_config_error(self):
         with patch(
             "dlt_saga.session.execute_pipeline",
-            side_effect=ValueError("missing required field"),
+            side_effect=PipelineConfigError("missing required field"),
         ):
             r = Session._execute_single_ingest(_config("p"))
+        assert r.success is False
+        assert r.config_error is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ApiRequestError("API request failed with status 401", status_code=401),
+            ValueError("Key 'data' not found in response"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+            MinRowsNotMetError("1 row(s) < min_rows 100"),
+        ],
+        ids=["api", "response-shape", "decode", "row-guard"],
+    )
+    def test_ingest_failure_during_run_is_recorded_without_traceback(
+        self, error, caplog
+    ):
+        cfg = _config("p")
+        cfg.pipeline_name = "grp__p"
+        with (
+            patch("dlt_saga.session.execute_pipeline", side_effect=error),
+            caplog.at_level(logging.ERROR, logger="dlt_saga.session"),
+        ):
+            r = Session._execute_single_ingest(cfg)
+        assert r.success is False
+        assert r.config_error is False
+        assert not [rec for rec in caplog.records if rec.name == "dlt_saga.session"]
+
+    def test_historize_factory_valueerror_flags_config_error(self):
+        session = object.__new__(Session)
+        with patch(
+            "dlt_saga.historize.factory.build_historize_runner",
+            side_effect=ValueError("unknown table_format 'parquet'"),
+        ):
+            r = session._execute_single_historize(_config("p"), full_refresh=False)
         assert r.success is False
         assert r.config_error is True
 

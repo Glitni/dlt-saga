@@ -289,13 +289,6 @@ class TestUnsupportedDestination:
 
 @pytest.mark.unit
 class TestFailureReporting:
-    def test_guard_failure_is_not_a_config_error(self):
-        """`session.py` reads a ValueError from a pipeline as a pre-run config
-        error and skips recording it as a run outcome — which would hide a
-        tripped guard from `saga report` and `--select "state:failed"`.
-        """
-        assert not issubclass(MinRowsNotMetError, ValueError)
-
     def test_guard_failure_logs_no_traceback(self, caplog):
         """The message is self-explanatory; a traceback is noise. Mirrors the
         dlt-based path in BasePipeline.run.
