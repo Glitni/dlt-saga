@@ -215,6 +215,13 @@ class TestResolveWindow:
         _s2, end_yday = yday_p.resolve_window()
         assert (end_today - end_yday).days == 1
 
+    def test_window_end_date_matches_resolved_end(self):
+        p = FakeDateWindowPipeline(
+            _base_cfg(window_end="yesterday"), max_value="2024-06-10"
+        )
+        _start, end = p.resolve_window()
+        assert p.window_end_date() == end
+
 
 # ---------------------------------------------------------------------------
 # Fetch

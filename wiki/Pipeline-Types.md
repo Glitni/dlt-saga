@@ -257,6 +257,11 @@ class MySourcePipeline(DateWindowResolver, BasePipeline):
 so the host just needs the standard `BasePipeline` attributes (`destination`,
 `pipeline`, `table_name`).
 
+Some tables in the same adapter may not be windowed, for example a full dump of
+reference data. To stamp them with the run's date, call `window_end_date()` (today
+or yesterday per `window_end`, in the configured `timezone`) rather than
+re-deriving it from `datetime.now()`.
+
 #### `overlap` semantics
 
 `overlap` is the number of already-loaded days to **re-fetch** to catch

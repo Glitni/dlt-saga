@@ -121,6 +121,28 @@ class P:
         return self.client.fetch(start)
 """
 
+_DATE_WINDOW = """from datetime import datetime, timedelta, timezone
+
+class P(DateWindowResolver):
+    def extract_data(self):
+        start, end = self.resolve_window()
+        ingested_at = datetime.now(timezone.utc)
+        snapshot = end - timedelta(days=1)
+        return self.client.fetch(start, end, ingested_at, snapshot)
+"""
+
+# Mentions the helpers only in prose and bases; the window is still now() - 1 day.
+_DATE_WINDOW_UNUSED = """from datetime import datetime, timedelta
+
+class P(DateWindowResolver):
+    \"\"\"Resumes from the watermark like resolve_window would.\"\"\"
+
+    def extract_data(self):
+        # TODO: switch to resolve_window / get_max_column_value
+        start = datetime.now() - timedelta(days=1)
+        return self.client.fetch(start)
+"""
+
 
 class TestHardcodedWindow:
     def test_flags_now_minus_timedelta_without_watermark(self, tmp_path):
@@ -135,6 +157,16 @@ class TestHardcodedWindow:
         pf = tmp_path / "pipeline.py"
         pf.write_text(_IDEMPOTENT, encoding="utf-8")
         assert list(check_hardcoded_window(_target(pipeline_file=pf))) == []
+
+    def test_not_flagged_on_date_window_resolver(self, tmp_path):
+        pf = tmp_path / "pipeline.py"
+        pf.write_text(_DATE_WINDOW, encoding="utf-8")
+        assert list(check_hardcoded_window(_target(pipeline_file=pf))) == []
+
+    def test_flagged_when_helpers_only_mentioned(self, tmp_path):
+        pf = tmp_path / "pipeline.py"
+        pf.write_text(_DATE_WINDOW_UNUSED, encoding="utf-8")
+        assert len(list(check_hardcoded_window(_target(pipeline_file=pf)))) == 1
 
     def test_missing_file_is_safe(self, tmp_path):
         pf = tmp_path / "does_not_exist.py"

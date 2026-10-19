@@ -182,6 +182,24 @@ class DateWindowResolver:
             return None
         return self._to_date(raw)
 
+    def _today(self) -> date:
+        """Today in the configured timezone."""
+        return datetime.now(ZoneInfo(self.window_config.timezone)).date()
+
+    def window_end_date(self) -> date:
+        """The scheduled end of this run's window: today or yesterday, per
+        ``window_end``, in the configured timezone.
+
+        Exposed for stamping rows the window doesn't cover (e.g. a full-dump
+        table loaded alongside windowed ones) with the same run date, without
+        re-deriving it. Ignores ``end_value_override``; that applies only to an
+        explicit backfill in :meth:`resolve_window`.
+        """
+        today = self._today()
+        if self.window_config.window_end == "today":
+            return today
+        return today - timedelta(days=1)
+
     def resolve_window(self) -> Tuple[date, date]:
         """Resolve the ``[start, end]`` date window to load this run.
 
@@ -197,8 +215,8 @@ class DateWindowResolver:
         timezone, unless an explicit ``end_value_override`` is given.
         """
         cfg = self.window_config
-        today = datetime.now(ZoneInfo(cfg.timezone)).date()
-        end = today if cfg.window_end == "today" else today - timedelta(days=1)
+        today = self._today()
+        end = self.window_end_date()
 
         # 1. Explicit backfill override (wins even when incremental is off).
         if cfg.start_value_override:
