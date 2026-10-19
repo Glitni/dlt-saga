@@ -96,6 +96,8 @@ class OrchestrationRun:
     completed_at: Optional[datetime]
     error_message: Optional[str]
     is_orchestrated: bool = True
+    # Resolved from the pipeline's config; empty when no config matches.
+    schema_name: str = ""
 
     @property
     def duration_seconds(self) -> Optional[float]:
@@ -330,15 +332,15 @@ def _query_orchestration_runs(
         rows = list(destination.execute_sql(sql, schema))
         runs = []
         for row in rows:
-            # Derive pipeline_name from group + table to match load_run naming
-            pipeline_name = f"{row.pipeline_type}__{row.table_name}"
             is_orch = getattr(row, "is_orchestrated", None)
             runs.append(
                 OrchestrationRun(
                     execution_id=row.execution_id,
                     task_index=row.task_index,
                     pipeline_group=row.pipeline_type,
-                    pipeline_name=pipeline_name,
+                    # The table stores no pipeline name; _name_orchestration_runs
+                    # resolves it from the configs.
+                    pipeline_name=row.table_name,
                     table_name=row.table_name,
                     status=row.status or "unknown",
                     log_timestamp=row.log_timestamp,
@@ -355,6 +357,41 @@ def _query_orchestration_runs(
     except Exception as e:
         _log_report_query_failure("execution plans", schema, e)
         return [] if looks_like_missing_table(e) else None
+
+
+def pipeline_key(pipeline_group: str, table_name: str) -> Tuple[str, str]:
+    """Identify a pipeline in run records: ``(pipeline_type, table_name)``.
+
+    The key ``state:`` selectors and ``saga notify`` use too. Run records carry
+    no reliable pipeline name, and a pipeline's identifier is a config path that
+    differs between a checkout and a worker container.
+    """
+    from dlt_saga.utility.naming import normalize_identifier
+
+    return (pipeline_group or "", normalize_identifier(table_name or ""))
+
+
+def _name_orchestration_runs(
+    runs: List[OrchestrationRun],
+    config_sets: List[Dict[str, List[PipelineConfig]]],
+) -> None:
+    """Set each run's ``pipeline_name`` and ``schema_name`` from its config.
+
+    Matched by :func:`pipeline_key`. A run whose pipeline is no longer configured
+    keeps its stored ``table_name`` as the name and an empty schema: naming rules
+    map a pipeline to its table, not back.
+    """
+    by_key = {
+        pipeline_key(c.pipeline_group, c.table_name): c
+        for configs in config_sets
+        for config_list in configs.values()
+        for c in config_list
+    }
+    for run in runs:
+        config = by_key.get(pipeline_key(run.pipeline_group, run.table_name))
+        if config is not None:
+            run.pipeline_name = config.pipeline_name
+            run.schema_name = config.schema_name
 
 
 def _query_executions(destination: Any, schema: str, days: int) -> List[ExecutionInfo]:
@@ -463,6 +500,7 @@ def collect_report_data(
     project: str = "",
     orchestration_schema: Optional[str] = None,
     disabled_configs: Optional[Dict[str, List[PipelineConfig]]] = None,
+    known_configs: Optional[List[Dict[str, List[PipelineConfig]]]] = None,
 ) -> ReportData:
     """Collect all data needed for the report.
 
@@ -476,6 +514,10 @@ def collect_report_data(
         orchestration_schema: Dataset containing _saga_execution_plans table
         disabled_configs: Disabled pipeline configs in the selection, carried
             for the status summary only (no run history is queried for them)
+        known_configs: Every discovered config set (enabled, disabled), used to
+            name execution-plan rows — the plans table holds runs of pipelines
+            outside the selection too. Defaults to ``configs`` and
+            ``disabled_configs``.
 
     Returns:
         ReportData with all collected information
@@ -514,6 +556,10 @@ def collect_report_data(
     all_load_runs, all_historize_runs, orchestration_runs, executions = (
         _run_queries_parallel(tasks)
     )
+    if orchestration_runs:
+        _name_orchestration_runs(
+            orchestration_runs, known_configs or [configs, disabled_configs or {}]
+        )
 
     return ReportData(
         generated_at=datetime.now(timezone.utc),

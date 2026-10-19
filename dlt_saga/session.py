@@ -667,6 +667,9 @@ class Session:
         selected_configs, disabled_configs = self._discover_and_select(select)
         if not selected_configs:
             raise ValueError("No pipeline configs found matching selectors")
+        # Execution-plan rows of pipelines outside the selection are named from
+        # these too (discovery is cached, so this re-reads nothing).
+        known_configs = list(self._config_source.discover())
 
         context = get_execution_context()
         environment = context.get_environment() or get_environment()
@@ -700,6 +703,7 @@ class Session:
                 project=project,
                 orchestration_schema=get_execution_plan_schema(),
                 disabled_configs=disabled_configs,
+                known_configs=known_configs,
             )
         finally:
             # Always release the connection, even if collection raises.

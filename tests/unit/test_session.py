@@ -1241,6 +1241,8 @@ class TestSessionReport:
         session = Session.__new__(Session)
         session._profile_target = None
         session._auth_provider = MagicMock()
+        session._config_source = MagicMock()
+        session._config_source.discover.return_value = ({}, {})
         return session
 
     def _config(self):
