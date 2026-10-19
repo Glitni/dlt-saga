@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dlt_saga.pipeline_config import PipelineConfig
 from dlt_saga.utility.cli.logging import YELLOW, colorize
+from dlt_saga.utility.secrets.redaction import redact
 
 logger = logging.getLogger(__name__)
 
@@ -550,7 +551,7 @@ class ExecutionPlanManager:
                 f"{empty_json}, "
                 f"{self._format_sql_value(row['status'])}, "
                 f"{now}, {now}, "
-                f"{self._format_sql_value(row.get('error_message') or '')}, "
+                f"{self._format_sql_value(redact(row.get('error_message') or ''))}, "
                 f"FALSE)"
             )
 
@@ -775,7 +776,7 @@ class ExecutionPlanManager:
                         {self._format_sql_value(status)},
                         {started_at_sql},
                         {completed_at_sql},
-                        {self._format_sql_value(error_message or "")},
+                        {self._format_sql_value(redact(error_message or ""))},
                         TRUE
                     )
                 """

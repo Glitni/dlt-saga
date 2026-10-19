@@ -38,6 +38,7 @@ from dlt_saga.utility.cli.profiles import ProfileTarget, get_profiles_config
 from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.cli.selectors import PipelineSelector
 from dlt_saga.utility.collisions import check_target_collisions
+from dlt_saga.utility.secrets.redaction import redact
 from dlt_saga.utility.task_groups import (
     check_task_concurrency,
     submit_with_group_caps,
@@ -75,6 +76,12 @@ class PipelineResult:
     # started) — developer feedback, not a run outcome. Excluded from the
     # `saga report` telemetry recorded by `_record_run`.
     config_error: bool = False
+
+    def __post_init__(self) -> None:
+        # The error leaves the process (stderr summary, run records, notifiers),
+        # none of which pass through the log handlers' redaction filter.
+        if self.error:
+            self.error = redact(self.error)
 
 
 @dataclass
