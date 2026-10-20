@@ -182,7 +182,8 @@ def run_pipeline_test(
     Sets up a temporary execution context pointing at DuckDB, instantiates
     *pipeline_class*, calls ``.run()``, and returns a
     :class:`~dlt_saga.session.PipelineResult`. No cloud credentials are
-    needed.
+    needed. saga's dlt defaults are registered first, as a real run does, so
+    the pipeline loads with the same dlt settings it gets in production.
 
     Args:
         pipeline_class: A :class:`~dlt_saga.pipelines.base_pipeline.BasePipeline`
@@ -225,9 +226,12 @@ def run_pipeline_test(
         assert result.success
         assert result.load_info  # list of dlt load-info dicts
     """
+    from dlt_saga.defaults import apply_dlt_defaults
     from dlt_saga.session import PipelineResult
     from dlt_saga.utility.cli.context import execution_context_scope
     from dlt_saga.utility.cli.profiles import ProfileTarget
+
+    apply_dlt_defaults()
 
     # Resolve effective config dict
     if pipeline_config is not None:
