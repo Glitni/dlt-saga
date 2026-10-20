@@ -6,7 +6,7 @@ providers configuration, and pipeline settings.
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
 from dlt_saga.utility.project_root import find_project_root
@@ -333,6 +333,55 @@ class LogTablesConfig:
         )
 
 
+def _reject_unknown_keys(config_class: Any, data: dict, context: str) -> None:
+    """Fail on keys *config_class* doesn't define.
+
+    A misspelled key would otherwise be dropped: a typo'd ``notify_on`` reverts
+    to its default, a typo'd ``webhook_url`` leaves nothing to post through.
+
+    Raises:
+        ValueError: Naming the unknown keys and the valid ones.
+    """
+    known = [f.name for f in fields(config_class)]
+    unknown = sorted(set(data) - set(known))
+    if unknown:
+        raise ValueError(
+            f"Unknown key(s) under {context}: {', '.join(unknown)}. "
+            f"Valid keys: {', '.join(known)}"
+        )
+
+
+def normalize_environments(value: Any, context: str) -> List[str]:
+    """Normalise a required ``environments`` value to a non-empty list of names.
+
+    Shared by ``hooks.environments`` and
+    ``notifications.slack.on_run_complete.environments``. Both live in
+    ``saga_project.yml``, which every target shares, so where they fire is
+    always stated rather than defaulted.
+
+    Raises:
+        ValueError: If the value is missing, or not a name or a non-empty list
+            of names.
+    """
+    if value is None:
+        raise ValueError(
+            f"{context} is required: list the environments to fire in, matched "
+            "against the target's 'environment' (e.g. [prod]). saga_project.yml "
+            "is shared by every target, so this is never assumed."
+        )
+    environments = [value] if isinstance(value, str) else value
+    if (
+        not isinstance(environments, list)
+        or not environments
+        or not all(isinstance(e, str) and e for e in environments)
+    ):
+        raise ValueError(
+            f"{context} must be an environment name or a non-empty list of "
+            f"them, got {value!r}"
+        )
+    return environments
+
+
 def normalize_mentions(value: Any, context: str) -> Optional[List[str]]:
     """Normalise a ``mentions`` value to a list of Slack tokens.
 
@@ -359,6 +408,54 @@ def normalize_mentions(value: Any, context: str) -> Optional[List[str]]:
             f"{context} must be a string or list of strings, got {value!r}"
         )
     return list(value)
+
+
+@dataclass
+class SlackRunCompleteConfig:
+    """Posting when a command finishes (``notifications.slack.on_run_complete``).
+
+    Its presence is the opt-in. It fires at the end of ``saga ingest``,
+    ``saga historize`` and ``saga run``, which read the same
+    ``saga_project.yml`` in every target, so ``environments`` is required.
+    """
+
+    environments: List[str] = field(
+        metadata={
+            "description": (
+                "Required. Environments to post for, matched against the "
+                "target's 'environment', e.g. [prod]. Independent of "
+                "hooks.environments."
+            )
+        },
+    )
+    notify_on: str = field(
+        default="failure",
+        metadata={
+            "description": (
+                "'failure' (default) posts only when at least one pipeline "
+                "failed; 'always' posts every run."
+            ),
+            "enum": ["failure", "always"],
+        },
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SlackRunCompleteConfig":
+        """Create from the ``notifications.slack.on_run_complete`` block."""
+        _reject_unknown_keys(cls, data, "notifications.slack.on_run_complete")
+        notify_on = str(data.get("notify_on", "failure")).lower()
+        if notify_on not in ("failure", "always"):
+            raise ValueError(
+                "notifications.slack.on_run_complete.notify_on must be 'failure' or "
+                f"'always', got {data.get('notify_on')!r}"
+            )
+        return cls(
+            environments=normalize_environments(
+                data.get("environments"),
+                "notifications.slack.on_run_complete.environments",
+            ),
+            notify_on=notify_on,
+        )
 
 
 @dataclass
@@ -449,16 +546,6 @@ class SlackNotificationConfig:
         },
     )
 
-    notify_on: str = field(
-        default="failure",
-        metadata={
-            "description": (
-                "When to post the run digest. 'failure' (default) posts only "
-                "when at least one pipeline failed; 'always' posts every run."
-            ),
-            "enum": ["failure", "always"],
-        },
-    )
     mentions: Optional[List[str]] = field(
         default=None,
         metadata={
@@ -472,13 +559,15 @@ class SlackNotificationConfig:
             )
         },
     )
-    per_pipeline: bool = field(
-        default=False,
+    on_run_complete: Optional[SlackRunCompleteConfig] = field(
+        default=None,
         metadata={
             "description": (
-                "Also post one message per failed pipeline in addition to the "
-                "run digest. Off by default — a systemic failure across a large "
-                "selection would otherwise flood the channel."
+                "Also post when each saga ingest/historize/run command "
+                "finishes, on top of what `saga notify` reports. Absent by "
+                "default: `saga notify` is the notification path. Only "
+                "commands that run through a Session post this way, not "
+                "orchestrated workers."
             )
         },
     )
@@ -493,15 +582,33 @@ class SlackNotificationConfig:
     @classmethod
     def from_dict(cls, data: dict) -> "SlackNotificationConfig":
         """Create from the ``notifications.slack`` block."""
-        notify_on = str(data.get("notify_on", "failure")).lower()
-        if notify_on not in ("failure", "always"):
+        if "per_pipeline" in data:
             raise ValueError(
-                f"notifications.slack.notify_on must be 'failure' or 'always', "
-                f"got {data.get('notify_on')!r}"
+                "notifications.slack.per_pipeline was removed: it posted from "
+                "inside each run, workers included, as pipelines failed. `saga "
+                "notify` reports every failure; for an immediate per-failure "
+                "alert, register an on_pipeline_error hook."
             )
+        if "notify_on" in data:
+            raise ValueError(
+                "notifications.slack.notify_on belongs under "
+                "notifications.slack.on_run_complete: it only shapes the message "
+                "posted when a command finishes. `saga notify` posts a digest "
+                "whenever something failed or recovered, so remove the key if "
+                "that is all you use."
+            )
+        _reject_unknown_keys(cls, data, "notifications.slack")
         mentions = normalize_mentions(
             data.get("mentions"), "notifications.slack.mentions"
         )
+        on_run_complete = data.get("on_run_complete")
+        if "on_run_complete" in data and on_run_complete is None:
+            # A bare `on_run_complete:` still opts in, and so still needs environments.
+            on_run_complete = {}
+        if on_run_complete is not None and not isinstance(on_run_complete, dict):
+            raise ValueError(
+                f"notifications.slack.on_run_complete must be a mapping, got {on_run_complete!r}"
+            )
         report_url = data.get("report_url")
         if report_url is not None and not isinstance(report_url, str):
             raise ValueError(
@@ -523,9 +630,12 @@ class SlackNotificationConfig:
             username=data.get("username", "dlt-saga"),
             icon_emoji=data.get("icon_emoji", ":satellite_antenna:"),
             webhook_url=data.get("webhook_url"),
-            notify_on=notify_on,
             mentions=mentions,
-            per_pipeline=bool(data.get("per_pipeline", False)),
+            on_run_complete=(
+                SlackRunCompleteConfig.from_dict(on_run_complete)
+                if on_run_complete is not None
+                else None
+            ),
             timeout_seconds=float(data.get("timeout_seconds", 10.0)),
         )
 
@@ -542,12 +652,102 @@ class NotificationsConfig:
     @classmethod
     def from_dict(cls, data: dict) -> "NotificationsConfig":
         """Create from the ``notifications:`` block."""
+        _reject_unknown_keys(cls, data, "notifications")
         slack_data = data.get("slack")
         return cls(
             slack=(
                 SlackNotificationConfig.from_dict(slack_data) if slack_data else None
             )
         )
+
+
+@dataclass
+class HooksConfig:
+    """Lifecycle hooks declared under ``hooks:`` in ``saga_project.yml``.
+
+    Mirrors the YAML: one list of ``'module:callable'`` strings per event,
+    next to ``environments``. The event fields are the closed set in
+    :data:`dlt_saga.hooks.registry.HOOK_EVENTS`, so a misspelled event is a
+    config error rather than a hook that never fires.
+    """
+
+    environments: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Environments these hooks fire in, matched against the "
+                "target's 'environment', e.g. [prod]. Required when any hook "
+                "is listed. Also applies to installed entry-point hooks, which "
+                "are skipped with a warning while it is unset. Independent of "
+                "notifications.slack.on_run_complete.environments."
+            )
+        },
+    )
+    on_pipeline_start: List[str] = field(
+        default_factory=list,
+        metadata={"description": "Called as each pipeline starts."},
+    )
+    on_pipeline_complete: List[str] = field(
+        default_factory=list,
+        metadata={
+            "description": "Called as each pipeline succeeds.",
+        },
+    )
+    on_pipeline_error: List[str] = field(
+        default_factory=list,
+        metadata={"description": "Called as each pipeline fails."},
+    )
+    on_run_complete: List[str] = field(
+        default_factory=list,
+        metadata={
+            "description": "Called once when a command finishes.",
+        },
+    )
+
+    @property
+    def events(self) -> Dict[str, List[str]]:
+        """Hook references per event, for the events that list any."""
+        return {
+            f.name: getattr(self, f.name)
+            for f in fields(self)
+            if f.name != "environments" and getattr(self, f.name)
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "HooksConfig":
+        """Create from the ``hooks:`` block.
+
+        Raises:
+            ValueError: On anything but a mapping of known events to lists of
+                strings, or hooks listed without ``environments``.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(
+                "hooks must be a mapping of event names to lists of "
+                f"'module:callable' strings, got {data!r}"
+            )
+        events = [f.name for f in fields(cls) if f.name != "environments"]
+        refs: Dict[str, List[str]] = {}
+        for key, value in data.items():
+            if key == "environments":
+                continue
+            if key not in events:
+                raise ValueError(
+                    f"Unknown hook event 'hooks.{key}'. Valid events: "
+                    f"{', '.join(events)}"
+                )
+            if not isinstance(value, list) or not all(
+                isinstance(ref, str) for ref in value
+            ):
+                raise ValueError(
+                    f"hooks.{key} must be a list of 'module:callable' strings, "
+                    f"got {value!r}"
+                )
+            refs[key] = value
+        environments = data.get("environments")
+        if environments is not None or any(refs.values()):
+            environments = normalize_environments(environments, "hooks.environments")
+        return cls(environments=environments, **refs)
 
 
 @dataclass
@@ -586,12 +786,12 @@ class SagaProjectConfig:
             ),
         },
     )
-    hooks: Optional[Dict[str, Any]] = field(
+    hooks: Optional[HooksConfig] = field(
         default=None,
         metadata={
             "description": (
-                "Lifecycle hook callables, keyed by event name. "
-                "Each value is a list of 'module:callable' strings."
+                "Lifecycle hook callables per event, as 'module:callable' "
+                "strings, and the environments they fire in."
             ),
         },
     )
@@ -599,9 +799,9 @@ class SagaProjectConfig:
         default=None,
         metadata={
             "description": (
-                "Outbound notification settings. Configuring a channel here "
-                "registers the built-in notifier automatically — no 'hooks:' "
-                "entry needed."
+                "Outbound notification settings, used by `saga notify`. The "
+                "notifier also posts when a command finishes only with "
+                "notifications.slack.on_run_complete."
             ),
         },
     )
@@ -653,7 +853,11 @@ class SagaProjectConfig:
             ),
             naming_module=data.get("naming_module"),
             pipelines=data.get("pipelines"),
-            hooks=data.get("hooks"),
+            hooks=(
+                HooksConfig.from_dict(data["hooks"])
+                if data.get("hooks") is not None
+                else None
+            ),
             notifications=(
                 NotificationsConfig.from_dict(notif_data) if notif_data else None
             ),

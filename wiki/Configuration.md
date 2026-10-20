@@ -617,6 +617,7 @@ See the [Deployment Guide](Deployment) for full setup.
 
 ```yaml
 hooks:
+  environments: [prod]           # required
   on_pipeline_start:
     - mypackage.hooks:log_start
   on_pipeline_complete:
@@ -625,11 +626,13 @@ hooks:
     - mypackage.hooks:send_alert
 ```
 
+`environments` lists the environments these hooks fire in, matched against the target's `environment`. It is required whenever hooks are declared: `saga_project.yml` is shared by every target, so where hooks fire is always stated rather than assumed. It also applies to hooks installed through entry points; while it is unset, those are skipped with a warning naming them. A project with only entry-point hooks sets `environments` on its own. It is independent of `notifications.slack.on_run_complete.environments`, which gates the Slack notifier.
+
 See the [Plugin Development Guide](Plugin-Development) for writing hooks.
 
 ### Slack notifications
 
-A built-in notifier posts run outcomes to a Slack incoming webhook. Configuring it is enough to activate it — there is no `hooks:` entry to add:
+A built-in notifier posts run outcomes to Slack. `notifications.slack` configures where and how it posts for [`saga notify`](CLI-Reference#saga-notify), which reports from recorded run state and is the notification path. Posting when each command finishes is a separate opt-in through an [`on_run_complete`](#posting-when-a-command-finishes) block.
 
 Two transports, the same pair Elementary offers. A **bot token** posts through `chat.postMessage` and needs a `channel`; an **incoming webhook** posts to a URL whose channel was fixed when the webhook was created. `token` wins when both are set.
 
@@ -638,7 +641,6 @@ notifications:
   slack:
     token: googlesecretmanager::my-project::slack-bot-token
     channel: "#data-alerts"
-    notify_on: failure           # failure (default) | always
     mentions: ["<@U012ABCDEF>"]  # appended to failure messages
 ```
 
@@ -646,7 +648,6 @@ notifications:
 notifications:
   slack:
     webhook_url: googlesecretmanager::my-project::slack-webhook
-    notify_on: failure
 ```
 
 | Key | Default | Description |
@@ -657,12 +658,32 @@ notifications:
 | `report_url` | — | Public URL of the published [`saga report`](CLI-Reference#saga-report), linked from every digest |
 | `username` | `dlt-saga` | Display name on posted messages. Needs `chat:write.customize` with `token`; without it, saga posts under the app's own name and warns |
 | `icon_emoji` | `:satellite_antenna:` | Icon shown in place of the app's avatar. Same scope requirement as `username` |
-| `notify_on` | `failure` | `failure` posts only when a pipeline failed; `always` posts every run |
 | `mentions` | — | Mention tokens appended to a failure digest. A string or list |
-| `per_pipeline` | `false` | Also post one message per failed pipeline, on top of the digest |
 | `timeout_seconds` | `10` | HTTP timeout per Slack request |
+| `on_run_complete` | — | Also post when each command finishes. See below |
 
-**One message per command, not per pipeline.** The notifier posts a digest when the command finishes, listing the failures (capped at ten, with a count of the rest). This matters when something systemic breaks: an expired credential fails every pipeline in the selection at once, and fifty separate messages bury the signal they were meant to carry. `saga run` posts one digest covering both the ingest and historize phases. Set `per_pipeline: true` to additionally get a message per failed pipeline.
+Unknown keys under `notifications`, `notifications.slack` and `notifications.slack.on_run_complete` are a config error naming the valid ones, so a misspelled `webhook_url` fails instead of leaving nothing to post through.
+
+#### Posting when a command finishes
+
+```yaml
+notifications:
+  slack:
+    token: googlesecretmanager::my-project::slack-bot-token
+    channel: "#data-alerts"
+    on_run_complete:
+      environments: [prod]       # required
+      notify_on: failure         # failure (default) | always
+```
+
+An `on_run_complete` block subscribes the notifier to the [`on_run_complete` hook event](#hooks), so `saga ingest`, `saga historize` and `saga run` post a digest when they finish, on top of what `saga notify` reports. Without the block they post nothing. `environments` is required, so the block always states where it posts.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `environments` | required | Environments to post for, matched against the target's `environment`, e.g. `[prod]`. `saga_project.yml` is shared by every target, so a development run never reaches the channel unless its environment is listed. Independent of `hooks.environments` |
+| `notify_on` | `failure` | `failure` posts only when a pipeline failed; `always` posts every run |
+
+**One message per command, not per pipeline.** The digest lists the failures (capped at ten, with a count of the rest). This matters when something systemic breaks: an expired credential fails every pipeline in the selection at once, and fifty separate messages bury the signal they were meant to carry. `saga run` posts one digest covering both the ingest and historize phases. For an immediate alert per failed pipeline, register an `on_pipeline_error` [hook](#hooks).
 
 ```
 :x: saga run failed — 2 of 34 pipeline(s)
@@ -698,11 +719,11 @@ pipelines:
         mentions: ["<!subteam^S012ABCDEF>"]
 ```
 
-Transport settings (`webhook_url`, `notify_on`, `timeout_seconds`) are project-level only — a pipeline chooses who hears about it, not where or whether the notifier posts.
+Transport settings (`token`, `webhook_url`, `timeout_seconds`) and `on_run_complete` are project-level only — a pipeline chooses who hears about it, not where or whether the notifier posts.
 
 **Routing to several channels** means several webhooks — a webhook is bound to one channel and the notifier takes one. Post to one operational channel and route from there, or write a custom `on_run_complete` hook.
 
-> **Orchestrated runs need [`saga notify`](CLI-Reference#saga-notify).** This digest rides `on_run_complete`, which fires once per command — and on a fan-out run no container has a view of the whole thing, so none of them posts it. (The per-pipeline events do fire inside workers.) `saga notify` covers the summary by reading recorded state instead, and works for every way of running saga.
+> **Orchestrated runs need [`saga notify`](CLI-Reference#saga-notify).** This digest rides the `on_run_complete` event, which fires once per command — and on a fan-out run no container has a view of the whole thing, so none of them posts it. (The per-pipeline events do fire inside workers.) `saga notify` covers the summary by reading recorded state instead, and works for every way of running saga.
 
 **Linking the report.** `saga report` publishes to a URI you choose (`--output gs://…`), and saga never learns how that bucket is served — so the browsable URL has to be configured:
 
@@ -728,7 +749,7 @@ The message body identifies itself either way: the context line carries `dlt-sag
 
 **Which transport to pick.** A token is usually easier to operate: one credential covers every channel, the app **joins the channel itself** on `not_in_channel` rather than failing, and routing elsewhere is a config change rather than a new webhook. A webhook needs no app install and no scopes, so it is the lighter option when you only ever post to one channel. With a token the app needs `chat:write`, plus `chat:write.public` or membership of the target channel.
 
-**Failure to notify never fails a run.** A Slack outage, a revoked webhook, or a malformed payload is logged as a warning and the run continues; requests are retried on timeouts, connection errors, `429`, and `5xx`, but not on other `4xx` (a bad payload would only fail again). An empty selection still notifies when `notify_on: always`, so a scheduled run whose selector stopped matching does not pass silently.
+**Failure to notify never fails a run.** A Slack outage, a revoked webhook, or a malformed payload is logged as a warning and the run continues; requests are retried on timeouts, connection errors, `429`, and `5xx`, but not on other `4xx` (a bad payload would only fail again). An empty selection still posts an `on_run_complete` digest with `notify_on: always`, so a scheduled run whose selector stopped matching does not pass silently.
 
 ### Historize Placement
 

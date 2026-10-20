@@ -100,22 +100,3 @@ def test_worker_error_masked_before_truncation():
 
     assert SECRET[:5] not in message
     assert len(message) <= _MAX_ERROR_MESSAGE_LEN
-
-
-def test_slack_per_pipeline_alert_is_redacted():
-    from dlt_saga.hooks.notifiers.slack import SlackNotifier
-    from dlt_saga.hooks.registry import HookContext
-
-    notifier = SlackNotifier.__new__(SlackNotifier)
-    notifier._pipeline_mentions = lambda config: ""
-    ctx = HookContext(
-        pipeline_name="api__orders",
-        config=None,
-        command="ingest",
-        error=Exception(_error_text()),
-    )
-
-    payload = notifier._build_pipeline_payload(ctx)
-
-    assert SECRET not in payload["text"]
-    assert MASK in payload["text"]

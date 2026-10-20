@@ -3,9 +3,12 @@
 import importlib
 import logging
 import threading
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from .registry import HOOK_EVENTS, HookCallable, HookRegistry, get_hook_registry
+
+if TYPE_CHECKING:
+    from dlt_saga.project_config import HooksConfig
 
 logger = logging.getLogger(__name__)
 
@@ -45,39 +48,31 @@ def _resolve_callable(ref: str) -> HookCallable:
 
 
 def load_hooks_from_config(
-    hooks_config: Dict[str, List[str]],
+    hooks: "HooksConfig",
     registry: Optional[HookRegistry] = None,
 ) -> None:
-    """Load hooks from the ``hooks:`` section of *saga_project.yml*.
+    """Register the hooks declared under ``hooks:`` in *saga_project.yml*.
 
     Expected shape::
 
         hooks:
+          environments: [prod]      # required when any hook is listed
           on_pipeline_start:
             - mypackage.hooks:notify_start
-          on_pipeline_complete:
-            - mypackage.hooks:notify_complete
           on_pipeline_error:
             - mypackage.hooks:notify_error
 
     Args:
-        hooks_config: Parsed ``hooks:`` dict from saga_project.yml.
+        hooks: The parsed ``hooks:`` block.
         registry: Registry to register into.  Defaults to the global registry.
     """
     if registry is None:
         registry = get_hook_registry()
-    for event, refs in hooks_config.items():
-        if event not in HOOK_EVENTS:
-            logger.warning(
-                "Unknown hook event '%s' in saga_project.yml; valid events: %s",
-                event,
-                HOOK_EVENTS,
-            )
-            continue
+    for event, refs in hooks.events.items():
         for ref in refs:
             try:
                 fn = _resolve_callable(ref)
-                registry.register(event, fn)
+                registry.register(event, fn, environments=hooks.environments)
             except Exception:
                 logger.error(
                     "Failed to load hook '%s' for event '%s'",
@@ -89,6 +84,7 @@ def load_hooks_from_config(
 
 def load_hooks_from_entry_points(
     registry: Optional[HookRegistry] = None,
+    environments: Optional[List[str]] = None,
 ) -> None:
     """Load hook callables registered via the ``dlt_saga.hooks`` entry point group.
 
@@ -112,15 +108,28 @@ def load_hooks_from_entry_points(
 
     Args:
         registry: Registry to register into.  Defaults to the global registry.
+        environments: Environments the hooks fire in (``hooks.environments``).
+            ``None`` skips any installed entry-point hooks, with a warning.
     """
     if registry is None:
         registry = get_hook_registry()
     try:
         from importlib.metadata import entry_points
 
-        eps = entry_points(group="dlt_saga.hooks")
+        eps = list(entry_points(group="dlt_saga.hooks"))
     except Exception:
         logger.debug("Could not load entry points for dlt_saga.hooks", exc_info=True)
+        return
+    if eps and environments is None:
+        # Firing them everywhere would run an installed package's hooks for
+        # every development run. Whether one is installed depends on the
+        # environment, not the project, so this skips rather than fails.
+        logger.warning(
+            "Skipping installed lifecycle hooks (%s): set hooks.environments in "
+            "saga_project.yml to the environments they should fire in, e.g. "
+            "[prod].",
+            ", ".join(sorted(ep.name for ep in eps)),
+        )
         return
     for ep in eps:
         try:
@@ -137,7 +146,7 @@ def load_hooks_from_entry_points(
         events = getattr(fn, "saga_hook_events", HOOK_EVENTS)
         for event in events:
             try:
-                registry.register(event, fn)
+                registry.register(event, fn, environments=environments)
             except ValueError:
                 logger.warning(
                     "Entry point '%s' declares unknown event '%s'; skipping",
@@ -172,11 +181,14 @@ def load_hooks(registry: Optional[HookRegistry] = None) -> None:
             registry = get_hook_registry()
 
         project_config = get_project_config()
-        if project_config.hooks:
-            load_hooks_from_config(project_config.hooks, registry)
+        hooks = project_config.hooks
+        if hooks:
+            load_hooks_from_config(hooks, registry)
 
         load_notifiers_from_config(project_config, registry)
-        load_hooks_from_entry_points(registry)
+        load_hooks_from_entry_points(
+            registry, environments=hooks.environments if hooks else None
+        )
 
 
 def load_notifiers_from_config(

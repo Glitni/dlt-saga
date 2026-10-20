@@ -61,7 +61,7 @@ from dlt_saga.utility.cli.run_modes import (
 from dlt_saga.utility.cli.selectors import SelectorSyntaxError, format_config_list
 from dlt_saga.utility.collisions import TargetCollisionError
 from dlt_saga.utility.env import get_env
-from dlt_saga.utility.naming import get_environment
+from dlt_saga.utility.naming import environment_of, get_environment
 
 # Configure CLI logging (handlers, formatters, colors)
 configure_cli_logging()
@@ -1111,7 +1111,7 @@ def run(
         "run",
         select=select_list,
         target=profile_target.name if profile_target else None,
-        environment=profile_target.environment if profile_target else None,
+        environment=environment_of(profile_target),
     ):
         _run_phases(
             session,

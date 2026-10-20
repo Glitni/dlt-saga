@@ -39,8 +39,29 @@ def normalize_identifier(name: str, max_length: Optional[int] = None) -> str:
 
 if TYPE_CHECKING:
     from dlt_saga.historize.config import HistorizeConfig
+    from dlt_saga.utility.cli.profiles import ProfileTarget
 
 logger = logging.getLogger(__name__)
+
+
+def _environment_or_default(environment: Optional[str]) -> str:
+    """Fall back to SAGA_ENVIRONMENT (DLT_ENVIRONMENT with a warning), then dev."""
+    return environment or get_env("SAGA_ENVIRONMENT", "dev")
+
+
+def environment_of(profile_target: Optional["ProfileTarget"]) -> str:
+    """Environment of *profile_target*, by the same rule as :func:`get_environment`.
+
+    For building an event's context from a target that is not (or no longer)
+    the active one — the target's own ``environment``, else SAGA_ENVIRONMENT,
+    else ``"dev"``.
+
+    Args:
+        profile_target: A :class:`ProfileTarget`, or ``None`` without a profile.
+    """
+    return _environment_or_default(
+        profile_target.environment if profile_target else None
+    )
 
 
 def get_environment() -> str:
@@ -49,23 +70,19 @@ def get_environment() -> str:
     Priority:
     1. Active profile target's environment setting
     2. SAGA_ENVIRONMENT env var (falls back to DLT_ENVIRONMENT with warning)
+    3. ``"dev"``
 
     Returns:
         Environment string ('prod' or 'dev')
     """
-    # Check if we have a profile target with environment setting
+    environment = None
     try:
         from dlt_saga.utility.cli.context import get_execution_context
 
-        context = get_execution_context()
-        env = context.get_environment()
-        if env:
-            return env
+        environment = get_execution_context().get_environment()
     except ImportError:
         pass  # context module not available yet
-
-    # Fall back to environment variable
-    return get_env("SAGA_ENVIRONMENT", "dev")
+    return _environment_or_default(environment)
 
 
 def is_production() -> bool:

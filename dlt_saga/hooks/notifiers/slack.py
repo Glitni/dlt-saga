@@ -1,10 +1,15 @@
 """Slack notifier for run outcomes.
 
+``saga notify`` is the notification path: it posts from recorded run state.
+Posting when a command finishes is a separate opt-in: a
+``notifications.slack.on_run_complete`` block subscribes the notifier to the
+``on_run_complete`` hook event, filtered to its required ``environments`` —
+``saga_project.yml`` is shared by every target.
+
 Posts one **digest per command invocation** rather than one message per
 pipeline: a credential that broke overnight fails every pipeline in the
 selection, and fifty separate messages bury the signal they were meant to
-carry. Per-pipeline messages are available via ``per_pipeline: true`` for the
-cases where a single pipeline warrants its own alert.
+carry.
 
 Two transports, mirroring Elementary's. A **bot token** posts through
 ``chat.postMessage`` and needs a ``channel``; it joins the channel on
@@ -31,10 +36,8 @@ the warning names Slack rather than surfacing as a generic hook failure.
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-from dlt_saga.utility.secrets.redaction import redact
-
 if TYPE_CHECKING:
-    from dlt_saga.hooks.registry import HookContext, HookRegistry, RunContext
+    from dlt_saga.hooks.registry import HookRegistry, RunContext
     from dlt_saga.notify import SweepContext
     from dlt_saga.project_config import SlackNotificationConfig
 
@@ -318,16 +321,12 @@ class SlackNotifier:
 
     def on_run_complete(self, ctx: "RunContext") -> None:
         """Post the run digest, if this run's outcome warrants one."""
-        if self.config.notify_on == "failure" and not ctx.has_failures:
+        subscription = self.config.on_run_complete
+        notify_on = subscription.notify_on if subscription else "failure"
+        if notify_on == "failure" and not ctx.has_failures:
             logger.debug("Slack digest skipped: run had no failures")
             return
         self._send(self._build_run_payload(ctx))
-
-    def on_pipeline_error(self, ctx: "HookContext") -> None:
-        """Post a message for one failed pipeline (``per_pipeline: true``)."""
-        if not self.config.per_pipeline:
-            return
-        self._send(self._build_pipeline_payload(ctx))
 
     # ------------------------------------------------------------------
     # Message construction
@@ -491,21 +490,6 @@ class SlackNotifier:
         if remaining > 0:
             lines.append(f"…and {remaining} more")
         return "\n".join(lines)
-
-    def _build_pipeline_payload(self, ctx: "HookContext") -> Dict[str, Any]:
-        """Build the Slack payload for a single failed pipeline."""
-        # ctx.error is the raw exception: mask secrets before truncating, or a
-        # secret cut in half no longer matches and its prefix is posted.
-        error = (
-            _truncate(redact(str(ctx.error)), _MAX_ERROR_CHARS)
-            if ctx.error
-            else "failed"
-        )
-        mentions = self._pipeline_mentions(getattr(ctx, "config", None))
-        line = f":x: `{ctx.pipeline_name}` ({ctx.command}) — {error}"
-        if mentions:
-            line = f"{line} {mentions}"
-        return {"text": line}
 
     def _context_line(self, ctx: "RunContext") -> str:
         """Build the target / selection / duration line under the headline."""
@@ -699,21 +683,31 @@ def register_slack_notifier(
         sender: Optional HTTP sender override (tests).
 
     Returns:
-        The registered notifier, or ``None`` when no ``webhook_url`` is set.
+        The registered notifier, or ``None`` when no transport is configured
+        or there is no ``on_run_complete`` block.
     """
     if not (config.token or config.webhook_url):
         logger.debug(
             "Slack notifier not registered: neither token nor webhook_url configured"
         )
         return None
+    on_run_complete = config.on_run_complete
+    if on_run_complete is None:
+        # The block configures `saga notify`; posting when a command finishes
+        # is its own opt-in.
+        logger.debug("Slack notifier not registered: no on_run_complete block")
+        return None
 
-    from dlt_saga.hooks.registry import ON_PIPELINE_ERROR, ON_RUN_COMPLETE
+    from dlt_saga.hooks.registry import ON_RUN_COMPLETE
 
     notifier = SlackNotifier(config, sender=sender)
-    registry.register(ON_RUN_COMPLETE, notifier.on_run_complete)
-    events: List[str] = ["on_run_complete"]
-    if config.per_pipeline:
-        registry.register(ON_PIPELINE_ERROR, notifier.on_pipeline_error)
-        events.append("on_pipeline_error")
-    logger.debug("Registered Slack notifier for %s", ", ".join(events))
+    registry.register(
+        ON_RUN_COMPLETE,
+        notifier.on_run_complete,
+        environments=on_run_complete.environments,
+    )
+    logger.debug(
+        "Registered Slack notifier for on_run_complete (environments: %s)",
+        ", ".join(on_run_complete.environments),
+    )
     return notifier

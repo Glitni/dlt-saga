@@ -195,6 +195,8 @@ class TestWorkerRegistersHooksFromConfig:
                 [
                     "",
                     "hooks:",
+                    # Required with any hook listed; this target is dev.
+                    "  environments: [dev]",
                     "  on_pipeline_complete:",
                     "    - worker_hook_probe:record",
                     "",

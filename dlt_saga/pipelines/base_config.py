@@ -86,7 +86,7 @@ class BaseConfig:
                 "'slack.mentions' (a string or list of Slack mention tokens), "
                 "appended to this pipeline's line in a failure digest — for "
                 "reaching whoever owns or is on call for it. Transport settings "
-                "(webhook, notify_on) are project-level only. Inherits through "
+                "(token, webhook_url, after_run) are project-level only. Inherits through "
                 "the usual saga_project.yml 'pipelines:' hierarchy."
             ),
         },
