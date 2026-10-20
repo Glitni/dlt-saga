@@ -19,6 +19,11 @@ class TargetWriter:
             # degrades merge to keyless append and duplicates rows.
             if self.config.merge_strategy:
                 data.apply_hints(write_disposition=self._build_merge_config())
+            elif not self.config.deduplicate:
+                # Strategy left to the destination's default, as for "merge".
+                data.apply_hints(
+                    write_disposition={"disposition": "merge", "deduplicated": True}
+                )
             else:
                 data.apply_hints(write_disposition="merge")
             if self.config.merge_key:
@@ -50,6 +55,11 @@ class TargetWriter:
             "disposition": "merge",
             "strategy": self.config.merge_strategy.value,
         }
+        if not self.config.deduplicate:
+            # dlt's flag is inverted: deduplicated=True declares the incoming
+            # data already unique, so dlt skips its own deduplication. Config
+            # validation limits this to delete-insert.
+            merge_config["deduplicated"] = True
 
         if self.config.merge_strategy == MergeStrategy.SCD2:
             merge_config.update(

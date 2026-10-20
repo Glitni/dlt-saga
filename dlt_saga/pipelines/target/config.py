@@ -308,7 +308,14 @@ class TargetConfig:
     # Deduplication configuration
     deduplicate: bool = field(
         default=True,
-        metadata={"description": "Whether to deduplicate rows based on primary_key"},
+        metadata={
+            "description": (
+                "Deduplicate incoming rows by primary_key before a merge. Set to "
+                "false to skip deduplication when the source is already unique. "
+                "Applies to the delete-insert strategy (the default for a bare "
+                "merge); other strategies reject false"
+            )
+        },
     )
     dedup_sort: Optional[str] = field(
         default=None,
@@ -435,6 +442,7 @@ class TargetConfig:
         self._normalize_keys()
         self._normalize_enums()
         self._validate_merge_strategy()
+        self._validate_deduplicate()
         self._initialize_columns()
         self._validate_classification()
 
@@ -507,6 +515,31 @@ class TargetConfig:
                 "(dlt limitation). Use primary_key only."
             )
 
+    def _validate_deduplicate(self):
+        """Reject ``deduplicate: false`` where dlt has no way to honour it.
+
+        dlt only deduplicates (and only lets that be switched off) in the
+        delete-insert merge, so anywhere else the key would be silently ignored.
+        """
+        if self.deduplicate:
+            return
+        base_disposition = self.write_disposition.replace("+historize", "")
+        if base_disposition == "merge" and self.merge_strategy in (
+            None,
+            MergeStrategy.DELETE_INSERT,
+        ):
+            return
+        target = (
+            f"merge_strategy='{self.merge_strategy.value}'"
+            if base_disposition == "merge" and self.merge_strategy
+            else f"write_disposition='{self.write_disposition}'"
+        )
+        raise ValueError(
+            f"deduplicate: false is not supported with {target}. It only applies "
+            "to merge with the delete-insert strategy (the default for a bare "
+            "merge); remove the key otherwise."
+        )
+
     def _validate_insert_api(self):
         """Validate insert_api value and write-disposition compatibility.
 
@@ -566,10 +599,18 @@ class TargetConfig:
         """Initialize columns dict and add dedup/hard_delete hints."""
         if self.columns is None:
             self.columns = {}
+        # Merged into the column's own entry so its configured type,
+        # description, etc. survive alongside the hint.
         if self.dedup_sort and self.dedup_sort_column:
-            self.columns[self.dedup_sort_column] = {"dedup_sort": self.dedup_sort}
+            self.columns[self.dedup_sort_column] = {
+                **(self.columns.get(self.dedup_sort_column) or {}),
+                "dedup_sort": self.dedup_sort,
+            }
         if self.hard_delete_column:
-            self.columns[self.hard_delete_column] = {"hard_delete": True}
+            self.columns[self.hard_delete_column] = {
+                **(self.columns.get(self.hard_delete_column) or {}),
+                "hard_delete": True,
+            }
 
     # Classification labels are encoded into the description, so they must not
     # contain the block's delimiters (``, ; = ]``) or the encoding would be
