@@ -11,7 +11,6 @@ import dlt
 import duckdb
 import pytest
 
-from dlt_saga.defaults import apply_dlt_defaults
 from dlt_saga.pipelines.base_pipeline import BasePipeline
 from dlt_saga.testing import run_pipeline_test
 
@@ -59,18 +58,7 @@ def _execute(db_path, sql):
 
 
 @pytest.fixture
-def db_path(tmp_path, monkeypatch):
-    """Fresh DuckDB file, with dlt's working dir under tmp_path too.
-
-    The pipelines dir lives under ``~/.dlt``; pointing home at tmp_path keeps a
-    package left behind by one run of this test out of the next.
-
-    ``run_pipeline_test`` doesn't build a Session, so the saga dlt defaults the
-    fix lives in are registered explicitly, as a real run would.
-    """
-    apply_dlt_defaults()
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+def db_path(tmp_path):
     _ROWS.update(n=3, null_val=False)
     return str(tmp_path / "terminal.duckdb")
 

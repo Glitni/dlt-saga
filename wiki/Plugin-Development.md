@@ -816,6 +816,18 @@ def test_pipeline_failure_is_captured():
 
 `run_pipeline_test` returns a `PipelineResult` with `.success`, `.error`, and `.load_info` (list of dlt load-info dicts on success).
 
+It registers saga's dlt defaults before running (the same ones `saga ingest` uses, e.g. `insert-from-staging` replaces and aborting a package whose load fails terminally), so a test loads with production dlt settings. Your `.dlt/config.toml` and environment variables still override them.
+
+dlt keeps each pipeline's local state and pending packages under `~/.dlt/pipelines_*`, which outlives a test's database. To keep tests independent, point the home directory at a temporary one:
+
+```python
+@pytest.fixture(autouse=True)
+def _isolated_dlt_home(tmp_path_factory, monkeypatch):
+    home = str(tmp_path_factory.mktemp("home"))
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)  # Windows
+```
+
 ### Mocking external API calls
 
 Wrap your HTTP client calls with `unittest.mock.patch` or `responses`:

@@ -166,11 +166,13 @@ class RowGuard:
         loads it then — turning a refused load into the same damage a day
         later, with nothing connecting the two.
 
-        dlt's ``drop_pending_packages`` is all-or-nothing, so a package left
-        behind by an *earlier* crashed run is discarded alongside this one.
-        That is still the better of the two outcomes (the alternative is the
-        delayed rewrite above), but it is real data loss on an ``append``, so
-        it is named rather than swallowed.
+        Discarding is all-or-nothing, so a package left behind by an *earlier*
+        crashed run is discarded alongside this one. That is still the better
+        of the two outcomes (the alternative is the delayed rewrite above), and
+        it is named rather than swallowed. ``abort_packages`` (dlt >= 1.30)
+        also rolls local state back to before the oldest discarded package, so
+        an incremental source re-extracts it; ``drop_pending_packages`` on older
+        dlt doesn't, which makes the discard real data loss on an ``append``.
 
         Args:
             pipeline: dlt Pipeline instance.

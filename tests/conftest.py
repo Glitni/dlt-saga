@@ -21,6 +21,21 @@ def _clear_bigquery_client_pool():
     client_pool.bigquery_pool.clear_cache()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_dlt_home(tmp_path_factory, monkeypatch):
+    """Keep dlt's working directories out of the real ``~/.dlt``.
+
+    Pipelines keep local state and pending packages under
+    ``~/.dlt/pipelines_*``. Shared across tests, a package or schema left by
+    one test leaks into the next test's fresh database, and into the next run.
+    A directory of its own, not ``tmp_path``, so tests that inspect their
+    ``tmp_path`` never find a ``.dlt`` in it.
+    """
+    home = str(tmp_path_factory.mktemp("home"))
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+
+
 @pytest.fixture
 def sample_configs():
     """Create sample pipeline configs for testing.
