@@ -116,7 +116,7 @@ def _fire(scope: _RunScope) -> None:
         )
 
         registry = get_hook_registry()
-        if not registry.has_handlers(ON_RUN_COMPLETE):
+        if not registry.has_handlers(ON_RUN_COMPLETE, scope.environment):
             return
         registry.fire(
             ON_RUN_COMPLETE,

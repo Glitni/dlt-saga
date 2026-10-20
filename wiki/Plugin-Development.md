@@ -737,11 +737,14 @@ on_run.saga_hook_events = ["on_run_complete"]
 
 ```yaml
 hooks:
+  environments: [prod]          # required
   on_pipeline_error:
     - mypackage.hooks:on_failure
   on_pipeline_complete:
     - mypackage.hooks:emit_metrics
 ```
+
+Hooks fire only in the environments listed under `environments`, matched against the target's `environment`. It is required, because `saga_project.yml` is shared by every target and a hook would otherwise also fire for a developer's local run. The same list applies to entry-point hooks; while it is unset, they are skipped with a warning naming them, so a project with entry-point hooks installed sets `environments` even without `hooks:` entries of its own.
 
 **Via entry points** — for hooks shipped inside an installable package:
 

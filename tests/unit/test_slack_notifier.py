@@ -18,11 +18,10 @@ from dlt_saga.hooks.notifiers.slack import SlackNotifier, register_slack_notifie
 from dlt_saga.hooks.registry import (
     ON_PIPELINE_ERROR,
     ON_RUN_COMPLETE,
-    HookContext,
     HookRegistry,
     RunContext,
 )
-from dlt_saga.project_config import SlackNotificationConfig
+from dlt_saga.project_config import SlackNotificationConfig, SlackRunCompleteConfig
 
 
 @dataclass
@@ -56,8 +55,20 @@ class _Recorder:
         return self.sent[-1]["payload"]["text"]
 
 
+_RUN_COMPLETE_KEYS = ("environments", "notify_on")
+
+
 def _notifier(recorder, **overrides):
-    config = SlackNotificationConfig(webhook_url="env_secret::SLACK_HOOK", **overrides)
+    """Notifier with an ``on_run_complete`` block; its keys can be passed flat."""
+    on_run_complete = {
+        k: overrides.pop(k) for k in _RUN_COMPLETE_KEYS if k in overrides
+    }
+    on_run_complete.setdefault("environments", ["prod"])
+    config = SlackNotificationConfig(
+        webhook_url="env_secret::SLACK_HOOK",
+        on_run_complete=SlackRunCompleteConfig(**on_run_complete),
+        **overrides,
+    )
     return SlackNotifier(config, sender=recorder)
 
 
@@ -288,32 +299,6 @@ class TestPerPipelineMentions:
 
 
 @pytest.mark.unit
-class TestPerPipeline:
-    def test_off_by_default(self):
-        recorder = _Recorder()
-        ctx = HookContext(
-            pipeline_name="p", config=_Config(), command="ingest", error=Exception("x")
-        )
-
-        _notifier(recorder).on_pipeline_error(ctx)
-
-        assert recorder.sent == []
-
-    def test_opt_in_posts_per_failed_pipeline(self):
-        recorder = _Recorder()
-        ctx = HookContext(
-            pipeline_name="shop__orders",
-            config=_Config({"notifications": {"slack": {"mentions": ["<@U9>"]}}}),
-            command="ingest",
-            error=Exception("boom"),
-        )
-
-        _notifier(recorder, per_pipeline=True).on_pipeline_error(ctx)
-
-        assert "`shop__orders` (ingest) — boom <@U9>" in recorder.text
-
-
-@pytest.mark.unit
 class TestDeliveryIsBestEffort:
     def test_send_failure_is_logged_not_raised(self, caplog):
         """A broken alerting channel must never break the load it reports on."""
@@ -352,26 +337,30 @@ class TestRegistration:
         assert result is None
         assert registry.is_empty()
 
+    def test_nothing_registered_without_on_run_complete(self):
+        """The block configures `saga notify`; posting after a run is opt-in."""
+        registry = HookRegistry()
+
+        result = register_slack_notifier(
+            SlackNotificationConfig(webhook_url="env_secret::X"), registry
+        )
+
+        assert result is None
+        assert registry.is_empty()
+
     def test_digest_only_by_default(self):
         registry = HookRegistry()
 
         register_slack_notifier(
-            SlackNotificationConfig(webhook_url="env_secret::X"), registry
-        )
-
-        assert registry.has_handlers(ON_RUN_COMPLETE)
-        assert not registry.has_handlers(ON_PIPELINE_ERROR)
-
-    def test_per_pipeline_also_registers_the_error_event(self):
-        registry = HookRegistry()
-
-        register_slack_notifier(
-            SlackNotificationConfig(webhook_url="env_secret::X", per_pipeline=True),
+            SlackNotificationConfig(
+                webhook_url="env_secret::X",
+                on_run_complete=SlackRunCompleteConfig(environments=["prod"]),
+            ),
             registry,
         )
 
-        assert registry.has_handlers(ON_RUN_COMPLETE)
-        assert registry.has_handlers(ON_PIPELINE_ERROR)
+        assert registry.has_handlers(ON_RUN_COMPLETE, "prod")
+        assert not registry.has_handlers(ON_PIPELINE_ERROR, "prod")
 
 
 @pytest.mark.unit
@@ -483,18 +472,19 @@ class TestNotificationsProjectConfig:
                 "notifications": {
                     "slack": {
                         "webhook_url": "googlesecretmanager::projects/p/secrets/s/versions/latest",
-                        "notify_on": "always",
                         "mentions": ["<@U1>"],
-                        "per_pipeline": True,
+                        "on_run_complete": {
+                            "environments": ["prod"],
+                            "notify_on": "always",
+                        },
                         "timeout_seconds": 5,
                     }
                 }
             }
         ).notifications.slack
 
-        assert config.notify_on == "always"
+        assert config.on_run_complete.notify_on == "always"
         assert config.mentions == ["<@U1>"]
-        assert config.per_pipeline is True
         assert config.timeout_seconds == 5.0
 
     def test_single_mention_string_is_wrapped(self):
@@ -507,15 +497,8 @@ class TestNotificationsProjectConfig:
         config = self._parse(
             {"notifications": {"slack": {"webhook_url": "x"}}}
         ).notifications.slack
-        assert config.notify_on == "failure"
-        assert config.per_pipeline is False
+        assert config.on_run_complete is None
         assert config.mentions is None
-
-    def test_invalid_notify_on_rejected(self):
-        with pytest.raises(ValueError, match="notify_on must be"):
-            self._parse(
-                {"notifications": {"slack": {"webhook_url": "x", "notify_on": "daily"}}}
-            )
 
     def test_invalid_mentions_rejected(self):
         with pytest.raises(ValueError, match="mentions must be"):
@@ -999,10 +982,15 @@ class TestTransportSelection:
         registry = HookRegistry()
 
         register_slack_notifier(
-            self._config(token="env_secret::T", channel="#c"), registry
+            self._config(
+                token="env_secret::T",
+                channel="#c",
+                on_run_complete=SlackRunCompleteConfig(environments=["prod"]),
+            ),
+            registry,
         )
 
-        assert registry.has_handlers(ON_RUN_COMPLETE)
+        assert registry.has_handlers(ON_RUN_COMPLETE, "prod")
 
     def test_registration_still_needs_one_of_them(self):
         from dlt_saga.hooks.notifiers.slack import register_slack_notifier
@@ -1221,3 +1209,117 @@ class TestIdentityOverrideFeedback:
             self._post([{"ok": True}])
 
         assert "posted under the app" not in caplog.text
+
+
+@pytest.mark.unit
+class TestOnRunComplete:
+    """Posting when a command finishes is opt-in through an ``on_run_complete`` block,
+    and, since ``saga_project.yml`` is shared by every target, filtered to the
+    environments it lists — prod unless set.
+    """
+
+    def _registered(self, **on_run_complete):
+        on_run_complete.setdefault("environments", ["prod"])
+        registry = HookRegistry()
+        register_slack_notifier(
+            SlackNotificationConfig(
+                webhook_url="env_secret::X",
+                on_run_complete=SlackRunCompleteConfig(**on_run_complete),
+            ),
+            registry,
+        )
+        return registry
+
+    def _parse(self, slack):
+        return SlackNotificationConfig.from_dict({"webhook_url": "x", **slack})
+
+    def test_absent_by_default(self):
+        assert self._parse({}).on_run_complete is None
+
+    @pytest.mark.parametrize("value", [{}, None, {"notify_on": "always"}])
+    def test_environments_required(self, value):
+        """Where it posts is never assumed — not even for a bare `on_run_complete:`."""
+        with pytest.raises(
+            ValueError, match="on_run_complete.environments is required"
+        ):
+            self._parse({"on_run_complete": value})
+
+    def test_optional_keys_default_to_quiet(self):
+        on_run_complete = self._parse(
+            {"on_run_complete": {"environments": ["prod"]}}
+        ).on_run_complete
+        assert on_run_complete.notify_on == "failure"
+
+    def test_fires_in_prod(self):
+        assert self._registered().has_handlers(ON_RUN_COMPLETE, "prod")
+
+    def test_skipped_in_dev(self):
+        assert not self._registered().has_handlers(ON_RUN_COMPLETE, "dev")
+
+    def test_listed_environment_fires(self):
+        registry = self._registered(environments=["prod", "staging"])
+        assert registry.has_handlers(ON_RUN_COMPLETE, "staging")
+
+    def test_never_registers_per_pipeline_events(self):
+        registry = self._registered()
+        assert not registry.has_handlers(ON_PIPELINE_ERROR, "prod")
+
+    def test_single_environment_name_is_accepted(self):
+        on_run_complete = self._parse(
+            {"on_run_complete": {"environments": "staging"}}
+        ).on_run_complete
+
+        assert on_run_complete.environments == ["staging"]
+
+    @pytest.mark.parametrize("value", [[], [""], [1], {"prod": True}])
+    def test_invalid_environments_rejected(self, value):
+        with pytest.raises(ValueError, match="on_run_complete.environments"):
+            self._parse({"on_run_complete": {"environments": value}})
+
+    def test_invalid_notify_on_rejected(self):
+        with pytest.raises(ValueError, match="on_run_complete.notify_on must be"):
+            self._parse(
+                {"on_run_complete": {"environments": ["prod"], "notify_on": "daily"}}
+            )
+
+    @pytest.mark.parametrize("value", [True, False, "yes"])
+    def test_non_mapping_rejected(self, value):
+        with pytest.raises(ValueError, match="on_run_complete must be a mapping"):
+            self._parse({"on_run_complete": value})
+
+    def test_top_level_notify_on_points_to_on_run_complete(self):
+        with pytest.raises(ValueError, match="slack.notify_on belongs under"):
+            self._parse({"notify_on": "failure"})
+
+    def test_top_level_per_pipeline_is_reported_as_removed(self):
+        with pytest.raises(ValueError, match="per_pipeline was removed"):
+            self._parse({"per_pipeline": True})
+
+    @pytest.mark.parametrize("key", ["notifiy_on", "per_pipeline"])
+    def test_unknown_keys_rejected(self, key):
+        """A misspelled key would otherwise fall back to its default silently."""
+        with pytest.raises(ValueError, match=rf"Unknown key\(s\).*{key}"):
+            self._parse({"on_run_complete": {"environments": ["prod"], key: "x"}})
+
+
+@pytest.mark.unit
+class TestUnknownNotificationKeys:
+    """A misspelled key would otherwise be dropped — a typo'd `webhook_url`
+    leaves nothing to post through, with no error.
+    """
+
+    def test_unknown_slack_key_rejected(self):
+        with pytest.raises(
+            ValueError, match="Unknown key.*notifications.slack: webhook_ur"
+        ):
+            SlackNotificationConfig.from_dict({"webhook_ur": "x"})
+
+    def test_unknown_notifications_key_rejected(self):
+        from dlt_saga.project_config import NotificationsConfig
+
+        with pytest.raises(ValueError, match="Unknown key.*notifications: slak"):
+            NotificationsConfig.from_dict({"slak": {"webhook_url": "x"}})
+
+    def test_moved_keys_keep_their_specific_message(self):
+        with pytest.raises(ValueError, match="notify_on belongs under"):
+            SlackNotificationConfig.from_dict({"notify_on": "failure"})

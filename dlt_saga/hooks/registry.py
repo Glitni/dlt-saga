@@ -10,7 +10,7 @@ thread-safe and should not perform long-running blocking work.
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:
     from dlt_saga.pipeline_config import PipelineConfig
@@ -56,6 +56,8 @@ class HookContext:
             ``None`` for ``on_pipeline_start`` events and on error.
         error: The exception raised on failure.  ``None`` for
             ``on_pipeline_start`` and ``on_pipeline_complete`` events.
+        environment: Environment of the target the pipeline runs against
+            (e.g. ``"prod"``); what a hook's ``environments`` is matched to.
     """
 
     pipeline_name: str
@@ -63,6 +65,7 @@ class HookContext:
     command: str
     result: Optional[Any] = None
     error: Optional[Exception] = None
+    environment: Optional[str] = None
 
 
 @dataclass
@@ -80,7 +83,9 @@ class RunContext:
         select: Selector expressions the run was invoked with, or ``None`` for
             an unfiltered run.
         target: Profile target name the run executed against (e.g. ``"prod"``).
-        environment: Environment of that target (e.g. ``"prod"``, ``"dev"``).
+        environment: Environment of that target (e.g. ``"prod"``, ``"dev"``),
+            resolved by :func:`~dlt_saga.utility.naming.environment_of` — so
+            without a profile target it is ``SAGA_ENVIRONMENT``, else ``"dev"``.
         results: Per-pipeline outcomes.  For a combined ``run`` a pipeline may
             appear twice, once per phase.
         started_at: When the command started (UTC).
@@ -132,6 +137,10 @@ HookCallable = Callable[[Any], None]
 # ---------------------------------------------------------------------------
 
 
+# A handler and the environments it fires in (None: every environment).
+_Registration = Tuple[HookCallable, Optional[Tuple[str, ...]]]
+
+
 class HookRegistry:
     """Simple registry that maps lifecycle event names to lists of callables.
 
@@ -143,9 +152,14 @@ class HookRegistry:
     """
 
     def __init__(self) -> None:
-        self._hooks: Dict[str, List[HookCallable]] = {e: [] for e in HOOK_EVENTS}
+        self._hooks: Dict[str, List[_Registration]] = {e: [] for e in HOOK_EVENTS}
 
-    def register(self, event: str, handler: HookCallable) -> None:
+    def register(
+        self,
+        event: str,
+        handler: HookCallable,
+        environments: Optional[Sequence[str]] = None,
+    ) -> None:
         """Register *handler* for *event*.
 
         Args:
@@ -154,6 +168,9 @@ class HookRegistry:
                 :class:`HookContext` for the per-pipeline events,
                 :class:`RunContext` for ``on_run_complete``.  Must be
                 thread-safe.
+            environments: Environments the handler fires in, matched against
+                the active target's ``environment``.  ``None`` fires in every
+                environment.
 
         Raises:
             ValueError: If *event* is not a recognised lifecycle event.
@@ -162,17 +179,48 @@ class HookRegistry:
             raise ValueError(
                 f"Unknown hook event {event!r}. Valid events: {HOOK_EVENTS}"
             )
-        self._hooks[event].append(handler)
+        allowed = tuple(environments) if environments is not None else None
+        self._hooks[event].append((handler, allowed))
         name = getattr(handler, "__qualname__", repr(handler))
-        logger.debug("Registered hook %s → %s", event, name)
+        scope = f" (environments: {', '.join(allowed)})" if allowed else ""
+        logger.debug("Registered hook %s → %s%s", event, name, scope)
+
+    def _active(
+        self, event: str, environment: Optional[str] = None
+    ) -> List[HookCallable]:
+        """Handlers for *event* that fire in *environment*.
+
+        *environment* is the event's own — resolved when its context is built
+        rather than looked up here, since ``saga run`` fires after its phases'
+        execution contexts have closed. saga's own contexts always carry one;
+        a hand-built context without it reaches only ungated handlers.
+        """
+        registrations = self._hooks.get(event, [])
+        if all(allowed is None for _, allowed in registrations):
+            return [handler for handler, _ in registrations]
+
+        active = []
+        for handler, allowed in registrations:
+            if allowed is None or environment in allowed:
+                active.append(handler)
+            else:
+                logger.debug(
+                    "Hook %s skipped for %s: environment %r not in %s",
+                    getattr(handler, "__qualname__", repr(handler)),
+                    event,
+                    environment,
+                    ", ".join(allowed),
+                )
+        return active
 
     def fire(self, event: str, context: Any) -> None:
-        """Call all handlers registered for *event*.
+        """Call all handlers registered for *event* in the active environment.
 
         Exceptions raised by individual handlers are caught and logged as
         warnings so that a failing hook never aborts pipeline execution.
         """
-        for handler in self._hooks.get(event, []):
+        environment = getattr(context, "environment", None)
+        for handler in self._active(event, environment):
             try:
                 handler(context)
             except Exception:
@@ -190,13 +238,14 @@ class HookRegistry:
                     exc_info=True,
                 )
 
-    def has_handlers(self, event: str) -> bool:
-        """Return ``True`` if anything is registered for *event*.
+    def has_handlers(self, event: str, environment: Optional[str] = None) -> bool:
+        """Return ``True`` if anything would receive *event* in *environment*.
 
         Lets callers skip building an expensive context (and the work of
-        gathering what goes in it) when nothing would receive it.
+        gathering what goes in it) when nothing would receive it.  Pass the
+        environment the event's context will carry, as :meth:`fire` uses it.
         """
-        return bool(self._hooks.get(event))
+        return bool(self._active(event, environment))
 
     def clear(self) -> None:
         """Remove all registered hooks.  Intended for use in tests."""
@@ -247,6 +296,7 @@ def _fire_pipeline_event(
     after the first call.
     """
     from dlt_saga.hooks.loader import load_hooks
+    from dlt_saga.utility.naming import get_environment
 
     # One registry object for both halves. `loader` binds `get_hook_registry`
     # at import while this resolves it per call, so leaving each to find its
@@ -269,6 +319,8 @@ def _fire_pipeline_event(
             command=command,
             result=result,
             error=error,
+            # Fired inside the pipeline's run, so the active target is its own.
+            environment=get_environment(),
         ),
     )
 

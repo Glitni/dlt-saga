@@ -18,6 +18,7 @@ from dlt_saga.hooks.run_scope import (
     get_active_scope,
     run_notification_scope,
 )
+from dlt_saga.project_config import HooksConfig
 
 
 @dataclass
@@ -379,7 +380,9 @@ class TestConcurrentRegistration:
         )
         monkeypatch.setattr(
             "dlt_saga.project_config.get_project_config",
-            lambda: SimpleNamespace(hooks={"on_pipeline_start": ["m:f"]}),
+            lambda: SimpleNamespace(
+                hooks=HooksConfig(environments=["prod"], on_pipeline_start=["m:f"])
+            ),
             raising=True,
         )
         loader._reset_loaded()
@@ -411,7 +414,9 @@ class TestConcurrentRegistration:
         )
         monkeypatch.setattr(
             "dlt_saga.project_config.get_project_config",
-            lambda: SimpleNamespace(hooks={"on_pipeline_start": ["m:f"]}),
+            lambda: SimpleNamespace(
+                hooks=HooksConfig(environments=["prod"], on_pipeline_start=["m:f"])
+            ),
             raising=True,
         )
         loader._reset_loaded()

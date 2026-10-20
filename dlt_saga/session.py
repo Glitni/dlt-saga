@@ -943,19 +943,21 @@ class Session:
                 get_hook_registry,
             )
             from dlt_saga.hooks.run_scope import contribute
+            from dlt_saga.utility.naming import environment_of
 
             target = self._profile_target
+            environment = environment_of(target)
             # `saga run` wraps both phases in a scope so one command produces one
             # digest; inside a scope this call only contributes its results.
             if contribute(
                 list(result.pipeline_results),
                 target=target.name if target else None,
-                environment=target.environment if target else None,
+                environment=environment,
             ):
                 return
 
             registry = get_hook_registry()
-            if not registry.has_handlers(ON_RUN_COMPLETE):
+            if not registry.has_handlers(ON_RUN_COMPLETE, environment):
                 return
 
             registry.fire(
@@ -964,7 +966,7 @@ class Session:
                     command=command,
                     select=select,
                     target=target.name if target else None,
-                    environment=target.environment if target else None,
+                    environment=environment,
                     results=list(result.pipeline_results),
                     started_at=started_at,
                     finished_at=datetime.now(timezone.utc),
