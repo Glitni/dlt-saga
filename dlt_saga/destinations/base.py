@@ -325,12 +325,21 @@ class Destination(ABC):
         Returns:
             LoadInfo from the run
 
+        A terminal failure while the load is being set up aborts the pending
+        package — see :mod:`dlt_saga.pipelines.load_abort`.
+
         Raises:
             MinRowsNotMetError: If *guard* is set and the load is too small.
         """
-        if guard is None:
-            return pipeline.run(data)
-        return guard.run(pipeline, data)
+        from dlt_saga.pipelines.load_abort import abort_after_terminal_load_failure
+
+        try:
+            if guard is None:
+                return pipeline.run(data)
+            return guard.run(pipeline, data)
+        except Exception as exc:
+            abort_after_terminal_load_failure(pipeline, exc)
+            raise
 
     def sync_table_options(self, dataset: str, table: str) -> None:
         """Reconcile declared table-level options against the destination.
