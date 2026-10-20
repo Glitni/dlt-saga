@@ -102,3 +102,27 @@ class TestTerminalLoadFailureDoesNotWedge:
         assert recovered.success, recovered.error
         count = _execute(db_path, f"SELECT COUNT(*) FROM {_SCHEMA}.{_TABLE}")[0][0]
         assert count == 7, "the stale package was loaded instead of the current source"
+
+    def test_run_after_setup_failure_extracts_current_source(
+        self, db_path, monkeypatch
+    ):
+        """A terminal error before any job runs is outside dlt's auto-abort."""
+        # truncate-and-insert truncates the target while the load is being set
+        # up; saga's default insert-from-staging does it inside a job instead.
+        monkeypatch.setenv("DESTINATION__REPLACE_STRATEGY", "truncate-and-insert")
+        assert _run(db_path).success
+
+        # Move the target away: dlt's schema still believes it exists, so the
+        # setup-time truncate fails before any job runs.
+        _execute(db_path, f"ALTER TABLE {_SCHEMA}.{_TABLE} RENAME TO {_TABLE}_moved")
+        failed = _run(db_path)
+        assert not failed.success
+        assert "step=load" in failed.error
+
+        _execute(db_path, f"ALTER TABLE {_SCHEMA}.{_TABLE}_moved RENAME TO {_TABLE}")
+        _ROWS["n"] = 7
+        recovered = _run(db_path)
+
+        assert recovered.success, recovered.error
+        count = _execute(db_path, f"SELECT COUNT(*) FROM {_SCHEMA}.{_TABLE}")[0][0]
+        assert count == 7, "the stale package was loaded instead of the current source"
