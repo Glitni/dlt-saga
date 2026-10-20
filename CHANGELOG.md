@@ -1,3 +1,13 @@
+## 0.42.0 — 2026-10-20
+
+### Fixed
+- Honour deduplicate and keep column config for dedup/hard-delete hints (#574)
+- Apply replace_strategy from pipeline config (#572)
+- Apply saga dlt defaults in run_pipeline_test and isolate tests from ~/.dlt (#570)
+- Abort pending package on terminal load-setup failure (#568)
+- Abort load packages on terminal job failure (dlt >= 1.30) (#566)
+- Write generated schemas and linked configs with LF line endings (#563)
+
 ## 0.41.1 — 2026-10-19
 
 ### Fixed
