@@ -26,8 +26,9 @@ class TargetWriter:
             if self.config.primary_key:
                 data.apply_hints(primary_key=self.config.primary_key)
         elif base_disposition == "replace":
-            replace_config = self._build_replace_config()
-            data.apply_hints(write_disposition=replace_config)
+            # replace_strategy is destination config in dlt, not a table hint —
+            # BasePipeline sets it on the pipeline's dlt destination.
+            data.apply_hints(write_disposition="replace")
         else:
             # For append disposition (including full_refresh mode)
             data.apply_hints(write_disposition=base_disposition)
@@ -84,10 +85,3 @@ class TargetWriter:
             merge_config["primary_key"] = self.config.primary_key
 
         return merge_config
-
-    def _build_replace_config(self) -> Dict[str, Any]:
-        """Build replace configuration based on target configuration"""
-        replace_config = {"disposition": "replace"}
-        if self.config.replace_strategy:
-            replace_config["strategy"] = self.config.replace_strategy.value
-        return replace_config

@@ -186,6 +186,7 @@ class BasePipeline:
 
         # Create dlt destination from our abstraction
         dlt_destination = self.destination.create_dlt_destination()
+        self._apply_replace_strategy(dlt_destination)
         dlt_staging = self.destination.create_dlt_staging()
 
         # Set pipelines_dir to isolate state per destination, project, and dataset
@@ -208,6 +209,30 @@ class BasePipeline:
             pipeline_params["staging"] = dlt_staging
 
         return dlt.pipeline(**pipeline_params)
+
+    def _apply_replace_strategy(self, dlt_destination: Any) -> None:
+        """Hand the configured ``replace_strategy`` to dlt's destination.
+
+        dlt reads the replace strategy from destination config only — a
+        strategy in a resource's ``write_disposition`` hint is dropped — so it
+        is set on this pipeline's own dlt destination.
+
+        Raises:
+            ValueError: If the destination doesn't support the strategy.
+        """
+        strategy = self.target_writer.config.replace_strategy
+        if strategy is None:
+            return
+        supported = dlt_destination.capabilities().supported_replace_strategies
+        if not hasattr(dlt_destination.spec(), "replace_strategy") or (
+            strategy.value not in supported
+        ):
+            raise ValueError(
+                f"replace_strategy '{strategy.value}' is not supported by the "
+                f"{dlt_destination.destination_name} destination. Supported: "
+                f"{', '.join(supported) or 'none'}."
+            )
+        dlt_destination.config_params["replace_strategy"] = strategy.value
 
     def _get_last_load_with_data(self, table_name: str) -> Optional[datetime]:
         """Get the timestamp of the last successful load that had data.
