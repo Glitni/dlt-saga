@@ -48,6 +48,12 @@ DEFAULTS = {
         "workers": 2,
         "delete_completed_jobs": True,
         "truncate_staging_dataset": True,
+        # Since dlt 1.30 a terminally failed job leaves its package pending, and
+        # the next run() loads pending packages and returns without extracting —
+        # so a deterministic load error wedges the pipeline on the same package
+        # forever. Aborting fails the run just the same, but discards the package
+        # and rolls local state (incremental cursors included) back to before it.
+        "auto_abort_on_terminal_error": True,
     },
 }
 

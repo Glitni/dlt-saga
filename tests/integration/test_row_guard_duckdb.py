@@ -283,9 +283,13 @@ class TestRejectedPackageIsNotLoadedLater:
 
         # A drop that fails leaves the rejected package on disk.
         _ROWS["n"] = 0
-        with patch.object(
-            dlt.Pipeline, "drop_pending_packages", side_effect=OSError("locked")
-        ):
+        # Patch whichever discard method the guard calls on this dlt version.
+        discard = (
+            "abort_packages"
+            if hasattr(dlt.Pipeline, "abort_packages")
+            else "drop_pending_packages"
+        )
+        with patch.object(dlt.Pipeline, discard, side_effect=OSError("locked")):
             blocked = run_pipeline_test(
                 _OrdersPipeline,
                 config_dict=_config(db_path, min_rows=1),

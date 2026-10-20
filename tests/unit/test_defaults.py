@@ -43,6 +43,7 @@ class TestApplyDltDefaults:
         assert "destination" in DEFAULTS
         assert DEFAULTS["normalize"]["workers"] == 4
         assert DEFAULTS["load"]["delete_completed_jobs"] is True
+        assert DEFAULTS["load"]["auto_abort_on_terminal_error"] is True
         assert DEFAULTS["destination"]["replace_strategy"] == "insert-from-staging"
 
     def test_normalize_pool_type_patched(self):
