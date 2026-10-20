@@ -1,3 +1,8 @@
+## 0.43.0 — 2026-10-20
+
+### Breaking Changes
+- Gate hooks and post-run Slack notifications by environment (#577)
+
 ## 0.42.0 — 2026-10-20
 
 ### Fixed
