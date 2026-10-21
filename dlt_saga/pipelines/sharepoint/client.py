@@ -28,6 +28,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 from dlt_saga.pipelines.base_client import BaseClient
+from dlt_saga.utility.http_errors import response_body_snippet
 from dlt_saga.utility.optional_deps import require_optional
 from dlt_saga.utility.secrets.resolver import resolve_secret
 from dlt_saga.utility.tabular import dedupe_headers
@@ -126,8 +127,8 @@ class SharePointClient(BaseClient):
                 continue
 
             if not response.ok:
-                body = (response.text or "").strip()
-                snippet = f": {body[:500]}" if body else ""
+                body = response_body_snippet(response)
+                snippet = f": {body}" if body else ""
                 raise requests.HTTPError(
                     f"SharePoint {method} {url} failed with HTTP "
                     f"{response.status_code} {response.reason}{snippet}",

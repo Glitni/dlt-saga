@@ -307,6 +307,11 @@ except ApiRequestError as e:
 `status_code` is `None` for non-HTTP failures (timeout, connection error) — itself
 the signal that no HTTP status was returned, so don't treat `None` as tolerable.
 
+The message carries only a short summary of the response body (an HTML error
+page is reduced to its `<title>`, anything else capped at 500 characters). To
+parse a structured error payload, read the full body from `e.response_text`
+(`None` for non-HTTP failures).
+
 ### Standard config vocabulary
 
 Reuse the inherited field names instead of inventing new ones — configs stay

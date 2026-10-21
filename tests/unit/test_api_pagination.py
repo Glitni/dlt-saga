@@ -1034,6 +1034,18 @@ class TestSendRequest:
         assert exc_info.value.status_code == 401
         assert exc_info.value.url == "https://api.example.com/report"
 
+    def test_html_error_page_summarised_in_message(self):
+        """The message carries the page title, not the markup; the full body
+        stays on the exception for adapters that parse it."""
+        page = b"<html><head><title>Bad Gateway</title><style>x{}</style></head></html>"
+        pipeline = RetryApiPipeline(max_retries=0)
+        error = _response(502, content=page, headers={"Content-Type": "text/html"})
+        with _transport(error):
+            with pytest.raises(ApiRequestError) as exc_info:
+                pipeline._send_request("GET", "https://api.example.com/report")
+        assert str(exc_info.value) == "API request failed with status 502: Bad Gateway"
+        assert exc_info.value.response_text == page.decode()
+
     def test_session_reused_across_requests(self):
         pipeline = RetryApiPipeline()
         with _transport(_response(200), _response(200)):
