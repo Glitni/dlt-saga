@@ -28,6 +28,7 @@ from requests.exceptions import ChunkedEncodingError
 from dlt_saga.pipelines.api.config import ApiConfig
 from dlt_saga.pipelines.base_pipeline import BasePipeline
 from dlt_saga.pipelines.watermark import read_destination_watermark
+from dlt_saga.utility.http_errors import response_body_snippet
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,10 @@ class ApiRequestError(ValueError):
     ``status_code`` is ``None`` for the non-HTTP paths (timeout, connection
     error, other transport failures), which is itself the signal that the failure
     carried no HTTP status.
+
+    The message carries only a short summary of the response body;
+    ``response_text`` holds the full, unredacted body for an adapter that parses
+    a structured error payload (``None`` on the non-HTTP paths).
     """
 
     def __init__(
@@ -68,10 +73,12 @@ class ApiRequestError(ValueError):
         *,
         status_code: Optional[int] = None,
         url: Optional[str] = None,
+        response_text: Optional[str] = None,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.url = url
+        self.response_text = response_text
 
 
 class BaseApiPipeline(BasePipeline):
@@ -329,14 +336,18 @@ class BaseApiPipeline(BasePipeline):
             return response
 
         status = response.status_code
+        snippet = response_body_snippet(response)
+        detail = f": {snippet}" if snippet else ""
         if status in _RETRY_STATUSES and self.api_config.max_retries:
             message = (
                 f"API request failed after {self.api_config.max_retries} retries "
-                f"(HTTP {status}): {response.text}"
+                f"(HTTP {status}){detail}"
             )
         else:
-            message = f"API request failed with status {status}: {response.text}"
-        raise ApiRequestError(message, status_code=status, url=url)
+            message = f"API request failed with status {status}{detail}"
+        raise ApiRequestError(
+            message, status_code=status, url=url, response_text=response.text
+        )
 
     def _transport_error(
         self, error: requests.RequestException, url: str
