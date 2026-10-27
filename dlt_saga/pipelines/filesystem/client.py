@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -219,41 +220,55 @@ class FilesystemClient:
                 self.config.key_passphrase
             )
 
-        # Resolve known_hosts (if secret URI, write to temp file)
-        if self.config.known_hosts:
-            known_hosts_value = resolve_secret(self.config.known_hosts)
-
-            # If it looks like known_hosts content, write to temp file
-            if "\n" in known_hosts_value or " ssh-" in known_hosts_value:
-                import tempfile
-
-                temp_known_hosts = tempfile.NamedTemporaryFile(
-                    mode="w", delete=False, suffix="_known_hosts"
-                )
-                temp_known_hosts.write(known_hosts_value)
-                temp_known_hosts.close()
-                credentials["sftp_known_hosts"] = temp_known_hosts.name
-                logger.debug("Wrote known_hosts to temporary file")
-            else:
-                # Assume it's a file path
-                credentials["sftp_known_hosts"] = known_hosts_value
-
         # Add port if non-standard
         if self.config.port and self.config.port != 22:
             credentials["sftp_port"] = self.config.port
 
         return credentials if credentials else None
 
+    def _get_sftp_known_hosts_file(self) -> Optional[str]:
+        """Path to the configured ``known_hosts``, writing content to a temp file.
+
+        The value (plain or a secret URI) is either a path to an existing file
+        or the entries themselves.
+        """
+        from dlt_saga.utility.secrets import resolve_secret
+
+        if not self.config.known_hosts:
+            return None
+        value = resolve_secret(self.config.known_hosts)
+        if os.path.isfile(value):
+            return value
+        # An entry is at least "<host> <key type> <key>"
+        if len(value.split()) < 3:
+            raise ValueError(
+                f"known_hosts is neither an existing file nor known_hosts entries: "
+                f"{value!r}. Give a path to a known_hosts file, or its content "
+                f"(e.g. the output of `ssh-keyscan <hostname>`)."
+            )
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", delete=False, suffix="_known_hosts"
+        ) as temp_known_hosts:
+            temp_known_hosts.write(value)
+        logger.debug("Wrote known_hosts to temporary file")
+        return temp_known_hosts.name
+
     def _get_sftp_filesystem(self) -> Any:
         """Open the SFTP filesystem for this source, cached per client.
 
         Opened outside fsspec's instance cache, so the channel timeout set here
         stays on this client's connection, and a connection a stall has broken
-        is never handed to a later run in the same process.
+        is never handed to a later run in the same process. With
+        ``known_hosts`` set, a server whose host key it doesn't list is refused
+        before any credential is sent.
         """
         if self._sftp_filesystem is None:
             from dlt.common.configuration.specs import SFTPCredentials
-            from dlt.common.storages.fsspec_filesystem import fsspec_filesystem
+            from dlt.common.utils import without_none
+
+            from dlt_saga.pipelines.filesystem.sftp import KnownHostsSFTPFileSystem
 
             sftp_creds = self._get_sftp_credentials()
             if not sftp_creds:
@@ -262,8 +277,11 @@ class FilesystemClient:
             credentials.update(
                 {"sftp_timeout": _SFTP_CONNECT_TIMEOUT_SECONDS, **(sftp_creds or {})}
             )
-            fs, _ = fsspec_filesystem(
-                self.fs_url, credentials, kwargs={"skip_instance_cache": True}
+            fs = KnownHostsSFTPFileSystem(
+                self.config.hostname,
+                known_hosts=self._get_sftp_known_hosts_file(),
+                skip_instance_cache=True,
+                **without_none(credentials.to_fsspec_credentials()),
             )
             fs.ftp.get_channel().settimeout(_SFTP_READ_STALL_TIMEOUT_SECONDS)
             self._sftp_filesystem = fs

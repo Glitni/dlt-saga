@@ -62,11 +62,11 @@ def _sftp_client(**overrides) -> FilesystemClient:
 
 @pytest.fixture
 def opened_sftp():
-    """Patch the fsspec open; yields the mock opener and the filesystem it returns."""
+    """Patch the SFTP open; yields the mock opener and the filesystem it returns."""
     fs = MagicMock()
     with patch(
-        "dlt.common.storages.fsspec_filesystem.fsspec_filesystem",
-        return_value=(fs, "sftp://sftp.example.com/data"),
+        "dlt_saga.pipelines.filesystem.sftp.KnownHostsSFTPFileSystem",
+        return_value=fs,
     ) as opener:
         yield opener, fs
 
@@ -92,16 +92,16 @@ class TestSftpReadTimeout:
 
         _sftp_client().get_filesystem_kwargs()
 
-        credentials = opener.call_args.args[1]
-        assert credentials.sftp_timeout
-        assert credentials.sftp_username == "user"
+        assert opener.call_args.kwargs["timeout"]
+        assert opener.call_args.kwargs["username"] == "user"
 
     def test_configured_credentials_reach_the_connection(self, opened_sftp):
         opener, _ = opened_sftp
 
         _sftp_client(port=2222).get_filesystem_kwargs()
 
-        assert opener.call_args.args[1].sftp_port == 2222
+        assert opener.call_args.args == ("sftp.example.com",)
+        assert opener.call_args.kwargs["port"] == 2222
 
     def test_filesystem_kept_out_of_the_fsspec_instance_cache(self, opened_sftp):
         """A cached instance is shared with anyone opening the same host in the
@@ -110,7 +110,7 @@ class TestSftpReadTimeout:
 
         _sftp_client().get_filesystem_kwargs()
 
-        assert opener.call_args.kwargs["kwargs"] == {"skip_instance_cache": True}
+        assert opener.call_args.kwargs["skip_instance_cache"] is True
 
     def test_one_connection_per_client(self, opened_sftp):
         """Header and data reads each build a resource; they share a connection."""

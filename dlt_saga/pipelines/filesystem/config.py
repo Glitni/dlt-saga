@@ -123,7 +123,12 @@ class FilesystemConfig(BaseConfig):
     known_hosts: Optional[str] = field(
         default=None,
         metadata={
-            "description": "Known hosts (file path or content)",
+            "description": (
+                "Known hosts (file path or content, e.g. `ssh-keyscan` output). "
+                "When set, the connection is refused unless the server's host "
+                "key matches an entry for the host; when unset, any host key is "
+                "accepted"
+            ),
             "secret": True,
         },
     )
