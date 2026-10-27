@@ -1,3 +1,16 @@
+## 0.44.0 — 2026-10-27
+
+### Added
+- Add --exclude to selecting commands (#583)
+
+
+### Fixed
+- Enforce SFTP known_hosts so an unpinned server host key is refused (#591)
+- Bound SFTP filesystem reads so a stalled server fails instead of hanging (#589)
+- Bound GCS filesystem requests so a stalled connection fails instead of hanging (#587)
+- Record worker outcomes per pipeline and on SIGTERM (#585)
+- Summarise HTTP error response bodies in API error messages (#581)
+
 ## 0.43.0 — 2026-10-20
 
 ### Breaking Changes
