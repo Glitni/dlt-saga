@@ -248,9 +248,16 @@ class HistorizeRunner:
             merged[col] = {**merged.get(col, {}), **hints}
         return merged
 
-    def _scd2_system_column_descriptions(self) -> Dict[str, str]:
-        """Canned descriptions for the SCD2 system columns (auto-documentation)."""
+    def _system_column_descriptions(self) -> Dict[str, str]:
+        """Canned descriptions for the historize system columns (auto-documentation)."""
         c = self.config
+        if c.is_scd1:
+            return {
+                c.valid_from_column: (
+                    "When the row's current values took effect (the snapshot "
+                    "they first appeared in)."
+                ),
+            }
         return {
             c.valid_from_column: (
                 "SCD2 validity start: when this version of the row became current."
@@ -291,7 +298,7 @@ class HistorizeRunner:
         if cfg.persist_docs.columns:
             # Config columns win over the canned SCD2 defaults on any overlap.
             column_descriptions = {
-                **self._scd2_system_column_descriptions(),
+                **self._system_column_descriptions(),
                 **column_descriptions,
             }
         table_description = cfg.resolve_table_description(None)
@@ -479,6 +486,9 @@ class HistorizeRunner:
         self._guard_null_primary_keys(discovery)
 
         value_columns = self._discover_value_columns()
+        if self.config.is_scd1:
+            # Before any setup: a full reprocess drops the target first.
+            self._guard_order_by(value_columns)
 
         # Mode selection:
         # - partial_refresh/historize_from + no prior run → full reprocess
@@ -497,7 +507,11 @@ class HistorizeRunner:
         timings["setup"] = time.time() - t
 
         t = time.time()
-        if is_partial and not needs_full:
+        if self.config.is_scd1:
+            stats = self._run_scd1(
+                value_columns, started_at, needs_full, is_partial, new_snapshots
+            )
+        elif is_partial and not needs_full:
             stats = self._run_partial_refresh(value_columns, started_at)
         elif needs_full:
             stats = self._run_full_reprocess(value_columns, started_at)
@@ -608,7 +622,7 @@ class HistorizeRunner:
                 f"{self.pipeline_name}: {total} late-arriving snapshot(s) "
                 f"found at or below the watermark (earliest: {earliest}) — "
                 f"not historized. Set 'detect_late_arrivals: true' under "
-                f"historize: to rewind and replay them automatically, replay "
+                f"historize: to replay them automatically, replay "
                 f"manually with --historize-from, or set it to false to "
                 f"silence this warning."
             )
@@ -633,6 +647,17 @@ class HistorizeRunner:
             primary_key=self.config.primary_key,
             min_snapshot_inclusive=late.min_snapshot,
         )
+        if self.config.is_scd1:
+            # scd1 ranks every version against the stored one, so re-merging
+            # the window settles late versions without unwinding anything —
+            # no rewind, so no retention guard and no baseline.
+            self.logger.warning(
+                f"{self.pipeline_name}: {late.snapshot_count} late-arriving "
+                f"snapshot(s) at or below the watermark "
+                f"(earliest: {late.min_snapshot}); re-merging "
+                f"{len(replay.snapshots)} snapshot(s) from that boundary"
+            )
+            return replay, baseline_snapshot
         # Retention guard: the rewind deletes target history in the replay
         # window and rebuilds it from raw, so every historized snapshot in the
         # window must still exist in raw. Partition expiration on the raw
@@ -780,6 +805,7 @@ class HistorizeRunner:
             ("snapshot_column", [self.config.snapshot_column], True),
             ("primary_key", list(self.config.primary_key or []), False),
             ("merge_key", list(self.config.merge_key or []), False),
+            ("order_by", list(self.config.order_by or []), True),
         ]
         missing = [
             (key, col)
@@ -954,6 +980,9 @@ class HistorizeRunner:
             return list(self.config.cluster_columns) or None
         if not self.destination.supports_clustering() or self._is_databricks_iceberg():
             return None
+        if self.config.is_scd1:
+            # One row per key: valid_from is what "changed since T" reads filter on.
+            return [self.config.valid_from_column]
         return [self.config.valid_to_column, self.config.valid_from_column]
 
     @property
@@ -1063,6 +1092,11 @@ class HistorizeRunner:
             # these are reported by config_changed only when both dicts have the key)
             if key in previous and previous[key] != current[key]:
                 changes.append(f"  {key}: {previous[key]} → {current[key]}")
+        if previous.get("strategy") == "scd1" and current.get("strategy") == "scd2":
+            changes.append(
+                "  (scd1 kept only the latest version per key — the rebuilt "
+                "scd2 history starts from what the source still holds)"
+            )
         diff = "\n".join(changes)
         rebuild_cmd = f"Run '{self._rebuild_command}' to rebuild."
         is_partial = self.partial_refresh or self.historize_from is not None
@@ -1110,6 +1144,32 @@ class HistorizeRunner:
         )
         return columns
 
+    def _guard_order_by(self, value_columns: List[str]) -> None:
+        """Refuse scd1 ranking columns the historized table won't carry.
+
+        Each run ranks incoming versions against the stored row, so every
+        ``order_by`` column must exist on both sides: a value column, or
+        ``snapshot_column`` (stored as ``valid_from``). A primary-key or
+        system column would rank on the source side only.
+        """
+        carried = {c.lower() for c in value_columns}
+        snapshot = self.config.snapshot_column.lower()
+        missing = [
+            col
+            for col in self.config.effective_order_by
+            if col.lower() != snapshot and col.lower() not in carried
+        ]
+        if not missing:
+            return
+        raise ValueError(
+            f"historize.order_by for '{self.pipeline_name}' names column(s) "
+            f"{missing} that the historized table doesn't carry. scd1 compares "
+            f"each new version against the stored row, so order_by may only "
+            f"name value columns or snapshot_column "
+            f"('{self.config.snapshot_column}'). Value columns: "
+            f"{', '.join(value_columns)}"
+        )
+
     def _create_target_table(
         self, value_columns: List[str], replace: bool = False
     ) -> None:
@@ -1144,6 +1204,25 @@ class HistorizeRunner:
         action = "Replaced" if replace else "Created"
         self.logger.info(f"{action} historized table: {self.target_table_id}")
 
+    def _resolve_max_snapshot(self) -> Optional[str]:
+        """The source's latest snapshot, read before a whole-source reprocess.
+
+        Used both as the reprocess upper bound and as the recorded baseline.
+        Reading it afterwards would record a snapshot that arrived between the
+        reprocess read and the max read as "processed" — the next run then
+        discovers nothing past it and that snapshot is skipped forever.
+        Bounding the reads with <= max keeps the baseline exactly in step with
+        what was historized. ``None`` for an empty or fully-filtered source.
+        """
+        q_snapshot = self.destination.quote_identifier(self.config.snapshot_column)
+        cast_max = self.destination.cast_to_string(f"MAX({q_snapshot})")
+        max_sql = (
+            f"SELECT {cast_max} AS last_snapshot "
+            f"FROM {self.source_table_id}{filter_where_clause(self._filter_sql)}"
+        )
+        max_rows = list(self.destination.execute_sql(max_sql, self.schema))
+        return max_rows[0].last_snapshot if max_rows else None
+
     def _run_full_reprocess(
         self, value_columns: List[str], started_at: datetime
     ) -> Dict[str, Any]:
@@ -1153,23 +1232,8 @@ class HistorizeRunner:
             "all snapshots (full reprocess)"
         )
 
-        src = self.source_table_id
         tgt = self.target_table_id
-        q_snapshot = self.destination.quote_identifier(self.config.snapshot_column)
-
-        # Resolve the max source snapshot BEFORE processing and use it both as the
-        # reprocess upper bound and as the recorded baseline. Reading it afterwards
-        # would record a snapshot that arrived between the reprocess read and the
-        # max read as "processed" — the next run then discovers nothing past it and
-        # that snapshot is skipped forever. Bounding the reads with <= max keeps the
-        # baseline exactly in step with what was historized.
-        cast_max = self.destination.cast_to_string(f"MAX({q_snapshot})")
-        max_sql = (
-            f"SELECT {cast_max} AS last_snapshot "
-            f"FROM {src}{filter_where_clause(self._filter_sql)}"
-        )
-        max_rows = list(self.destination.execute_sql(max_sql, self.schema))
-        max_snapshot = max_rows[0].last_snapshot if max_rows else None
+        max_snapshot = self._resolve_max_snapshot()
 
         # An empty/fully-filtered source has no snapshot, so no baseline exists.
         # Skip processing and the log entry rather than record a NULL-snapshot
@@ -1214,21 +1278,13 @@ class HistorizeRunner:
             f"{new_or_changed:,} rows, {deleted:,} deletions"
         )
 
-        fingerprint = self.state_manager.compute_fingerprint(self.config)
-        self.state_manager.write_log_entry(
-            HistorizeLogEntry(
-                pipeline_name=self.pipeline_name,
-                source_table=self.source_table_id,
-                target_table=self.target_table_id,
-                snapshot_value=max_snapshot,
-                new_or_changed_rows=new_or_changed,
-                deleted_rows=deleted,
-                config_fingerprint=fingerprint,
-                is_full_reprocess=True,
-                started_at=started_at,
-                finished_at=finished_at,
-                status="completed",
-            )
+        self._log_completed_run(
+            max_snapshot,
+            new_or_changed,
+            deleted,
+            started_at,
+            is_full_reprocess=True,
+            finished_at=finished_at,
         )
 
         return {
@@ -1310,22 +1366,13 @@ class HistorizeRunner:
         )
 
         # Log with last snapshot value for state tracking
-        fingerprint = self.state_manager.compute_fingerprint(self.config)
-        last_snapshot = new_snapshots[-1]
-        self.state_manager.write_log_entry(
-            HistorizeLogEntry(
-                pipeline_name=self.pipeline_name,
-                source_table=self.source_table_id,
-                target_table=self.target_table_id,
-                snapshot_value=last_snapshot,
-                new_or_changed_rows=new_or_changed,
-                deleted_rows=deleted,
-                config_fingerprint=fingerprint,
-                is_full_reprocess=False,
-                started_at=started_at,
-                finished_at=finished_at,
-                status="completed",
-            )
+        self._log_completed_run(
+            new_snapshots[-1],
+            new_or_changed,
+            deleted,
+            started_at,
+            is_full_reprocess=False,
+            finished_at=finished_at,
         )
 
         return {
@@ -1334,6 +1381,138 @@ class HistorizeRunner:
             "new_or_changed_rows": new_or_changed,
             "deleted_rows": deleted,
         }
+
+    def _run_scd1(
+        self,
+        value_columns: List[str],
+        started_at: datetime,
+        needs_full: bool,
+        is_partial: bool,
+        new_snapshots: Optional[List[str]],
+    ) -> Dict[str, Any]:
+        """Merge the latest version per key into the target (``strategy: scd1``).
+
+        One statement serves every mode (see ``build_scd1_sql``); the modes
+        differ only in which source rows are in scope. A partial refresh runs
+        in place — re-merging a window can't move a key off its highest-ranked
+        version, so there is no history to unwind and nothing to clone. It
+        also can't remove a version that has since left the source; that takes
+        a full refresh.
+        """
+        if needs_full:
+            return self._run_scd1_full(value_columns, started_at)
+        if is_partial:
+            return self._run_scd1_partial(value_columns, started_at)
+
+        snapshots = list(new_snapshots or [])
+        self.logger.info(
+            f"Historizing {self.pipeline_name} → {self._target_display}: "
+            f"{len(snapshots)} new snapshot(s) (scd1)"
+        )
+        merged = self._execute_scd1(
+            self.sql_builder.build_scd1_sql(value_columns, snapshots=snapshots)
+        )
+        self._log_completed_run(
+            snapshots[-1], merged, 0, started_at, is_full_reprocess=False
+        )
+        return {
+            "mode": "incremental",
+            "snapshots_processed": len(snapshots),
+            "new_or_changed_rows": merged,
+            "deleted_rows": 0,
+        }
+
+    def _run_scd1_full(
+        self, value_columns: List[str], started_at: datetime
+    ) -> Dict[str, Any]:
+        """Rebuild the scd1 target from the whole source (recreated empty first)."""
+        max_snapshot = self._resolve_max_snapshot()
+        if max_snapshot is None:
+            self.logger.info(
+                f"Source for {self.pipeline_name} is empty; nothing to historize. "
+                "No baseline recorded."
+            )
+            return {**self._empty_stats("full_reprocess"), "snapshots_processed": "all"}
+
+        self.logger.info(
+            f"Historizing {self.pipeline_name} → {self._target_display}: "
+            "all snapshots (full reprocess, scd1)"
+        )
+        merged = self._execute_scd1(
+            self.sql_builder.build_scd1_sql(
+                value_columns, snapshot_upper_bound=max_snapshot, target_is_empty=True
+            )
+        )
+        self._log_completed_run(
+            max_snapshot, merged, 0, started_at, is_full_reprocess=True
+        )
+        return {
+            "mode": "full_reprocess",
+            "snapshots_processed": "all",
+            "new_or_changed_rows": merged,
+            "deleted_rows": 0,
+        }
+
+    def _run_scd1_partial(
+        self, value_columns: List[str], started_at: datetime
+    ) -> Dict[str, Any]:
+        """Re-merge the source from the partial-refresh boundary, in place."""
+        effective_from_date, snapshots, _ = self._resolve_partial_window(
+            self.target_schema, with_lag_reference=False
+        )
+        if not snapshots:
+            return self._empty_stats("partial_refresh")
+
+        self.logger.info(
+            f"Historizing {self.pipeline_name} → {self._target_display} from "
+            f"{effective_from_date}: {len(snapshots)} snapshot(s) to reprocess (scd1)"
+        )
+        merged = self._execute_scd1(
+            self.sql_builder.build_scd1_sql(value_columns, snapshots=snapshots)
+        )
+        self._write_partial_log(effective_from_date, snapshots, merged, 0, started_at)
+        return {
+            "mode": "partial_refresh",
+            "snapshots_processed": len(snapshots),
+            "new_or_changed_rows": merged,
+            "deleted_rows": 0,
+        }
+
+    def _execute_scd1(self, sql: str) -> int:
+        """Run an scd1 script and return the number of rows it merged."""
+        self.logger.debug(f"SCD1 SQL ({len(sql)} chars)")
+        rows = list(self.destination.execute_sql(sql, self.schema))
+        return (rows[0].new_or_changed_rows if rows else 0) or 0
+
+    def _log_completed_run(
+        self,
+        snapshot_value: str,
+        new_or_changed: int,
+        deleted: int,
+        started_at: datetime,
+        is_full_reprocess: bool,
+        finished_at: Optional[datetime] = None,
+    ) -> None:
+        """Record a completed run; ``snapshot_value`` becomes the watermark.
+
+        ``finished_at`` defaults to now; callers that finish writing before
+        their stats queries pass the earlier time.
+        """
+        self.state_manager.write_log_entry(
+            HistorizeLogEntry(
+                pipeline_name=self.pipeline_name,
+                source_table=self.source_table_id,
+                target_table=self.target_table_id,
+                snapshot_value=snapshot_value,
+                new_or_changed_rows=new_or_changed,
+                deleted_rows=deleted,
+                config_fingerprint=self.state_manager.compute_fingerprint(self.config),
+                is_full_reprocess=is_full_reprocess,
+                started_at=started_at,
+                finished_at=finished_at or datetime.now(timezone.utc),
+                status="completed",
+            )
+        )
 
     def _run_partial_refresh(
         self,
@@ -1351,34 +1530,11 @@ class HistorizeRunner:
         run_id = uuid.uuid4().hex[:8]
         target_schema = self.config.schema_name or self.schema
 
-        # Resolve effective boundary
-        effective_from_date, clamped = self._resolve_effective_from_date()
-        if effective_from_date is None:
-            raise ValueError(
-                f"No raw snapshots found in {self.source_table_id}; "
-                "cannot determine reprocessing boundary."
-            )
-        if clamped:
-            self.logger.warning(
-                f"--historize-from {self.historize_from} predates earliest raw snapshot "
-                f"({effective_from_date}). Using {effective_from_date} as effective start date."
-            )
-
-        # Discover snapshots to reprocess before cloning (avoids clone cost on early exit)
-        snapshots_to_reprocess, lag_reference = self._discover_reprocess_snapshots(
-            effective_from_date, target_schema
+        effective_from_date, snapshots_to_reprocess, lag_reference = (
+            self._resolve_partial_window(target_schema)
         )
         if not snapshots_to_reprocess:
-            self.logger.info(
-                f"No snapshots to reprocess from {effective_from_date} for "
-                f"{self.pipeline_name}; nothing to do."
-            )
-            return {
-                "mode": "partial_refresh",
-                "snapshots_processed": 0,
-                "new_or_changed_rows": 0,
-                "deleted_rows": 0,
-            }
+            return self._empty_stats("partial_refresh")
 
         self.logger.info(
             f"Historizing {self.pipeline_name} → {self._target_display} from "
@@ -1395,6 +1551,52 @@ class HistorizeRunner:
             value_columns=value_columns,
             started_at=started_at,
         )
+
+    @staticmethod
+    def _empty_stats(mode: str) -> Dict[str, Any]:
+        """Stats for a run that found nothing to process."""
+        return {
+            "mode": mode,
+            "snapshots_processed": 0,
+            "new_or_changed_rows": 0,
+            "deleted_rows": 0,
+        }
+
+    def _resolve_partial_window(
+        self, target_schema: str, with_lag_reference: bool = True
+    ) -> tuple:
+        """Resolve a partial refresh's boundary and the snapshots it covers.
+
+        ``with_lag_reference=False`` skips the change-detection reference
+        lookup (returned as ``None``) for callers that don't need one.
+
+        Returns:
+            ``(effective_from_date, snapshots_to_reprocess, lag_reference)``;
+            ``snapshots_to_reprocess`` is empty (and logged) when nothing sits
+            at or above the boundary.
+        """
+        effective_from_date, clamped = self._resolve_effective_from_date()
+        if effective_from_date is None:
+            raise ValueError(
+                f"No raw snapshots found in {self.source_table_id}; "
+                "cannot determine reprocessing boundary."
+            )
+        if clamped:
+            self.logger.warning(
+                f"--historize-from {self.historize_from} predates earliest raw snapshot "
+                f"({effective_from_date}). Using {effective_from_date} as effective start date."
+            )
+
+        # Discover snapshots to reprocess before cloning (avoids clone cost on early exit)
+        snapshots_to_reprocess, lag_reference = self._discover_reprocess_snapshots(
+            effective_from_date, target_schema, with_lag_reference=with_lag_reference
+        )
+        if not snapshots_to_reprocess:
+            self.logger.info(
+                f"No snapshots to reprocess from {effective_from_date} for "
+                f"{self.pipeline_name}; nothing to do."
+            )
+        return effective_from_date, snapshots_to_reprocess, lag_reference
 
     def _execute_clone_and_swap(
         self,
@@ -1612,22 +1814,12 @@ class HistorizeRunner:
         self.state_manager.clear_log_entries_from(
             self.pipeline_name, effective_from_date
         )
-        finished_at = datetime.now(timezone.utc)
-        fingerprint = self.state_manager.compute_fingerprint(self.config)
-        self.state_manager.write_log_entry(
-            HistorizeLogEntry(
-                pipeline_name=self.pipeline_name,
-                source_table=self.source_table_id,
-                target_table=self.target_table_id,
-                snapshot_value=snapshots_to_reprocess[-1],
-                new_or_changed_rows=new_or_changed,
-                deleted_rows=deleted,
-                config_fingerprint=fingerprint,
-                is_full_reprocess=False,
-                started_at=started_at,
-                finished_at=finished_at,
-                status="completed",
-            )
+        self._log_completed_run(
+            snapshots_to_reprocess[-1],
+            new_or_changed,
+            deleted,
+            started_at,
+            is_full_reprocess=False,
         )
         self.logger.debug(
             f"Partial re-historization complete for {self.pipeline_name}: "
@@ -1676,13 +1868,18 @@ class HistorizeRunner:
         return self.historize_from, False
 
     def _discover_reprocess_snapshots(
-        self, effective_from_date: str, target_schema: str
+        self,
+        effective_from_date: str,
+        target_schema: str,
+        with_lag_reference: bool = True,
     ) -> tuple:
         """Discover snapshots to reprocess and the LAG reference snapshot.
 
         Args:
             effective_from_date: ISO timestamp string for the lower bound (inclusive).
             target_schema: Schema/dataset for query context.
+            with_lag_reference: When False, skip the reference query and
+                return ``None`` for it.
 
         Returns:
             Tuple of (snapshots_list, lag_reference):
@@ -1703,6 +1900,8 @@ class HistorizeRunner:
         """
         rows = list(self.destination.execute_sql(forward_sql, target_schema))
         snapshots = [row.snapshot_val for row in rows]
+        if not with_lag_reference:
+            return snapshots, None
 
         # Last snapshot before the boundary (used as LAG reference for incremental SQL)
         lag_sql = f"""

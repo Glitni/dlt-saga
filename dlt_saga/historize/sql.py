@@ -367,15 +367,18 @@ class HistorizeSqlBuilder:
         ts_type = self.destination.type_name("timestamp")
         bool_type = self.destination.type_name("bool")
 
-        select_body = (
-            f"SELECT\n"
-            f"    {self._qcols(all_data_cols)},\n"
-            f"    CAST(NULL AS {ts_type}) AS {self.valid_from},\n"
-            f"    CAST(NULL AS {ts_type}) AS {self.valid_to},\n"
-            f"    CAST(NULL AS {bool_type}) AS {self.is_deleted}\n"
-            f"FROM {src}\n"
-            f"WHERE FALSE"
+        # scd1 keeps one row per key, so it has no validity end and no
+        # deletion markers — only when the current version took effect.
+        system_cols = [f"CAST(NULL AS {ts_type}) AS {self.valid_from}"]
+        if not self.config.is_scd1:
+            system_cols += [
+                f"CAST(NULL AS {ts_type}) AS {self.valid_to}",
+                f"CAST(NULL AS {bool_type}) AS {self.is_deleted}",
+            ]
+        select_list = ",\n".join(
+            f"    {col}" for col in [self._qcols(all_data_cols), *system_cols]
         )
+        select_body = f"SELECT\n{select_list}\nFROM {src}\nWHERE FALSE"
 
         hints = MaterializationHints(
             partition_column=self.config.partition_column,
@@ -387,8 +390,8 @@ class HistorizeSqlBuilder:
             source_schema=self.source_schema,
             source_table=self.source_table,
             valid_from_column=self.valid_from,
-            valid_to_column=self.valid_to,
-            is_deleted_column=self.is_deleted,
+            valid_to_column=None if self.config.is_scd1 else self.valid_to,
+            is_deleted_column=None if self.config.is_scd1 else self.is_deleted,
         )
 
         return self.destination.build_historize_create_table_sql(
@@ -924,4 +927,184 @@ deletions AS (
   WHERE next_overall_snapshot IS NOT NULL
     AND (next_key_snapshot IS NULL OR next_key_snapshot > next_overall_snapshot)
 ),
+"""
+
+    def _scd1_rank_sql(self, descending: bool) -> str:
+        """``ORDER BY`` terms ranking a key's versions (scd1).
+
+        ``descending`` lists the highest-ranked version first; ascending is its
+        exact reverse, so the winner is the last row of an ascending window.
+        ``snapshot_column`` isn't carried into the target under its own name —
+        it becomes ``valid_from`` — so it is ranked through that column, which
+        both the source and the stored side carry. After ``order_by``, a source
+        row outranks the stored one on an exact tie, and the value hash makes
+        the order total.
+        """
+        snapshot = self.config.snapshot_column.lower()
+        refs = [
+            self.valid_from if col.lower() == snapshot else col
+            for col in self.config.effective_order_by
+        ]
+        nulls, direction = (
+            ("NULLS LAST", "DESC") if descending else ("NULLS FIRST", "ASC")
+        )
+        terms = [f"{self._q(ref)} {direction} {nulls}" for ref in refs]
+        terms += [f"_saga_from_batch {direction}", f"_saga_hash {direction}"]
+        return ", ".join(terms)
+
+    def build_scd1_sql(
+        self,
+        value_columns: List[str],
+        snapshots: Optional[List[str]] = None,
+        snapshot_upper_bound: Optional[str] = None,
+        target_is_empty: bool = False,
+    ) -> str:
+        """Build SQL that keeps the latest version per key (``strategy: scd1``).
+
+        Candidate versions are the source rows in scope plus the stored row of
+        every key they touch, ranked per key by ``order_by``. Ranking against
+        the stored row instead of overwriting it makes the outcome independent
+        of the order batches arrive in: a version ranked below the stored one
+        loses, however late it lands. On an exact tie the source row wins, so
+        re-processing a corrected source row takes effect.
+
+        The winner's ``valid_from`` is where its values took effect: the
+        earliest version in the unbroken stretch of identical values that ends
+        at the winner. When that stretch includes the stored row, the stored
+        row already says so and nothing is written — an unchanged key is
+        never rewritten, however often the source re-delivers it.
+
+        Serves every mode: a full reprocess runs it against the freshly
+        recreated target (``target_is_empty``: no stored rows to rank against,
+        plain INSERT); incremental runs and partial refreshes run it against
+        the existing target with a snapshot range. Nothing is written outside
+        the final statement that applies the winners, so a crashed-then-retried
+        run converges without the rollback scd2 needs.
+
+        The script ends by selecting the number of rows written, which the
+        runner reads as the run's ``new_or_changed_rows``.
+
+        Args:
+            value_columns: Non-PK columns carried into the target.
+            snapshots: Chronologically ordered batch to process; bounds the
+                source read by range. ``None`` reads the whole source.
+            snapshot_upper_bound: Upper bound for a whole-source read, so the
+                recorded baseline matches what was processed.
+            target_is_empty: The target holds no rows (full reprocess).
+        """
+        pk_cols = self._pk_cols_sql()
+        data_cols = list(self.primary_key) + list(value_columns)
+        all_cols = data_cols + [self.valid_from]
+        all_cols_sql = self._qcols(all_cols)
+        q_vf = self._q(self.valid_from)
+        src = self.source_table_id
+        tgt = self.target_table_id
+
+        if snapshots is not None:
+            source_filter: Optional[str] = and_filter(
+                self.filter_sql,
+                snapshot_range_filter(self.destination, self._snap_src, snapshots),
+            )
+        else:
+            source_filter = self._source_filter_with_bound(
+                self._snap_src, snapshot_upper_bound
+            )
+
+        if target_is_empty:
+            candidates = """-- Nothing stored yet: the source rows are the only candidates.
+candidates AS (
+  SELECT * FROM batch
+),"""
+            apply_sql = f"""INSERT INTO {tgt} ({all_cols_sql})
+SELECT {all_cols_sql} FROM _historize_scd1;"""
+        else:
+            target_cols = ", ".join(f"t.{self._q(c)}" for c in all_cols)
+            candidates = f"""batch_keys AS (
+  SELECT DISTINCT {pk_cols} FROM batch
+),
+
+-- The stored version of every key in the batch competes with the batch's own.
+candidates AS (
+  SELECT * FROM batch
+  UNION ALL
+  SELECT {target_cols}, 0 AS _saga_from_batch
+  FROM {tgt} t
+  INNER JOIN batch_keys k ON {self._pk_join("t", "k")}
+),"""
+            update_set = ",\n    ".join(
+                f"{self._q(c)} = n.{self._q(c)}"
+                for c in list(value_columns) + [self.valid_from]
+            )
+            insert_values = ", ".join(f"n.{self._q(c)}" for c in all_cols)
+            apply_sql = f"""MERGE INTO {tgt} t
+USING _historize_scd1 n
+ON {self._pk_join("t", "n")}
+WHEN MATCHED THEN
+  UPDATE SET
+    {update_set}
+WHEN NOT MATCHED THEN
+  INSERT ({all_cols_sql})
+  VALUES ({insert_values});"""
+
+        hash_expr = self.destination.hash_expression(list(value_columns))
+        rank_asc = self._scd1_rank_sql(descending=False)
+
+        return f"""
+-- SCD1 Historization
+-- Keeps the latest version per key
+
+CREATE OR REPLACE TEMP TABLE _historize_scd1 AS
+WITH
+-- Source rows in scope; the snapshot value becomes the version's valid_from.
+batch AS (
+  SELECT {self._qcols(data_cols)}, {self._snap_src} AS {q_vf},
+    1 AS _saga_from_batch
+  FROM {src}{filter_where_clause(source_filter)}
+),
+
+{candidates}
+
+hashed AS (
+  SELECT c.*, {hash_expr} AS _saga_hash
+  FROM candidates c
+),
+
+-- Rank each key's versions; flag where the values differ from the next-lower one.
+sequenced AS (
+  SELECT h.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY {pk_cols} ORDER BY {self._scd1_rank_sql(descending=True)}
+    ) AS _saga_rn,
+    CASE WHEN _saga_hash = LAG(_saga_hash) OVER (
+      PARTITION BY {pk_cols} ORDER BY {rank_asc}
+    ) THEN 0 ELSE 1 END AS _saga_changed
+  FROM hashed h
+),
+
+-- Number the stretches of identical values, in rank order.
+stretched AS (
+  SELECT s.*,
+    SUM(_saga_changed) OVER (
+      PARTITION BY {pk_cols} ORDER BY {rank_asc}
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS _saga_stretch
+  FROM sequenced s
+),
+
+-- Where each stretch began, and whether the stored row is part of it.
+with_since AS (
+  SELECT st.*,
+    MIN({q_vf}) OVER (PARTITION BY {pk_cols}, _saga_stretch) AS _saga_since,
+    MIN(_saga_from_batch) OVER (PARTITION BY {pk_cols}, _saga_stretch)
+      AS _saga_stretch_from_batch
+  FROM stretched st
+)
+-- The winner, unless the stored row already holds its values.
+SELECT {self._qcols(data_cols)}, _saga_since AS {q_vf}
+FROM with_since
+WHERE _saga_rn = 1 AND _saga_stretch_from_batch = 1;
+
+{apply_sql}
+
+SELECT COUNT(*) AS new_or_changed_rows FROM _historize_scd1;
 """

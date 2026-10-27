@@ -1,6 +1,6 @@
-# Historize (SCD2)
+# Historize (SCD2 / SCD1)
 
-The historize engine transforms raw snapshot tables into [Slowly Changing Dimension Type 2 (SCD2)](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_2:_add_new_row) tables that track the full history of every record.
+The historize engine transforms raw snapshot tables into [Slowly Changing Dimension Type 2 (SCD2)](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_2:_add_new_row) tables that track the full history of every record — or, with `strategy: scd1`, into [Type 1](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_1:_overwrite) tables that keep only the latest version of each record. See [SCD1: latest version per key](#scd1-latest-version-per-key). Everything else on this page describes SCD2 unless it says otherwise.
 
 ---
 
@@ -93,6 +93,63 @@ saga historize --select "filesystem__snapshots__companies"
 
 ---
 
+## SCD1: latest version per key
+
+`strategy: scd1` keeps one row per primary key: the highest-ranked version seen so far. A newer
+version overwrites the stored row, so superseded values don't survive in the historized table. That
+matters when a newer version exists to *replace* the old one — a correction, or an anonymized
+re-delivery that must not leave the original values readable downstream.
+
+```yaml
+# configs/streams/events.yml — an append-only event log, one row per version
+write_disposition: historize
+primary_key: [event_key]
+source_schema: landing
+source_table: events
+
+historize:
+  strategy: scd1
+  snapshot_column: ingested_at            # watermark: which rows are new
+  order_by: [ingested_at, landing_offset] # ranking: which version wins
+```
+
+The output table holds the primary key, the value columns, and `_dlt_valid_from`: when the current
+values took effect, i.e. the snapshot where they first appeared without a different version in
+between. There is no `_dlt_valid_to` or `_dlt_is_deleted`. A newly created table is clustered by
+`[valid_from]` unless `cluster_columns` is set.
+
+**Ranking.** Each run reads the new source rows, adds the stored row of every key they touch, and
+keeps the highest-ranked version per key by `order_by` (descending, `NULL` ranks lowest).
+`snapshot_column` is appended as the final tiebreaker unless `order_by` already lists it. Because
+new versions are ranked *against* the stored one rather than written over it, the result doesn't depend on the order rows land in: a
+version ranked below the stored one loses, however late it arrives. Pick `order_by` so the version
+that should win always ranks highest. For example, if a re-delivery keeps the original event time,
+ranking by event time alone ties and can't tell the two apart. Every `order_by` column must be
+carried into the historized table: a value column, or `snapshot_column` itself.
+
+**Change detection.** A winning version whose values equal the stored row's writes nothing, so a
+source that re-delivers unchanged records (full extracts, re-sent events) doesn't rewrite them or
+move their `_dlt_valid_from`.
+
+**Runs and refreshes.**
+
+- **Incremental runs** merge the snapshots above the watermark. A retried run converges: the rows
+  it already applied are unchanged, so it writes nothing for them.
+- **Partial refreshes** (`--partial-refresh`, `--historize-from`) re-merge the window in place. On an
+  exact tie the source row wins, so a corrected source row takes effect.
+- **Full refresh only** can remove a version that has since left the source.
+- **Late arrivals:** `detect_late_arrivals: true` re-merges from the earliest late snapshot. Nothing
+  is rewound, so the retention guard doesn't apply.
+
+**Not supported with `scd1`:** `track_deletions: true`, `merge_key`, `track_columns`,
+`ignore_columns` — these are rejected rather than ignored. `order_by` is rejected under `scd2`.
+
+**Switching strategy** changes the config fingerprint, so the next run asks for `--full-refresh`.
+Going from `scd1` to `scd2` can't recover the versions `scd1` already overwrote. The rebuilt history
+starts from what the source still holds.
+
+---
+
 ## Config reference
 
 | Field | Location | Default | Description |
@@ -100,12 +157,14 @@ saga historize --select "filesystem__snapshots__companies"
 | `primary_key` | top-level | required | Key columns identifying a unique record. Must never be NULL in the source — see [NULL primary keys are rejected](#null-primary-keys-are-rejected) |
 | `snapshot_date_regex` | top-level | — | Regex to extract snapshot date from file paths (filesystem only) |
 | `snapshot_date_format` | top-level | — | `strptime` format for the extracted date string |
+| `strategy` | `historize:` | `scd2` | `scd2` keeps every version; `scd1` keeps only the latest version per key. See [SCD1: latest version per key](#scd1-latest-version-per-key) |
+| `order_by` | `historize:` | `[snapshot_column]` | `scd1` only: columns ranking a key's versions, highest wins |
 | `snapshot_column` | `historize:` | `_dlt_ingested_at` | Column used as the snapshot timestamp |
 | `track_columns` | `historize:` | — | Opt-in allowlist: only these columns drive change detection (all columns still appear in output) |
 | `ignore_columns` | `historize:` | `[]` | Columns excluded from change detection (still appear in output) |
 | `partition_column` | `historize:` | — | Partition the SCD2 output table. Unset by default — see [Table layout](#table-layout) |
 | `cluster_columns` | `historize:` | `[valid_to, valid_from]` at create | Cluster the SCD2 output table. Explicit values are enforced on existing tables; `[]` removes clustering — see [Table layout](#table-layout) |
-| `track_deletions` | `historize:` | `false` | Emit deletion marker rows when a key disappears |
+| `track_deletions` | `historize:` | `true` (`scd2`) | Emit deletion marker rows when a key disappears. Not supported with `scd1` |
 | `merge_key` | `historize:` | — | Subset of `primary_key` that scopes deletion / reappearance detection. See [Scoping deletion detection (`merge_key`)](#scoping-deletion-detection-merge_key) |
 | `detect_late_arrivals` | `historize:` | unset | Late snapshots below the watermark: unset = detect + warn, `true` = detect + rewind-and-replay, `false` = skip detection. See [Late-arriving snapshots](#late-arriving-snapshots) |
 | `late_arrival_window_days` | `historize:` | — | How many days behind the watermark a late snapshot may be and still replay automatically; older ones are ignored with a warning. Omit for no bound |

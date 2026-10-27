@@ -143,12 +143,13 @@ class MaterializationHints:
     source_schema: str = ""
     source_table: str = ""
 
-    # SCD2 column names.  Only destinations that emit explicit column DDL
-    # (BigQuery Iceberg today) consult these; CTAS paths read the names
-    # straight from ``select_body``.
+    # Historize system column names.  Only destinations that emit explicit
+    # column DDL (BigQuery Iceberg today) consult these; CTAS paths read the
+    # names straight from ``select_body``.  ``None`` means the table has no
+    # such column (an scd1 target carries only valid_from).
     valid_from_column: str = "_dlt_valid_from"
-    valid_to_column: str = "_dlt_valid_to"
-    is_deleted_column: str = "_dlt_is_deleted"
+    valid_to_column: Optional[str] = "_dlt_valid_to"
+    is_deleted_column: Optional[str] = "_dlt_is_deleted"
 
 
 class Destination(ABC):
