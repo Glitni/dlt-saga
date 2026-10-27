@@ -777,3 +777,70 @@ class TestColumnBackfill:
         manager.ensure_table_exists()
 
         assert "notified_at" in {c for _, c, _ in dest.added}
+
+
+class _TaskRowsDestination(_RecordingDestination):
+    """Returns a fixed set of task rows for the status-update SELECT."""
+
+    def __init__(self, identifiers):
+        super().__init__()
+        from types import SimpleNamespace
+
+        self.rows = [
+            SimpleNamespace(
+                pipeline_type="api",
+                pipeline_identifier=identifier,
+                table_name=identifier.rsplit("/", 1)[-1],
+                config_json="{}",
+                started_at="2026-01-01 00:00:00",
+                completed_at=None,
+            )
+            for identifier in identifiers
+        ]
+
+    def execute_sql(self, sql: str, schema: str = ""):
+        self.sql_calls.append(sql)
+        return self.rows if sql.lstrip().startswith("SELECT") else []
+
+
+@pytest.mark.unit
+class TestRecordPipelineOutcomes:
+    """A task's final status is written per pipeline, in a single INSERT."""
+
+    def _inserts(self, dest):
+        return [s for s in dest.sql_calls if "INSERT INTO" in s]
+
+    def test_each_pipeline_gets_its_own_status(self):
+        dest = _TaskRowsDestination(["api/ok", "api/bad"])
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.record_pipeline_outcomes(
+            "exec-1",
+            0,
+            {"api/ok": ("completed", None), "api/bad": ("failed", "boom")},
+        )
+
+        (insert,) = self._inserts(dest)
+        # Rows follow the SELECT's order: api/ok, then api/bad.
+        ok_values, bad_values = insert.split("VALUES", 1)[1].split("'api/bad'")
+        assert "'api/ok'" in ok_values and "'completed'" in ok_values
+        assert "'failed'" not in ok_values
+        assert "'failed'" in bad_values and "'boom'" in bad_values
+
+    def test_pipelines_without_an_outcome_are_left_unchanged(self):
+        dest = _TaskRowsDestination(["api/ok", "api/other"])
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.record_pipeline_outcomes("exec-1", 0, {"api/ok": ("completed", None)})
+
+        (insert,) = self._inserts(dest)
+        assert "'api/other'" not in insert
+
+    def test_task_status_still_applies_to_every_pipeline(self):
+        dest = _TaskRowsDestination(["api/a", "api/b"])
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        manager.update_task_status("exec-1", 0, "running")
+
+        (insert,) = self._inserts(dest)
+        assert insert.count("'running'") == 2

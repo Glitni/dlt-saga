@@ -15,9 +15,11 @@ Extracted from ``cli.py`` (module-boundary cleanup); behavior unchanged.
 
 import logging
 import os
+import signal
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
 import typer
 
@@ -529,6 +531,7 @@ def _execute_worker_parallel(
     label: str,
     run_fn: Callable[[PipelineConfig, str], Optional[str]],
     max_workers: int = _DEFAULT_WORKER_CONCURRENCY,
+    progress: Optional["_TaskProgress"] = None,
 ) -> List[tuple[str, str]]:
     """Execute pipelines in parallel within a worker task.
 
@@ -544,6 +547,8 @@ def _execute_worker_parallel(
             point spawning idle threads. Defaults to
             ``_DEFAULT_WORKER_CONCURRENCY`` so a large ``task_group`` can't OOM
             the worker container by spawning one thread per pipeline.
+        progress: Records each pipeline's outcome for this phase as it
+            finishes, so a task stopped part-way still knows which did.
 
     Returns:
         List of (table_name, error_message) tuples for failed pipelines, carrying
@@ -582,15 +587,17 @@ def _execute_worker_parallel(
             config = future_to_config[future]
             try:
                 error = future.result()
-                if error:
-                    failed_pipelines.append((config.table_name, error))
             except Exception as e:
                 # Safety net: run_fn handles its own exceptions, but if one
                 # escapes, still record the real cause rather than dropping it.
                 logger.error(
                     "%s %s failed: %s", label.capitalize(), config.table_name, e
                 )
-                failed_pipelines.append((config.table_name, _format_run_error(e)))
+                error = _format_run_error(e)
+            if error:
+                failed_pipelines.append((config.table_name, error))
+            if progress is not None:
+                progress.record(config, label, error)
 
     return failed_pipelines
 
@@ -599,11 +606,17 @@ def _execute_worker_ingest(
     pipeline_configs: List[PipelineConfig],
     task_index: int,
     max_workers: int = _DEFAULT_WORKER_CONCURRENCY,
+    progress: Optional["_TaskProgress"] = None,
 ) -> List[tuple[str, str]]:
     """Execute ingest for assigned pipelines."""
     configs = [c for c in pipeline_configs if c.ingest_enabled]
     return _execute_worker_parallel(
-        configs, task_index, "ingest", _run_pipeline_safe, max_workers=max_workers
+        configs,
+        task_index,
+        "ingest",
+        _run_pipeline_safe,
+        max_workers=max_workers,
+        progress=progress,
     )
 
 
@@ -612,6 +625,7 @@ def _execute_worker_historize(
     task_index: int,
     full_refresh: bool = False,
     max_workers: int = _DEFAULT_WORKER_CONCURRENCY,
+    progress: Optional["_TaskProgress"] = None,
 ) -> List[tuple[str, str]]:
     """Execute historize for assigned pipelines."""
     configs = [c for c in pipeline_configs if c.historize_enabled]
@@ -620,7 +634,12 @@ def _execute_worker_historize(
         return _run_historize_safe(config, full_refresh, log_prefix)
 
     return _execute_worker_parallel(
-        configs, task_index, "historize", _run, max_workers=max_workers
+        configs,
+        task_index,
+        "historize",
+        _run,
+        max_workers=max_workers,
+        progress=progress,
     )
 
 
@@ -629,13 +648,14 @@ def _execute_worker_run(
     task_index: int,
     full_refresh: bool = False,
     max_workers: int = _DEFAULT_WORKER_CONCURRENCY,
+    progress: Optional["_TaskProgress"] = None,
 ) -> List[tuple[str, str]]:
     """Execute ingest then historize for assigned pipelines."""
     failed_pipelines = []
 
     # Run ingest first
     ingest_failed = _execute_worker_ingest(
-        pipeline_configs, task_index, max_workers=max_workers
+        pipeline_configs, task_index, max_workers=max_workers, progress=progress
     )
     failed_pipelines.extend(ingest_failed)
     failed_names = {name for name, _ in ingest_failed}
@@ -655,61 +675,191 @@ def _execute_worker_run(
             )
 
     historize_failed = _execute_worker_historize(
-        historize_configs, task_index, full_refresh, max_workers=max_workers
+        historize_configs,
+        task_index,
+        full_refresh,
+        max_workers=max_workers,
+        progress=progress,
     )
     failed_pipelines.extend(historize_failed)
 
     return failed_pipelines
 
 
-def _mark_task_failed_best_effort(
-    plan_manager,
-    execution_id: str,
-    task_index: int,
-    exc: BaseException,
-):
-    """Mark a task ``failed`` after an unexpected crash, swallowing any error.
+_WORKER_PHASES: Dict[str, Tuple[str, ...]] = {
+    "ingest": ("ingest",),
+    "historize": ("historize",),
+    "run": ("ingest", "historize"),
+}
 
-    Called from the crash path, so a failure to write the status must not mask
-    the original exception — the caller re-raises it.
+# Exit code for a worker stopped by SIGTERM (128 + signal number, by convention).
+_SIGTERM_EXIT_CODE = 128 + int(signal.SIGTERM)
+
+_SIGTERM_REASON = "Terminated before completing (SIGTERM: task timeout or cancellation)"
+
+PipelineOutcomes = Dict[str, Tuple[str, Optional[str]]]
+
+
+class _TaskProgress:
+    """Each assigned pipeline's outcome within one worker task, as phases finish.
+
+    Kept in memory so the task's final status can be written per pipeline from
+    any exit path — normal completion, a crash, or termination by the
+    platform — with pipelines that finished keeping their real outcome.
     """
-    try:
-        plan_manager.update_task_status(
-            execution_id, task_index, "failed", f"Worker crashed: {exc}"
-        )
-    except Exception:
+
+    def __init__(self, pipeline_configs: List[PipelineConfig], worker_command: str):
+        phases = _WORKER_PHASES.get(worker_command, ("ingest",))
+        self._lock = threading.Lock()
+        self._pending: Dict[str, Set[str]] = {
+            config.identifier: {
+                phase for phase in phases if getattr(config, f"{phase}_enabled")
+            }
+            for config in pipeline_configs
+        }
+        self._errors: Dict[str, List[Tuple[str, str]]] = {
+            config.identifier: [] for config in pipeline_configs
+        }
+
+    def record(self, config: PipelineConfig, phase: str, error: Optional[str]) -> None:
+        """Record that ``phase`` finished for ``config``, failed if ``error``."""
+        with self._lock:
+            self._pending.setdefault(config.identifier, set()).discard(phase)
+            if error:
+                self._errors.setdefault(config.identifier, []).append((phase, error))
+
+    def outcomes(self, interrupted_by: Optional[str] = None) -> PipelineOutcomes:
+        """``(status, error_message)`` per pipeline identifier.
+
+        Args:
+            interrupted_by: Why the task stopped early; a pipeline with a phase
+                still unfinished is failed with it. None when the executor
+                returned normally, i.e. every phase ran.
+        """
+        with self._lock:
+            result: PipelineOutcomes = {}
+            for identifier, errors in self._errors.items():
+                if len(errors) == 1:
+                    messages = [errors[0][1]]
+                else:
+                    messages = [f"{phase}: {error}" for phase, error in errors]
+                if interrupted_by and self._pending.get(identifier):
+                    messages.append(interrupted_by)
+                result[identifier] = (
+                    ("failed", "; ".join(messages)) if messages else ("completed", None)
+                )
+            return result
+
+
+class _TaskStatusWriter:
+    """Writes a worker task's final per-pipeline statuses exactly once.
+
+    The normal exit, the crash path and the SIGTERM handler can race to record
+    the outcome; whichever claims it first writes, the others do nothing.
+    """
+
+    def __init__(
+        self, plan_manager, execution_id: str, task_index: int, progress: _TaskProgress
+    ):
+        self._plan_manager = plan_manager
+        self._execution_id = execution_id
+        self._task_index = task_index
+        self._progress = progress
+        # Only ever acquired without blocking: the signal handler runs on the
+        # main thread, so it must not wait on a lock the main thread holds.
+        self._claim = threading.Lock()
+
+    def write(self, interrupted_by: Optional[str] = None) -> Optional[PipelineOutcomes]:
+        """Write the final statuses; None if another exit path already claimed it.
+
+        Best-effort: a failed write is logged, never raised, so it can't mask
+        the error that ended the task.
+        """
+        if not self._claim.acquire(blocking=False):
+            return None
+        outcomes = self._progress.outcomes(interrupted_by)
+        try:
+            self._plan_manager.record_pipeline_outcomes(
+                self._execution_id, self._task_index, outcomes
+            )
+        except Exception:
+            logger.error(
+                "[Task %d] Failed to record final pipeline statuses; "
+                "the task may remain 'running' in the plan",
+                self._task_index,
+                exc_info=True,
+            )
+        return outcomes
+
+
+def _install_sigterm_handler(
+    status_writer: _TaskStatusWriter, task_index: int
+) -> Callable[[], None]:
+    """Record unfinished pipelines as failed when the platform stops the worker.
+
+    A task timeout or cancellation arrives as SIGTERM, followed by SIGKILL after
+    a short grace period. Python's default SIGTERM action ends the process
+    without running any Python code, leaving every pipeline ``running`` until
+    the stale reconciler relabels it — so the failure never reached the report
+    or ``state:failed``. The handler exits with ``os._exit`` once the statuses
+    are written: unwinding normally would wait on the worker pool, whose stuck
+    thread is often why the task overran.
+
+    Returns:
+        A callable restoring the previous handler (a no-op when none was
+        installed: signal handlers can only be set from the main thread).
+    """
+
+    def _handle(signum, frame):
+        outcomes = status_writer.write(interrupted_by=_SIGTERM_REASON)
+        if outcomes is None:
+            # The normal exit is already writing the final statuses; let it finish.
+            return
+        failed = sum(1 for status, _ in outcomes.values() if status == "failed")
         logger.error(
-            "[Task %d] Failed to record 'failed' status after a crash; "
-            "the task may remain 'running' in the plan",
+            "[Task %d] Terminated by SIGTERM; recorded %d/%d pipeline(s) as failed",
             task_index,
-            exc_info=True,
+            failed,
+            len(outcomes),
         )
+        logging.shutdown()
+        os._exit(_SIGTERM_EXIT_CODE)
+
+    try:
+        previous = signal.signal(signal.SIGTERM, _handle)
+    except ValueError:
+        logger.debug("Not on the main thread; SIGTERM handler not installed")
+        return lambda: None
+    # None means the previous handler wasn't set from Python: the default.
+    restored = signal.SIG_DFL if previous is None else previous
+
+    def _restore() -> None:
+        signal.signal(signal.SIGTERM, restored)
+
+    return _restore
 
 
 def _update_worker_status(
-    plan_manager,
-    execution_id: str,
+    status_writer: _TaskStatusWriter,
     task_index: int,
     pipeline_configs: List[PipelineConfig],
-    failed_pipelines: List[tuple[str, str]],
 ):
-    """Update final worker status in execution plan."""
-    if failed_pipelines:
-        error_summary = (
-            f"{len(failed_pipelines)}/{len(pipeline_configs)} pipelines failed: "
-            + "; ".join(f"{name}: {err}" for name, err in failed_pipelines)
-        )
-        plan_manager.update_task_status(
-            execution_id, task_index, "failed", error_summary
-        )
-        raise typer.Exit(1)
-    else:
-        plan_manager.update_task_status(execution_id, task_index, "completed")
-        logger.info(
-            "[Task %d] All %d pipeline(s) completed successfully",
+    """Record each pipeline's final status; exit non-zero if any failed."""
+    outcomes = status_writer.write() or {}
+    failed = sum(1 for status, _ in outcomes.values() if status == "failed")
+    if failed:
+        logger.error(
+            "[Task %d] %d/%d pipeline(s) failed",
             task_index,
+            failed,
             len(pipeline_configs),
         )
+        raise typer.Exit(1)
+    logger.info(
+        "[Task %d] All %d pipeline(s) completed successfully",
+        task_index,
+        len(pipeline_configs),
+    )
 
 
 # Default for the CLI --workers option on ingest/historize/run. Kept here so the
@@ -781,30 +931,46 @@ def run_worker_mode(
     _log_assigned_pipelines(pipeline_configs)
     plan_manager.update_task_status(execution_id, task_index, "running")
 
-    # Any crash between here and the final status write (OOM, SIGTERM-turned-
-    # KeyboardInterrupt, connection loss, an unexpected bug) would otherwise
-    # leave the task "running" forever, and the orchestrator waits on task
-    # status — a stuck "running" blocks the whole plan from ever completing.
-    # Catch BaseException so SystemExit/KeyboardInterrupt are recorded too, mark
-    # the task failed best-effort, then re-raise to preserve the exit/traceback.
-    try:
-        if worker_command == "historize":
-            failed_pipelines = _execute_worker_historize(
-                pipeline_configs, task_index, full_refresh, max_workers=max_workers
-            )
-        elif worker_command == "run":
-            failed_pipelines = _execute_worker_run(
-                pipeline_configs, task_index, full_refresh, max_workers=max_workers
-            )
-        else:
-            # Default: ingest only (backward compatible)
-            failed_pipelines = _execute_worker_ingest(
-                pipeline_configs, task_index, max_workers=max_workers
-            )
-    except BaseException as exc:
-        _mark_task_failed_best_effort(plan_manager, execution_id, task_index, exc)
-        raise
+    progress = _TaskProgress(pipeline_configs, worker_command)
+    status_writer = _TaskStatusWriter(plan_manager, execution_id, task_index, progress)
+    restore_sigterm_handler = _install_sigterm_handler(status_writer, task_index)
 
-    _update_worker_status(
-        plan_manager, execution_id, task_index, pipeline_configs, failed_pipelines
-    )
+    # Any crash between here and the final status write (connection loss, an
+    # unexpected bug, Ctrl-C) would otherwise leave the task "running" until the
+    # stale reconciler relabels it, and the orchestrator waits on task status.
+    # Catch BaseException so SystemExit/KeyboardInterrupt are recorded too, write
+    # the statuses best-effort, then re-raise to preserve the exit/traceback.
+    # Termination by the platform is handled by the SIGTERM handler.
+    try:
+        try:
+            if worker_command == "historize":
+                _execute_worker_historize(
+                    pipeline_configs,
+                    task_index,
+                    full_refresh,
+                    max_workers=max_workers,
+                    progress=progress,
+                )
+            elif worker_command == "run":
+                _execute_worker_run(
+                    pipeline_configs,
+                    task_index,
+                    full_refresh,
+                    max_workers=max_workers,
+                    progress=progress,
+                )
+            else:
+                # Default: ingest only (backward compatible)
+                _execute_worker_ingest(
+                    pipeline_configs,
+                    task_index,
+                    max_workers=max_workers,
+                    progress=progress,
+                )
+        except BaseException as exc:
+            status_writer.write(interrupted_by=f"Worker crashed: {exc}")
+            raise
+
+        _update_worker_status(status_writer, task_index, pipeline_configs)
+    finally:
+        restore_sigterm_handler()
