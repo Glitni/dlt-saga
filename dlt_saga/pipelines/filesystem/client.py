@@ -38,6 +38,13 @@ _GDRIVE_NATIVE_MIME_PREFIX = "application/vnd.google-apps."
 _GCS_CONNECT_TIMEOUT_SECONDS = 30
 _GCS_READ_STALL_TIMEOUT_SECONDS = 60
 
+# paramiko bounds only the SSH handshake by default: reads on an open SFTP
+# channel wait forever for a server that stops sending. The read timeout is set
+# on the channel of a filesystem this client opens for itself (see
+# _get_sftp_filesystem), so it reaches no other fsspec user in the process.
+_SFTP_CONNECT_TIMEOUT_SECONDS = 30
+_SFTP_READ_STALL_TIMEOUT_SECONDS = 60
+
 
 class _GdriveFileItem(FileItemDict):
     """A Drive file addressed by ID, downloaded on first open().
@@ -132,6 +139,7 @@ class FilesystemClient:
         # file_id content by ID, so the header read and the data read share one
         # download (each _file_source() call builds a fresh, empty file item)
         self._gdrive_content: Dict[str, bytes] = {}
+        self._sftp_filesystem: Any = None  # Lazy-loaded, see _get_sftp_filesystem
         # GCS without explicit credentials uses Application Default Credentials
         # (gcloud / metadata server / profile `run_as` impersonation) — the same
         # resolution as the BigQuery destination. Credential selection is left to
@@ -235,6 +243,31 @@ class FilesystemClient:
             credentials["sftp_port"] = self.config.port
 
         return credentials if credentials else None
+
+    def _get_sftp_filesystem(self) -> Any:
+        """Open the SFTP filesystem for this source, cached per client.
+
+        Opened outside fsspec's instance cache, so the channel timeout set here
+        stays on this client's connection, and a connection a stall has broken
+        is never handed to a later run in the same process.
+        """
+        if self._sftp_filesystem is None:
+            from dlt.common.configuration.specs import SFTPCredentials
+            from dlt.common.storages.fsspec_filesystem import fsspec_filesystem
+
+            sftp_creds = self._get_sftp_credentials()
+            if not sftp_creds:
+                logger.warning("SFTP filesystem_type but no credentials retrieved!")
+            credentials = SFTPCredentials()
+            credentials.update(
+                {"sftp_timeout": _SFTP_CONNECT_TIMEOUT_SECONDS, **(sftp_creds or {})}
+            )
+            fs, _ = fsspec_filesystem(
+                self.fs_url, credentials, kwargs={"skip_instance_cache": True}
+            )
+            fs.ftp.get_channel().settimeout(_SFTP_READ_STALL_TIMEOUT_SECONDS)
+            self._sftp_filesystem = fs
+        return self._sftp_filesystem
 
     def _get_gdrive_credentials(self) -> Any:
         """Build Drive credentials for dlt's gdrive filesystem, cached per client.
@@ -500,13 +533,10 @@ class FilesystemClient:
                 kwargs["client_kwargs"] = {}
             kwargs["client_kwargs"]["endpoint_url"] = self.config.endpoint_url
 
-        # SFTP credentials
+        # SFTP: dlt reads through an fsspec instance passed as credentials, which
+        # lets the connection carry a read timeout
         if self.config.filesystem_type == "sftp":
-            sftp_creds = self._get_sftp_credentials()
-            if sftp_creds:
-                kwargs["credentials"] = sftp_creds
-            else:
-                logger.warning("SFTP filesystem_type but no credentials retrieved!")
+            kwargs["credentials"] = self._get_sftp_filesystem()
 
         # Google Drive: resolved credentials replace the raw config value, and
         # the filesystem is opened read-only
