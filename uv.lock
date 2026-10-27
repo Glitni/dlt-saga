@@ -1,12 +1,12 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11.0, <3.13.0"
 resolution-markers = [
     "python_full_version >= '3.12' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and sys_platform == 'emscripten'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version >= '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
@@ -637,8 +637,8 @@ name = "databricks-zerobus-ingest-sdk"
 version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "protobuf", marker = "sys_platform != 'emscripten'" },
-    { name = "requests", marker = "sys_platform != 'emscripten'" },
+    { name = "protobuf" },
+    { name = "requests" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b3/64/29d1e419e07fabc5f3436a58cbfdddbc87ffc456e798f8aff0027f1eb33a/databricks_zerobus_ingest_sdk-1.10.0.tar.gz", hash = "sha256:7aa5ba91b651fa712473c24e693c87b88714fd5de4c1e97a99cd0007b623fe24", size = 506931, upload-time = "2026-10-06T11:59:01.1Z" }
 wheels = [
@@ -748,7 +748,7 @@ sftp = [
 
 [[package]]
 name = "dlt-saga"
-version = "0.43.0"
+version = "0.44.0"
 source = { editable = "." }
 dependencies = [
     { name = "connectorx" },
