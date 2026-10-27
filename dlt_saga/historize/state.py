@@ -228,6 +228,11 @@ class HistorizeStateManager:
             # latest — both need a rebuild to apply to existing rows.
             "strategy": config.strategy,
             "order_by": config.effective_order_by,
+            # Decides whether absence from a snapshot means anything, which
+            # changes the versions and deletions scd2 already wrote. scd1 output
+            # doesn't depend on it, so it is pinned there: describing the
+            # source differently must not force a rebuild that changes nothing.
+            "delivery": "full" if config.is_scd1 else config.delivery,
         }
         return base64.b64encode(json.dumps(fingerprint_data).encode()).decode()
 
@@ -235,10 +240,10 @@ class HistorizeStateManager:
     def decode_fingerprint(encoded: str) -> dict:
         """Decode a base64-encoded config fingerprint back to a dict.
 
-        Fingerprints written before ``strategy`` existed are scd2 ones, so the
-        key is filled in rather than left absent: ``config_changed`` skips keys
-        a stored fingerprint lacks, and switching such a table to scd1 must
-        still demand a rebuild.
+        Fingerprints written before ``strategy`` / ``delivery`` existed are
+        scd2 / full-delivery ones, so those keys are filled in rather than left
+        absent: ``config_changed`` skips keys a stored fingerprint lacks, and
+        switching such a table must still demand a rebuild.
         """
         import base64
         import json
@@ -246,6 +251,7 @@ class HistorizeStateManager:
         decoded = json.loads(base64.b64decode(encoded).decode())
         decoded.setdefault("strategy", "scd2")
         decoded.setdefault("order_by", [])
+        decoded.setdefault("delivery", "full")
         return decoded
 
     def config_changed(

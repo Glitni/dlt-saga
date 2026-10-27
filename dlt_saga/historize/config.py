@@ -17,6 +17,7 @@ from dlt_saga.utility.filters import filter_field_metadata as _filter_field_meta
 _SQL_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 STRATEGIES = ("scd2", "scd1")
+DELIVERIES = ("full", "incremental")
 
 
 @dataclass
@@ -45,6 +46,23 @@ class HistorizeConfig:
                 "versions scd1 already overwrote."
             ),
             "enum": list(STRATEGIES),
+        },
+    )
+
+    delivery: str = field(
+        default="full",
+        metadata={
+            "description": (
+                "What each snapshot_column value holds. 'full' (default): every "
+                "record that exists at that time, so a record missing from a "
+                "snapshot has been deleted and one returning after missing "
+                "snapshots has reappeared. 'incremental': only the records sent "
+                "in that delivery (new, changed or re-sent), so a missing record "
+                "means nothing — deletion detection, gap-driven reappearance and "
+                "merge_key don't apply, and scd2 opens a version only when a "
+                "record's values change. Changing it requires a full refresh."
+            ),
+            "enum": list(DELIVERIES),
         },
     )
 
@@ -206,7 +224,8 @@ class HistorizeConfig:
                 "When True, rows that disappear from the source produce a deletion marker row "
                 "(_dlt_is_deleted=True) in the historized table. "
                 "When False, only value changes are tracked. Defaults to True for "
-                "strategy: scd2; not supported with strategy: scd1."
+                "strategy: scd2 with delivery: full; not supported with strategy: "
+                "scd1 or delivery: incremental."
             )
         },
     )
@@ -365,14 +384,11 @@ class HistorizeConfig:
         ):
             if isinstance(getattr(self, attr), str):
                 setattr(self, attr, [getattr(self, attr)])
-        if self.strategy not in STRATEGIES:
-            raise ValueError(
-                f"historize.strategy must be one of {', '.join(STRATEGIES)}, "
-                f"got '{self.strategy}'"
-            )
+        self._validate_choices()
         self._validate_strategy_options()
+        self._validate_delivery_options()
         if self.track_deletions is None:
-            self.track_deletions = self.strategy == "scd2"
+            self.track_deletions = self.strategy == "scd2" and self.is_full_delivery
         if (
             self.late_arrival_window_days is not None
             and self.late_arrival_window_days < 1
@@ -382,6 +398,11 @@ class HistorizeConfig:
                 f"got {self.late_arrival_window_days}"
             )
         self._validate_column_identifiers()
+
+    @property
+    def is_full_delivery(self) -> bool:
+        """Whether each snapshot holds every record that exists at that time."""
+        return self.delivery == "full"
 
     @property
     def is_scd1(self) -> bool:
@@ -401,6 +422,37 @@ class HistorizeConfig:
         if self.snapshot_column.lower() not in {c.lower() for c in columns}:
             columns.append(self.snapshot_column)
         return columns
+
+    def _validate_choices(self) -> None:
+        """Reject values outside a closed set of choices."""
+        for key, allowed in (("strategy", STRATEGIES), ("delivery", DELIVERIES)):
+            value = getattr(self, key)
+            if value not in allowed:
+                raise ValueError(
+                    f"historize.{key} must be one of {', '.join(allowed)}, "
+                    f"got '{value}'"
+                )
+
+    def _validate_delivery_options(self) -> None:
+        """Reject options that need full snapshots under ``delivery: incremental``.
+
+        Both read a record's absence from a snapshot, which only means something
+        when the snapshot holds every record.
+        """
+        if self.is_full_delivery:
+            return
+        unsupported = {
+            "track_deletions": self.track_deletions is True,
+            "merge_key": bool(self.merge_key),
+        }
+        for key, is_set in unsupported.items():
+            if is_set:
+                raise ValueError(
+                    f"historize.{key} is not supported with delivery: incremental "
+                    f"— each snapshot holds only the records sent in it, so a "
+                    f"record's absence says nothing. Remove it, or use delivery: "
+                    f"full if every snapshot is a complete copy of the source."
+                )
 
     def _validate_strategy_options(self) -> None:
         """Reject options that have no meaning under the chosen strategy.
