@@ -31,6 +31,13 @@ _GDRIVE_FILE_FIELDS = "id, name, mimeType, modifiedTime, size"
 # Native Google files (Sheets, Docs, ...) have no binary content to download
 _GDRIVE_NATIVE_MIME_PREFIX = "application/vnd.google-apps."
 
+# gcsfs sends every request with no timeout unless given one, so a connection
+# that stops delivering bytes hangs the pipeline indefinitely. Bounding the
+# connect and the gap between reads (not the total) turns a stall into an error
+# gcsfs retries, without capping how long a large file may take to download.
+_GCS_CONNECT_TIMEOUT_SECONDS = 30
+_GCS_READ_STALL_TIMEOUT_SECONDS = 60
+
 
 class _GdriveFileItem(FileItemDict):
     """A Drive file addressed by ID, downloaded on first open().
@@ -49,6 +56,17 @@ class _GdriveFileItem(FileItemDict):
         if "file_content" not in self:
             self["file_content"] = self._download(self._file_id)
         return super().open(*args, **kwargs)
+
+
+def _gcs_requests_timeout() -> Any:
+    """The per-request timeout handed to gcsfs (an ``aiohttp.ClientTimeout``)."""
+    import aiohttp
+
+    return aiohttp.ClientTimeout(
+        total=None,
+        sock_connect=_GCS_CONNECT_TIMEOUT_SECONDS,
+        sock_read=_GCS_READ_STALL_TIMEOUT_SECONDS,
+    )
 
 
 def _resolve_secret_uris(credentials: Any) -> Any:
@@ -472,6 +490,9 @@ class FilesystemClient:
         # by value, whole or inside an object
         if self.config.credentials is not None:
             kwargs["credentials"] = _resolve_secret_uris(self.config.credentials)
+
+        if self.config.filesystem_type == "gs":
+            kwargs["kwargs"] = {"requests_timeout": _gcs_requests_timeout()}
 
         # Special handling for S3 endpoints
         if self.config.filesystem_type == "s3" and self.config.endpoint_url:
