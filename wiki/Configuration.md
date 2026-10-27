@@ -517,7 +517,7 @@ Authenticate with **either** Entra ID certificate auth (`client_id` + `certifica
 
 ## Historize Configuration
 
-The `historize:` section configures SCD2 historization for pipelines with `append+historize` or `historize` write dispositions.
+The `historize:` section configures historization (SCD2 by default, SCD1 with `strategy: scd1` — see [Historize](Historize#scd1-latest-version-per-key)) for pipelines with `append+historize` or `historize` write dispositions.
 
 ```yaml
 write_disposition: "append+historize"
@@ -536,13 +536,15 @@ historize:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `strategy` | string | `scd2` | `scd2` keeps every version; `scd1` keeps only the latest version per key |
+| `order_by` | list | `[snapshot_column]` | `scd1` only: columns ranking a key's versions, highest wins |
 | `snapshot_column` | string | `_dlt_ingested_at` | Column identifying snapshot timestamps |
 | `primary_key` | list | inherited | Inherits from top-level `primary_key` |
 | `track_columns` | list | — | Opt-in allowlist for change detection (all columns still in output) |
 | `ignore_columns` | list | `[]` | Columns excluded from change detection (still in output) |
 | `partition_column` | string | — | Partition the output table |
 | `cluster_columns` | list | — | Cluster the output table |
-| `track_deletions` | bool | `false` | Detect rows deleted between snapshots |
+| `track_deletions` | bool | `true` (`scd2`) | Detect rows deleted between snapshots. Not supported with `scd1` |
 | `table_format` | string | inherited | Table format override for this pipeline's historized table |
 | `schema_name` | string | — | Write the historized table to a different schema (used directly in prod, sandbox-composed in dev). Legacy alias: `output_schema` |
 | `table_name` | string | — | Explicit name for the historized output table. Legacy alias: `output_table` |

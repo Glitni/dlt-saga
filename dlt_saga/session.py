@@ -1453,8 +1453,11 @@ class Session:
                     else f"{run_result['snapshots_processed']} snapshot(s)"
                 )
                 stats_parts = []
-                if run_result.get("new_or_changed_rows"):
-                    stats_parts.append(f"{run_result['new_or_changed_rows']} rows")
+                # A run that processed snapshots reports its row count even when
+                # it is 0 — "nothing changed" is a result, not an absent one.
+                if run_result.get("snapshots_processed"):
+                    rows = run_result.get("new_or_changed_rows") or 0
+                    stats_parts.append(f"{rows} rows")
                 if run_result.get("deleted_rows"):
                     stats_parts.append(f"{run_result['deleted_rows']} deletions")
                 stats_str = f", {', '.join(stats_parts)}" if stats_parts else ""

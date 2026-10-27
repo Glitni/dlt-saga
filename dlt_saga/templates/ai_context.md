@@ -376,6 +376,8 @@ historize:
 
 Renaming an SCD2 column or changing `merge_key` after the historized table exists is part of the config fingerprint — the framework will refuse the run and prompt for `saga historize --full-refresh`.
 
+To keep only the latest version per key instead of full history, set `strategy: scd1` (default `scd2`). The output keeps the key, the value columns and `_dlt_valid_from` (no `_dlt_valid_to` / `_dlt_is_deleted`). `order_by` (default `[snapshot_column]`) ranks a key's versions, highest wins, and every `order_by` column must be a value column or `snapshot_column`. `track_deletions`, `merge_key`, `track_columns` and `ignore_columns` are rejected under `scd1`, and `strategy`/`order_by` are part of the fingerprint.
+
 ### Bulk loading from cloud storage (`native_load`)
 
 For loading large file batches (Parquet, CSV, JSONL) directly into the warehouse — bypassing dlt's extract/normalize — use the built-in `dlt_saga.native_load` adapter. Designed for >1 000 files or >1 GB per run.

@@ -781,11 +781,13 @@ class BigQueryDestination(BigQueryBaseDestination):
         # Also exclude the configured SCD2 names so a source column with the same
         # name as a renamed SCD2 column doesn't collide with the explicit
         # definition added below (duplicate column → BigQuery rejects the DDL).
-        excludes = self._HISTORIZE_EXCLUDE_COLS | {
-            hints.valid_from_column,
-            hints.valid_to_column,
-            hints.is_deleted_column,
-        }
+        system_cols = [
+            (hints.valid_from_column, ts_type),
+            (hints.valid_to_column, ts_type),
+            (hints.is_deleted_column, bool_type),
+        ]
+        system_cols = [(name, typ) for name, typ in system_cols if name]
+        excludes = self._HISTORIZE_EXCLUDE_COLS | {name for name, _ in system_cols}
         col_defs: List[str] = []
         if hints.source_schema and hints.source_table:
             src_db = hints.source_database or self.config.project_id
@@ -797,13 +799,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                 if row.column_name not in excludes:
                     col_defs.append(f"  `{row.column_name}` {row.data_type}")
 
-        col_defs.extend(
-            [
-                f"  `{hints.valid_from_column}` {ts_type}",
-                f"  `{hints.valid_to_column}` {ts_type}",
-                f"  `{hints.is_deleted_column}` {bool_type}",
-            ]
-        )
+        col_defs.extend(f"  `{name}` {typ}" for name, typ in system_cols)
 
         parts = [f"CREATE TABLE IF NOT EXISTS {target_table_id} ("]
         parts.append(",\n".join(col_defs))

@@ -1,7 +1,8 @@
 """Configuration for the historize command.
 
-Defines HistorizeConfig which controls how snapshot data is historized
-into SCD2 tables with _dlt_valid_from/_dlt_valid_to periods.
+Defines HistorizeConfig which controls how snapshot data is historized:
+into SCD2 tables with _dlt_valid_from/_dlt_valid_to periods, or into SCD1
+tables holding only the latest version per key.
 """
 
 import re
@@ -15,10 +16,12 @@ from dlt_saga.utility.filters import filter_field_metadata as _filter_field_meta
 # config value can't inject SQL or silently break unquoted interpolation.
 _SQL_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
+STRATEGIES = ("scd2", "scd1")
+
 
 @dataclass
 class HistorizeConfig:
-    """Configuration for historizing a pipeline's raw snapshot data into SCD2.
+    """Configuration for historizing a pipeline's raw snapshot data.
 
     This config is nested under the `historize:` key in pipeline YAML files.
     For pipelines that also run ingest, primary_key is inherited from the
@@ -28,6 +31,39 @@ class HistorizeConfig:
     location is specified via top-level source_database, source_schema,
     source_table fields (shared with ingest config).
     """
+
+    strategy: str = field(
+        default="scd2",
+        metadata={
+            "description": (
+                "How changes are kept. 'scd2' (default): every version of a key "
+                "is kept, with _dlt_valid_from/_dlt_valid_to validity periods. "
+                "'scd1': only the latest version per key is kept — a newer "
+                "version overwrites the stored row, so superseded values do not "
+                "survive in the historized table. Changing it requires a full "
+                "refresh, and moving from scd1 to scd2 can't recover the "
+                "versions scd1 already overwrote."
+            ),
+            "enum": list(STRATEGIES),
+        },
+    )
+
+    order_by: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "strategy: scd1 only. Columns that rank the versions of a key, "
+                "highest wins (NULL ranks lowest). Defaults to [snapshot_column]; "
+                "when snapshot_column isn't listed, it is appended as the final "
+                "tiebreaker. "
+                "Each column must be carried into the historized table (a value "
+                "column, or snapshot_column itself), since later runs compare "
+                "against the stored version. A version tying with the stored "
+                "one on every column replaces it, so re-processing a corrected "
+                "source row takes effect."
+            )
+        },
+    )
 
     snapshot_column: str = field(
         default="_dlt_ingested_at",
@@ -163,13 +199,14 @@ class HistorizeConfig:
         },
     )
 
-    track_deletions: bool = field(
-        default=True,
+    track_deletions: Optional[bool] = field(
+        default=None,
         metadata={
             "description": (
                 "When True, rows that disappear from the source produce a deletion marker row "
                 "(_dlt_is_deleted=True) in the historized table. "
-                "When False, only value changes are tracked."
+                "When False, only value changes are tracked. Defaults to True for "
+                "strategy: scd2; not supported with strategy: scd1."
             )
         },
     )
@@ -317,18 +354,25 @@ class HistorizeConfig:
     )
 
     def __post_init__(self):
-        if isinstance(self.primary_key, str):
-            self.primary_key = [self.primary_key]
-        if isinstance(self.classification, str):
-            self.classification = [self.classification]
-        if isinstance(self.track_columns, str):
-            self.track_columns = [self.track_columns]
-        if isinstance(self.ignore_columns, str):
-            self.ignore_columns = [self.ignore_columns]
-        if isinstance(self.cluster_columns, str):
-            self.cluster_columns = [self.cluster_columns]
-        if isinstance(self.merge_key, str):
-            self.merge_key = [self.merge_key]
+        for attr in (
+            "primary_key",
+            "classification",
+            "track_columns",
+            "ignore_columns",
+            "cluster_columns",
+            "merge_key",
+            "order_by",
+        ):
+            if isinstance(getattr(self, attr), str):
+                setattr(self, attr, [getattr(self, attr)])
+        if self.strategy not in STRATEGIES:
+            raise ValueError(
+                f"historize.strategy must be one of {', '.join(STRATEGIES)}, "
+                f"got '{self.strategy}'"
+            )
+        self._validate_strategy_options()
+        if self.track_deletions is None:
+            self.track_deletions = self.strategy == "scd2"
         if (
             self.late_arrival_window_days is not None
             and self.late_arrival_window_days < 1
@@ -338,6 +382,77 @@ class HistorizeConfig:
                 f"got {self.late_arrival_window_days}"
             )
         self._validate_column_identifiers()
+
+    @property
+    def is_scd1(self) -> bool:
+        """Whether only the latest version per key is kept."""
+        return self.strategy == "scd1"
+
+    @property
+    def effective_order_by(self) -> List[str]:
+        """Version ranking for scd1: ``order_by`` plus the snapshot tiebreaker.
+
+        Empty for scd2, which orders versions by ``snapshot_column`` alone.
+        """
+        if not self.is_scd1:
+            return []
+        columns = list(self.order_by or [])
+        # Case-insensitive, like column resolution on every destination.
+        if self.snapshot_column.lower() not in {c.lower() for c in columns}:
+            columns.append(self.snapshot_column)
+        return columns
+
+    def _validate_strategy_options(self) -> None:
+        """Reject options that have no meaning under the chosen strategy.
+
+        Refused rather than ignored, so a config never reads as doing something
+        it doesn't.
+        """
+        if not self.is_scd1:
+            if self.order_by:
+                raise ValueError(
+                    "historize.order_by only applies to strategy: scd1 — scd2 "
+                    "orders versions by snapshot_column. Remove order_by, or "
+                    "set strategy: scd1."
+                )
+            return
+
+        if self.order_by is not None and len(self.order_by) == 0:
+            raise ValueError(
+                "historize.order_by must be either omitted (rank versions by "
+                "snapshot_column) or a non-empty list."
+            )
+        unsupported = {
+            "track_deletions": (
+                self.track_deletions is True,
+                "deletion tracking is not supported with scd1",
+            ),
+            "merge_key": (
+                bool(self.merge_key),
+                "it only scopes deletion detection, which scd1 doesn't do",
+            ),
+            "track_columns": (
+                self.track_columns is not None,
+                "every newer version replaces the stored one, so no column is "
+                "excluded from change detection",
+            ),
+            "ignore_columns": (
+                bool(self.ignore_columns),
+                "every newer version replaces the stored one, so no column is "
+                "excluded from change detection",
+            ),
+        }
+        for key in ("valid_to_column", "is_deleted_column"):
+            unsupported[key] = (
+                getattr(self, key) != self.__dataclass_fields__[key].default,
+                "an scd1 table has no such column",
+            )
+        for key, (is_set, reason) in unsupported.items():
+            if is_set:
+                raise ValueError(
+                    f"historize.{key} is not supported with strategy: scd1 — "
+                    f"{reason}. Remove it, or use strategy: scd2."
+                )
 
     def _validate_column_identifiers(self):
         """Validate SQL identifier format for column name fields.
@@ -359,7 +474,13 @@ class HistorizeConfig:
                 raise ValueError(
                     f"{attr} must be a valid SQL identifier, got '{value}'"
                 )
-        for attr in ("cluster_columns", "merge_key", "track_columns", "ignore_columns"):
+        for attr in (
+            "cluster_columns",
+            "merge_key",
+            "track_columns",
+            "ignore_columns",
+            "order_by",
+        ):
             for col in getattr(self, attr) or []:
                 if not _SQL_IDENT.match(col):
                     raise ValueError(f"{attr} contains invalid SQL identifier: '{col}'")

@@ -19,7 +19,7 @@ pip install dlt-saga                    # DuckDB only (no cloud dependencies)
 - [Pipeline Types](Pipeline-Types) — API, Database, Filesystem, Google Sheets, SharePoint config reference
 - [Configuration](Configuration) — all config fields, hierarchical defaults, access control
 - [Profiles](Profiles) — multi-environment setup, service account impersonation
-- [Historize (SCD2)](Historize) — snapshot tables → slowly changing dimensions
+- [Historize (SCD2 / SCD1)](Historize) — snapshot tables → slowly changing dimensions
 - [CLI Reference](CLI-Reference) — all commands, flags, and selectors
 - [Deployment](Deployment) — Cloud Run, orchestration, worker setup
 - [Orchestration Recipes](Orchestration-Recipes) — Dagster, Airflow, and Prefect integration patterns

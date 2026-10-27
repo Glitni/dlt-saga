@@ -9,7 +9,7 @@
 - [Native Cloud-Storage Loader](Native-Load)
 - [Configuration](Configuration)
 - [Profiles](Profiles)
-- [Historize (SCD2)](Historize)
+- [Historize (SCD2 / SCD1)](Historize)
 - [CLI Reference](CLI-Reference)
 
 **Operations**

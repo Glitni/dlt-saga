@@ -223,16 +223,30 @@ class HistorizeStateManager:
             # longer pass the filter would survive as stale history.
             # Serialised with sort_keys so dict-order isn't load-bearing.
             "filters": json.dumps(config.filters or [], sort_keys=True),
+            # The strategy decides the target's shape (every version vs. the
+            # latest per key), and order_by decides which version is the
+            # latest — both need a rebuild to apply to existing rows.
+            "strategy": config.strategy,
+            "order_by": config.effective_order_by,
         }
         return base64.b64encode(json.dumps(fingerprint_data).encode()).decode()
 
     @staticmethod
     def decode_fingerprint(encoded: str) -> dict:
-        """Decode a base64-encoded config fingerprint back to a dict."""
+        """Decode a base64-encoded config fingerprint back to a dict.
+
+        Fingerprints written before ``strategy`` existed are scd2 ones, so the
+        key is filled in rather than left absent: ``config_changed`` skips keys
+        a stored fingerprint lacks, and switching such a table to scd1 must
+        still demand a rebuild.
+        """
         import base64
         import json
 
-        return json.loads(base64.b64decode(encoded).decode())
+        decoded = json.loads(base64.b64decode(encoded).decode())
+        decoded.setdefault("strategy", "scd2")
+        decoded.setdefault("order_by", [])
+        return decoded
 
     def config_changed(
         self, state: "HistorizeStateManager.PipelineState", config: Any
