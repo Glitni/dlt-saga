@@ -407,6 +407,21 @@ credentials:
 This bypasses the GAC clearing and gives the resource the exact credentials
 you specify.
 
+### SFTP authentication
+
+```yaml
+filesystem_type: "sftp"
+hostname: "sftp.example.com"
+port: 22
+bucket_name: "outgoing"          # remote directory
+username: "googlesecretmanager::my-project::sftp-user"
+password: "googlesecretmanager::my-project::sftp-password"
+# or key-based: key_filename (path or key content) + key_passphrase
+known_hosts: "googlesecretmanager::my-project::sftp-known-hosts"
+```
+
+`known_hosts` pins the server's host key: a path to a known_hosts file, or its content (e.g. the output of `ssh-keyscan -p <port> <hostname>`). When it's set, the connection is refused before any credential is sent unless the server presents a key listed for that host — for a port other than 22 the entry's host is written `[hostname]:port`, as `ssh-keyscan -p` does. Without `known_hosts`, any host key is accepted, so a server impersonating the host would receive the credentials.
+
 ### Google Drive
 
 `filesystem_type: gdrive` reads files from Google Drive. Point it at either one file or a folder:
