@@ -114,6 +114,20 @@ def test_selection_needs_state(select, expected):
     assert selection_needs_state(select) is expected
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "select, exclude, expected",
+    [
+        (None, ["state:failed"], True),
+        (["tag:daily"], ["tag:daily,state:new"], True),
+        (["tag:daily"], ["group:api"], False),
+        (None, None, False),
+    ],
+)
+def test_selection_needs_state_reads_exclude(select, exclude, expected):
+    assert selection_needs_state(select, exclude) is expected
+
+
 # ---------------------------------------------------------------------------
 # state:new
 # ---------------------------------------------------------------------------
@@ -377,6 +391,26 @@ def test_build_state_resolver_skips_warehouse_for_stateless_selection():
 def test_build_state_resolver_rejects_state_without_warehouse_access():
     with pytest.raises(StateSelectorError, match="does not connect"):
         build_state_resolver(["state:new"], None)
+
+
+@pytest.mark.unit
+def test_build_state_resolver_rejects_state_in_exclude_without_warehouse_access():
+    with pytest.raises(StateSelectorError, match="does not connect"):
+        build_state_resolver(["tag:daily"], None, exclude=["state:failed"])
+
+
+@pytest.mark.unit
+def test_exclude_state_failed_skips_what_broke_last_run(dev_schema):
+    broke = make_config("broke")
+    fine = make_config("fine")
+    destination = FakeDestination(plan_rows=[plan_row("filesystem", "broke", "failed")])
+    resolver = PipelineStateResolver(destination, layer="ingest")
+
+    result = PipelineSelector(as_groups([broke, fine]), state=resolver).select(
+        None, exclude=["state:failed"]
+    )
+
+    assert selected_names(result) == ["filesystem__fine"]
 
 
 @pytest.mark.unit

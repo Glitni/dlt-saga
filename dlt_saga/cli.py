@@ -58,7 +58,11 @@ from dlt_saga.utility.cli.run_modes import (
     run_orchestrator_mode,
     run_worker_mode,
 )
-from dlt_saga.utility.cli.selectors import SelectorSyntaxError, format_config_list
+from dlt_saga.utility.cli.selectors import (
+    SelectorSyntaxError,
+    format_config_list,
+    format_selection,
+)
 from dlt_saga.utility.collisions import TargetCollisionError
 from dlt_saga.utility.env import get_env
 from dlt_saga.utility.naming import environment_of, get_environment
@@ -108,6 +112,11 @@ _SELECT_HELP = (
     "Supports: pipeline names, glob patterns (*), tag:name, group:name, "
     "state:new (target table doesn't exist yet), "
     "state:failed (last recorded run failed)."
+)
+
+_EXCLUDE_HELP = (
+    "Exclude pipelines matching these selectors (same syntax as --select). "
+    "Exclusion wins: a pipeline matched by both is not run."
 )
 
 
@@ -268,6 +277,7 @@ def list_pipelines(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help=_EXCLUDE_HELP),
     resource_type: str = typer.Option(
         "all",
         "--resource-type",
@@ -326,6 +336,7 @@ def list_pipelines(
         profile_target,
         filter_fn=filter_fn,
         layer=layer_for_resource_type(resource_type),
+        exclude=exclude,
     )
     output = format_config_list(selected_configs, selected_disabled)
     print(output)
@@ -427,6 +438,7 @@ def validate_configs(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help=_EXCLUDE_HELP),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="Profile to use from profiles.yml"
@@ -457,7 +469,10 @@ def validate_configs(
     profile_target = load_profile_config(profile, target)
     results = Session(
         profile=profile, target=target, _profile_target=profile_target
-    ).validate(select=list(select) if select else None)
+    ).validate(
+        select=list(select) if select else None,
+        exclude=list(exclude) if exclude else None,
+    )
 
     if not results:
         logger.error("No pipeline configs found matching selectors")
@@ -471,6 +486,7 @@ def ingest(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help=_EXCLUDE_HELP),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     workers: int = typer.Option(
         4, "--workers", "-w", help="Number of parallel workers"
@@ -558,14 +574,14 @@ def ingest(
         )
         provider = _resolve_orchestration_provider()
         validate_credentials(in_cloud_run)
-        select_str = " ".join(select) if select else None
+        select_str = format_selection(select, exclude)
 
         def _plan_ingest() -> None:
             # Selection runs inside the impersonation scope: a ``state:``
             # selector reads the target's warehouse state, and it must read it
             # as the identity the run itself uses.
             selected_configs, _ = discover_and_select_configs(
-                select, filter_fn=_is_ingest_enabled, layer="ingest"
+                select, filter_fn=_is_ingest_enabled, layer="ingest", exclude=exclude
             )
             if not selected_configs:
                 logger.error(
@@ -602,6 +618,7 @@ def ingest(
             full_refresh=full_refresh,
             start_value_override=start_value_override,
             end_value_override=end_value_override,
+            exclude=list(exclude) if exclude else None,
         )
     except (AuthenticationError, TargetCollisionError) as e:
         logger.error(str(e))
@@ -614,6 +631,7 @@ def historize(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help=_EXCLUDE_HELP),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     workers: int = typer.Option(
         4, "--workers", "-w", help="Number of parallel workers"
@@ -697,12 +715,15 @@ def historize(
         setup_execution_context(profile_target, full_refresh=full_refresh)
         provider = _resolve_orchestration_provider()
         validate_credentials(in_cloud_run)
-        select_str = " ".join(select) if select else None
+        select_str = format_selection(select, exclude)
 
         def _plan_historize() -> None:
             # Inside the impersonation scope — see the ingest path.
             selected_configs, _ = discover_and_select_configs(
-                select, filter_fn=_is_historize_enabled, layer="historize"
+                select,
+                filter_fn=_is_historize_enabled,
+                layer="historize",
+                exclude=exclude,
             )
             if not selected_configs:
                 logger.error(
@@ -736,6 +757,7 @@ def historize(
             full_refresh=full_refresh,
             partial_refresh=partial_refresh,
             historize_from=historize_from,
+            exclude=list(exclude) if exclude else None,
         )
     except (AuthenticationError, TargetCollisionError) as e:
         logger.error(str(e))
@@ -748,6 +770,7 @@ def destroy(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help=_EXCLUDE_HELP),
     resource_type: str = typer.Option(
         "all",
         "--resource-type",
@@ -810,6 +833,7 @@ def destroy(
             resource_type=resource_type,
             workers=workers,
             dry_run=dry_run,
+            exclude=list(exclude) if exclude else None,
         )
     except AuthenticationError as e:
         logger.error(str(e))
@@ -822,6 +846,7 @@ def update_access(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help=_EXCLUDE_HELP),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     workers: int = typer.Option(
         4, "--workers", "-w", help="Number of parallel workers"
@@ -871,6 +896,7 @@ def update_access(
         select=list(select) if select else None,
         workers=workers,
         dry_run=dry_run,
+        exclude=list(exclude) if exclude else None,
     )
     # Config errors (lockout / missing-OWNER) and per-table reconcile failures
     # are logged as they occur rather than raised, so the operator sees every
@@ -888,6 +914,7 @@ def _run_orchestrate(
     *,
     profile_target,
     select: Optional[List[str]],
+    exclude: Optional[List[str]],
     select_str: Optional[str],
     profile: str,
     target: Optional[str],
@@ -919,7 +946,7 @@ def _run_orchestrate(
         # Selection runs inside the impersonation scope: a ``state:`` selector
         # reads the target's warehouse state, and it must read it as the
         # identity the run itself uses.
-        state = build_state_resolver(select, "any")
+        state = build_state_resolver(select, "any", exclude)
 
         # One pass over the full enabled set, for the no-match warning alone:
         # ``run`` spans both the ingest and historize layers, so the warning
@@ -928,7 +955,7 @@ def _run_orchestrate(
         # spuriously for a selector that matches a pipeline present in only one
         # layer (e.g. an ingest-only pipeline warns against the historize subset
         # even though it runs), which is why the per-layer passes below don't.
-        discover_and_select_configs(select, state=state)
+        discover_and_select_configs(select, state=state, exclude=exclude)
 
         # Select per layer, so ``state:new`` judges each layer against the
         # target that layer writes — matching what a local ``saga run`` does
@@ -940,6 +967,7 @@ def _run_orchestrate(
             layer="ingest",
             warn_on_no_match=False,
             state=state.scoped("ingest") if state else None,
+            exclude=exclude,
         )
         historize_configs, _ = discover_and_select_configs(
             select,
@@ -947,6 +975,7 @@ def _run_orchestrate(
             layer="historize",
             warn_on_no_match=False,
             state=state.scoped("historize") if state else None,
+            exclude=exclude,
         )
         if not ingest_configs and not historize_configs:
             logger.error("No pipelines matched the selection criteria")
@@ -989,6 +1018,7 @@ def run(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help=_EXCLUDE_HELP),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     workers: int = typer.Option(
         4, "--workers", "-w", help="Number of parallel workers"
@@ -1051,7 +1081,7 @@ def run(
     """
     setup_logging(verbose)
     in_cloud_run = check_cloud_run_environment()
-    select_str = " ".join(select) if select else None
+    select_str = format_selection(select, exclude)
 
     _validate_historize_flags(
         full_refresh, partial_refresh, historize_from, orchestrate
@@ -1083,6 +1113,7 @@ def run(
         _run_orchestrate(
             profile_target=profile_target,
             select=select,
+            exclude=exclude,
             select_str=select_str,
             profile=profile,
             target=target,
@@ -1102,6 +1133,7 @@ def run(
 
     session = Session(profile=profile, target=target, _profile_target=profile_target)
     select_list = list(select) if select else None
+    exclude_list = list(exclude) if exclude else None
 
     # `run` is two session calls (ingest, then historize — the phases stay
     # separate so --full-refresh can be confirmed per phase), but one command to
@@ -1112,10 +1144,12 @@ def run(
         select=select_list,
         target=profile_target.name if profile_target else None,
         environment=environment_of(profile_target),
+        exclude=exclude_list,
     ):
         _run_phases(
             session,
             select_list,
+            exclude_list,
             workers=workers,
             force=force,
             full_refresh=full_refresh,
@@ -1131,6 +1165,7 @@ def run(
 def _run_phases(
     session: "Session",
     select_list: Optional[List[str]],
+    exclude_list: Optional[List[str]],
     *,
     workers: int,
     force: bool,
@@ -1147,7 +1182,7 @@ def _run_phases(
 
     # Discover once over the full enabled set, then partition by layer — see the
     # orchestrate path for why per-resource-type probing warns spuriously here.
-    all_cfgs = session.discover(select_list)
+    all_cfgs = session.discover(select_list, exclude=exclude_list)
     ingest_cfgs = [c for c in all_cfgs if c.ingest_enabled]
     historize_cfgs = [c for c in all_cfgs if c.historize_enabled]
 
@@ -1181,6 +1216,7 @@ def _run_phases(
                 full_refresh=refresh_ingest,
                 start_value_override=start_value_override,
                 end_value_override=end_value_override,
+                exclude=exclude_list,
             )
             all_results.extend(r.pipeline_results)
         if run_historize and historize_cfgs:
@@ -1190,6 +1226,7 @@ def _run_phases(
                 full_refresh=refresh_historize,
                 partial_refresh=partial_refresh,
                 historize_from=historize_from,
+                exclude=exclude_list,
             )
             all_results.extend(r.pipeline_results)
     except (AuthenticationError, TargetCollisionError) as e:
@@ -1204,6 +1241,7 @@ def report(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help=_EXCLUDE_HELP),
     output: str = typer.Option(
         "saga_report.html",
         "--output",
@@ -1290,6 +1328,7 @@ def report(
             days=days,
             summary=summary,
             stale_after_minutes=stale_after_minutes,
+            exclude=list(exclude) if exclude else None,
         )
     except ValueError as e:
         logger.error(str(e))
@@ -1337,6 +1376,7 @@ def plan(
     select: Optional[List[str]] = typer.Option(
         None, "--select", "-s", help=_SELECT_HELP
     ),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help=_EXCLUDE_HELP),
     command: str = typer.Option("ingest", "--command", "-c", help=_PLAN_COMMAND_HELP),
     execution_id: Optional[str] = typer.Option(
         None,
@@ -1413,7 +1453,7 @@ def plan(
         layer = "any"
 
     selected_configs, _ = discover_and_select_with_auth(
-        select, profile_target, filter_fn=filter_fn, layer=layer
+        select, profile_target, filter_fn=filter_fn, layer=layer, exclude=exclude
     )
     if not selected_configs:
         logger.error("No pipelines matched the selection criteria")
@@ -1452,7 +1492,7 @@ def plan(
         plan_manager = ExecutionPlanManager(
             destination=destination, schema=plan_dataset
         )
-        select_str = " ".join(select) if select else None
+        select_str = format_selection(select, exclude)
         context = get_execution_context()
         metadata = ExecutionMetadata(
             select_criteria=select_str,
@@ -2000,6 +2040,7 @@ def doctor(
             "pipeline's resolved project.schema.table target."
         ),
     ),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help=_EXCLUDE_HELP),
 ):
     """Check environment health and destination connectivity.
 
@@ -2042,7 +2083,9 @@ def doctor(
     )
     ok = _doctor_check_project(verbose, _emit)
     _doctor_check_stray_project_config(_emit)
-    selected_configs = _doctor_check_configs(select, context, verbose, _emit)
+    selected_configs = _doctor_check_configs(
+        select, context, verbose, _emit, exclude=exclude
+    )
     ok = (
         _doctor_check_destination(
             dest_type, context, selected_configs, profile_target, verbose, _emit
@@ -2091,6 +2134,7 @@ def maintenance(
         "-s",
         help="Selector(s) to scope which pipeline schemas are swept.",
     ),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help=_EXCLUDE_HELP),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -2132,7 +2176,9 @@ def maintenance(
         setup_execution_context(profile_target)
     context = get_execution_context()
 
-    selected_configs, _ = discover_and_select_with_auth(select, profile_target)
+    selected_configs, _ = discover_and_select_with_auth(
+        select, profile_target, exclude=exclude
+    )
     if not selected_configs:
         logger.error("No pipeline configs found matching selectors")
         raise typer.Exit(1)

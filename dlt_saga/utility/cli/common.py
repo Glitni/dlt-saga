@@ -177,6 +177,7 @@ def discover_and_select_configs(
     layer: Optional[str] = "any",
     warn_on_no_match: bool = True,
     state: Optional["PipelineStateResolver"] = None,
+    exclude: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, List[PipelineConfig]], Dict[str, List[PipelineConfig]]]:
     """Discover and select pipeline configs.
 
@@ -192,13 +193,15 @@ def discover_and_select_configs(
         state: Pre-built state resolver, so a caller selecting more than once
                over the same selection (``saga run --orchestrate``, once per
                layer) reads warehouse state once instead of per pass. Built
-               from ``select`` and ``layer`` when omitted.
+               from ``select``, ``exclude`` and ``layer`` when omitted.
+        exclude: Selector expressions whose matches are removed from the
+               selection.
 
     Returns:
         Tuple of (selected_enabled_configs, selected_disabled_configs)
     """
     if state is None:
-        state = build_state_resolver(select, layer)
+        state = build_state_resolver(select, layer, exclude)
     config_source = get_config_source()
     all_enabled_configs, all_disabled_configs = config_source.discover()
 
@@ -213,14 +216,16 @@ def discover_and_select_configs(
 
     enabled_selector = PipelineSelector(all_enabled_configs, state=state)
     selected_configs = enabled_selector.select(
-        select, warn_on_no_match=warn_on_no_match
+        select, warn_on_no_match=warn_on_no_match, exclude=exclude
     )
 
     # The disabled set is only probed to report matches that are disabled; a
     # non-match here is expected and must not warn (it would contradict a
     # successful enabled match).
     disabled_selector = PipelineSelector(all_disabled_configs, state=state)
-    selected_disabled_configs = disabled_selector.select(select, warn_on_no_match=False)
+    selected_disabled_configs = disabled_selector.select(
+        select, warn_on_no_match=False, exclude=exclude
+    )
 
     return selected_configs, selected_disabled_configs
 
@@ -231,6 +236,7 @@ def discover_and_select_with_auth(
     filter_fn=None,
     layer: Optional[str] = "any",
     warn_on_no_match: bool = True,
+    exclude: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, List[PipelineConfig]], Dict[str, List[PipelineConfig]]]:
     """Select configs, reading warehouse state under the run's own identity.
 
@@ -252,22 +258,29 @@ def discover_and_select_with_auth(
         filter_fn: Optional pre-selection filter.
         layer: Layer a ``state:new`` selector judges newness in.
         warn_on_no_match: Emit a warning for selectors that match nothing.
+        exclude: Selector expressions whose matches are removed from the
+            selection.
 
     Returns:
         Tuple of (selected_enabled_configs, selected_disabled_configs)
     """
-    if not selection_needs_state(select):
+
+    def _select() -> Tuple[
+        Dict[str, List[PipelineConfig]], Dict[str, List[PipelineConfig]]
+    ]:
         return discover_and_select_configs(
-            select, filter_fn=filter_fn, layer=layer, warn_on_no_match=warn_on_no_match
+            select,
+            filter_fn=filter_fn,
+            layer=layer,
+            warn_on_no_match=warn_on_no_match,
+            exclude=exclude,
         )
 
+    if not selection_needs_state(select, exclude):
+        return _select()
+
     validate_credentials(check_cloud_run_environment())
-    return execute_with_impersonation(
-        profile_target,
-        lambda: discover_and_select_configs(
-            select, filter_fn=filter_fn, layer=layer, warn_on_no_match=warn_on_no_match
-        ),
-    )
+    return execute_with_impersonation(profile_target, _select)
 
 
 def validate_credentials(

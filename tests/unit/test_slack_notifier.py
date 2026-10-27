@@ -153,6 +153,16 @@ class TestDigestGrouping:
         assert "select `tag:daily`" in recorder.text
         assert "42.5s" in recorder.text
 
+    def test_context_line_carries_exclusions(self):
+        recorder = _Recorder()
+        ctx = _run_context(
+            [_Result("p", success=False, error="boom")], exclude=["tag:slow"]
+        )
+
+        _notifier(recorder).on_run_complete(ctx)
+
+        assert "exclude `tag:slow`" in recorder.text
+
 
 @pytest.mark.unit
 class TestNotifyOn:

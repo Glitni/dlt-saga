@@ -90,6 +90,8 @@ class RunContext:
             appear twice, once per phase.
         started_at: When the command started (UTC).
         finished_at: When the command finished (UTC).
+        exclude: Exclusion expressions the run was invoked with
+            (``--exclude``), or ``None`` when nothing was excluded.
     """
 
     command: str
@@ -99,6 +101,7 @@ class RunContext:
     results: List[Any] = field(default_factory=list)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+    exclude: Optional[List[str]] = None
 
     @property
     def succeeded(self) -> int:

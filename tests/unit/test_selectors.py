@@ -10,6 +10,7 @@ from dlt_saga.utility.cli.selectors import (
     PipelineSelector,
     SelectorSyntaxError,
     format_config_list,
+    format_selection,
 )
 
 
@@ -390,3 +391,137 @@ class TestUnknownSelectorPrefix:
         self, sample_configs, selector
     ):
         assert PipelineSelector(sample_configs).select([selector]) == {}
+
+
+def _names(result):
+    return sorted(c.pipeline_name for group in result.values() for c in group)
+
+
+@pytest.mark.unit
+class TestExclude:
+    def test_exclude_removes_matches_from_selection(self, sample_configs):
+        result = PipelineSelector(sample_configs).select(
+            ["group:filesystem"], exclude=["filesystem__di_avvik_hourly"]
+        )
+        assert _names(result) == ["filesystem__di_avvik_daily"]
+
+    def test_exclude_without_select_subtracts_from_everything(self, sample_configs):
+        result = PipelineSelector(sample_configs).select(
+            None, exclude=["group:google_sheets"]
+        )
+        assert set(result) == {"filesystem", "api"}
+        assert len(_names(result)) == 3
+
+    def test_exclusion_wins_over_selection(self, sample_configs):
+        result = PipelineSelector(sample_configs).select(
+            ["api__partner__stats"], exclude=["api__partner__stats"]
+        )
+        assert result == {}
+
+    def test_exclude_uses_the_select_grammar(self, sample_configs):
+        selector = PipelineSelector(sample_configs)
+        # UNION within an exclude: drop both groups
+        assert set(selector.select(None, exclude=["group:api group:filesystem"])) == {
+            "google_sheets"
+        }
+        # INTERSECTION within an exclude: drop only the critical google_sheets one
+        assert _names(
+            selector.select(
+                ["group:google_sheets"],
+                exclude=["group:google_sheets,tag:critical"],
+            )
+        ) == ["google_sheets__query_balance_view"]
+        # Glob
+        assert _names(selector.select(["group:filesystem"], exclude=["*hourly"])) == [
+            "filesystem__di_avvik_daily"
+        ]
+
+    def test_empty_exclude_is_a_no_op(self, sample_configs):
+        selector = PipelineSelector(sample_configs)
+        assert selector.select(None, exclude=[]) == sample_configs
+        assert selector.select(["group:api"], exclude=[]) == selector.select(
+            ["group:api"]
+        )
+
+    def test_exclude_matching_nothing_warns(self, sample_configs, caplog):
+        """A typo'd exclude lets the pipeline meant to be skipped run."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dlt_saga.utility.cli.selectors"):
+            PipelineSelector(sample_configs).select(
+                ["group:api"], exclude=["api__partner__stat"]
+            )
+        assert any(
+            "Exclude selector 'api__partner__stat'" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_exclude_outside_the_selection_does_not_warn(self, sample_configs, caplog):
+        """Matching a pipeline the selection didn't include is not a typo."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dlt_saga.utility.cli.selectors"):
+            result = PipelineSelector(sample_configs).select(
+                ["group:api"], exclude=["group:filesystem"]
+            )
+        assert _names(result) == ["api__partner__stats"]
+        assert not caplog.records
+
+    def test_warn_on_no_match_false_silences_exclude_warning(
+        self, sample_configs, caplog
+    ):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dlt_saga.utility.cli.selectors"):
+            PipelineSelector(sample_configs).select(
+                None, exclude=["nonexistent"], warn_on_no_match=False
+            )
+        assert not caplog.records
+
+    def test_unknown_prefix_in_exclude_raises(self, sample_configs):
+        with pytest.raises(SelectorSyntaxError):
+            PipelineSelector(sample_configs).select(None, exclude=["tags:daily"])
+
+    def test_excluded_disabled_config_is_not_reported(self):
+        """The disabled-set probe honours the exclusion too."""
+        from unittest.mock import MagicMock, patch
+
+        from dlt_saga.utility.cli import common
+
+        def cfg(name):
+            c = MagicMock()
+            c.pipeline_name = f"crm__{name}"
+            c.pipeline_group = "crm"
+            c.table_name = name
+            c.identifier = f"configs/crm/{name}.yml"
+            return c
+
+        source = MagicMock()
+        source.discover.return_value = (
+            {"crm": [cfg("accounts")]},
+            {"crm": [cfg("legacy")]},
+        )
+        with patch.object(common, "get_config_source", return_value=source):
+            selected, disabled = common.discover_and_select_configs(
+                ["group:crm"], exclude=["crm__legacy"]
+            )
+
+        assert _names(selected) == ["crm__accounts"]
+        assert disabled == {}
+
+
+@pytest.mark.unit
+class TestFormatSelection:
+    @pytest.mark.parametrize(
+        "select, exclude, expected",
+        [
+            (None, None, None),
+            ([], [], None),
+            (["tag:daily"], None, "tag:daily"),
+            (["tag:daily", "group:api"], None, "tag:daily group:api"),
+            (["group:x"], ["x__a"], "group:x --exclude x__a"),
+            (None, ["x__a", "tag:slow"], "--exclude x__a tag:slow"),
+        ],
+    )
+    def test_format_selection(self, select, exclude, expected):
+        assert format_selection(select, exclude) == expected

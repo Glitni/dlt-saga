@@ -80,6 +80,12 @@ class TestScopeCoalescing:
         assert ctx.succeeded == 1
         assert ctx.failed == 1
 
+    def test_event_carries_exclusions(self, captured):
+        with run_notification_scope("run", select=["tag:daily"], exclude=["x__a"]):
+            contribute([_Result("a")])
+
+        assert captured[0].exclude == ["x__a"]
+
     def test_event_carries_timing(self, captured):
         with run_notification_scope("run"):
             contribute([_Result("a")])

@@ -36,7 +36,7 @@ from dlt_saga.utility.cli.pipeline_state import (
 )
 from dlt_saga.utility.cli.profiles import ProfileTarget, get_profiles_config
 from dlt_saga.utility.cli.reporting import summarize_load_info
-from dlt_saga.utility.cli.selectors import PipelineSelector
+from dlt_saga.utility.cli.selectors import PipelineSelector, format_selection
 from dlt_saga.utility.collisions import check_target_collisions
 from dlt_saga.utility.secrets.redaction import redact
 from dlt_saga.utility.task_groups import (
@@ -197,6 +197,7 @@ class Session:
         self,
         select: Optional[List[str]] = None,
         resource_type: str = "all",
+        exclude: Optional[List[str]] = None,
     ) -> List[PipelineConfig]:
         """Discover and select pipeline configs.
 
@@ -207,6 +208,8 @@ class Session:
         Args:
             select: Selector expressions (dbt-style). None = all.
             resource_type: Filter by ``"ingest"``, ``"historize"``, or ``"all"``.
+            exclude: Selector expressions whose matches are removed from the
+                selection. Exclusion wins over ``select``.
 
         Returns:
             Flat list of matching PipelineConfig objects.
@@ -215,7 +218,9 @@ class Session:
         layer = layer_for_resource_type(resource_type)
 
         def _select() -> List[PipelineConfig]:
-            configs, _ = self._discover_and_select(select, filter_fn, layer=layer)
+            configs, _ = self._discover_and_select(
+                select, filter_fn, layer=layer, exclude=exclude
+            )
             return flatten_configs(configs)
 
         # Resolve inside the profile's execution context so environment-aware
@@ -227,7 +232,7 @@ class Session:
         # pre-discovers for its pipeline count) landing in ``dlt_dev`` while
         # ``saga ingest`` resolved correctly.
         with execution_context_scope(self._profile_target):
-            if selection_needs_state(select):
+            if selection_needs_state(select, exclude):
                 return self._execute_with_auth(_select)
             return _select()
 
@@ -239,6 +244,7 @@ class Session:
         full_refresh: bool = False,
         start_value_override: Optional[str] = None,
         end_value_override: Optional[str] = None,
+        exclude: Optional[List[str]] = None,
     ) -> SessionResult:
         """Run data ingestion pipelines.
 
@@ -249,6 +255,8 @@ class Session:
             full_refresh: Drop state/tables and reload from scratch.
             start_value_override: Override start value for incremental loading.
             end_value_override: Override end value for incremental loading.
+            exclude: Selector expressions whose matches are removed from the
+                selection. Exclusion wins over ``select``.
 
         Returns:
             SessionResult with per-pipeline outcomes.
@@ -263,9 +271,9 @@ class Session:
 
             def _ingest_and_record() -> SessionResult:
                 started_at = datetime.now(timezone.utc)
-                result = self._run_ingest(select, workers)
-                self._record_run("ingest", select, result)
-                self._fire_run_complete("ingest", select, result, started_at)
+                result = self._run_ingest(select, workers, exclude)
+                self._record_run("ingest", select, result, exclude)
+                self._fire_run_complete("ingest", select, result, started_at, exclude)
                 return result
 
             return self._execute_with_auth(_ingest_and_record)
@@ -277,6 +285,7 @@ class Session:
         full_refresh: bool = False,
         partial_refresh: bool = False,
         historize_from: Optional[str] = None,
+        exclude: Optional[List[str]] = None,
     ) -> SessionResult:
         """Historize snapshot data into SCD2 tables.
 
@@ -287,6 +296,8 @@ class Session:
             partial_refresh: Rebuild from earliest available raw snapshot,
                 preserving older SCD2 records.
             historize_from: Reprocess from this ISO date/datetime onwards.
+            exclude: Selector expressions whose matches are removed from the
+                selection. Exclusion wins over ``select``.
 
         Returns:
             SessionResult with per-pipeline outcomes.
@@ -299,10 +310,17 @@ class Session:
             def _historize_and_record() -> SessionResult:
                 started_at = datetime.now(timezone.utc)
                 result = self._run_historize(
-                    select, workers, full_refresh, partial_refresh, historize_from
+                    select,
+                    workers,
+                    full_refresh,
+                    partial_refresh,
+                    historize_from,
+                    exclude=exclude,
                 )
-                self._record_run("historize", select, result)
-                self._fire_run_complete("historize", select, result, started_at)
+                self._record_run("historize", select, result, exclude)
+                self._fire_run_complete(
+                    "historize", select, result, started_at, exclude
+                )
                 return result
 
             return self._execute_with_auth(_historize_and_record)
@@ -317,6 +335,7 @@ class Session:
         historize_from: Optional[str] = None,
         start_value_override: Optional[str] = None,
         end_value_override: Optional[str] = None,
+        exclude: Optional[List[str]] = None,
     ) -> SessionResult:
         """Run both ingest and historize sequentially.
 
@@ -333,6 +352,8 @@ class Session:
             historize_from: Reprocess historize from this date only.
             start_value_override: Override start value for incremental loading.
             end_value_override: Override end value for incremental loading.
+            exclude: Selector expressions whose matches are removed from the
+                selection. Exclusion wins over ``select``.
 
         Returns:
             SessionResult combining ingest and historize outcomes.
@@ -348,10 +369,15 @@ class Session:
             def _run_and_record() -> SessionResult:
                 started_at = datetime.now(timezone.utc)
                 result = self._run_both(
-                    select, workers, full_refresh, partial_refresh, historize_from
+                    select,
+                    workers,
+                    full_refresh,
+                    partial_refresh,
+                    historize_from,
+                    exclude=exclude,
                 )
-                self._record_run("run", select, result)
-                self._fire_run_complete("run", select, result, started_at)
+                self._record_run("run", select, result, exclude)
+                self._fire_run_complete("run", select, result, started_at, exclude)
                 return result
 
             return self._execute_with_auth(_run_and_record)
@@ -362,6 +388,7 @@ class Session:
         resource_type: str = "all",
         workers: int = 4,
         dry_run: bool = False,
+        exclude: Optional[List[str]] = None,
     ) -> SessionResult:
         """Remove selected pipelines' warehouse footprint without reloading.
 
@@ -380,6 +407,8 @@ class Session:
                 ``"historize"``, or ``"all"``.
             workers: Number of parallel workers.
             dry_run: When True, report what would be dropped without deleting.
+            exclude: Selector expressions whose matches are removed from the
+                selection. Exclusion wins over ``select``.
 
         Returns:
             SessionResult with per-pipeline outcomes.
@@ -391,7 +420,9 @@ class Session:
             )
         with execution_context_scope(self._profile_target):
             return self._execute_with_auth(
-                lambda: self._run_destroy(select, resource_type, workers, dry_run)
+                lambda: self._run_destroy(
+                    select, resource_type, workers, dry_run, exclude
+                )
             )
 
     def update_access(
@@ -399,6 +430,7 @@ class Session:
         select: Optional[List[str]] = None,
         workers: int = 4,
         dry_run: bool = False,
+        exclude: Optional[List[str]] = None,
     ) -> SessionResult:
         """Update access controls (e.g., BigQuery IAM policies) without running pipelines.
 
@@ -414,6 +446,8 @@ class Session:
                 applying, but skip the BigQuery PATCH / set_iam_policy /
                 create_dataset calls. Use to preview the change set before
                 committing.
+            exclude: Selector expressions whose matches are removed from the
+                selection. Exclusion wins over ``select``.
 
         Returns:
             SessionResult with per-pipeline outcomes.
@@ -424,11 +458,14 @@ class Session:
             dry_run=dry_run,
         ):
             return self._execute_with_auth(
-                lambda: self._run_update_access(select, workers)
+                lambda: self._run_update_access(select, workers, exclude)
             )
 
     def _run_update_access(
-        self, select: Optional[List[str]], workers: int
+        self,
+        select: Optional[List[str]],
+        workers: int,
+        exclude: Optional[List[str]] = None,
     ) -> SessionResult:
         """Orchestration schema sync first, then per-pipeline access sync.
 
@@ -440,7 +477,7 @@ class Session:
         independently — so the reordering is purely about log clarity.
         """
         self._apply_orchestration_access()
-        return self._run_ingest(select, workers)
+        return self._run_ingest(select, workers, exclude)
 
     @staticmethod
     def _apply_orchestration_access() -> None:
@@ -515,6 +552,7 @@ class Session:
         self,
         select: Optional[List[str]] = None,
         dry_run: bool = False,
+        exclude: Optional[List[str]] = None,
     ) -> Dict[str, Dict[str, int]]:
         """Reconcile and compact saga's internal bookkeeping tables.
 
@@ -530,6 +568,8 @@ class Session:
             select: Selector expressions scoping which pipeline schemas are
                 swept. None = all.
             dry_run: When True, report what would change without writing.
+            exclude: Selector expressions whose matches are removed from the
+                selection. Exclusion wins over ``select``.
 
         Returns:
             Per-pass status counts::
@@ -540,16 +580,19 @@ class Session:
         """
         with execution_context_scope(self._profile_target, dry_run=dry_run):
             return self._execute_with_auth(
-                lambda: self._run_maintenance(select, dry_run)
+                lambda: self._run_maintenance(select, dry_run, exclude)
             )
 
     def _run_maintenance(
-        self, select: Optional[List[str]], dry_run: bool
+        self,
+        select: Optional[List[str]],
+        dry_run: bool,
+        exclude: Optional[List[str]] = None,
     ) -> Dict[str, Dict[str, int]]:
         from dlt_saga.maintenance import run_maintenance
         from dlt_saga.utility.cli.context import get_execution_context
 
-        selected, _ = self._discover_and_select(select)
+        selected, _ = self._discover_and_select(select, exclude=exclude)
         if not selected:
             logger.warning("No pipeline configs found matching selectors")
             return {
@@ -563,6 +606,7 @@ class Session:
     def validate(
         self,
         select: Optional[List[str]] = None,
+        exclude: Optional[List[str]] = None,
     ) -> List["ValidationResult"]:
         """Validate selected pipeline configs without executing anything.
 
@@ -574,6 +618,8 @@ class Session:
 
         Args:
             select: Selector expressions. None = all.
+            exclude: Selector expressions whose matches are removed from the
+                selection. Exclusion wins over ``select``.
 
         Returns:
             One :class:`~dlt_saga.validate.ValidationResult` per selected
@@ -590,7 +636,7 @@ class Session:
             # layer=None: validation is offline, so a ``state:`` selector (which
             # would need a warehouse read) is refused rather than silently
             # matching nothing.
-            configs, _ = self._discover_and_select(select, layer=None)
+            configs, _ = self._discover_and_select(select, layer=None, exclude=exclude)
             return validate_pipeline_configs(
                 flatten_configs(configs), self._config_source
             )
@@ -602,6 +648,7 @@ class Session:
         days: int = 14,
         summary: bool = False,
         stale_after_minutes: Optional[int] = None,
+        exclude: Optional[List[str]] = None,
     ) -> str:
         """Generate a standalone HTML observability report.
 
@@ -621,6 +668,8 @@ class Session:
             stale_after_minutes: How long the summary should be considered
                 current; defaults to ``DEFAULT_STALE_AFTER_MINUTES``. Only
                 meaningful with ``summary``.
+            exclude: Selector expressions whose matches are removed from the
+                selection. Exclusion wins over ``select``.
 
         Returns:
             The resolved report location: the absolute local path, or the
@@ -645,6 +694,7 @@ class Session:
                     days,
                     summary=summary,
                     stale_after_minutes=stale_after_minutes,
+                    exclude=exclude,
                 )
             )
 
@@ -656,6 +706,7 @@ class Session:
         *,
         summary: bool = False,
         stale_after_minutes: Optional[int] = None,
+        exclude: Optional[List[str]] = None,
     ) -> str:
         import os
         import tempfile
@@ -671,7 +722,9 @@ class Session:
         # overwrite the report fails fast.
         summary_output = summary_location(output) if summary else None
 
-        selected_configs, disabled_configs = self._discover_and_select(select)
+        selected_configs, disabled_configs = self._discover_and_select(
+            select, exclude=exclude
+        )
         if not selected_configs:
             raise ValueError("No pipeline configs found matching selectors")
         # Execution-plan rows of pipelines outside the selection are named from
@@ -846,6 +899,7 @@ class Session:
         filter_fn: Optional[Callable[[PipelineConfig], bool]] = None,
         warn_on_no_match: bool = True,
         layer: Optional[str] = "any",
+        exclude: Optional[List[str]] = None,
     ) -> tuple:
         """Discover configs using this session's config source and apply selectors.
 
@@ -863,11 +917,13 @@ class Session:
                 phase against its own target. Only consulted when the selection
                 uses a ``state:`` selector; None rejects those (``validate`` is
                 offline and never connects).
+            exclude: Selector expressions whose matches are removed from the
+                selection.
 
         Returns:
             Tuple of (selected_enabled, selected_disabled) dicts.
         """
-        state = build_state_resolver(select, layer)
+        state = build_state_resolver(select, layer, exclude)
         all_enabled, all_disabled = self._config_source.discover()
 
         if filter_fn:
@@ -878,13 +934,17 @@ class Session:
             all_enabled = {k: v for k, v in all_enabled.items() if v}
 
         enabled_selector = PipelineSelector(all_enabled, state=state)
-        selected = enabled_selector.select(select, warn_on_no_match=warn_on_no_match)
+        selected = enabled_selector.select(
+            select, warn_on_no_match=warn_on_no_match, exclude=exclude
+        )
 
         # The disabled set is only probed to report matches that are disabled;
         # a non-match here is expected and must not warn (it would contradict a
         # successful enabled match).
         disabled_selector = PipelineSelector(all_disabled, state=state)
-        selected_disabled = disabled_selector.select(select, warn_on_no_match=False)
+        selected_disabled = disabled_selector.select(
+            select, warn_on_no_match=False, exclude=exclude
+        )
 
         return selected, selected_disabled
 
@@ -925,6 +985,7 @@ class Session:
         select: Optional[List[str]],
         result: SessionResult,
         started_at: datetime,
+        exclude: Optional[List[str]] = None,
     ) -> None:
         """Fire ``on_run_complete`` once for this command invocation.
 
@@ -965,6 +1026,7 @@ class Session:
                 RunContext(
                     command=command,
                     select=select,
+                    exclude=exclude,
                     target=target.name if target else None,
                     environment=environment,
                     results=list(result.pipeline_results),
@@ -980,6 +1042,7 @@ class Session:
         command: str,
         select: Optional[List[str]],
         result: SessionResult,
+        exclude: Optional[List[str]] = None,
     ) -> None:
         """Record this local run's per-pipeline outcomes for `saga report`.
 
@@ -1037,7 +1100,7 @@ class Session:
                 context.get_destination_type(), context, {"schema_name": ""}
             )
             metadata = ExecutionMetadata(
-                select_criteria=" ".join(select) if select else None,
+                select_criteria=format_selection(select, exclude),
                 command=command,
                 environment=context.get_environment(),
                 target=self._profile_target.name if self._profile_target else None,
@@ -1058,10 +1121,14 @@ class Session:
         self,
         select: Optional[List[str]],
         workers: int,
+        exclude: Optional[List[str]] = None,
     ) -> SessionResult:
         """Discover ingest-enabled configs and execute them."""
         configs, _ = self._discover_and_select(
-            select, filter_fn=lambda c: c.ingest_enabled, layer="ingest"
+            select,
+            filter_fn=lambda c: c.ingest_enabled,
+            layer="ingest",
+            exclude=exclude,
         )
         all_configs = flatten_configs(configs)
 
@@ -1259,10 +1326,14 @@ class Session:
         full_refresh: bool,
         partial_refresh: bool = False,
         historize_from: Optional[str] = None,
+        exclude: Optional[List[str]] = None,
     ) -> SessionResult:
         """Discover historize-enabled configs and execute them."""
         configs, _ = self._discover_and_select(
-            select, filter_fn=lambda c: c.historize_enabled, layer="historize"
+            select,
+            filter_fn=lambda c: c.historize_enabled,
+            layer="historize",
+            exclude=exclude,
         )
         all_configs = flatten_configs(configs)
 
@@ -1439,6 +1510,7 @@ class Session:
         full_refresh: bool,
         partial_refresh: bool = False,
         historize_from: Optional[str] = None,
+        exclude: Optional[List[str]] = None,
     ) -> SessionResult:
         """Run ingest then historize, combining results."""
         all_results: List[PipelineResult] = []
@@ -1448,7 +1520,10 @@ class Session:
         # raw table exists but whose historized table doesn't is skipped here
         # and picked up by the historize phase below.
         ingest_configs, _ = self._discover_and_select(
-            select, filter_fn=lambda c: c.ingest_enabled, layer="ingest"
+            select,
+            filter_fn=lambda c: c.ingest_enabled,
+            layer="ingest",
+            exclude=exclude,
         )
         ingest_list = flatten_configs(ingest_configs)
 
@@ -1473,7 +1548,10 @@ class Session:
 
         # Historize phase
         historize_configs, _ = self._discover_and_select(
-            select, filter_fn=lambda c: c.historize_enabled, layer="historize"
+            select,
+            filter_fn=lambda c: c.historize_enabled,
+            layer="historize",
+            exclude=exclude,
         )
         historize_list = flatten_configs(historize_configs)
 
@@ -1517,6 +1595,7 @@ class Session:
         resource_type: str,
         workers: int,
         dry_run: bool,
+        exclude: Optional[List[str]] = None,
     ) -> SessionResult:
         """Discover matching configs (enabled + disabled) and tear them down.
 
@@ -1530,7 +1609,7 @@ class Session:
         # match living only there must not trip the enabled-set "did not match"
         # warning. The empty-union check below reports a genuine no-match once.
         enabled, disabled = self._discover_and_select(
-            select, filter_fn=None, warn_on_no_match=False
+            select, filter_fn=None, warn_on_no_match=False, exclude=exclude
         )
         all_configs = flatten_configs(enabled) + flatten_configs(disabled)
 

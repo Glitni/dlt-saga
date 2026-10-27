@@ -31,6 +31,7 @@ class _RunScope:
 
     command: str
     select: Optional[List[str]] = None
+    exclude: Optional[List[str]] = None
     target: Optional[str] = None
     environment: Optional[str] = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -81,6 +82,7 @@ def run_notification_scope(
     select: Optional[List[str]] = None,
     target: Optional[str] = None,
     environment: Optional[str] = None,
+    exclude: Optional[List[str]] = None,
 ) -> Iterator[None]:
     """Coalesce every phase inside the block into one ``on_run_complete`` event.
 
@@ -94,9 +96,14 @@ def run_notification_scope(
         select: Selector expressions the command was invoked with.
         target: Profile target name.
         environment: Environment of that target.
+        exclude: Exclusion expressions the command was invoked with.
     """
     scope = _RunScope(
-        command=command, select=select, target=target, environment=environment
+        command=command,
+        select=select,
+        exclude=exclude,
+        target=target,
+        environment=environment,
     )
     token = _active_scope.set(scope)
     try:
@@ -123,6 +130,7 @@ def _fire(scope: _RunScope) -> None:
             RunContext(
                 command=scope.command,
                 select=scope.select,
+                exclude=scope.exclude,
                 target=scope.target,
                 environment=scope.environment,
                 results=scope.results,

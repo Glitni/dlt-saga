@@ -62,6 +62,10 @@ Selector combinations:
 - Space-separated: UNION (OR) - "tag:daily group:google_sheets"
 - Comma-separated: INTERSECTION (AND) - "tag:daily,group:google_sheets"
 - State composes like any other: "tag:daily,state:new" is daily AND new
+
+Exclusion (``exclude=``, the CLI's ``--exclude``) takes selectors in the same
+grammar and removes whatever they match from the selection — exclusion always
+wins, as in dbt. Without ``--select`` it subtracts from every candidate.
 """
 
 import fnmatch
@@ -120,6 +124,7 @@ class PipelineSelector:
         self,
         selectors: Optional[List[str]] = None,
         warn_on_no_match: bool = True,
+        exclude: Optional[List[str]] = None,
     ) -> Dict[str, List[PipelineConfig]]:
         """Apply selectors to filter configs.
 
@@ -130,6 +135,8 @@ class PipelineSelector:
                       Set False when selecting against a subset (e.g. the
                       disabled-config probe), where a non-match is expected and
                       the warning would contradict a successful enabled match.
+            exclude: Selector strings in the same grammar; anything they match
+                      is removed from the selection. Exclusion always wins.
 
         Returns:
             Filtered configs organized by pipeline type
@@ -143,14 +150,43 @@ class PipelineSelector:
             select(["tag:daily", "group:google_sheets"]) -> UNION (configs with daily tag OR google_sheets group)
             select(["tag:daily group:google_sheets"]) -> UNION (space-separated in single string)
             select(["tag:daily,group:google_sheets"]) -> INTERSECTION (google_sheets configs with daily tag)
+            select(["group:api"], exclude=["tag:slow"]) -> api configs without the slow tag
         """
         # Default: return all configs if no selectors
-        if not selectors:
+        if not selectors and not exclude:
             return self.all_configs
 
-        # Collect all selected configs using UNION logic
-        # Use dict to deduplicate by identifier (since PipelineConfig is not hashable)
-        selected_dict = {}
+        if selectors:
+            selected = self._match_union(selectors, warn_on_no_match, "Selector")
+        else:
+            selected = {c.identifier: c for c in self.flat_configs}
+
+        if exclude:
+            # Matched against every candidate rather than the selection, so the
+            # warning flags an exclude matching no pipeline at all (a typo, which
+            # would let the pipeline meant to be skipped run) — not one that
+            # merely had nothing to remove from this selection.
+            excluded = self._match_union(exclude, warn_on_no_match, "Exclude selector")
+            selected = {k: c for k, c in selected.items() if k not in excluded}
+
+        return self._organize_by_group(list(selected.values()))
+
+    def _match_union(
+        self, selectors: List[str], warn_on_no_match: bool, label: str
+    ) -> Dict[str, PipelineConfig]:
+        """Match selector strings with UNION logic, keyed by config identifier.
+
+        Args:
+            selectors: Selector strings (space-separated = UNION,
+                comma-separated = INTERSECTION).
+            warn_on_no_match: Emit a warning for selectors that match nothing.
+            label: How the warning names the selector (``--select`` vs
+                ``--exclude``).
+
+        Returns:
+            Matched configs keyed by identifier (PipelineConfig isn't hashable).
+        """
+        selected_dict: Dict[str, PipelineConfig] = {}
 
         for selector_group in selectors:
             # Collapse whitespace around commas first, so a comma followed by a
@@ -180,15 +216,14 @@ class PipelineSelector:
                 # typo'd tag/group/name doesn't silently narrow the run to zero.
                 if not matched and warn_on_no_match:
                     logger.warning(
-                        "Selector '%s' did not match any pipelines.", selector
+                        "%s '%s' did not match any pipelines.", label, selector
                     )
 
                 # Add to dict using identifier as key for deduplication
                 for config in matched:
                     selected_dict[config.identifier] = config
 
-        # Convert back to dict organized by group
-        return self._organize_by_group(list(selected_dict.values()))
+        return selected_dict
 
     def _select_single(self, selector: str) -> List[PipelineConfig]:
         """Apply a single selector to get matching configs.
@@ -407,6 +442,25 @@ class PipelineSelector:
                 organized[config.pipeline_group] = []
             organized[config.pipeline_group].append(config)
         return organized
+
+
+def format_selection(
+    select: Optional[List[str]], exclude: Optional[List[str]] = None
+) -> Optional[str]:
+    """Render a selection as one string, for run records and notifications.
+
+    Args:
+        select: ``--select`` expressions.
+        exclude: ``--exclude`` expressions.
+
+    Returns:
+        The selectors joined by spaces, followed by ``--exclude`` and the
+        exclusions when there are any; None for an unfiltered selection.
+    """
+    parts = list(select or [])
+    if exclude:
+        parts += ["--exclude", *exclude]
+    return " ".join(parts) or None
 
 
 def format_config_list(
