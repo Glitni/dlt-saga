@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from dlt_saga.pipeline_config import PipelineConfig
 from dlt_saga.utility.cli.logging import YELLOW, colorize
@@ -691,10 +691,10 @@ class ExecutionPlanManager:
         status: str,
         error_message: Optional[str] = None,
     ):
-        """Log a status change for a task (append-only pattern).
+        """Log one status change for every pipeline in a task (append-only).
 
-        Updates status for ALL pipelines assigned to this task (supports task groups).
-        Inserts a new log entry for each pipeline with the updated status.
+        Used for task-wide transitions such as ``running``. A task's final
+        outcome is per pipeline — see :meth:`record_pipeline_outcomes`.
 
         Args:
             execution_id: Execution plan ID
@@ -702,9 +702,51 @@ class ExecutionPlanManager:
             status: New status (pending/running/completed/failed)
             error_message: Optional error message if failed
         """
+        self._log_status_rows(
+            execution_id, task_index, lambda identifier: (status, error_message)
+        )
+
+    def record_pipeline_outcomes(
+        self,
+        execution_id: str,
+        task_index: int,
+        outcomes: Dict[str, Tuple[str, Optional[str]]],
+    ):
+        """Log each pipeline's own final status within a task (append-only).
+
+        A task group's members succeed and fail independently, and the report
+        and ``state:failed`` judge each pipeline by its own row, so one failing
+        member must not mark the others failed.
+
+        Args:
+            execution_id: Execution plan ID
+            task_index: Task index
+            outcomes: ``(status, error_message)`` per ``pipeline_identifier``.
+                Pipelines of the task missing from it are left unchanged.
+        """
+        self._log_status_rows(execution_id, task_index, outcomes.get)
+
+    def _log_status_rows(
+        self,
+        execution_id: str,
+        task_index: int,
+        status_for: Callable[[str], Optional[Tuple[str, Optional[str]]]],
+    ):
+        """Append a status row per pipeline of a task, in one INSERT.
+
+        One statement rather than one per pipeline: the termination path writes
+        a large task group's statuses inside the few seconds a container gets
+        between SIGTERM and SIGKILL. Best-effort — failures are logged, never
+        raised.
+
+        Args:
+            execution_id: Execution plan ID
+            task_index: Task index
+            status_for: ``(status, error_message)`` for a pipeline identifier,
+                or None to leave that pipeline's status unchanged.
+        """
         d = self.destination
         safe_eid = self.destination.escape_string_literal(execution_id)
-        now = d.current_timestamp_expression()
 
         # Get current task data from view
         select_query = f"""
@@ -732,66 +774,93 @@ class ExecutionPlanManager:
                 )
                 return
 
+            value_clauses = []
+            statuses = set()
             for current_data in rows:
-                # Resolve timestamps
-                started_at = current_data.started_at
-                completed_at = current_data.completed_at
-
-                if status == "running" and not started_at:
-                    started_at_sql = now
-                elif started_at:
-                    started_at_sql = self._format_sql_value(started_at)
-                else:
-                    started_at_sql = "NULL"
-
-                if status in ("completed", "failed"):
-                    completed_at_sql = now
-                elif completed_at:
-                    completed_at_sql = self._format_sql_value(completed_at)
-                else:
-                    completed_at_sql = "NULL"
-
-                # config_json may be dict or string depending on destination
-                config_json_raw = current_data.config_json
-                if not isinstance(config_json_raw, str):
-                    config_json_raw = json.dumps(config_json_raw)
-
-                parse_json = d.parse_json_expression(
-                    self._format_sql_value(config_json_raw)
+                outcome = status_for(current_data.pipeline_identifier)
+                if outcome is None:
+                    continue
+                status, error_message = outcome
+                statuses.add(status)
+                value_clauses.append(
+                    self._status_row_sql(
+                        current_data, execution_id, task_index, status, error_message
+                    )
                 )
 
-                insert_sql = f"""
-                    INSERT INTO {self.plans_table_id}
-                    (log_timestamp, execution_id, task_index, pipeline_type,
-                     pipeline_identifier, table_name, config_json, status,
-                     started_at, completed_at, error_message, is_orchestrated)
-                    VALUES (
-                        {now},
-                        '{safe_eid}',
-                        {int(task_index)},
-                        {self._format_sql_value(current_data.pipeline_type)},
-                        {self._format_sql_value(current_data.pipeline_identifier)},
-                        {self._format_sql_value(current_data.table_name)},
-                        {parse_json},
-                        {self._format_sql_value(status)},
-                        {started_at_sql},
-                        {completed_at_sql},
-                        {self._format_sql_value(redact(error_message or ""))},
-                        TRUE
-                    )
-                """
-                d.execute_sql(insert_sql, self.schema)
+            if not value_clauses:
+                return
 
-            pipeline_count = len(rows)
+            insert_sql = f"""
+                INSERT INTO {self.plans_table_id}
+                (log_timestamp, execution_id, task_index, pipeline_type,
+                 pipeline_identifier, table_name, config_json, status,
+                 started_at, completed_at, error_message, is_orchestrated)
+                VALUES
+                {",".join(value_clauses)}
+            """
+            d.execute_sql(insert_sql, self.schema)
+
+            pipeline_count = len(value_clauses)
             pipeline_word = "pipeline" if pipeline_count == 1 else "pipelines"
             logger.debug(
                 f"Logged status change for task {task_index} "
-                f"({pipeline_count} {pipeline_word}): {status}"
+                f"({pipeline_count} {pipeline_word}): {', '.join(sorted(statuses))}"
             )
 
         except Exception as e:
             logger.error(f"Failed to log status change: {e}")
             # Don't raise - status updates are best-effort
+
+    def _status_row_sql(
+        self,
+        current_data: Any,
+        execution_id: str,
+        task_index: int,
+        status: str,
+        error_message: Optional[str],
+    ) -> str:
+        """The ``VALUES`` tuple appending ``status`` for one plan row."""
+        d = self.destination
+        now = d.current_timestamp_expression()
+        started_at = current_data.started_at
+        completed_at = current_data.completed_at
+
+        if status == "running" and not started_at:
+            started_at_sql = now
+        elif started_at:
+            started_at_sql = self._format_sql_value(started_at)
+        else:
+            started_at_sql = "NULL"
+
+        if status in ("completed", "failed"):
+            completed_at_sql = now
+        elif completed_at:
+            completed_at_sql = self._format_sql_value(completed_at)
+        else:
+            completed_at_sql = "NULL"
+
+        # config_json may be dict or string depending on destination
+        config_json_raw = current_data.config_json
+        if not isinstance(config_json_raw, str):
+            config_json_raw = json.dumps(config_json_raw)
+
+        parse_json = d.parse_json_expression(self._format_sql_value(config_json_raw))
+
+        return f"""(
+            {now},
+            {self._format_sql_value(execution_id)},
+            {int(task_index)},
+            {self._format_sql_value(current_data.pipeline_type)},
+            {self._format_sql_value(current_data.pipeline_identifier)},
+            {self._format_sql_value(current_data.table_name)},
+            {parse_json},
+            {self._format_sql_value(status)},
+            {started_at_sql},
+            {completed_at_sql},
+            {self._format_sql_value(redact(error_message or ""))},
+            TRUE
+        )"""
 
     def get_execution_summary(self, execution_id: str) -> Dict:
         """Get summary statistics for an execution.

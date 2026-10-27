@@ -53,6 +53,8 @@ The orchestrator:
 2. Writes an execution plan to the destination (`_saga_execution_plans` table)
 3. Triggers N workers — each worker reads its assignment by task index and runs its assigned pipelines
 
+Each worker records every assigned pipeline's own outcome back to the plan, so in a `task_group` only the members that failed are recorded as failed. If the platform stops a worker early — a task timeout or a cancellation, which arrives as SIGTERM — the worker records the pipelines that had not finished as failed before exiting, and the ones that had finished keep their real outcome. A worker killed outright (SIGKILL, out of memory) can record nothing; its pipelines stay `running` until [`saga maintenance`](CLI-Reference#saga-maintenance) relabels them `abandoned`.
+
 ---
 
 ## Orchestration Providers
