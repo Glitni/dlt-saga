@@ -45,6 +45,12 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
   - `--select "tag:daily group:filesystem"` - union (OR)
   - `--select "state:new"` - un-ingested / un-historized pipelines
   - `--select "state:failed"` - last recorded run failed
+- EXCLUSION: `--exclude` on every command that has `--select`, same grammar, applied after selection
+  (`PipelineSelector.select(..., exclude=)`) — exclusion wins; without `--select` it subtracts from
+  every candidate. It warns when it matches no candidate at all (a typo would let the pipeline
+  meant to be skipped run), not when it merely misses the selection. A `state:` token in it needs
+  the resolver like one in `--select` (`selection_needs_state(select, exclude)`). Run records
+  (`select_criteria`) and `RunContext.exclude` carry it (`format_selection`)
 - Prefix set is closed (`tag:`, `group:`, `state:`): an unknown prefix raises `SelectorSyntaxError`
   rather than falling through to the name/glob match, where a typo was indistinguishable from a
   valid selector matching nothing (a scheduled run would do nothing and report success). Values
@@ -162,6 +168,7 @@ saga ingest --select "*sales*"                      # Glob pattern
 # Selectors
 saga ingest --select "tag:daily group:google_sheets"    # UNION (OR)
 saga ingest --select "tag:daily,group:google_sheets"    # INTERSECTION (AND)
+saga historize --select "group:finance" --exclude finance__legacy  # all but one
 
 # Parallel execution
 saga ingest --workers 8

@@ -731,6 +731,37 @@ class TestSessionIngest:
         with pytest.raises(AuthenticationError, match="Credentials not configured"):
             session.ingest()
 
+    def test_run_applies_exclude_to_both_phases(self):
+        def cfg(name):
+            c = MagicMock()
+            c.pipeline_name = f"crm__{name}"
+            c.pipeline_group = "crm"
+            c.table_name = name
+            c.identifier = f"configs/crm/{name}.yml"
+            c.ingest_enabled = True
+            c.historize_enabled = True
+            return c
+
+        session = self._make_session_with_configs(
+            {"crm": [cfg("accounts"), cfg("contacts")]}
+        )
+        session._prepare_destinations = MagicMock()
+        session._execute_pipelines_tracked = MagicMock(return_value=SessionResult())
+        session._execute_historize_tracked = MagicMock(return_value=SessionResult())
+
+        with (
+            patch("dlt_saga.session.check_target_collisions"),
+            patch("dlt_saga.session.check_task_concurrency"),
+        ):
+            session._run_both(
+                ["group:crm"], workers=1, full_refresh=False, exclude=["crm__contacts"]
+            )
+
+        ingested = session._execute_pipelines_tracked.call_args.args[0]
+        historized = session._execute_historize_tracked.call_args.args[0]
+        assert [c.pipeline_name for c in ingested] == ["crm__accounts"]
+        assert [c.pipeline_name for c in historized] == ["crm__accounts"]
+
 
 # ---------------------------------------------------------------------------
 # Session.update_access tests

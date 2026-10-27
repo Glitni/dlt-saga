@@ -1,6 +1,6 @@
 # CLI Reference
 
-All commands share common options: `--select`, `--verbose`, `--profile`, `--target`. See [Logging & debugging](#logging--debugging) for the on-disk debug log written for every local run.
+All commands share common options: `--select`, `--exclude`, `--verbose`, `--profile`, `--target`. See [Logging & debugging](#logging--debugging) for the on-disk debug log written for every local run.
 
 ---
 
@@ -15,6 +15,7 @@ saga list [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `-s, --select TEXT` | Selector expression(s) |
+| `--exclude TEXT` | Remove pipelines matching these selectors — see [Excluding pipelines](#excluding-pipelines) |
 | `--resource-type TEXT` | Filter by `ingest`, `historize`, or `all` (default: `all`) |
 | `--pipelines` | List available pipeline implementations instead of configs |
 | `-v, --verbose` | Enable debug logging |
@@ -41,6 +42,7 @@ saga validate [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `-s, --select TEXT` | Selector expression(s) |
+| `--exclude TEXT` | Remove pipelines matching these selectors — see [Excluding pipelines](#excluding-pipelines) |
 | `-v, --verbose` | Enable debug logging |
 | `--profile TEXT` | Profile name (default: `default`) |
 | `--target TEXT` | Target within profile |
@@ -58,6 +60,7 @@ saga ingest [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-s, --select TEXT` | all ingest-enabled | Selector expression(s) |
+| `--exclude TEXT` | none | Remove pipelines matching these selectors — see [Excluding pipelines](#excluding-pipelines) |
 | `-w, --workers INT` | `4` | Number of parallel workers |
 | `--orchestrate / --no-orchestrate` | off | Distribute via orchestration provider |
 | `--full-refresh` | off | Drop state and tables, reload from scratch |
@@ -81,6 +84,7 @@ saga historize [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-s, --select TEXT` | all historize-enabled | Selector expression(s) |
+| `--exclude TEXT` | none | Remove pipelines matching these selectors — see [Excluding pipelines](#excluding-pipelines) |
 | `-w, --workers INT` | `4` | Number of parallel workers |
 | `--orchestrate / --no-orchestrate` | off | Distribute via orchestration provider |
 | `--full-refresh` | off | Rebuild SCD2 table from all raw snapshots |
@@ -105,6 +109,7 @@ saga run [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-s, --select TEXT` | all enabled | Selector expression(s) |
+| `--exclude TEXT` | none | Remove pipelines matching these selectors — see [Excluding pipelines](#excluding-pipelines) |
 | `-w, --workers INT` | `4` | Number of parallel workers |
 | `--orchestrate / --no-orchestrate` | off | Distribute via orchestration provider |
 | `--full-refresh` | off | Full refresh for both ingest and historize |
@@ -133,6 +138,7 @@ saga destroy [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-s, --select TEXT` | all matching | Selector expression(s) |
+| `--exclude TEXT` | none | Remove pipelines matching these selectors — see [Excluding pipelines](#excluding-pipelines) |
 | `--resource-type TEXT` | `all` | Which layer to tear down: `ingest`, `historize`, or `all` |
 | `--dry-run` | off | Show exactly what would be dropped without deleting anything |
 | `-w, --workers INT` | `4` | Number of parallel workers |
@@ -173,6 +179,7 @@ saga update-access [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-s, --select TEXT` | all ingest-enabled | Selector expression(s) |
+| `--exclude TEXT` | none | Remove pipelines matching these selectors — see [Excluding pipelines](#excluding-pipelines) |
 | `-w, --workers INT` | `4` | Number of parallel workers |
 | `--dry-run` | off | Preview the access changes that would be applied without calling BigQuery's `update_dataset` / `set_iam_policy`. Log output mirrors a real run, prefixed with `[DRY RUN]` and using `would grant` / `would revoke` verbs. The run-end summary reports `would apply N grant(s), M revoke(s)` instead of `applied …`. |
 | `-v, --verbose` | off | Enable debug logging |
@@ -208,6 +215,7 @@ saga plan [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-s, --select TEXT` | all | Selector expression(s) |
+| `--exclude TEXT` | none | Remove pipelines matching these selectors — see [Excluding pipelines](#excluding-pipelines) |
 | `-c, --command TEXT` | `ingest` | Command workers will run: `ingest`, `historize`, or `run` |
 | `--dry-run` | off | Preview task assignments without persisting |
 | `--compact` | off | Emit JSON on a single line instead of pretty-printed. Pair with automation harnesses that read Cloud Logging entry-by-entry, where a multi-line block can be split into separate ingestion entries and arrive interleaved. |
@@ -252,6 +260,7 @@ saga report [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-s, --select TEXT` | all | Selector expression(s) |
+| `--exclude TEXT` | none | Remove pipelines matching these selectors — see [Excluding pipelines](#excluding-pipelines) |
 | `-o, --output TEXT` | `saga_report.html` | Output path: local file or remote URI (`gs://`, `s3://`, `az://`) |
 | `-d, --days INT` | `14` | Days of run history to include |
 | `--open / --no-open` | open | Open in browser after generating (local output only) |
@@ -373,6 +382,7 @@ saga doctor [OPTIONS]
 | `--profile TEXT` | Profile to use from profiles.yml |
 | `--target TEXT` | Target within profile |
 | `-s, --select TEXT` | Scope the config check and print each matched pipeline's resolved `project.schema.table` |
+| `--exclude TEXT` | Remove pipelines matching these selectors — see [Excluding pipelines](#excluding-pipelines) |
 
 ---
 
@@ -396,6 +406,7 @@ saga maintenance [OPTIONS]
 | `--profile TEXT` | Profile to use from profiles.yml |
 | `--target TEXT` | Target within profile |
 | `-s, --select TEXT` | Scope which pipeline schemas are swept |
+| `--exclude TEXT` | Remove pipelines matching these selectors — see [Excluding pipelines](#excluding-pipelines) |
 | `--dry-run` | Report what would change without writing anything |
 
 ```bash
@@ -628,6 +639,26 @@ saga list --select "tags:daily"   # error: Unknown selector 'tags:daily'
 saga list --select "tag:nosuch"   # warning: matched no pipelines
 ```
 
+### Excluding pipelines
+
+`--exclude` takes selectors in the same syntax and removes whatever they match
+from the selection. Exclusion always wins: a pipeline matched by both `--select`
+and `--exclude` does not run. Without `--select`, it subtracts from every
+pipeline the command would otherwise run.
+
+```bash
+saga historize --select "group:finance" --exclude finance__legacy_ledger
+saga run --select "tag:daily" --exclude "tag:slow group:sharepoint"   # UNION
+saga ingest --exclude "group:api,tag:slow"                            # all but slow api ones
+saga ingest --select "tag:daily" --exclude "state:failed"             # skip what broke last run
+```
+
+An exclude that matches no pipeline at all warns, since a typo there lets the
+pipeline you meant to skip run anyway. An exclude that matches pipelines that
+just weren't in the selection is fine and stays quiet. `state:` selectors work
+in `--exclude` too, with the same credential requirement (see below). Run
+records and notifications show the exclusion next to the selection.
+
 ### State selectors
 
 `state:new` and `state:failed` filter on what has already happened in the
@@ -685,8 +716,8 @@ configs = session.discover(select=["tag:daily"])
 ingest_result = session.ingest(select=["tag:daily"], workers=8)
 hist_result = session.historize(select=["tag:daily"])
 
-# Or both at once
-result = session.run(select=["tag:daily"], workers=4)
+# Or both at once; every selecting method also takes exclude=
+result = session.run(select=["tag:daily"], exclude=["tag:slow"], workers=4)
 
 if result.has_failures:
     for failure in result.failures:

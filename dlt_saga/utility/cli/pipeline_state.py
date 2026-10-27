@@ -80,15 +80,15 @@ class StateSelectorError(ValueError):
     """
 
 
-def selection_needs_state(select: Optional[Sequence[str]]) -> bool:
-    """Return True if any selector in ``select`` is a ``state:`` selector.
+def selection_needs_state(
+    select: Optional[Sequence[str]], exclude: Optional[Sequence[str]] = None
+) -> bool:
+    """Return True if any selector in ``select`` or ``exclude`` is a ``state:`` selector.
 
     Called before any warehouse work so a selection without ``state:`` costs
     exactly what it always did — no connection, no query.
     """
-    if not select:
-        return False
-    for group in select:
+    for group in [*(select or []), *(exclude or [])]:
         for token in group.replace(",", " ").split():
             if token.strip().startswith(STATE_PREFIX):
                 return True
@@ -293,15 +293,19 @@ class PipelineStateResolver:
 
 
 def build_state_resolver(
-    select: Optional[Sequence[str]], layer: Optional[str]
+    select: Optional[Sequence[str]],
+    layer: Optional[str],
+    exclude: Optional[Sequence[str]] = None,
 ) -> Optional[PipelineStateResolver]:
-    """Build a resolver for ``select``, or None when it needs no warehouse state.
+    """Build a resolver for a selection, or None when it needs no warehouse state.
 
     Args:
         select: The selectors about to be applied.
         layer: Layer to judge newness in, or None for a command that has no
             warehouse access (``saga validate``) — a ``state:`` selector there
             is an error rather than a silent no-match.
+        exclude: The exclusions about to be applied; a ``state:`` selector
+            there needs the resolver just as one in ``select`` does.
 
     Returns:
         A connected :class:`PipelineStateResolver`, or None when no ``state:``
@@ -311,7 +315,7 @@ def build_state_resolver(
         StateSelectorError: A ``state:`` selector was used by a command that
             cannot read warehouse state.
     """
-    if not selection_needs_state(select):
+    if not selection_needs_state(select, exclude):
         return None
     if layer is None:
         raise StateSelectorError(

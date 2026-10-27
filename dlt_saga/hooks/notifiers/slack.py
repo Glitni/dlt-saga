@@ -501,6 +501,8 @@ class SlackNotifier:
             parts.append(f"environment `{ctx.environment}`")
         if ctx.select:
             parts.append(f"select `{' '.join(ctx.select)}`")
+        if ctx.exclude:
+            parts.append(f"exclude `{' '.join(ctx.exclude)}`")
         duration = ctx.duration_seconds
         if duration is not None:
             parts.append(f"{duration:.1f}s")

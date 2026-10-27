@@ -259,6 +259,7 @@ def _doctor_check_configs(
     context: "ExecutionContext",
     verbose: bool,
     emit: Callable[..., None],
+    exclude: Optional[List[str]] = None,
 ) -> dict:
     """Discover pipeline configs and report their resolved destination targets.
 
@@ -273,7 +274,7 @@ def _doctor_check_configs(
     import traceback
 
     try:
-        selected, _ = discover_and_select_configs(select)
+        selected, _ = discover_and_select_configs(select, exclude=exclude)
         total = sum(len(v) for v in selected.values())
         flat = flatten_configs(selected) if selected else []
         schemas = sorted({c.schema_name for c in flat if c.schema_name})
