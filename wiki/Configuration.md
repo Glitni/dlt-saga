@@ -524,7 +524,7 @@ write_disposition: "append+historize"
 primary_key: [orgnr]
 
 historize:
-  snapshot_column: "_dlt_ingested_at"  # Default — column identifying snapshots
+  snapshot_column: "_dlt_ingested_at"  # Default — column identifying each delivery
   ignore_columns: [updated_by]
   cluster_columns: [_dlt_valid_to, _dlt_valid_from, orgnr]  # Default is the two validity columns
   track_deletions: true                # Detect deleted rows between snapshots
@@ -538,7 +538,7 @@ historize:
 |-------|------|---------|-------------|
 | `strategy` | string | `scd2` | `scd2` keeps every version; `scd1` keeps only the latest version per key |
 | `order_by` | list | `[snapshot_column]` | `scd1` only: columns ranking a key's versions, highest wins. With `track_deletions: true` it must start with `snapshot_column` |
-| `snapshot_column` | string | `_dlt_ingested_at` | Column identifying snapshot timestamps |
+| `snapshot_column` | string | `_dlt_ingested_at` | Column identifying each delivery (a complete snapshot under `delivery: full`); its value becomes `_dlt_valid_from` |
 | `primary_key` | list | inherited | Inherits from top-level `primary_key` |
 | `track_columns` | list | — | Opt-in allowlist for change detection (all columns still in output) |
 | `ignore_columns` | list | `[]` | Columns excluded from change detection (still in output) |

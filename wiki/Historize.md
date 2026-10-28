@@ -6,7 +6,9 @@ The historize engine transforms raw snapshot tables into [Slowly Changing Dimens
 
 ## How it works
 
-A "snapshot" is a point-in-time copy of a source table. Historize processes a sequence of snapshots and computes:
+Historize reads the source as a sequence of deliveries. The `snapshot_column` identifies them: all rows sharing one of its values form one delivery, and the value becomes `_dlt_valid_from` of the versions it brings. What a delivery holds is declared with `delivery`: under `full` (the default) each one is a snapshot, a complete point-in-time copy of the source; under `incremental` it holds only the records sent in it. This page says "snapshot" for one such delivery under either setting, matching the key's name.
+
+From that sequence, historize computes:
 
 - **When did each version of a record become active?** (`_dlt_valid_from`)
 - **When was it superseded?** (`_dlt_valid_to`)
@@ -14,7 +16,7 @@ A "snapshot" is a point-in-time copy of a source table. Historize processes a se
 
 A row is active when `ts >= _dlt_valid_from AND (ts < _dlt_valid_to OR _dlt_valid_to IS NULL)`.
 
-By default each snapshot is taken to be a *complete* copy of the source, so a record missing from a snapshot was deleted. Sources that deliver only new or changed records set `delivery: incremental` — see [Delivery: full vs incremental](#delivery-full-vs-incremental).
+Under `delivery: full`, a record missing from a snapshot was deleted; under `incremental`, it simply wasn't sent — see [Delivery: full vs incremental](#delivery-full-vs-incremental).
 
 ---
 
@@ -218,7 +220,7 @@ starts from what the source still holds.
 | `snapshot_date_format` | top-level | — | `strptime` format for the extracted date string |
 | `strategy` | `historize:` | `scd2` | `scd2` keeps every version; `scd1` keeps only the latest version per key. See [SCD1: latest version per key](#scd1-latest-version-per-key) |
 | `order_by` | `historize:` | `[snapshot_column]` | `scd1` only: columns ranking a key's versions, highest wins. With `track_deletions: true` it must start with `snapshot_column` |
-| `snapshot_column` | `historize:` | `_dlt_ingested_at` | Column used as the snapshot timestamp |
+| `snapshot_column` | `historize:` | `_dlt_ingested_at` | Column identifying each delivery (a complete snapshot under `delivery: full`); its value becomes `_dlt_valid_from` |
 | `track_columns` | `historize:` | — | Opt-in allowlist: only these columns drive change detection (all columns still appear in output) |
 | `ignore_columns` | `historize:` | `[]` | Columns excluded from change detection (still appear in output) |
 | `partition_column` | `historize:` | — | Partition the SCD2 output table. Unset by default — see [Table layout](#table-layout) |

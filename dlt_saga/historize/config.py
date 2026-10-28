@@ -87,8 +87,11 @@ class HistorizeConfig:
         default="_dlt_ingested_at",
         metadata={
             "description": (
-                "Column that identifies each snapshot in the source table. "
-                "Rows sharing the same value are treated as one point-in-time view. "
+                "Column that identifies each delivery in the source table: rows "
+                "sharing a value form one delivery, and the value becomes "
+                "valid_from. Under delivery: full each delivery is a complete "
+                "snapshot of the source; under incremental it holds only the "
+                "records sent in it. "
                 "Defaults to '_dlt_ingested_at', which is injected automatically for append and replace pipelines."
             )
         },
