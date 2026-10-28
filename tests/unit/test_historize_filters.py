@@ -190,8 +190,8 @@ class TestSqlInjection:
         )
         # Deletion detection flows through source_rows, so it inherits the filter
         # without re-stating it (rather than reading the raw source directly).
-        assert "deletion_candidates" in sql
-        deletion_block = sql.split("deletion_candidates AS (")[1].split(")")[0]
+        assert "key_presence" in sql
+        deletion_block = sql.split("key_presence AS (")[1].split(")")[0]
         assert "FROM source_rows" in deletion_block
         assert "proj.ds.src" not in deletion_block
 

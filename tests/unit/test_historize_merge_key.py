@@ -148,8 +148,8 @@ class TestMergeKeyScopesSnapshotSequence:
         assert "PARTITION BY `instance` ORDER BY snapshot_date" in sql
         # The deletion-side JOIN must also scope on instance.
         assert (
-            "ss.seq_snapshot_date = dc.snapshot_date "
-            "AND ss.`seq_instance` = dc.`instance`"
+            "ss.seq_snapshot_date = kp.snapshot_date "
+            "AND ss.`seq_instance` = kp.`instance`"
         ) in sql
 
     def test_unset_merge_key_yields_global_window(self):

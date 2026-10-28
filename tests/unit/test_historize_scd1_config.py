@@ -37,7 +37,6 @@ class TestScd1RejectsScd2Options:
     @pytest.mark.parametrize(
         "option",
         [
-            {"track_deletions": True},
             {"merge_key": ["id"]},
             {"track_columns": ["payload"]},
             {"ignore_columns": ["payload"]},
@@ -140,3 +139,51 @@ class TestScd1RejectsRenamedScd2Columns:
             strategy="scd1", snapshot_column="ingested_at", order_by=["Ingested_At"]
         )
         assert config.effective_order_by == ["Ingested_At"]
+
+
+@pytest.mark.unit
+class TestScd1Deletions:
+    def test_track_deletions_allowed(self):
+        config = _config(strategy="scd1", track_deletions=True)
+        assert config.track_deletions is True
+
+    def test_merge_key_allowed_with_deletions(self):
+        config = _config(strategy="scd1", track_deletions=True, merge_key=["id"])
+        assert config.merge_key == ["id"]
+
+    def test_is_deleted_rename_allowed_with_deletions(self):
+        config = _config(
+            strategy="scd1", track_deletions=True, is_deleted_column="deleted"
+        )
+        assert config.is_deleted_column == "deleted"
+
+    def test_order_by_not_led_by_snapshot_rejected_with_deletions(self):
+        with pytest.raises(ValueError, match=r"order_by: \[loaded_at, event_time\]"):
+            _config(
+                strategy="scd1",
+                track_deletions=True,
+                snapshot_column="loaded_at",
+                order_by=["event_time", "loaded_at"],
+            )
+
+    def test_order_by_led_by_snapshot_allowed_with_deletions(self):
+        config = _config(
+            strategy="scd1",
+            track_deletions=True,
+            snapshot_column="loaded_at",
+            order_by=["Loaded_At", "event_time"],
+        )
+        assert config.effective_order_by == ["Loaded_At", "event_time"]
+
+    def test_order_by_naming_only_the_snapshot_column_allowed(self):
+        config = _config(
+            strategy="scd1",
+            track_deletions=True,
+            snapshot_column="loaded_at",
+            order_by=["Loaded_At"],
+        )
+        assert config.track_deletions is True
+
+    def test_rejected_with_incremental_delivery(self):
+        with pytest.raises(ValueError, match="delivery: incremental"):
+            _config(strategy="scd1", track_deletions=True, delivery="incremental")

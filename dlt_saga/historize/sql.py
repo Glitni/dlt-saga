@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 # HistorizeSqlBuilder._snap. Prefixed so it can't collide with a source column.
 SNAPSHOT_ALIAS = "_saga_snapshot"
 
+# Stamp for "present before this batch" in scd1 deletion detection: earlier than
+# any real snapshot, never written to the target.
+SCD1_BASELINE_SNAPSHOT = "0001-01-01 00:00:00"
+SCD1_FINAL_DELETION_RANK = "9999-12-31 23:59:59"
+
 
 def snapshot_range_filter(destination: Any, column: str, snapshots: List[str]) -> str:
     """Render a ``column >= first AND column <= last`` bound for a snapshot batch.
@@ -396,6 +401,11 @@ snapshot_sequence AS (
         exclude = self._output_exclude | set(self.primary_key)
         return [col for col in source_columns if col not in exclude]
 
+    @property
+    def _has_deleted_column(self) -> bool:
+        """Whether the target carries the deleted flag (always for scd2)."""
+        return not self.config.is_scd1 or bool(self.config.track_deletions)
+
     def build_drop_target_table_sql(self) -> str:
         """DROP TABLE IF EXISTS for the historized target table."""
         return f"DROP TABLE IF EXISTS {self.target_table_id}"
@@ -427,14 +437,14 @@ snapshot_sequence AS (
         ts_type = self.destination.type_name("timestamp")
         bool_type = self.destination.type_name("bool")
 
-        # scd1 keeps one row per key, so it has no validity end and no
-        # deletion markers — only when the current version took effect.
+        # scd1 keeps one row per key, so it has no validity end — only when
+        # the current version took effect, plus a deleted flag when deletions
+        # are tracked.
         system_cols = [f"CAST(NULL AS {ts_type}) AS {self.valid_from}"]
         if not self.config.is_scd1:
-            system_cols += [
-                f"CAST(NULL AS {ts_type}) AS {self.valid_to}",
-                f"CAST(NULL AS {bool_type}) AS {self.is_deleted}",
-            ]
+            system_cols.append(f"CAST(NULL AS {ts_type}) AS {self.valid_to}")
+        if self._has_deleted_column:
+            system_cols.append(f"CAST(NULL AS {bool_type}) AS {self.is_deleted}")
         select_list = ",\n".join(
             f"    {col}" for col in [self._qcols(all_data_cols), *system_cols]
         )
@@ -451,7 +461,7 @@ snapshot_sequence AS (
             source_table=self.source_table,
             valid_from_column=self.valid_from,
             valid_to_column=None if self.config.is_scd1 else self.valid_to,
-            is_deleted_column=None if self.config.is_scd1 else self.is_deleted,
+            is_deleted_column=self.is_deleted if self._has_deleted_column else None,
         )
 
         return self.destination.build_historize_create_table_sql(
@@ -547,8 +557,10 @@ snapshot_sequence AS (
         track_deletions_sql = ""
         deletion_union = ""
         if self.config.track_deletions:
-            track_deletions_sql = self._build_deletion_tracking_sql(
-                pk_cols, snapshot_col, src, source_filter
+            # source_filter carries any snapshot upper bound, so the deletion
+            # read stays in lockstep with the change-detection reads.
+            track_deletions_sql = self._disappearance_ctes(
+                self._snap_src, f"{src}{filter_where_clause(source_filter)}"
             )
             # Separate deletion marker rows: one row per disappearance,
             # carrying data from the last-seen snapshot.
@@ -642,21 +654,26 @@ INSERT INTO {tgt} ({all_columns_sql})
 SELECT {all_columns_sql} FROM _historize_result;
 """
 
-    def _build_deletion_tracking_sql(
-        self, pk_cols: str, snapshot_col: str, src: str, source_filter: Optional[str]
-    ) -> str:
-        """Build the CTE for tracking deletions (keys disappearing from snapshots).
+    def _disappearance_ctes(self, snapshot_expr: str, from_clause: str) -> str:
+        """``key_presence`` / ``with_next_presence`` / ``disappearances`` CTEs.
 
-        ``source_filter`` is the historize.filters WHERE body already combined
-        with any snapshot upper bound, so the deletion-detection read stays in
-        lockstep with the change-detection reads.
+        The one definition of "this key disappeared": a key whose next
+        appearance skips the next snapshot of its group (overall, or per
+        merge_key) disappeared at that snapshot. ``disappearances`` yields the
+        primary key, ``last_seen``, ``disappeared_at`` and ``reappeared_at``
+        (NULL when the key doesn't come back). Needs the
+        ``snapshot_sequence`` CTE, which only exists under ``delivery: full``.
+
+        Args:
+            snapshot_expr: Expression yielding each row's snapshot value.
+            from_clause: What to read key appearances from (table or CTE,
+                plus any WHERE), already scoped to the rows being processed.
         """
-        q_snapshot = self._snap_src
-        return f"""
--- Track key presence across snapshots for deletion detection
+        pk_cols = self._pk_cols_sql()
+        return f"""-- Key presence across snapshots, for deletion detection
 key_presence AS (
-  SELECT DISTINCT {pk_cols}, {q_snapshot} AS snapshot_date
-  FROM {src}{filter_where_clause(source_filter)}
+  SELECT DISTINCT {pk_cols}, {snapshot_expr} AS snapshot_date
+  FROM {from_clause}
 ),
 with_next_presence AS (
   SELECT kp.*,
@@ -668,7 +685,7 @@ with_next_presence AS (
 ),
 disappearances AS (
   SELECT {pk_cols}, snapshot_date AS last_seen,
-    next_overall_snapshot AS disappeared_at
+    next_overall_snapshot AS disappeared_at, next_key_snapshot AS reappeared_at
   FROM with_next_presence
   WHERE next_overall_snapshot IS NOT NULL
     AND (next_key_snapshot IS NULL OR next_key_snapshot > next_overall_snapshot)
@@ -723,7 +740,6 @@ disappearances AS (
                 prefix there would run an unscoped rollback over unaffected keys).
         """
         pk_cols = self._pk_cols_sql()
-        snapshot_col = self.config.snapshot_column
         # source_rows projects the snapshot value once; everything downstream
         # (including the target-derived baseline union) reads that projection.
         q_snapshot = self._snap
@@ -764,15 +780,16 @@ disappearances AS (
         track_deletions_sql = ""
         deletion_union = ""
         if self.config.track_deletions:
-            track_deletions_sql = self._build_incremental_deletion_sql(
-                pk_cols, snapshot_col
-            )
+            # source_rows = new snapshots + the target-derived baseline, so a
+            # key present in the baseline but missing from the new snapshots
+            # is detected; it is already filtered and scoped.
+            track_deletions_sql = self._disappearance_ctes(q_snapshot, "source_rows")
             deletion_union = f"""UNION ALL
   SELECT
     {", ".join(f"del_src.{self._q(col)}" for col in (list(self.primary_key) + list(value_columns)))},
-    del.deleted_at AS {self.valid_from},
+    del.disappeared_at AS {self.valid_from},
     TRUE AS {self.is_deleted}
-  FROM deletions del
+  FROM disappearances del
   INNER JOIN deduped del_src ON {self._pk_join("del", "del_src")}
     AND del_src.{q_snapshot} = del.last_seen"""
 
@@ -917,62 +934,95 @@ SELECT {all_columns_sql} FROM _historize_incremental;
 
 """
 
-    def _build_incremental_deletion_sql(
-        self,
-        pk_cols: str,
-        snapshot_col: str,
-    ) -> str:
-        """Build deletion detection CTEs for incremental mode.
-
-        Reads from ``source_rows`` (new snapshots + the target-derived baseline),
-        so a key present in the baseline but missing from the new snapshots is
-        detected as a deletion. ``source_rows`` is already filtered and scoped to
-        the snapshots being processed, so no extra filter is needed here.
-        """
-        q_snapshot = self._snap
-        return f"""
--- Detect deletions: keys present in reference but missing in new snapshots
-deletion_candidates AS (
-  SELECT DISTINCT {pk_cols}, {q_snapshot} AS snapshot_date
-  FROM source_rows
-),
-with_next_key AS (
-  SELECT dc.*,
-    LEAD(snapshot_date) OVER (PARTITION BY {pk_cols} ORDER BY snapshot_date) AS next_key_snapshot,
-    ss.next_snapshot_date AS next_overall_snapshot
-  FROM deletion_candidates dc
-  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = dc.snapshot_date{self._merge_key_join_extra("ss", "dc")}
-),
-deletions AS (
-  SELECT {pk_cols}, snapshot_date AS last_seen, next_overall_snapshot AS deleted_at
-  FROM with_next_key
-  WHERE next_overall_snapshot IS NOT NULL
-    AND (next_key_snapshot IS NULL OR next_key_snapshot > next_overall_snapshot)
-),
-"""
-
-    def _scd1_rank_sql(self, descending: bool) -> str:
+    def _scd1_rank_sql(self, descending: bool, snapshot_ref: str) -> str:
         """``ORDER BY`` terms ranking a key's versions (scd1).
 
         ``descending`` lists the highest-ranked version first; ascending is its
         exact reverse, so the winner is the last row of an ascending window.
         ``snapshot_column`` isn't carried into the target under its own name —
-        it becomes ``valid_from`` — so it is ranked through that column, which
-        both the source and the stored side carry. After ``order_by``, a source
+        it becomes ``valid_from`` — so it is ranked through ``snapshot_ref``:
+        ``valid_from``, or with deletions a rank column that lets a deletion
+        lasting to the end of the batch outrank the stored row. After
+        ``order_by``, a source
         row outranks the stored one on an exact tie, and the value hash makes
         the order total.
         """
         snapshot = self.config.snapshot_column.lower()
         refs = [
-            self.valid_from if col.lower() == snapshot else col
+            snapshot_ref if col.lower() == snapshot else self._q(col)
             for col in self.config.effective_order_by
         ]
         nulls, direction = (
             ("NULLS LAST", "DESC") if descending else ("NULLS FIRST", "ASC")
         )
-        terms = [f"{self._q(ref)} {direction} {nulls}" for ref in refs]
+        terms = [f"{ref} {direction} {nulls}" for ref in refs]
         terms += [f"_saga_from_batch {direction}", f"_saga_hash {direction}"]
         return ", ".join(terms)
+
+    def _scd1_deletion_ctes(self, data_cols: List[str], has_stored: bool) -> str:
+        """CTEs turning a key's absence from a snapshot into a deletion candidate.
+
+        Only for scd1 with ``track_deletions`` (which requires ``delivery:
+        full``). A key's appearances are the batch rows plus, when the target
+        has rows, every stored key that isn't deleted — stamped at a sentinel
+        before any real snapshot, meaning "present before this batch". A key
+        whose next appearance skips the next snapshot of its group (per
+        merge_key) disappeared at that snapshot: the candidate carries the
+        values it was last seen with, flagged deleted. Ranking then decides
+        between it and any later appearance, exactly as between versions.
+
+        A disappearance the key doesn't come back from within the batch ranks
+        above everything else: absent through the batch's last snapshot, the
+        key is deleted there. Ranked at its own snapshot instead, it would lose
+        to a stored row dated later — which a partial refresh or late-arrival
+        replay over a window the key has left can hold.
+
+        With stored rows, ``touched_keys`` limits the stored side of the
+        ranking to keys a winner can come from: every other stored key keeps
+        its row unchanged, so ranking it would only cost.
+        """
+        q_vf = self._q(self.valid_from)
+        q_del = self._q(self.is_deleted)
+        pk_cols = self._pk_cols_sql()
+        touched_keys = f"""
+
+-- Keys a winner can come from: those in the batch, and those that disappeared.
+touched_keys AS (
+  SELECT DISTINCT {pk_cols} FROM (
+    SELECT {pk_cols} FROM batch
+    UNION ALL
+    SELECT {pk_cols} FROM disappearances
+  ) AS k
+),"""
+        baseline = ""
+        if has_stored:
+            baseline = f"""
+  UNION ALL
+  SELECT {self._qcols(data_cols)}, TIMESTAMP '{SCD1_BASELINE_SNAPSHOT}'
+  FROM stored
+  WHERE NOT {q_del}"""
+        seen_cols = ", ".join(f"s.{self._q(c)}" for c in data_cols)
+        return f"""-- Every appearance of a key, with the values it had (stored keys: before the batch).
+seen_rows AS (
+  SELECT {self._qcols(data_cols)}, {q_vf} AS _saga_seen_at
+  FROM batch{baseline}
+),
+
+{self._snapshot_sequence_ctes("_saga_seen_at", "seen_rows")}{self._disappearance_ctes("_saga_seen_at", "seen_rows")}
+-- A deletion is a version: the last-seen values, flagged, from the disappearance on.
+-- One lasting to the end of the batch is the key's state there, so it outranks
+-- every other version, including a stored one dated after the disappearance.
+deletion_rows AS (
+  SELECT {seen_cols}, d.disappeared_at AS {q_vf}, TRUE AS {q_del},
+    1 AS _saga_from_batch,
+    CASE WHEN d.reappeared_at IS NULL THEN TIMESTAMP '{SCD1_FINAL_DELETION_RANK}'
+      ELSE d.disappeared_at END AS _saga_rank_at
+  FROM disappearances d
+  INNER JOIN seen_rows s ON {self._pk_join("d", "s")}
+    AND s._saga_seen_at = d.last_seen
+),{touched_keys if has_stored else ""}
+
+"""
 
     def build_scd1_sql(
         self,
@@ -996,6 +1046,14 @@ deletions AS (
         row already says so and nothing is written — an unchanged key is
         never rewritten, however often the source re-delivers it.
 
+        With ``track_deletions``, a key's disappearance is one more candidate
+        version (see :meth:`_scd1_deletion_ctes`), flagged ``is_deleted`` and
+        carrying its last-seen values; the deleted flag counts as part of the
+        values for change detection. Every stored key that isn't deleted then
+        counts as present before the batch, since a key missing from the batch
+        is exactly what a deletion looks like; only keys in the batch or
+        disappearing from it are ranked.
+
         Serves every mode: a full reprocess runs it against the freshly
         recreated target (``target_is_empty``: no stored rows to rank against,
         plain INSERT); incremental runs and partial refreshes run it against
@@ -1003,8 +1061,8 @@ deletions AS (
         the final statement that applies the winners, so a crashed-then-retried
         run converges without the rollback scd2 needs.
 
-        The script ends by selecting the number of rows written, which the
-        runner reads as the run's ``new_or_changed_rows``.
+        The script ends by selecting the number of rows written (and of those,
+        deletions), which the runner reads as the run's stats.
 
         Args:
             value_columns: Non-PK columns carried into the target.
@@ -1014,11 +1072,14 @@ deletions AS (
                 recorded baseline matches what was processed.
             target_is_empty: The target holds no rows (full reprocess).
         """
+        deletions = bool(self.config.track_deletions)
         pk_cols = self._pk_cols_sql()
         data_cols = list(self.primary_key) + list(value_columns)
-        all_cols = data_cols + [self.valid_from]
+        system_cols = [self.valid_from] + ([self.is_deleted] if deletions else [])
+        all_cols = data_cols + system_cols
         all_cols_sql = self._qcols(all_cols)
         q_vf = self._q(self.valid_from)
+        q_del = self._q(self.is_deleted)
         src = self.source_table_id
         tgt = self.target_table_id
 
@@ -1032,30 +1093,51 @@ deletions AS (
                 self._snap_src, snapshot_upper_bound
             )
 
+        batch_deleted = f", FALSE AS {q_del}" if deletions else ""
+        # With deletions every candidate carries the snapshot it ranks at
+        # (see _scd1_deletion_ctes); otherwise that is valid_from itself.
+        rank_at = f", {self._snap_src} AS _saga_rank_at" if deletions else ""
+        snapshot_ref = "_saga_rank_at" if deletions else q_vf
+        deletion_union = (
+            "\n  UNION ALL\n  SELECT * FROM deletion_rows" if deletions else ""
+        )
+
         if target_is_empty:
-            candidates = """-- Nothing stored yet: the source rows are the only candidates.
-candidates AS (
-  SELECT * FROM batch
-),"""
+            stored_ctes = ""
+            stored_union = ""
             apply_sql = f"""INSERT INTO {tgt} ({all_cols_sql})
 SELECT {all_cols_sql} FROM _historize_scd1;"""
         else:
             target_cols = ", ".join(f"t.{self._q(c)}" for c in all_cols)
-            candidates = f"""batch_keys AS (
+            if deletions:
+                stored_ctes = f"""-- Every stored row: a stored key missing from the batch may have been deleted.
+stored AS (
+  SELECT {target_cols}, 0 AS _saga_from_batch, t.{q_vf} AS _saga_rank_at
+  FROM {tgt} t
+),
+
+"""
+                stored_union = f"""
+  UNION ALL
+  SELECT st.* FROM stored st
+  INNER JOIN touched_keys k ON {self._pk_join("st", "k")}"""
+            else:
+                stored_ctes = f"""batch_keys AS (
   SELECT DISTINCT {pk_cols} FROM batch
 ),
 
 -- The stored version of every key in the batch competes with the batch's own.
-candidates AS (
-  SELECT * FROM batch
-  UNION ALL
+stored AS (
   SELECT {target_cols}, 0 AS _saga_from_batch
   FROM {tgt} t
   INNER JOIN batch_keys k ON {self._pk_join("t", "k")}
-),"""
+),
+
+"""
+                stored_union = "\n  UNION ALL\n  SELECT * FROM stored"
             update_set = ",\n    ".join(
                 f"{self._q(c)} = n.{self._q(c)}"
-                for c in list(value_columns) + [self.valid_from]
+                for c in list(value_columns) + system_cols
             )
             insert_values = ", ".join(f"n.{self._q(c)}" for c in all_cols)
             apply_sql = f"""MERGE INTO {tgt} t
@@ -1068,8 +1150,25 @@ WHEN NOT MATCHED THEN
   INSERT ({all_cols_sql})
   VALUES ({insert_values});"""
 
-        hash_expr = self.destination.hash_expression(list(value_columns))
-        rank_asc = self._scd1_rank_sql(descending=False)
+        deletion_ctes = (
+            self._scd1_deletion_ctes(data_cols, has_stored=not target_is_empty)
+            if deletions
+            else ""
+        )
+        output_deleted = f", {q_del}" if deletions else ""
+        counts = (
+            f"SUM(CASE WHEN {q_del} THEN 0 ELSE 1 END) AS new_or_changed_rows,\n"
+            f"  SUM(CASE WHEN {q_del} THEN 1 ELSE 0 END) AS deleted_rows"
+            if deletions
+            else "COUNT(*) AS new_or_changed_rows"
+        )
+        # The deleted flag is part of a version's values: deleting a key, or
+        # bringing it back unchanged, is a change.
+        hash_expr = self.destination.hash_expression(
+            list(value_columns) + ([self.is_deleted] if deletions else [])
+        )
+        rank_asc = self._scd1_rank_sql(descending=False, snapshot_ref=snapshot_ref)
+        rank_desc = self._scd1_rank_sql(descending=True, snapshot_ref=snapshot_ref)
 
         return f"""
 -- SCD1 Historization
@@ -1079,28 +1178,42 @@ CREATE OR REPLACE TEMP TABLE _historize_scd1 AS
 WITH
 -- Source rows in scope; the snapshot value becomes the version's valid_from.
 batch AS (
-  SELECT {self._qcols(data_cols)}, {self._snap_src} AS {q_vf},
-    1 AS _saga_from_batch
+  SELECT {self._qcols(data_cols)}, {self._snap_src} AS {q_vf}{batch_deleted},
+    1 AS _saga_from_batch{rank_at}
   FROM {src}{filter_where_clause(source_filter)}
 ),
 
-{candidates}
+{stored_ctes}{deletion_ctes}candidates AS (
+  SELECT * FROM batch{deletion_union}{stored_union}
+),
 
 hashed AS (
   SELECT c.*, {hash_expr} AS _saga_hash
   FROM candidates c
 ),
 
--- Rank each key's versions; flag where the values differ from the next-lower one.
-sequenced AS (
+-- A key's rows within one snapshot: only the top-ranked can win, and the others
+-- would split its stretch of identical values from the stored row's.
+snapshot_best AS (
   SELECT h.*,
     ROW_NUMBER() OVER (
-      PARTITION BY {pk_cols} ORDER BY {self._scd1_rank_sql(descending=True)}
+      PARTITION BY {pk_cols}, {q_vf}, _saga_from_batch
+      ORDER BY {rank_desc}
+    ) AS _saga_snapshot_rn
+  FROM hashed h
+),
+
+-- Rank each key's versions; flag where the values differ from the next-lower one.
+sequenced AS (
+  SELECT b.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY {pk_cols} ORDER BY {rank_desc}
     ) AS _saga_rn,
     CASE WHEN _saga_hash = LAG(_saga_hash) OVER (
       PARTITION BY {pk_cols} ORDER BY {rank_asc}
     ) THEN 0 ELSE 1 END AS _saga_changed
-  FROM hashed h
+  FROM snapshot_best b
+  WHERE _saga_snapshot_rn = 1
 ),
 
 -- Number the stretches of identical values, in rank order.
@@ -1122,11 +1235,12 @@ with_since AS (
   FROM stretched st
 )
 -- The winner, unless the stored row already holds its values.
-SELECT {self._qcols(data_cols)}, _saga_since AS {q_vf}
+SELECT {self._qcols(data_cols)}, _saga_since AS {q_vf}{output_deleted}
 FROM with_since
 WHERE _saga_rn = 1 AND _saga_stretch_from_batch = 1;
 
 {apply_sql}
 
-SELECT COUNT(*) AS new_or_changed_rows FROM _historize_scd1;
+SELECT {counts}
+FROM _historize_scd1;
 """

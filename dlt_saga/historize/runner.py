@@ -7,7 +7,7 @@ raw snapshot data into SCD2 historized tables.
 import logging
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.sql import HistorizeSqlBuilder, snapshot_range_filter
@@ -252,12 +252,23 @@ class HistorizeRunner:
         """Canned descriptions for the historize system columns (auto-documentation)."""
         c = self.config
         if c.is_scd1:
-            return {
+            descriptions = {
                 c.valid_from_column: (
                     "When the row's current values took effect (the snapshot "
                     "they first appeared in)."
                 ),
             }
+            if c.track_deletions:
+                descriptions[c.valid_from_column] = (
+                    "When the row's current values took effect (the snapshot "
+                    "they first appeared in, or for a deleted key, the snapshot "
+                    "it disappeared from)."
+                )
+                descriptions[c.is_deleted_column] = (
+                    "TRUE when the key has been deleted at source; the row keeps "
+                    "the values it was last seen with."
+                )
+            return descriptions
         return {
             c.valid_from_column: (
                 "SCD2 validity start: when this version of the row became current."
@@ -1407,7 +1418,8 @@ class HistorizeRunner:
         in place — re-merging a window can't move a key off its highest-ranked
         version, so there is no history to unwind and nothing to clone. It
         also can't remove a version that has since left the source; that takes
-        a full refresh.
+        a full refresh. (A key leaving the *snapshots*, with ``track_deletions``,
+        is a deletion and is applied in every mode.)
         """
         if needs_full:
             return self._run_scd1_full(value_columns, started_at)
@@ -1419,17 +1431,17 @@ class HistorizeRunner:
             f"Historizing {self.pipeline_name} → {self._target_display}: "
             f"{len(snapshots)} new snapshot(s) (scd1)"
         )
-        merged = self._execute_scd1(
+        changed, deleted = self._execute_scd1(
             self.sql_builder.build_scd1_sql(value_columns, snapshots=snapshots)
         )
         self._log_completed_run(
-            snapshots[-1], merged, 0, started_at, is_full_reprocess=False
+            snapshots[-1], changed, deleted, started_at, is_full_reprocess=False
         )
         return {
             "mode": "incremental",
             "snapshots_processed": len(snapshots),
-            "new_or_changed_rows": merged,
-            "deleted_rows": 0,
+            "new_or_changed_rows": changed,
+            "deleted_rows": deleted,
         }
 
     def _run_scd1_full(
@@ -1448,19 +1460,19 @@ class HistorizeRunner:
             f"Historizing {self.pipeline_name} → {self._target_display}: "
             "all snapshots (full reprocess, scd1)"
         )
-        merged = self._execute_scd1(
+        changed, deleted = self._execute_scd1(
             self.sql_builder.build_scd1_sql(
                 value_columns, snapshot_upper_bound=max_snapshot, target_is_empty=True
             )
         )
         self._log_completed_run(
-            max_snapshot, merged, 0, started_at, is_full_reprocess=True
+            max_snapshot, changed, deleted, started_at, is_full_reprocess=True
         )
         return {
             "mode": "full_reprocess",
             "snapshots_processed": "all",
-            "new_or_changed_rows": merged,
-            "deleted_rows": 0,
+            "new_or_changed_rows": changed,
+            "deleted_rows": deleted,
         }
 
     def _run_scd1_partial(
@@ -1477,22 +1489,31 @@ class HistorizeRunner:
             f"Historizing {self.pipeline_name} → {self._target_display} from "
             f"{effective_from_date}: {len(snapshots)} snapshot(s) to reprocess (scd1)"
         )
-        merged = self._execute_scd1(
+        changed, deleted = self._execute_scd1(
             self.sql_builder.build_scd1_sql(value_columns, snapshots=snapshots)
         )
-        self._write_partial_log(effective_from_date, snapshots, merged, 0, started_at)
+        self._write_partial_log(
+            effective_from_date, snapshots, changed, deleted, started_at
+        )
         return {
             "mode": "partial_refresh",
             "snapshots_processed": len(snapshots),
-            "new_or_changed_rows": merged,
-            "deleted_rows": 0,
+            "new_or_changed_rows": changed,
+            "deleted_rows": deleted,
         }
 
-    def _execute_scd1(self, sql: str) -> int:
-        """Run an scd1 script and return the number of rows it merged."""
+    def _execute_scd1(self, sql: str) -> Tuple[int, int]:
+        """Run an scd1 script; return ``(new_or_changed, deleted)`` rows written.
+
+        The script selects ``deleted_rows`` only when deletions are tracked.
+        """
         self.logger.debug(f"SCD1 SQL ({len(sql)} chars)")
         rows = list(self.destination.execute_sql(sql, self.schema))
-        return (rows[0].new_or_changed_rows if rows else 0) or 0
+        if not rows:
+            return 0, 0
+        changed = rows[0].new_or_changed_rows or 0
+        deleted = (rows[0].deleted_rows or 0) if self.config.track_deletions else 0
+        return changed, deleted
 
     def _log_completed_run(
         self,
