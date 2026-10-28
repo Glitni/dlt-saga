@@ -537,7 +537,7 @@ historize:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `strategy` | string | `scd2` | `scd2` keeps every version; `scd1` keeps only the latest version per key |
-| `order_by` | list | `[snapshot_column]` | `scd1` only: columns ranking a key's versions, highest wins |
+| `order_by` | list | `[snapshot_column]` | `scd1` only: columns ranking a key's versions, highest wins. With `track_deletions: true` it must start with `snapshot_column` |
 | `snapshot_column` | string | `_dlt_ingested_at` | Column identifying snapshot timestamps |
 | `primary_key` | list | inherited | Inherits from top-level `primary_key` |
 | `track_columns` | list | — | Opt-in allowlist for change detection (all columns still in output) |
@@ -545,7 +545,7 @@ historize:
 | `partition_column` | string | — | Partition the output table |
 | `cluster_columns` | list | — | Cluster the output table |
 | `delivery` | string | `full` | `full`: each snapshot is a complete copy of the source; `incremental`: each holds only the records sent in it (no deletion or gap detection) |
-| `track_deletions` | bool | `true` (`scd2`, `full`) | Detect rows deleted between snapshots (`scd1`: opt-in, flags the key's row). Not supported with `delivery: incremental` |
+| `track_deletions` | bool | `true` (`scd2`, `full`) | Detect rows deleted between snapshots (`scd1`: opt-in, flags the key's row). Requires `delivery: full` |
 | `table_format` | string | inherited | Table format override for this pipeline's historized table |
 | `schema_name` | string | — | Write the historized table to a different schema (used directly in prod, sandbox-composed in dev). Legacy alias: `output_schema` |
 | `table_name` | string | — | Explicit name for the historized output table. Legacy alias: `output_table` |
