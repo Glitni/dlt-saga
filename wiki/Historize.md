@@ -182,6 +182,7 @@ historize:
   strategy: scd1
   snapshot_column: extract_date
   track_deletions: true
+  # delivery: full           # the default; deletions require it
   # merge_key: [tenant_id]   # scopes deletion detection, as under scd2
 ```
 
@@ -216,21 +217,21 @@ starts from what the source still holds.
 | `snapshot_date_regex` | top-level | — | Regex to extract snapshot date from file paths (filesystem only) |
 | `snapshot_date_format` | top-level | — | `strptime` format for the extracted date string |
 | `strategy` | `historize:` | `scd2` | `scd2` keeps every version; `scd1` keeps only the latest version per key. See [SCD1: latest version per key](#scd1-latest-version-per-key) |
-| `order_by` | `historize:` | `[snapshot_column]` | `scd1` only: columns ranking a key's versions, highest wins |
+| `order_by` | `historize:` | `[snapshot_column]` | `scd1` only: columns ranking a key's versions, highest wins. With `track_deletions: true` it must start with `snapshot_column` |
 | `snapshot_column` | `historize:` | `_dlt_ingested_at` | Column used as the snapshot timestamp |
 | `track_columns` | `historize:` | — | Opt-in allowlist: only these columns drive change detection (all columns still appear in output) |
 | `ignore_columns` | `historize:` | `[]` | Columns excluded from change detection (still appear in output) |
 | `partition_column` | `historize:` | — | Partition the SCD2 output table. Unset by default — see [Table layout](#table-layout) |
 | `cluster_columns` | `historize:` | `[valid_to, valid_from]` at create | Cluster the SCD2 output table. Explicit values are enforced on existing tables; `[]` removes clustering — see [Table layout](#table-layout) |
 | `delivery` | `historize:` | `full` | `full`: each snapshot is a complete copy of the source; `incremental`: each holds only the records sent in it. See [Delivery: full vs incremental](#delivery-full-vs-incremental) |
-| `track_deletions` | `historize:` | `true` (`scd2`, `full`) | Emit deletion marker rows when a key disappears (`scd1`: opt-in, flags the key's row). Not supported with `delivery: incremental` |
-| `merge_key` | `historize:` | — | Subset of `primary_key` that scopes deletion / reappearance detection. Not supported with `delivery: incremental`. See [Scoping deletion detection (`merge_key`)](#scoping-deletion-detection-merge_key) |
+| `track_deletions` | `historize:` | `true` (`scd2`, `full`) | Emit deletion marker rows when a key disappears (`scd1`: opt-in, flags the key's row). Requires `delivery: full` |
+| `merge_key` | `historize:` | — | Subset of `primary_key` that scopes deletion / reappearance detection. Requires `delivery: full`; under `scd1` also `track_deletions: true`. See [Scoping deletion detection (`merge_key`)](#scoping-deletion-detection-merge_key) |
 | `detect_late_arrivals` | `historize:` | unset | Late snapshots below the watermark: unset = detect + warn, `true` = detect + rewind-and-replay, `false` = skip detection. See [Late-arriving snapshots](#late-arriving-snapshots) |
 | `late_arrival_window_days` | `historize:` | — | How many days behind the watermark a late snapshot may be and still replay automatically; older ones are ignored with a warning. Omit for no bound |
 | `arrival_column` | `historize:` | `_dlt_ingested_at` | Column holding each row's warehouse arrival time, used for late-arrival detection |
 | `valid_from_column` | `historize:` | `_dlt_valid_from` | Name of the SCD2 valid-from column in the output table |
 | `valid_to_column` | `historize:` | `_dlt_valid_to` | Name of the SCD2 valid-to column in the output table |
-| `is_deleted_column` | `historize:` | `_dlt_is_deleted` | Name of the soft-delete marker column in the output table |
+| `is_deleted_column` | `historize:` | `_dlt_is_deleted` | Name of the soft-delete marker column in the output table (`scd1`: only with `track_deletions: true`) |
 | `table_format` | `historize:` | inherited | Table format for the SCD2 output table. Overrides the profile-level setting. See [Table format](#table-format) |
 | `schema_name` | `historize:` | — | Write the historized table to this schema instead of the source schema (used directly in prod, sandbox-composed in dev). Legacy alias: `output_schema` |
 | `table_name` | `historize:` | — | Explicit name for the historized output table (overrides the auto-generated name). Legacy alias: `output_table` |
@@ -605,7 +606,7 @@ Notes:
 saga historize --full-refresh --select "filesystem__snapshots__companies"
 ```
 
-Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when `primary_key`, `track_columns`, `ignore_columns`, `track_deletions`, `snapshot_column`, or `table_format` changes.
+Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when any of these changes: `primary_key`, `snapshot_column`, `strategy`, `order_by`, `delivery` (`scd2` only), `track_columns`, `ignore_columns`, `track_deletions`, `merge_key`, `filters`, `table_format`, or the output column names (`valid_from_column`, `valid_to_column`, `is_deleted_column`).
 
 ---
 
