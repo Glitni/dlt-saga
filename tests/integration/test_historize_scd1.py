@@ -264,6 +264,25 @@ class TestScd1ChangeDetection:
         assert stats["new_or_changed_rows"] == 0
         assert _valid_from(dest) == {1: "2026-01-01 00:00:00"}
 
+    def test_outranked_row_in_the_same_snapshot_writes_nothing(self, dest):
+        order_by = ["ingested_at", "landing_offset"]
+        _insert(dest, [(1, "a", "2026-01-01", "2026-01-01 00:00", 2)])
+        _run(dest, full_refresh=True, order_by=order_by)
+
+        # The losing row of the snapshot must not break the winner's stretch
+        # with the stored row, or an unchanged key is rewritten every run.
+        _insert(
+            dest,
+            [
+                (1, "a", "2026-01-01", "2026-01-02 00:00", 2),
+                (1, "stale", "2026-01-01", "2026-01-02 00:00", 1),
+            ],
+        )
+        stats = _run(dest, order_by=order_by)
+
+        assert stats["new_or_changed_rows"] == 0
+        assert _valid_from(dest) == {1: "2026-01-01 00:00:00"}
+
     def test_change_after_unchanged_redeliveries_is_dated_to_the_change(self, dest):
         _insert(dest, [(1, "a", "2026-01-01", "2026-01-01 00:00", 1)])
         _run(dest, full_refresh=True)

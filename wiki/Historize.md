@@ -122,7 +122,7 @@ Setting `full` on an incremental source is what to avoid: every record not re-se
 
 Each snapshot should hold at most one row per key, under either setting. When one delivery carries several versions of a key under the same `snapshot_column` value, historize keeps one of them, and which one is not defined — give each version its own snapshot value (e.g. a per-row load or event timestamp).
 
-`delivery` is part of the config fingerprint for `scd2`, so changing it requires `--full-refresh`. Under `scd1` it doesn't change the output today.
+`delivery` is part of the config fingerprint for `scd2`, so changing it requires `--full-refresh`. Under `scd1` it only decides whether `track_deletions` is allowed, which is fingerprinted itself.
 
 ---
 
@@ -148,8 +148,8 @@ historize:
 
 The output table holds the primary key, the value columns, and `_dlt_valid_from`: when the current
 values took effect, i.e. the snapshot where they first appeared without a different version in
-between. There is no `_dlt_valid_to` or `_dlt_is_deleted`. A newly created table is clustered by
-`[valid_from]` unless `cluster_columns` is set.
+between. There is no `_dlt_valid_to`, and `_dlt_is_deleted` only with `track_deletions: true` (see
+below). A newly created table is clustered by `[valid_from]` unless `cluster_columns` is set.
 
 **Ranking.** Each run reads the new source rows, adds the stored row of every key they touch, and
 keeps the highest-ranked version per key by `order_by` (descending, `NULL` ranks lowest).
@@ -174,8 +174,33 @@ move their `_dlt_valid_from`.
 - **Late arrivals:** `detect_late_arrivals: true` re-merges from the earliest late snapshot. Nothing
   is rewound, so the retention guard doesn't apply.
 
-**Not supported with `scd1`:** `track_deletions: true`, `merge_key`, `track_columns`,
-`ignore_columns` — these are rejected rather than ignored. `order_by` is rejected under `scd2`.
+**Deletions** are opt-in with `track_deletions: true`, for sources that deliver full snapshots
+(`delivery: full`, the default — see [Delivery: full vs incremental](#delivery-full-vs-incremental)):
+
+```yaml
+historize:
+  strategy: scd1
+  snapshot_column: extract_date
+  track_deletions: true
+  # merge_key: [tenant_id]   # scopes deletion detection, as under scd2
+```
+
+- A key missing from a later snapshot keeps its row, with `_dlt_is_deleted = TRUE`, the values it
+  was last seen with, and `_dlt_valid_from` set to the snapshot it disappeared from. Read current
+  state with `WHERE NOT _dlt_is_deleted`.
+- When it reappears, the row is overwritten with the new values and the flag cleared.
+- The row is kept rather than removed so later versions still have something to be ranked against:
+  with no stored row, a late, older version would re-insert a deleted key.
+- The latest snapshot decides: a deletion happens at a snapshot and has no values for other ranking
+  columns, so `order_by` must start with `snapshot_column`. Further columns break ties between rows
+  of one key within a snapshot, e.g. `order_by: [extract_date, updated_at]`.
+- A key missing from the batch is what a deletion looks like, so each run reads every stored key
+  that isn't deleted — the whole historized table, minus deleted keys.
+  Only keys in the batch or disappearing from it are ranked and written.
+
+**Not supported with `scd1`:** `track_columns`, `ignore_columns`, a renamed `valid_to_column`; a
+`merge_key` or renamed `is_deleted_column` without `track_deletions: true` — these are rejected
+rather than ignored. `order_by` is rejected under `scd2`.
 
 **Switching strategy** changes the config fingerprint, so the next run asks for `--full-refresh`.
 Going from `scd1` to `scd2` can't recover the versions `scd1` already overwrote. The rebuilt history
@@ -198,7 +223,7 @@ starts from what the source still holds.
 | `partition_column` | `historize:` | — | Partition the SCD2 output table. Unset by default — see [Table layout](#table-layout) |
 | `cluster_columns` | `historize:` | `[valid_to, valid_from]` at create | Cluster the SCD2 output table. Explicit values are enforced on existing tables; `[]` removes clustering — see [Table layout](#table-layout) |
 | `delivery` | `historize:` | `full` | `full`: each snapshot is a complete copy of the source; `incremental`: each holds only the records sent in it. See [Delivery: full vs incremental](#delivery-full-vs-incremental) |
-| `track_deletions` | `historize:` | `true` (`scd2`, `full`) | Emit deletion marker rows when a key disappears. Not supported with `scd1` or `delivery: incremental` |
+| `track_deletions` | `historize:` | `true` (`scd2`, `full`) | Emit deletion marker rows when a key disappears (`scd1`: opt-in, flags the key's row). Not supported with `delivery: incremental` |
 | `merge_key` | `historize:` | — | Subset of `primary_key` that scopes deletion / reappearance detection. Not supported with `delivery: incremental`. See [Scoping deletion detection (`merge_key`)](#scoping-deletion-detection-merge_key) |
 | `detect_late_arrivals` | `historize:` | unset | Late snapshots below the watermark: unset = detect + warn, `true` = detect + rewind-and-replay, `false` = skip detection. See [Late-arriving snapshots](#late-arriving-snapshots) |
 | `late_arrival_window_days` | `historize:` | — | How many days behind the watermark a late snapshot may be and still replay automatically; older ones are ignored with a warning. Omit for no bound |

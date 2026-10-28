@@ -230,7 +230,8 @@ class HistorizeStateManager:
             "order_by": config.effective_order_by,
             # Decides whether absence from a snapshot means anything, which
             # changes the versions and deletions scd2 already wrote. scd1 output
-            # doesn't depend on it, so it is pinned there: describing the
+            # doesn't depend on it (its deletion tracking, the one place it
+            # would, requires full), so it is pinned there: describing the
             # source differently must not force a rebuild that changes nothing.
             "delivery": "full" if config.is_scd1 else config.delivery,
         }

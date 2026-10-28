@@ -224,8 +224,10 @@ class HistorizeConfig:
                 "When True, rows that disappear from the source produce a deletion marker row "
                 "(_dlt_is_deleted=True) in the historized table. "
                 "When False, only value changes are tracked. Defaults to True for "
-                "strategy: scd2 with delivery: full; not supported with strategy: "
-                "scd1 or delivery: incremental."
+                "strategy: scd2 with delivery: full. Opt-in for strategy: scd1, "
+                "where a deleted key keeps its row with _dlt_is_deleted=True "
+                "(order_by must then start with snapshot_column). Not "
+                "supported with delivery: incremental."
             )
         },
     )
@@ -385,8 +387,10 @@ class HistorizeConfig:
             if isinstance(getattr(self, attr), str):
                 setattr(self, attr, [getattr(self, attr)])
         self._validate_choices()
-        self._validate_strategy_options()
+        # Delivery first: an option it rules out shouldn't get a strategy
+        # error suggesting a fix that delivery then rejects.
         self._validate_delivery_options()
+        self._validate_strategy_options()
         if self.track_deletions is None:
             self.track_deletions = self.strategy == "scd2" and self.is_full_delivery
         if (
@@ -474,36 +478,54 @@ class HistorizeConfig:
                 "historize.order_by must be either omitted (rank versions by "
                 "snapshot_column) or a non-empty list."
             )
+        tracks_deletions = self.track_deletions is True
+        if tracks_deletions and self.order_by:
+            snapshot = self.snapshot_column.lower()
+            if self.order_by[0].lower() != snapshot:
+                suggested = [self.snapshot_column] + [
+                    col for col in self.order_by if col.lower() != snapshot
+                ]
+                raise ValueError(
+                    "historize.order_by must start with snapshot_column when "
+                    "strategy: scd1 tracks deletions — a deletion happens at a "
+                    "snapshot and has no values for other ranking columns, so "
+                    "they can only break ties within one snapshot. Use "
+                    f"order_by: [{', '.join(suggested)}], or set "
+                    "track_deletions: false."
+                )
         unsupported = {
-            "track_deletions": (
-                self.track_deletions is True,
-                "deletion tracking is not supported with scd1",
-            ),
             "merge_key": (
-                bool(self.merge_key),
-                "it only scopes deletion detection, which scd1 doesn't do",
+                bool(self.merge_key) and not tracks_deletions,
+                "it only scopes deletion detection. Set track_deletions: true, "
+                "or remove it.",
             ),
             "track_columns": (
                 self.track_columns is not None,
                 "every newer version replaces the stored one, so no column is "
-                "excluded from change detection",
+                "excluded from change detection. Remove it, or use strategy: scd2.",
             ),
             "ignore_columns": (
                 bool(self.ignore_columns),
                 "every newer version replaces the stored one, so no column is "
-                "excluded from change detection",
+                "excluded from change detection. Remove it, or use strategy: scd2.",
+            ),
+            "valid_to_column": (
+                self.valid_to_column
+                != self.__dataclass_fields__["valid_to_column"].default,
+                "an scd1 table has no such column. Remove it, or use strategy: scd2.",
+            ),
+            "is_deleted_column": (
+                self.is_deleted_column
+                != self.__dataclass_fields__["is_deleted_column"].default
+                and not tracks_deletions,
+                "an scd1 table only has it with track_deletions: true. Set "
+                "that, or remove it.",
             ),
         }
-        for key in ("valid_to_column", "is_deleted_column"):
-            unsupported[key] = (
-                getattr(self, key) != self.__dataclass_fields__[key].default,
-                "an scd1 table has no such column",
-            )
         for key, (is_set, reason) in unsupported.items():
             if is_set:
                 raise ValueError(
-                    f"historize.{key} is not supported with strategy: scd1 — "
-                    f"{reason}. Remove it, or use strategy: scd2."
+                    f"historize.{key} is not supported with strategy: scd1 — {reason}"
                 )
 
     def _validate_column_identifiers(self):
