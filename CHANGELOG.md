@@ -1,3 +1,10 @@
+## 0.45.0 — 2026-10-28
+
+### Added
+- Track deletions under the scd1 historize strategy (#598)
+- Add historize delivery setting for full vs incremental sources (#596)
+- Add scd1 historize strategy (latest version per key) (#594)
+
 ## 0.44.0 — 2026-10-27
 
 ### Added
