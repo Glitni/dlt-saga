@@ -1097,6 +1097,16 @@ class HistorizeRunner:
                 "  (scd1 kept only the latest version per key — the rebuilt "
                 "scd2 history starts from what the source still holds)"
             )
+        if (
+            previous.get("delivery") == "full"
+            and current.get("delivery") == "incremental"
+            and previous.get("track_deletions") != current.get("track_deletions")
+        ):
+            changes.append(
+                "  (track_deletions follows delivery unless set; incremental "
+                "deliveries have no deletions, so the rebuilt history has no "
+                "deletion markers)"
+            )
         diff = "\n".join(changes)
         rebuild_cmd = f"Run '{self._rebuild_command}' to rebuild."
         is_partial = self.partial_refresh or self.historize_from is not None

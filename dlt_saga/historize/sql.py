@@ -250,6 +250,66 @@ class HistorizeSqlBuilder:
         )
         return f" AND {preds}"
 
+    def _snapshot_sequence_ctes(self, snapshot_expr: str, from_clause: str) -> str:
+        """The ``all_snapshots`` + ``snapshot_sequence`` CTEs, or ``''``.
+
+        They give each snapshot its previous/next snapshot overall, which gap
+        detection and deletion detection compare a key's own appearances
+        against. Both read a key's absence from a snapshot, so they exist only
+        under ``delivery: full`` — with incremental deliveries absence means
+        nothing, and the distinct-snapshot scan is skipped.
+
+        Precomputed so downstream CTEs can JOIN instead of using a correlated
+        scalar subquery in the same clause as a window function (unsupported
+        on Spark/Databricks). When merge_key is set, the window is partitioned
+        by it so a missed delivery in one group doesn't introduce a "next
+        overall snapshot" for sibling groups.
+
+        Args:
+            snapshot_expr: Expression yielding each row's snapshot value.
+            from_clause: What to read it from (table or CTE, plus any WHERE).
+        """
+        if not self.config.is_full_delivery:
+            return ""
+        return f"""-- All unique snapshot dates (per merge_key group when configured).
+all_snapshots AS (
+  SELECT DISTINCT {self._merge_key_cols_raw_with_comma()}{snapshot_expr} AS snapshot_date
+  FROM {from_clause}
+),
+
+-- Previous/next snapshot per distinct snapshot.
+snapshot_sequence AS (
+  SELECT {self._merge_key_cols_aliased_with_comma()}snapshot_date AS seq_snapshot_date,
+    LAG(snapshot_date) OVER ({self._merge_key_partition_clause()}ORDER BY snapshot_date) AS prev_snapshot_date,
+    LEAD(snapshot_date) OVER ({self._merge_key_partition_clause()}ORDER BY snapshot_date) AS next_snapshot_date
+  FROM all_snapshots
+),
+
+"""
+
+    def _gap_detection_sql(self) -> tuple:
+        """``(projection, join, condition)`` for gap-driven reappearance, or blanks.
+
+        Under ``delivery: full``, a key whose previous appearance is older than
+        the previous snapshot overall was absent in between, so it opens a new
+        version on its return even with unchanged values. Under ``delivery:
+        incremental`` that absence means nothing and only a value change opens
+        a version.
+        """
+        if not self.config.is_full_delivery:
+            return "", "", ""
+        q_snapshot = self._snap
+        projection = (
+            f",\n    LAG({q_snapshot}) OVER (pk_order) AS _prev_snapshot,\n"
+            f"    ss.prev_snapshot_date AS _expected_prev_snapshot"
+        )
+        join = (
+            f"\n  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = "
+            f"d.{q_snapshot}{self._merge_key_join_extra('ss', 'd')}"
+        )
+        condition = "\n     OR _prev_snapshot < _expected_prev_snapshot"
+        return projection, join, condition
+
     def build_rollback_sql(
         self, effective_from_date: str, run_id: str, dataset: str
     ) -> List[str]:
@@ -512,31 +572,15 @@ FROM disappearances d
 INNER JOIN deduped del_src ON {pk_join_del}
   AND del_src.{q_snapshot} = d.last_seen"""
 
+        gap_projection, gap_join, gap_condition = self._gap_detection_sql()
+
         return f"""
 -- Full Reprocess Historization
 -- Transforms all raw snapshot data into SCD2 format
 
 CREATE OR REPLACE TEMP TABLE _historize_result AS
 WITH
--- All unique snapshot dates (per merge_key group when configured).
-all_snapshots AS (
-  SELECT DISTINCT {self._merge_key_cols_raw_with_comma()}{self._snap_src} AS snapshot_date
-  FROM {src}{filter_where_clause(source_filter)}
-),
-
--- Previous/next snapshot per distinct snapshot. Precomputed here so downstream
--- CTEs can JOIN instead of using a correlated scalar subquery in the same clause
--- as a window function (unsupported on Spark/Databricks).
--- When merge_key is set, the window is partitioned by it so a missed delivery
--- in one group doesn't introduce a "next overall snapshot" for sibling groups.
-snapshot_sequence AS (
-  SELECT {self._merge_key_cols_aliased_with_comma()}snapshot_date AS seq_snapshot_date,
-    LAG(snapshot_date) OVER ({self._merge_key_partition_clause()}ORDER BY snapshot_date) AS prev_snapshot_date,
-    LEAD(snapshot_date) OVER ({self._merge_key_partition_clause()}ORDER BY snapshot_date) AS next_snapshot_date
-  FROM all_snapshots
-),
-
--- Hash value columns for change detection
+{self._snapshot_sequence_ctes(self._snap_src, f"{src}{filter_where_clause(source_filter)}")}-- Hash value columns for change detection
 hashed AS (
   SELECT *,
     {hash_expr} AS _row_hash{self._snapshot_star_projection()}
@@ -556,14 +600,11 @@ deduped AS (
   WHERE _dedup_rn = 1
 ),
 
--- Compare to previous snapshot + detect gaps
+-- Compare to previous snapshot (+ detect gaps under full delivery)
 with_context AS (
   SELECT d.*,
-    LAG(_row_hash) OVER (pk_order) AS _prev_hash,
-    LAG({q_snapshot}) OVER (pk_order) AS _prev_snapshot,
-    ss.prev_snapshot_date AS _expected_prev_snapshot
-  FROM deduped d
-  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = d.{q_snapshot}{self._merge_key_join_extra("ss", "d")}
+    LAG(_row_hash) OVER (pk_order) AS _prev_hash{gap_projection}
+  FROM deduped d{gap_join}
   WINDOW pk_order AS (PARTITION BY {pk_cols} ORDER BY {q_snapshot})
 ),
 
@@ -571,8 +612,7 @@ with_context AS (
 changes AS (
   SELECT * FROM with_context
   WHERE _prev_hash IS NULL
-     OR _row_hash != _prev_hash
-     OR _prev_snapshot < _expected_prev_snapshot
+     OR _row_hash != _prev_hash{gap_condition}
 ),
 
 {track_deletions_sql}
@@ -773,6 +813,8 @@ WHERE {self.valid_to} >= TIMESTAMP '{min_new}';
 
 """
 
+        gap_projection, gap_join, gap_condition = self._gap_detection_sql()
+
         return f"""
 -- Incremental Historization
 -- Processes new snapshots and merges into historized table
@@ -791,23 +833,7 @@ source_rows AS (
   WHERE {and_filter(self.filter_sql, new_snapshot_filter)}{baseline_union}
 ),
 
--- All snapshots being processed (including reference, per merge_key group when configured)
-all_snapshots AS (
-  SELECT DISTINCT {self._merge_key_cols_raw_with_comma()}{q_snapshot} AS snapshot_date
-  FROM source_rows
-),
-
--- Previous/next snapshot per distinct snapshot (JOINed below instead of using a
--- correlated subquery alongside window functions — unsupported on Spark/Databricks).
--- When merge_key is set the window is partitioned by it.
-snapshot_sequence AS (
-  SELECT {self._merge_key_cols_aliased_with_comma()}snapshot_date AS seq_snapshot_date,
-    LAG(snapshot_date) OVER ({self._merge_key_partition_clause()}ORDER BY snapshot_date) AS prev_snapshot_date,
-    LEAD(snapshot_date) OVER ({self._merge_key_partition_clause()}ORDER BY snapshot_date) AS next_snapshot_date
-  FROM all_snapshots
-),
-
--- Hash value columns
+{self._snapshot_sequence_ctes(q_snapshot, "source_rows")}-- Hash value columns
 hashed AS (
   SELECT *,
     {hash_expr} AS _row_hash
@@ -827,14 +853,11 @@ deduped AS (
   WHERE _dedup_rn = 1
 ),
 
--- Compare to previous via LAG
+-- Compare to previous via LAG (+ detect gaps under full delivery)
 with_context AS (
   SELECT d.*,
-    LAG(_row_hash) OVER (pk_order) AS _prev_hash,
-    LAG({q_snapshot}) OVER (pk_order) AS _prev_snapshot,
-    ss.prev_snapshot_date AS _expected_prev_snapshot
-  FROM deduped d
-  LEFT JOIN snapshot_sequence ss ON ss.seq_snapshot_date = d.{q_snapshot}{self._merge_key_join_extra("ss", "d")}
+    LAG(_row_hash) OVER (pk_order) AS _prev_hash{gap_projection}
+  FROM deduped d{gap_join}
   WINDOW pk_order AS (PARTITION BY {pk_cols} ORDER BY {q_snapshot})
 ),
 
@@ -842,8 +865,7 @@ with_context AS (
 changes AS (
   SELECT * FROM with_context c
   WHERE (_prev_hash IS NULL
-     OR _row_hash != _prev_hash
-     OR _prev_snapshot < _expected_prev_snapshot)
+     OR _row_hash != _prev_hash{gap_condition})
     {reference_filter}
 ),
 
