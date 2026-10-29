@@ -37,8 +37,9 @@ keywords = [
 dependencies = [
     # Core framework
     "dlt[duckdb,filesystem,parquet,sftp]>=1.18.0,<2.0.0",
-    # duckdb 2.0 removed DuckDBPyRelation.fetchmany(), which dlt's
-    # read_csv_duckdb reader calls (fetch_json). Lift once dlt drops it.
+    # dlt 1.31 still calls DuckDB APIs that 2.0 removed (read_csv_duckdb,
+    # Arrow reads from its DuckDB client). Saga's own code runs on 2.0; lift
+    # this once dlt supports it.
     "duckdb<2.0.0",
     "jinja2>=3.1.0",
     "pydantic>=2.11.7",

@@ -225,7 +225,9 @@ class TestGuardFailureIsRecorded:
             conn = duckdb.connect(str(tmp_path / "local.duckdb"))
             try:
                 conn.execute("use dlt_dev")
-                return conn.sql("select count(*) from filesystem__sample").fetchone()[0]
+                return conn.execute(
+                    "select count(*) from filesystem__sample"
+                ).fetchone()[0]
             finally:
                 conn.close()
 

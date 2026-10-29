@@ -310,6 +310,9 @@ def configure_cli_logging() -> None:
         "azure.identity",
         "azure.storage",
         "msal",
+        # Filesystem layers — feature/cache setup notices on every file source
+        "gcsfs",
+        "fsspec",
     ):
         logging.getLogger(name).setLevel(logging.WARNING)
 
