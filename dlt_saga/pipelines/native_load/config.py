@@ -12,6 +12,9 @@ from dlt_saga.pipelines.base_config import BaseConfig
 logger = logging.getLogger(__name__)
 
 _VALID_FILE_TYPES = ("parquet", "csv", "jsonl")
+# Formats that carry their full schema in every file, so any subset of the files
+# gives the same column types as all of them.
+SELF_DESCRIBING_FILE_TYPES = ("parquet",)
 _VALID_URI_SCHEMES = ("gs://", "s3://", "abfss://")
 _DEFAULT_PATTERNS = {"parquet": "*.parquet", "csv": "*.csv", "jsonl": "*.jsonl"}
 
@@ -232,8 +235,30 @@ class NativeLoadConfig(BaseConfig):
     # -------------------------------------------------------------------------
 
     load_batch_size: int = field(
-        default=5000,
-        metadata={"description": "Maximum number of source URIs per load chunk."},
+        default=1000,
+        metadata={
+            "description": (
+                "Maximum number of source URIs per load chunk; an upper bound, "
+                "not the chunk size. Files are spread evenly over the chunks: "
+                "loading one at a time, the fewest this allows; loading in "
+                "parallel, enough to fill every load_concurrency slot, down to "
+                "100 files per chunk (or this value, if smaller). At most 1000 "
+                "on Databricks (COPY INTO's FILES list limit)."
+            ),
+        },
+    )
+
+    load_concurrency: int = field(
+        default=4,
+        metadata={
+            "description": (
+                "How many load chunks run at once. When the run creates the "
+                "target table (first load, full refresh, replace), the chunk "
+                "that creates it runs alone first; otherwise every chunk runs "
+                "in parallel. 1 loads them one after another. BigQuery only; "
+                "Databricks always loads one chunk at a time."
+            ),
+        },
     )
 
     load_batch_bytes: Optional[int] = field(
@@ -610,6 +635,8 @@ class NativeLoadConfig(BaseConfig):
     def _validate_numeric_floors(self) -> None:
         if self.load_batch_size < 1:
             raise ValueError("load_batch_size must be >= 1")
+        if self.load_concurrency < 1:
+            raise ValueError("load_concurrency must be >= 1")
         if self.load_batch_bytes is not None and self.load_batch_bytes < 1:
             raise ValueError("load_batch_bytes must be >= 1")
         if self.date_lookback_days < 0:

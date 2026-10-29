@@ -149,7 +149,8 @@ A pattern that cannot reach below `source_uri` also prunes the listing server-si
 
 | Field | Default | Description |
 |---|---|---|
-| `load_batch_size` | `5000` | Maximum URIs per SQL job. |
+| `load_batch_size` | `1000` | Maximum URIs per load chunk — an upper bound, not the chunk size. Files are spread evenly over the chunks: loading one at a time, the fewest this allows (2500 files → three chunks of 833–834, not 1000 + 1000 + 500); loading in parallel, the count is rounded up to fill every `load_concurrency` slot (900 files at 4 → four chunks of 225), never splitting below 100 files per chunk or `load_batch_size`, whichever is smaller. Databricks accepts at most `1000` (`COPY INTO`'s `FILES` list limit); a larger value is a config error. |
+| `load_concurrency` | `4` | How many chunks load at once. When a run creates the target (first load, `--full-refresh`, `replace`), the chunk that creates it runs alone first; for Parquet, or CSV with an explicit `columns:` schema, that is a small 10-file chunk, since any files give the same column types. When the target already exists, every chunk loads in parallel. `1` loads them one after another. BigQuery only — Databricks always loads one chunk at a time. |
 | `load_batch_bytes` | `5 GiB` | Cross-cloud (`s3://`) only: also split a chunk once cumulative listed file size crosses this, keeping each cross-cloud transfer under BigQuery's 60 GiB result cap. The cap is on uncompressed result bytes (unknowable from a listing), so the default errs low. Ignored for `gs://`/`abfss://`. |
 | `max_bad_records` | `0` | BigQuery only: tolerated malformed rows per job. |
 | `ignore_unknown_values` | `false` | BigQuery only: ignore extra JSON keys not in schema. |
@@ -412,7 +413,7 @@ If your current ADF pipeline does:
 |---|---|
 | `GetMetadata` on container | Flat listing (automatic, no config needed) |
 | `Filter` on date folder | `partition_prefix_pattern: "{year}-{month}-{day}/"` (tokens; works on both `abfss://` and `gs://`) |
-| `ForEach` over date folders | Handled internally; chunks by `load_batch_size` |
+| `ForEach` over date folders | Handled internally; date partitions are listed in parallel (`gs://`, `s3://`), chunks by `load_batch_size` load `load_concurrency` at a time |
 | `DatabricksNotebook(COPY INTO)` | `adapter: dlt_saga.native_load` + `file_type: parquet` |
 | Manual SCD2 notebook | `write_disposition: append+historize` |
 
@@ -440,6 +441,7 @@ Replace the entire ADF pipeline with one YAML file and `saga ingest`.
 | `Access Denied: … does not have bigquery.connections.delegate permission` | The running identity has `connectionUser` (not `connectionAdmin`) on the Omni connection | Grant `roles/bigquery.connectionAdmin` (which includes `delegate`) on the connection — creating the BigLake external table requires it (see Prerequisites). |
 | `… failed assuming into your AWS IAM role because the session duration … is smaller than the requested` | AWS role max session duration < 12h | Set the IAM role's maximum session duration to 12 hours. |
 | `Source URI scheme '…' is not supported by destination` | Using a scheme the destination doesn't handle (e.g. `abfss://` on BigQuery) | BigQuery supports `gs://` and `s3://` (S3 via BigQuery Omni); Databricks supports `gs://` and `abfss://`. |
+| `499 … Job execution was cancelled: Job timed out` on `POST …/tables` | Too many URIs in one chunk's external table for BigQuery to create it in time | Lower `load_batch_size`. |
 | BigQuery external table quota errors | Too many tables in staging dataset | Reduce `load_batch_size` to create fewer concurrent tables. |
 | `COPY INTO` fails with permission error | UC external location not granted | Verify `GRANT READ FILES` on the external location (see setup above). |
 | Full-refresh PURGE fails | Storage credential missing DELETE permission | Grant DELETE on the external location, or use `--full-refresh` with manual file cleanup. |

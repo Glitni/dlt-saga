@@ -261,6 +261,10 @@ class TestNumericFloors:
         with pytest.raises(ValueError, match="load_batch_size"):
             _make(load_batch_size=0)
 
+    def test_load_concurrency_floor(self):
+        with pytest.raises(ValueError, match="load_concurrency"):
+            _make(load_concurrency=0)
+
     def test_date_lookback_days_floor(self):
         with pytest.raises(ValueError, match="date_lookback_days"):
             _make(date_lookback_days=-1)

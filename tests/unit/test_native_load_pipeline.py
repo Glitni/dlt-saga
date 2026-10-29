@@ -31,6 +31,10 @@ def _make_pipeline(**config_overrides) -> NativeLoadPipeline:
 
     dest = MagicMock()
     dest.supports_native_load.return_value = True
+    # Sequential by default so call order is deterministic; concurrency has
+    # its own tests.
+    dest.supports_concurrent_native_load.return_value = False
+    dest.native_load_max_files_per_chunk.return_value = None
     dest.supported_native_load_uri_schemes.return_value = {"gs"}
     dest.type_name.side_effect = lambda t: t.upper()
     dest.native_load_file_name_expr.return_value = "_FILE_NAME"
@@ -70,6 +74,7 @@ def _make_pipeline(**config_overrides) -> NativeLoadPipeline:
     p.context = context
     p.state_manager = MagicMock()
     p.storage_client = MagicMock()
+    p.storage_client.supports_concurrent_listing = False
 
     return p
 
@@ -768,6 +773,7 @@ class TestResolveTargetLocation:
         dest = MagicMock()
         dest.supports_native_load.return_value = True
         dest.supported_native_load_uri_schemes.return_value = {"gs", "abfss"}
+        dest.native_load_max_files_per_chunk.return_value = 1000
         dest.type_name.side_effect = lambda t: t.upper()
         dest.native_load_file_name_expr.return_value = "_metadata.file_path"
         dest.parse_filename_timestamp_expr.return_value = "try_to_timestamp(...)"
@@ -1361,6 +1367,257 @@ def _s3_config(**overrides) -> NativeLoadConfig:
 
 
 @pytest.mark.unit
+class TestConcurrentChunkLoading:
+    """The chunk that creates the target runs alone; the rest load in parallel."""
+
+    def _chunks(self, n: int) -> dict:
+        return {None: [_sobj(f"gs://b/f{i}", 10) for i in range(n)]}
+
+    def _concurrent_pipeline(self, **overrides) -> NativeLoadPipeline:
+        p = _make_pipeline(**{"load_batch_size": 1, **overrides})
+        p.destination.supports_concurrent_native_load.return_value = True
+        return p
+
+    def _record(self, p: NativeLoadPipeline) -> list:
+        """Replace _load_chunk with a recorder; returns the (event, chunk_num, size) log."""
+        import threading
+
+        events: list = []
+        lock = threading.Lock()
+
+        def load_chunk(chunk, chunk_num, total_chunks):
+            with lock:
+                events.append(("start", chunk_num, len(chunk)))
+            with lock:
+                events.append(("end", chunk_num, len(chunk)))
+            return 10
+
+        p._load_chunk = MagicMock(side_effect=load_chunk)
+        return events
+
+    def _sizes(self, events: list) -> list:
+        return [size for _, _, size in sorted(e for e in events if e[0] == "start")]
+
+    def test_creating_chunk_completes_before_any_other_starts(self):
+        p = self._concurrent_pipeline(load_concurrency=3)
+        p._target_exists = False
+        events = self._record(p)
+
+        rows = p._load_files(self._chunks(6))
+
+        assert events[:2] == [("start", 1, 1), ("end", 1, 1)]
+        assert sorted(c.args[1] for c in p._load_chunk.call_args_list) == list(
+            range(1, 7)
+        )
+        assert {c.args[2] for c in p._load_chunk.call_args_list} == {6}
+        assert rows == 60
+
+    def test_existing_target_loads_every_chunk_concurrently(self):
+        """No chunk creates the table, so chunk 1 needn't run alone."""
+        import threading
+
+        p = self._concurrent_pipeline(load_concurrency=2)
+        p._target_exists = True
+        both_running = threading.Barrier(2, timeout=5)
+
+        def load_chunk(chunk, chunk_num, total_chunks):
+            if chunk_num in (1, 2):
+                both_running.wait()  # breaks (and raises) unless 1 and 2 overlap
+            return 1
+
+        p._load_chunk = MagicMock(side_effect=load_chunk)
+        assert p._load_files(self._chunks(4)) == 4
+
+    def test_destination_without_support_loads_sequentially(self):
+        p = _make_pipeline(load_batch_size=1, load_concurrency=4)
+        p._target_exists = True
+        p._load_chunk = MagicMock(return_value=0)
+
+        p._load_files(self._chunks(5))
+
+        assert [c.args[1] for c in p._load_chunk.call_args_list] == [1, 2, 3, 4, 5]
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {},  # parquet carries its schema in every file
+            {  # headerless CSV: the schema comes from config
+                "file_type": "csv",
+                "autodetect_schema": False,
+                "columns": {"a": {"data_type": "text"}},
+            },
+        ],
+    )
+    def test_fixed_schema_creates_target_from_a_small_seed_chunk(self, overrides):
+        """A few files give the target the same types as all of them, so they
+        create it; the long chunks then all run in parallel."""
+        p = self._concurrent_pipeline(
+            load_batch_size=20, load_concurrency=4, **overrides
+        )
+        p._target_exists = False
+        events = self._record(p)
+
+        p._load_files(self._chunks(60))
+
+        assert events[:2] == [("start", 1, 10), ("end", 1, 10)]
+        assert self._sizes(events) == [10, 17, 17, 16]
+
+    def test_seed_chunk_never_exceeds_load_batch_size(self):
+        p = self._concurrent_pipeline(load_batch_size=4, load_concurrency=4)
+        p._target_exists = False
+        events = self._record(p)
+
+        p._load_files(self._chunks(30))
+
+        assert self._sizes(events)[0] == 4
+        assert max(self._sizes(events)) <= 4
+
+    def test_seed_chunk_respects_the_s3_byte_cap(self):
+        p = self._concurrent_pipeline(load_concurrency=4)
+        p.native_config = _s3_config(
+            load_batch_size=1000, load_concurrency=4, load_batch_bytes=25
+        )
+        p._target_exists = False
+        events = self._record(p)
+
+        p._load_files(self._chunks(40))  # 10 bytes per file
+
+        assert events[0][0:2] == ("start", 1)
+        assert events[0][2] * 10 <= 25
+
+    def test_waves_fill_after_a_creating_chunk_that_runs_alone(self):
+        """CSV autodetect gets no seed: chunk 1 runs alone, then full waves."""
+        p = self._concurrent_pipeline(
+            load_batch_size=1000, load_concurrency=4, file_type="csv"
+        )
+        p._target_exists = False
+        events = self._record(p)
+
+        p._load_files(self._chunks(500))
+
+        assert self._sizes(events) == [100] * 5
+
+    @pytest.mark.parametrize(
+        "overrides, target_exists, concurrency",
+        [
+            ({"file_type": "csv"}, False, 4),  # autodetect samples: types could differ
+            ({}, True, 4),  # nothing to create
+            ({}, False, 1),  # nothing would run alongside the long chunks
+        ],
+    )
+    def test_no_seed_chunk(self, overrides, target_exists, concurrency):
+        p = self._concurrent_pipeline(
+            load_batch_size=8, load_concurrency=concurrency, **overrides
+        )
+        p._target_exists = target_exists
+        events = self._record(p)
+
+        p._load_files(self._chunks(30))
+
+        assert self._sizes(events) == [8, 8, 7, 7]
+
+    def test_no_seed_chunk_when_the_rest_fits_one_chunk(self):
+        p = self._concurrent_pipeline(load_batch_size=8, load_concurrency=4)
+        p._target_exists = False
+        events = self._record(p)
+
+        p._load_files(self._chunks(15))
+
+        assert self._sizes(events) == [8, 7]
+
+    def test_other_running_chunk_failures_are_logged_once(self, caplog):
+        """The first failure is raised; others already running are only logged."""
+        import threading
+
+        p = self._concurrent_pipeline(load_concurrency=2)
+        p._target_exists = True
+        both_running = threading.Barrier(2, timeout=5)
+
+        def load_chunk(chunk, chunk_num, total_chunks):
+            both_running.wait()
+            raise RuntimeError(f"chunk {chunk_num} failed")
+
+        p._load_chunk = MagicMock(side_effect=load_chunk)
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(RuntimeError) as raised:
+                p._load_files(self._chunks(2))
+
+        logged = [
+            r.getMessage() for r in caplog.records if "also failed" in r.getMessage()
+        ]
+        assert len(logged) == 1
+        assert str(raised.value) not in logged[0]
+
+    def test_failure_stops_chunks_not_yet_started(self):
+        """Running chunks finish (and record their own state); queued ones never start."""
+        import threading
+
+        p = self._concurrent_pipeline(load_concurrency=2)
+        release = threading.Event()
+        started: list = []
+
+        def load_chunk(chunk, chunk_num, total_chunks):
+            started.append(chunk_num)
+            if chunk_num == 2:
+                raise RuntimeError("chunk 2 failed")
+            if chunk_num > 2:
+                release.wait(1)
+            return 1
+
+        p._load_chunk = MagicMock(side_effect=load_chunk)
+        with pytest.raises(RuntimeError, match="chunk 2 failed"):
+            p._load_files(self._chunks(8))
+
+        # Chunk 1 alone, then two workers: one fails on chunk 2 and may pick up
+        # one more before the rest are cancelled.
+        assert set(started) <= {1, 2, 3, 4}
+
+
+@pytest.mark.unit
+class TestLoadBatchSizeDestinationLimit:
+    def _build(self, limit, batch):
+        with patch.object(
+            NativeLoadPipeline, "_validate_load_batch_size_against_destination"
+        ):
+            p = _make_pipeline(load_batch_size=batch)
+        p.destination.native_load_max_files_per_chunk.return_value = limit
+        return p
+
+    def test_batch_over_the_destination_limit_is_a_config_error(self):
+        p = self._build(limit=1000, batch=5000)
+        with pytest.raises(ValueError, match="load_batch_size=5000 exceeds the 1000"):
+            p._validate_load_batch_size_against_destination()
+
+    @pytest.mark.parametrize("limit, batch", [(1000, 1000), (None, 50000)])
+    def test_batch_within_the_limit_is_accepted(self, limit, batch):
+        self._build(
+            limit=limit, batch=batch
+        )._validate_load_batch_size_against_destination()
+
+
+@pytest.mark.unit
+class TestConcurrentListing:
+    def _pipeline(self, concurrent: bool) -> NativeLoadPipeline:
+        p = _make_pipeline()
+        p.storage_client.supports_concurrent_listing = concurrent
+        p.storage_client.list_files.side_effect = lambda uri, pattern, start_offset: [
+            _sobj(f"{uri}a", 1),
+            _sobj(f"{uri}b", 1),
+        ]
+        return p
+
+    @pytest.mark.parametrize("concurrent", [True, False])
+    def test_objects_yielded_in_scan_order(self, concurrent):
+        p = self._pipeline(concurrent)
+        scans = [(f"gs://b/p{i}/", None) for i in range(20)]
+
+        uris = [o.full_uri for o in p._list_scan_uris(scans)]
+
+        assert uris == [f"gs://b/p{i}/{x}" for i in range(20) for x in "ab"]
+        assert p.storage_client.list_files.call_count == 20
+
+
+@pytest.mark.unit
 class TestBuildChunks:
     def test_count_based_chunking_gcs(self):
         p = _make_pipeline(load_batch_size=2)
@@ -1389,6 +1646,54 @@ class TestBuildChunks:
         flat = [(_sobj(f"s3://b/f{i}", 1), None) for i in range(5)]
         chunks = p._build_chunks(flat)
         assert [len(c) for c in chunks] == [2, 2, 1]
+
+    def test_chunks_are_balanced_not_filled_to_the_bound(self):
+        """A remainder isn't left as a small trailing chunk: 11 files at a
+        bound of 5 need three chunks, so they're split 4 + 4 + 3, not 5 + 5 + 1.
+        """
+        p = _make_pipeline(load_batch_size=5)
+        flat = [(_sobj(f"gs://b/f{i}", 10), None) for i in range(11)]
+        chunks = p._build_chunks(flat)
+        assert [len(c) for c in chunks] == [4, 4, 3]
+        assert [item for c in chunks for item in c] == flat
+
+    def test_exact_multiple_fills_every_chunk(self):
+        p = _make_pipeline(load_batch_size=5)
+        flat = [(_sobj(f"gs://b/f{i}", 10), None) for i in range(10)]
+        assert [len(c) for c in p._build_chunks(flat)] == [5, 5]
+
+    def test_byte_bound_also_balances_s3(self):
+        # 70 bytes under a 30-byte cap need three chunks: filling to the cap
+        # would give 3 + 3 + 1, balancing gives 3 + 2 + 2.
+        p = _make_pipeline(load_batch_size=1000)
+        p.native_config = _s3_config(load_batch_bytes=30)
+        flat = [(_sobj(f"s3://b/f{i}", 10), None) for i in range(7)]
+        chunks = p._build_chunks(flat)
+        assert [len(c) for c in chunks] == [3, 2, 2]
+
+    @pytest.mark.parametrize(
+        "files, batch, concurrency, expected",
+        [
+            # Below load_batch_size, still split to fill the slots.
+            (900, 1000, 4, [225] * 4),
+            # Chunk count rounded up to a full wave: 8, not 6.
+            (5600, 1000, 4, [700] * 8),
+            # Never below the minimum chunk size...
+            (250, 1000, 4, [125, 125]),
+            (150, 1000, 4, [150]),
+            # ...unless load_batch_size is smaller: it stays the upper bound.
+            (30, 10, 4, [10, 10, 10]),
+            (45, 10, 4, [9] * 5),
+            # Sequential: fewest chunks, as before.
+            (900, 1000, 1, [900]),
+        ],
+    )
+    def test_concurrency_shapes_chunks(self, files, batch, concurrency, expected):
+        p = _make_pipeline(load_batch_size=batch)
+        flat = [(_sobj(f"gs://b/f{i}", 10), None) for i in range(files)]
+        chunks = p._build_chunks(flat, concurrency)
+        assert [len(c) for c in chunks] == expected
+        assert max(len(c) for c in chunks) <= batch
 
     def test_single_file_over_cap_gets_own_chunk(self):
         p = _make_pipeline(load_batch_size=1000)

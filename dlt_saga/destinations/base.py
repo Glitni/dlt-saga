@@ -931,6 +931,24 @@ class Destination(ABC):
             "Set adapter: dlt_saga.native_load only on bigquery or databricks destinations."
         )
 
+    def native_load_max_files_per_chunk(self) -> Optional[int]:
+        """Most source files one ``native_load_chunk`` call can take, or None.
+
+        A ``load_batch_size`` above it is rejected when the pipeline is built,
+        rather than failing partway through a load.
+        """
+        return None
+
+    def supports_concurrent_native_load(self) -> bool:
+        """Return True if ``native_load_chunk`` may run for several chunks at once.
+
+        Concurrent chunks call ``native_load_chunk`` from separate threads, all
+        appending to an existing target. A destination opts in only when its
+        clients are safe to use that way and concurrent appends to one table
+        don't conflict.
+        """
+        return False
+
     def supports_native_load_precount(self) -> bool:
         """Return True if this destination can count source rows before loading.
 

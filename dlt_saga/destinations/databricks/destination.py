@@ -802,6 +802,11 @@ class DatabricksDestination(Destination):
     def supports_native_load(self) -> bool:
         return True
 
+    def native_load_max_files_per_chunk(self) -> Optional[int]:
+        # Each chunk is one COPY INTO with an explicit FILES list, which
+        # Databricks caps at 1000 entries.
+        return 1000
+
     def supported_native_load_uri_schemes(self) -> set:
         return {"gs", "s3", "abfss"}
 

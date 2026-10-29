@@ -8,13 +8,17 @@ pipeline.  Designed for large sources where dlt would be too slow.
 import itertools
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Iterator, Optional
 
 from dlt_saga.pipeline_config.base_config import resolve_write_disposition
 from dlt_saga.pipelines.base_pipeline import BasePipeline
-from dlt_saga.pipelines.native_load.config import NativeLoadConfig
+from dlt_saga.pipelines.native_load.config import (
+    SELF_DESCRIBING_FILE_TYPES,
+    NativeLoadConfig,
+)
 from dlt_saga.pipelines.native_load.state import NativeLoadStateManager, make_load_id
 from dlt_saga.pipelines.native_load.storage import get_storage_client
 from dlt_saga.pipelines.native_load.storage.matching import PatternMatcher
@@ -23,6 +27,7 @@ from dlt_saga.utility.naming import normalize_identifier
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.base import NativeLoadSpec
+    from dlt_saga.pipelines.native_load.storage import StorageObject
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +36,21 @@ logger = logging.getLogger(__name__)
 # dropped mid-load (external tables are cheap metadata; lingering orphans are
 # harmless).
 _ORPHAN_EXT_TABLE_MIN_AGE_HOURS = 6
+
+# Partition listings run at once during discovery, when the storage client
+# allows it. Each is a short metadata round-trip, so this stays below the HTTP
+# connection pool size of the storage clients rather than being configurable.
+_LIST_CONCURRENCY = 8
+
+# Files in the chunk that creates the target when the rest can load in parallel.
+# It runs alone, so it is kept small; later chunks add any columns it lacked.
+_SEED_CHUNK_FILES = 10
+
+# Smallest chunk worth splitting off to fill load_concurrency. Each chunk pays a
+# fixed cost (external table, column listing, row counts, cleanup, state
+# writes) of seconds, so below this splitting stops paying for itself. A
+# smaller load_batch_size still wins: it is the upper bound on every chunk.
+_MIN_PARALLEL_CHUNK_FILES = 100
 
 
 class NativeLoadPipeline(BasePipeline):
@@ -98,6 +118,7 @@ class NativeLoadPipeline(BasePipeline):
 
         self._validate_uri_scheme_against_destination()
         self._validate_databricks_only_fields()
+        self._validate_load_batch_size_against_destination()
 
         # destination_database: used for logging, mirrors what BasePipeline exposes
         self.destination_database = getattr(
@@ -465,34 +486,59 @@ class NativeLoadPipeline(BasePipeline):
         else:
             loaded = set()
 
-        for scan_uri, start_offset in uris_to_scan:
-            for obj in self.storage_client.list_files(
-                scan_uri,
-                self.native_config.file_pattern,
-                start_offset=start_offset,
-            ):
-                self._matched_count += 1
-                if (obj.full_uri, obj.generation) in loaded:
-                    continue
-                # Match cursor on the full path for partition patterns, basename for flat
-                match_target = (
-                    obj.full_uri
-                    if self.native_config.partition_prefix_pattern
-                    else obj.full_uri.rsplit("/", 1)[-1]
+        for obj in self._list_scan_uris(uris_to_scan):
+            self._matched_count += 1
+            if (obj.full_uri, obj.generation) in loaded:
+                continue
+            # Match cursor on the full path for partition patterns, basename for flat
+            match_target = (
+                obj.full_uri
+                if self.native_config.partition_prefix_pattern
+                else obj.full_uri.rsplit("/", 1)[-1]
+            )
+            m = cursor_re.search(match_target)
+            if not m:
+                self.logger.debug(
+                    "File %r does not match filename_date_regex, skipping",
+                    obj.full_uri,
                 )
-                m = cursor_re.search(match_target)
-                if not m:
-                    self.logger.debug(
-                        "File %r does not match filename_date_regex, skipping",
-                        obj.full_uri,
-                    )
-                    continue
-                cursor_val = m.group(1)
-                files_by_cursor.setdefault(cursor_val, []).append(obj)
+                continue
+            cursor_val = m.group(1)
+            files_by_cursor.setdefault(cursor_val, []).append(obj)
 
         # Sort cursor groups chronologically
         sorted_keys = sorted(files_by_cursor.keys())
         return {k: files_by_cursor[k] for k in sorted_keys}
+
+    def _list_scan_uris(self, uris_to_scan: list) -> Iterator["StorageObject"]:
+        """Yield every object under each ``(uri, start_offset)`` scan, in scan order.
+
+        A partition walk issues one listing per date (or hour) partition, and
+        over a long backfill those round-trips dominate discovery, so they run
+        in parallel when the storage client supports it. Objects are yielded in
+        the same order a sequential scan would produce.
+        """
+
+        def list_one(scan: tuple) -> list:
+            uri, start_offset = scan
+            return list(
+                self.storage_client.list_files(
+                    uri, self.native_config.file_pattern, start_offset=start_offset
+                )
+            )
+
+        if len(uris_to_scan) < 2 or not self.storage_client.supports_concurrent_listing:
+            for uri, start_offset in uris_to_scan:
+                yield from self.storage_client.list_files(
+                    uri, self.native_config.file_pattern, start_offset=start_offset
+                )
+            return
+
+        with ThreadPoolExecutor(
+            max_workers=_LIST_CONCURRENCY, thread_name_prefix="native-load-list"
+        ) as pool:
+            for objects in pool.map(list_one, uris_to_scan):
+                yield from objects
 
     def _effective_first_run_cursor(
         self, last_cursor_str: Optional[str]
@@ -666,15 +712,107 @@ class NativeLoadPipeline(BasePipeline):
         if not flat:
             return 0
 
-        chunks = self._build_chunks(flat)
-        self.logger.info("Loading %d file(s) in %d chunk(s)", len(flat), len(chunks))
+        concurrent = (
+            self.destination.supports_concurrent_native_load()
+            and self.native_config.load_concurrency > 1
+        )
+        # The chunk that creates the target (or, under replace, rewrites it)
+        # runs alone; every other chunk appends to it. When the target already
+        # exists, no chunk creates it and all of them can run at once.
+        creates_target = not self._target_exists
+
+        concurrency = self.native_config.load_concurrency if concurrent else 1
+        chunks: Optional[list] = None
+        if concurrent and creates_target and self._schema_fixed_per_file():
+            # Bounded like any chunk: by load_batch_size, and by the byte cap
+            # through _build_chunks.
+            seed_files = min(_SEED_CHUNK_FILES, self.native_config.load_batch_size)
+            seed = self._build_chunks(flat[:seed_files])[0]
+            remainder_chunks = self._build_chunks(flat[len(seed) :], concurrency)
+            # Only worth it when the remainder splits into chunks that can run
+            # alongside each other.
+            if len(remainder_chunks) > 1:
+                chunks = [seed] + remainder_chunks
+        if chunks is None:
+            chunks = self._build_chunks(flat, concurrency, lead_alone=creates_target)
+        numbered = list(enumerate(chunks, start=1))
+        lead, rest = (numbered[:1], numbered[1:]) if creates_target else ([], numbered)
+
+        concurrency = min(concurrency, len(rest))
+        self.logger.info(
+            "Loading %d file(s) in %d chunk(s)%s",
+            sum(len(c) for c in chunks),
+            len(chunks),
+            f", up to {concurrency} at a time" if concurrency > 1 else "",
+        )
 
         total_rows = 0
-        for chunk_num, chunk in enumerate(chunks, start=1):
+        for chunk_num, chunk in lead:
             total_rows += self._load_chunk(chunk, chunk_num, len(chunks))
-        return total_rows
+        if concurrency <= 1:
+            for chunk_num, chunk in rest:
+                total_rows += self._load_chunk(chunk, chunk_num, len(chunks))
+            return total_rows
+        return total_rows + self._load_chunks_concurrently(
+            rest, len(chunks), concurrency
+        )
 
-    def _build_chunks(self, flat: list) -> list:
+    def _schema_fixed_per_file(self) -> bool:
+        """Whether a few files give the target the same column types as all of them.
+
+        Self-describing formats carry their schema in every file, and an
+        explicit external schema (headerless CSV) comes from config. CSV/JSONL
+        autodetect samples the files it is given, so a small sample can infer
+        different types.
+        """
+        return (
+            self.native_config.file_type in SELF_DESCRIBING_FILE_TYPES
+            or self._external_schema is not None
+        )
+
+    def _load_chunks_concurrently(
+        self, numbered_chunks: list, total_chunks: int, concurrency: int
+    ) -> int:
+        """Load ``(chunk_num, chunk)`` pairs on a thread pool.
+
+        The first failure cancels the chunks not yet started. Those already
+        running are waited for, so each records its own outcome in the load
+        state before the error is raised.
+        """
+        total_rows = 0
+        failure: Optional[BaseException] = None
+        with ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="native-load"
+        ) as pool:
+            futures = [
+                pool.submit(self._load_chunk, chunk, chunk_num, total_chunks)
+                for chunk_num, chunk in numbered_chunks
+            ]
+            try:
+                for future in as_completed(futures):
+                    total_rows += future.result()
+            except BaseException as exc:
+                failure = exc
+                for future in futures:
+                    future.cancel()
+        if failure is None:
+            return total_rows
+
+        # The first failure is raised (and logged by run()); chunks that were
+        # already running can fail too, and this is their only record.
+        for (chunk_num, _), future in zip(numbered_chunks, futures):
+            if future.cancelled():
+                continue
+            other = future.exception()
+            if other is not None and other is not failure:
+                self.logger.error(
+                    "Chunk %d/%d also failed: %s", chunk_num, total_chunks, other
+                )
+        raise failure
+
+    def _build_chunks(
+        self, flat: list, concurrency: int = 1, lead_alone: bool = False
+    ) -> list:
         """Split discovered files into load chunks.
 
         Chunks are bounded by ``load_batch_size`` (file count) and, for
@@ -683,6 +821,18 @@ class NativeLoadPipeline(BasePipeline):
         BigQuery's 60 GiB per-statement result cap. Sizes come from listing; the
         cap is on uncompressed result bytes we can't know, so the default errs
         low (see NativeLoadConfig.load_batch_bytes).
+
+        The files are spread evenly over the fewest chunks those bounds allow,
+        rather than filling each chunk to the bound and leaving a small
+        remainder. The byte cap stays a hard limit, so files of uneven size can
+        still split a chunk early.
+
+        With ``concurrency`` > 1 the count is raised to the next multiple of it
+        (plus one when ``lead_alone``: the first chunk then runs by itself), so
+        every wave of parallel chunks is full and a load below
+        ``load_batch_size`` still runs in parallel — but never into chunks
+        smaller than ``_MIN_PARALLEL_CHUNK_FILES`` (or ``load_batch_size``, if
+        that is smaller), where per-chunk overhead outweighs the parallelism.
         """
         batch = self.native_config.load_batch_size
         byte_cap = (
@@ -691,13 +841,27 @@ class NativeLoadPipeline(BasePipeline):
             else None
         )
 
+        chunk_count = -(-len(flat) // batch)
+        if byte_cap is not None:
+            total_bytes = sum(f.size for f, _ in flat)
+            chunk_count = max(chunk_count, -(-total_bytes // byte_cap))
+        chunk_count = max(chunk_count, 1)
+        if concurrency > 1:
+            min_files = min(_MIN_PARALLEL_CHUNK_FILES, batch)
+            lead = 1 if lead_alone else 0
+            waves = -(-max(chunk_count - lead, 1) // concurrency)
+            filled = lead + waves * concurrency
+            chunk_count = max(chunk_count, min(filled, len(flat) // min_files))
+        base, extra = divmod(len(flat), chunk_count)
+
         chunks: list = []
         current: list = []
         current_bytes = 0
         for item in flat:
             f = item[0]
+            quota = base + 1 if len(chunks) < extra else base
             if current and (
-                len(current) >= batch
+                len(current) >= quota
                 or (byte_cap is not None and current_bytes + f.size > byte_cap)
             ):
                 chunks.append(current)
@@ -791,12 +955,13 @@ class NativeLoadPipeline(BasePipeline):
             )
 
         flat = [(f, cv) for cv, files in files_by_cursor.items() for f in files]
-        # Counted over the same chunks the load uses: a single external table
+        # Counted in chunks bounded like the load's: a single external table
         # over every discovered URI would exceed the per-statement source-URI
         # limit that load_batch_size exists to respect, and this adapter is
-        # built for file counts well past it. Every chunk is counted before any
-        # chunk is loaded, which is the property that matters — chunking the
-        # count does not weaken it.
+        # built for file counts well past it. The counts run one at a time, so
+        # this takes the fewest chunks rather than the load's parallel split.
+        # Every chunk is counted before any chunk is loaded, which is the
+        # property that matters — chunking the count does not weaken it.
         chunks = self._build_chunks(flat)
         row_count = 0
         with self._phase("guard"):
@@ -907,9 +1072,6 @@ class NativeLoadPipeline(BasePipeline):
         try:
             result = self.destination.native_load_chunk(spec)
         except Exception as exc:
-            self.logger.error(
-                "Native load failed for %d file(s): %s", len(files), exc, exc_info=True
-            )
             if self._incremental:
                 self.state_manager.record_loads_failed_bulk(
                     pipeline_name=self.pipeline_name,
@@ -1173,6 +1335,16 @@ class NativeLoadPipeline(BasePipeline):
             raise ValueError(
                 f"Source URI scheme {scheme!r} is not supported by destination "
                 f"{self.context.get_destination_type()!r}. Supported: {supported}"
+            )
+
+    def _validate_load_batch_size_against_destination(self) -> None:
+        limit = self.destination.native_load_max_files_per_chunk()
+        batch = self.native_config.load_batch_size
+        if limit is not None and batch > limit:
+            raise ValueError(
+                f"load_batch_size={batch} exceeds the {limit} files the "
+                f"{self.context.get_destination_type()!r} destination can load in "
+                f"one statement. Set load_batch_size to {limit} or less."
             )
 
     def _validate_databricks_only_fields(self) -> None:
