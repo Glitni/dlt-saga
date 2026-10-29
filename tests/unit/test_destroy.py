@@ -150,6 +150,194 @@ def test_destroy_historize_footprint_delegates_to_runner(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# destroy_ingest_footprint clears incremental state outside the dropped tables
+# ---------------------------------------------------------------------------
+
+
+class _FakeNativeState:
+    def __init__(self, has_rows):
+        self.has_rows = has_rows
+        self.cleared = []
+
+    def has_pipeline_state(self, pipeline_name):
+        return self.has_rows
+
+    def clear_pipeline_state(self, pipeline_name):
+        self.cleared.append(pipeline_name)
+
+
+def _patch_ingest_destroy(monkeypatch, tmp_path, tables, native_state):
+    """Wire destroy_ingest_footprint to fakes; returns the fake destination."""
+    resets = []
+    destination = SimpleNamespace(
+        config=SimpleNamespace(database="db"),
+        get_ingested_targets=lambda schema, name: tables,
+        get_full_table_id=lambda schema, table: f"db.{schema}.{table}",
+        reset_destination_state=lambda pipeline_name, table_name: resets.append(
+            table_name
+        ),
+        resets=resets,
+    )
+    context = SimpleNamespace(get_destination_type=lambda: "duckdb")
+    monkeypatch.setattr(
+        "dlt_saga.utility.cli.context.get_execution_context", lambda: context
+    )
+    monkeypatch.setattr(
+        "dlt_saga.destinations.factory.DestinationFactory.create_from_context",
+        lambda dest_type, ctx, cfg: destination,
+    )
+    monkeypatch.setattr(
+        "dlt_saga.pipelines.native_load.state.NativeLoadStateManager",
+        lambda dest, schema: native_state,
+    )
+    monkeypatch.setattr(
+        "dlt_saga.pipelines.base_pipeline.local_pipelines_dir",
+        lambda dest_type, database, schema: str(tmp_path),
+    )
+    return destination
+
+
+def _ingest_config():
+    return SimpleNamespace(pipeline_name="grp__thing", schema_name="s", config_dict={})
+
+
+def _seed_local_state(pipelines_dir, name):
+    """Give a local dlt pipeline real state (a schema), then deactivate it."""
+    import dlt
+
+    pipeline = dlt.pipeline(pipeline_name=name, pipelines_dir=str(pipelines_dir))
+    pipeline.extract([{"id": 1}], table_name="t")
+    pipeline.deactivate()
+
+
+def _has_local_state(pipelines_dir, name):
+    probe = destroy_mod._open_local_dlt_state(str(pipelines_dir), name)
+    if probe is None:
+        return False
+    probe.deactivate()
+    return True
+
+
+@pytest.fixture
+def no_active_dlt_pipeline():
+    """Assert destroy leaves no dlt pipeline active in the process-wide context."""
+    from dlt.common.configuration.container import Container
+    from dlt.common.pipeline import PipelineContext
+
+    yield
+    assert not Container()[PipelineContext].is_active()
+
+
+def test_destroy_ingest_clears_native_log_and_local_state(
+    monkeypatch, tmp_path, no_active_dlt_pipeline
+):
+    """Regression: destroy left the native_load cursor behind, so a re-created
+    pipeline resumed from it instead of its new initial_value."""
+    native_state = _FakeNativeState(has_rows=True)
+    destination = _patch_ingest_destroy(monkeypatch, tmp_path, ["thing"], native_state)
+    _seed_local_state(tmp_path, "grp__thing")
+
+    result = destroy_mod.destroy_ingest_footprint(_ingest_config())
+
+    assert destination.resets == ["thing"]
+    assert native_state.cleared == ["grp__thing"]
+    assert not _has_local_state(tmp_path, "grp__thing")
+    assert result["native_load_log"] is True
+    assert result["local_state"] is True
+
+
+def test_destroy_ingest_twice_is_a_noop(monkeypatch, tmp_path, no_active_dlt_pipeline):
+    """dlt's drop() re-creates an empty working folder; that is not state."""
+    _patch_ingest_destroy(monkeypatch, tmp_path, [], _FakeNativeState(False))
+    _seed_local_state(tmp_path, "grp__thing")
+
+    destroy_mod.destroy_ingest_footprint(_ingest_config())
+    second = destroy_mod.destroy_ingest_footprint(_ingest_config(), dry_run=True)
+
+    assert second["local_state"] is False
+
+
+def test_destroy_ingest_leaves_sibling_local_state(
+    monkeypatch, tmp_path, no_active_dlt_pipeline
+):
+    """Only this pipeline's working folder is dropped, never the shared dir."""
+    _patch_ingest_destroy(monkeypatch, tmp_path, [], _FakeNativeState(False))
+    for name in ("grp__thing", "grp__sibling"):
+        _seed_local_state(tmp_path, name)
+
+    destroy_mod.destroy_ingest_footprint(_ingest_config())
+
+    assert not _has_local_state(tmp_path, "grp__thing")
+    assert _has_local_state(tmp_path, "grp__sibling")
+
+
+def test_destroy_ingest_dry_run_reports_without_clearing(
+    monkeypatch, tmp_path, no_active_dlt_pipeline
+):
+    native_state = _FakeNativeState(has_rows=True)
+    destination = _patch_ingest_destroy(monkeypatch, tmp_path, ["thing"], native_state)
+    _seed_local_state(tmp_path, "grp__thing")
+
+    result = destroy_mod.destroy_ingest_footprint(_ingest_config(), dry_run=True)
+
+    assert destination.resets == []
+    assert native_state.cleared == []
+    assert _has_local_state(tmp_path, "grp__thing")
+    assert result["native_load_log"] is True
+    assert result["local_state"] is True
+
+
+def test_destroy_ingest_probes_before_dropping(monkeypatch, tmp_path):
+    """A failing probe must not leave a half-finished teardown behind."""
+
+    class _UnreadableLog(_FakeNativeState):
+        def has_pipeline_state(self, pipeline_name):
+            raise RuntimeError("access denied")
+
+    destination = _patch_ingest_destroy(
+        monkeypatch, tmp_path, ["thing"], _UnreadableLog(False)
+    )
+
+    with pytest.raises(RuntimeError, match="access denied"):
+        destroy_mod.destroy_ingest_footprint(_ingest_config())
+    assert destination.resets == []
+
+
+def test_destroy_ingest_without_state_is_a_noop(monkeypatch, tmp_path):
+    native_state = _FakeNativeState(has_rows=False)
+    destination = _patch_ingest_destroy(monkeypatch, tmp_path, [], native_state)
+
+    result = destroy_mod.destroy_ingest_footprint(_ingest_config())
+
+    assert destination.resets == []
+    assert native_state.cleared == []
+    assert result["native_load_log"] is False
+    assert result["local_state"] is False
+
+
+def test_execute_single_destroy_names_cleared_state(monkeypatch, caplog):
+    monkeypatch.setattr(
+        destroy_mod,
+        "destroy_ingest_footprint",
+        lambda c, dry_run, log_prefix="": {
+            "schema": "s",
+            "tables": [],
+            "table_ids": [],
+            "native_load_log": True,
+            "local_state": True,
+        },
+    )
+
+    with caplog.at_level("INFO", logger="dlt_saga.session"):
+        Session._execute_single_destroy(_config("grp__thing"), "ingest", False)
+
+    lines = [r.getMessage() for r in caplog.records if r.name == "dlt_saga.session"]
+    assert len(lines) == 1
+    assert "native_load log entries" in lines[0]
+    assert "local dlt state" in lines[0]
+
+
+# ---------------------------------------------------------------------------
 # Session.destroy input validation
 # ---------------------------------------------------------------------------
 
