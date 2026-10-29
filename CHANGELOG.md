@@ -1,3 +1,8 @@
+## 0.45.1 — 2026-10-29
+
+### Fixed
+- Pin duckdb below 2.0 to restore filesystem CSV ingests (#604)
+
 ## 0.45.0 — 2026-10-28
 
 ### Added
