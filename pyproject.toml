@@ -1,6 +1,6 @@
 [project]
 name = "dlt-saga"
-version = "0.45.1"
+version = "0.46.0"
 description = "Config-driven data ingestion and historization framework built on dlt"
 authors = [
     {name="Sindre Grindheim", email="sindre.grindheim@glitni.no"}

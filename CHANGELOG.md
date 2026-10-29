@@ -1,3 +1,14 @@
+## 0.46.0 — 2026-10-29
+
+### Fixed
+- Clear native_load log and local dlt state on saga destroy (#611)
+- Keep native_load chunks within destination limits and load them in parallel (#610)
+- Make saga's DuckDB code run on DuckDB 2.0 (#607)
+
+
+### Performance
+- Count native_load rows per file from the chunk instead of scanning the target (#613)
+
 ## 0.45.1 — 2026-10-29
 
 ### Fixed
