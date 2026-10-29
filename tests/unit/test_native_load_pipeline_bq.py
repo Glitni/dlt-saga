@@ -27,6 +27,12 @@ def _make_dest() -> BigQueryDestination:
     dest.execute_sql_with_job.return_value = ([], "job-001")
     dest.execute_sql.return_value = []
     dest.list_table_columns.return_value = []
+    dest._transfer_table.side_effect = lambda spec, select_sql, location=None: (
+        BigQueryDestination._transfer_table(dest, spec, select_sql, location)
+    )
+    dest._native_load_rowcounts.side_effect = lambda spec, transfer_id=None: (
+        BigQueryDestination._native_load_rowcounts(dest, spec, transfer_id)
+    )
     dest._run_insert.side_effect = lambda sql, job_config=None: (
         BigQueryDestination._run_insert(dest, sql, job_config)
     )
@@ -53,6 +59,7 @@ def _make_spec(
     omni_location=None,
     source_connection=None,
     external_schema=None,
+    incremental=False,
 ) -> NativeLoadSpec:
     if source_uris is None:
         source_uris = ["gs://bucket/prefix/file1.parquet"]
@@ -81,6 +88,7 @@ def _make_spec(
         omni_location=omni_location,
         source_connection=source_connection,
         external_schema=external_schema,
+        incremental=incremental,
     )
 
 
@@ -124,8 +132,7 @@ class TestNativeLoadChunkBQ:
         dest = _make_dest()
         dest.list_table_columns.return_value = [("col1", "STRING")]
         dest._patch_ext_for_hints.return_value = [("col1", "STRING")]
-        dest._native_load_insert_into_target.return_value = (7, "job-002")
-        dest._native_load_rowcounts.return_value = {}
+        dest._native_load_insert_into_target.return_value = (7, "job-002", {})
         spec = _make_spec(target_exists=True)
 
         result = BigQueryDestination.native_load_chunk(dest, spec)
@@ -402,93 +409,114 @@ class TestConcurrentNativeLoadSupport:
 
 
 @pytest.mark.unit
-class TestNativeLoadInsertCrossCloud:
-    """Cross-cloud append: CTAS to a destination-region transfer table, then
-    in-region INSERT (a single statement can't span the Omni + destination
-    regions)."""
+class TestNativeLoadInsertIntoTarget:
+    """Incremental and cross-cloud appends stage through a transient transfer
+    table: CTAS from the external table, INSERT from it, count per file from
+    it, drop it. Other appends insert straight from the external table."""
 
-    def test_ctas_transfer_then_in_region_insert_then_drop(self):
+    def _dest(self, rows_by_uri=None):
         dest = _make_dest()
-        dest.config = MagicMock()
         dest.config.project_id = "proj"
-        dest.get_full_table_id.side_effect = lambda ds, tbl: f"proj.{ds}.{tbl}"
-
+        dest.list_table_columns.return_value = [("col1", "STRING")]
         job = MagicMock()
         job.job_id = "job-x"
         job.num_dml_affected_rows = 3
-        client = MagicMock()
-        client.query.return_value = job
-        dest._client.return_value = client
+        dest._client.return_value.query.return_value = job
+        dest.execute_sql.return_value = [
+            MagicMock(uri=uri, cnt=cnt) for uri, cnt in (rows_by_uri or {}).items()
+        ]
+        return dest, job
 
-        spec = _make_spec(target_exists=True, omni_location="aws-eu-west-1")
-
-        rows, job_id = BigQueryDestination._native_load_insert_cross_cloud(
+    def _insert(self, dest, spec, query_location=None):
+        return BigQueryDestination._native_load_insert_into_target(
             dest,
             spec,
-            "proj.omni.ext",
-            "proj.ds.tbl",
-            "`a`, `b`",
-            "`a`, `b`",
-            "",
-            "aws-eu-west-1",
-        )
-
-        # 1. CTAS materializes a transfer table, run in the Omni region.
-        ctas_args = dest.execute_sql_with_job.call_args
-        assert ctas_args[0][0].startswith("CREATE TABLE")
-        assert "FROM proj.omni.ext" in ctas_args[0][0]
-        assert ctas_args[1]["location"] == "aws-eu-west-1"
-        # 2. In-region INSERT from the transfer table (no location override).
-        insert_sql = client.query.call_args[0][0]
-        assert insert_sql.startswith("INSERT INTO proj.ds.tbl")
-        assert "FROM proj.ds.tbl__xfer_" in insert_sql
-        dest._client.assert_called_once_with()  # default (destination) location
-        job.result.assert_called_once_with()  # no client-side timeout
-        # 3. Transfer table dropped.
-        dest.drop_table.assert_called_once()
-        assert rows == 3
-        assert job_id == "job-x"
-
-    def test_same_cloud_insert_stays_single_statement(self):
-        # No omni_location → _native_load_insert_into_target keeps the direct
-        # INSERT and never builds a transfer table.
-        from unittest.mock import patch
-
-        dest = _make_dest()
-        dest.config = MagicMock()
-        dest.config.project_id = "proj"
-        dest.config.location = "EU"
-        dest.list_table_columns.return_value = [("col1", "STRING")]
-        spec = _make_spec(target_exists=True)  # omni_location=None
-
-        job = MagicMock()
-        job.job_id = "job-gcs"
-        job.num_dml_affected_rows = 4
-        with patch("google.cloud.bigquery.Client") as mock_client:
-            mock_client.return_value.query.return_value = job
-            BigQueryDestination._native_load_insert_into_target(
-                dest, spec, "proj.ds_staging.ext", [("col1", "STRING")]
-            )
-
-        # Direct INSERT ... FROM the external table; no transfer CTAS.
-        dest.execute_sql_with_job.assert_not_called()
-        dest.drop_table.assert_not_called()
-
-    def test_insert_waits_without_client_timeout(self):
-        """Giving up on a running INSERT client-side would record its files as
-        failed while the job still commits, so the next run duplicates them."""
-        dest = _make_dest()
-        dest.config.project_id = "proj"
-        dest.list_table_columns.return_value = [("col1", "STRING")]
-        job = dest._client.return_value.query.return_value
-        job.num_dml_affected_rows = 1
-
-        BigQueryDestination._native_load_insert_into_target(
-            dest,
-            _make_spec(target_exists=True),
             "proj.ds_staging.ext",
             [("col1", "STRING")],
+            query_location=query_location,
         )
+
+    def _insert_sql(self, dest):
+        return dest._client.return_value.query.call_args[0][0]
+
+    def test_non_incremental_inserts_straight_from_the_external_table(self):
+        """Nothing records per-file counts, so a transfer table would only add
+        a second pass over the chunk."""
+        dest, _ = self._dest()
+
+        rows, job_id, rows_by_uri = self._insert(dest, _make_spec(target_exists=True))
+
+        dest.execute_sql_with_job.assert_not_called()
+        assert "FROM proj.ds_staging.ext" in self._insert_sql(dest)
+        job_config = dest._client.return_value.query.call_args[1]["job_config"]
+        assert job_config.default_dataset.dataset_id == "ds_staging"
+        assert (rows, job_id, rows_by_uri) == (3, "job-x", {})
+
+    def test_incremental_stages_in_staging_under_the_ext_prefix(self):
+        """So the orphan sweep reclaims it if a crash skips the drop."""
+        dest, _ = self._dest()
+
+        self._insert(dest, _make_spec(target_exists=True, incremental=True))
+
+        ctas = dest.execute_sql_with_job.call_args[0][0]
+        assert ctas.startswith("CREATE TABLE proj.ds_staging.tbl__ext_xfer_")
+        assert "FROM proj.ds_staging.ext" in ctas
+        assert "FROM proj.ds_staging.tbl__ext_xfer_" in self._insert_sql(dest)
+        dataset, table = dest.drop_table.call_args[0]
+        assert dataset == "ds_staging" and table.startswith("tbl__ext_xfer_")
+
+    def test_transfer_table_expires_on_its_own(self):
+        """A crash between CTAS and drop must not leave a data copy behind."""
+        dest, _ = self._dest()
+
+        self._insert(dest, _make_spec(target_exists=True, incremental=True))
+
+        ctas = dest.execute_sql_with_job.call_args[0][0]
+        assert (
+            "OPTIONS(expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP()" in ctas
+        )
+
+    def test_counts_come_from_the_transfer_table(self):
+        dest, _ = self._dest({"gs://b/f1.parquet": 2, "gs://b/f2.parquet": 1})
+
+        _, _, rows_by_uri = self._insert(
+            dest, _make_spec(target_exists=True, incremental=True)
+        )
+
+        count_sql = dest.execute_sql.call_args[0][0]
+        assert "FROM proj.ds_staging.tbl__ext_xfer_" in count_sql
+        assert rows_by_uri == {"gs://b/f1.parquet": 2, "gs://b/f2.parquet": 1}
+
+    def test_cross_cloud_ctas_in_omni_region_then_in_region_insert(self):
+        dest, _ = self._dest()
+        spec = _make_spec(target_exists=True, omni_location="aws-eu-west-1")
+
+        self._insert(dest, spec, "aws-eu-west-1")
+
+        ctas, ctas_kwargs = dest.execute_sql_with_job.call_args
+        assert ctas[0].startswith("CREATE TABLE proj.ds.tbl__xfer_")
+        assert ctas_kwargs["location"] == "aws-eu-west-1"
+        assert "FROM proj.ds.tbl__xfer_" in self._insert_sql(dest)
+        dest._client.assert_called_once_with()  # default (destination) location
+        dataset, table = dest.drop_table.call_args[0]
+        assert dataset == "ds" and table.startswith("tbl__xfer_")
+
+    def test_transfer_table_dropped_when_insert_fails(self):
+        dest, job = self._dest()
+        job.result.side_effect = RuntimeError("insert failed")
+
+        with pytest.raises(RuntimeError, match="insert failed"):
+            self._insert(dest, _make_spec(target_exists=True, incremental=True))
+
+        dest.drop_table.assert_called_once()
+
+    @pytest.mark.parametrize("incremental", [False, True])
+    def test_insert_waits_without_client_timeout(self, incremental):
+        """Giving up on a running INSERT client-side would record its files as
+        failed while the job still commits, so the next run duplicates them."""
+        dest, job = self._dest()
+
+        self._insert(dest, _make_spec(target_exists=True, incremental=incremental))
 
         job.result.assert_called_once_with()
 
@@ -628,7 +656,7 @@ class TestNativeLoadRowcountsBQ:
             MagicMock(uri="gs://bucket/prefix/f2.parquet", cnt=200),
         ]
         dest.get_full_table_id.return_value = "proj.ds.tbl"
-        spec = _make_spec()
+        spec = _make_spec(incremental=True)
 
         result = BigQueryDestination._native_load_rowcounts(dest, spec)
 
@@ -652,7 +680,7 @@ class TestNativeLoadRowcountsBQ:
     def test_returns_empty_on_query_failure(self):
         dest = _make_dest()
         dest.execute_sql.side_effect = RuntimeError("BQ error")
-        spec = _make_spec()
+        spec = _make_spec(incremental=True)
 
         result = BigQueryDestination._native_load_rowcounts(dest, spec)
         assert result == {}
@@ -660,13 +688,32 @@ class TestNativeLoadRowcountsBQ:
     def test_sql_uses_ingested_at_filter(self):
         dest = _make_dest()
         dest.execute_sql.return_value = []
-        spec = _make_spec()
+        spec = _make_spec(incremental=True)
 
         BigQueryDestination._native_load_rowcounts(dest, spec)
 
         sql = dest.execute_sql.call_args[0][0]
         assert "WHERE" in sql
         assert "_dlt_ingested_at" in sql
+
+    def test_transfer_table_needs_no_ingested_at_filter(self):
+        dest = _make_dest()
+        dest.execute_sql.return_value = []
+
+        BigQueryDestination._native_load_rowcounts(
+            dest, _make_spec(incremental=True), transfer_id="proj.st.xfer"
+        )
+
+        sql = dest.execute_sql.call_args[0][0]
+        assert "FROM proj.st.xfer" in sql
+        assert "WHERE" not in sql
+
+    def test_skipped_when_not_incremental(self):
+        """Only incremental runs record per-file counts."""
+        dest = _make_dest()
+
+        assert BigQueryDestination._native_load_rowcounts(dest, _make_spec()) == {}
+        dest.execute_sql.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -808,7 +855,7 @@ class TestNativeLoadChunkCrossCloud:
             "projects/proj/locations/aws-eu-west-1/connections/my-conn"
         )
         dest._native_load_create_target.return_value = (5, "job-omni")
-        dest._native_load_insert_into_target.return_value = (5, "job-omni")
+        dest._native_load_insert_into_target.return_value = (5, "job-omni", {})
         dest._native_load_rowcounts.return_value = {}
         return dest
 

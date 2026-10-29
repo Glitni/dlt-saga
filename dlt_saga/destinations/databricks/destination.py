@@ -1096,10 +1096,19 @@ class DatabricksDestination(Destination):
                 return 0
 
     def _native_load_rowcounts(self, spec: "Any", target_id: str) -> dict:
-        """Query per-file row counts from the target after COPY INTO."""
+        """Query per-file row counts from the target after COPY INTO.
+
+        Only incremental runs record them, so other runs skip the query. The
+        filter on this run's ingest timestamp lets Delta skip, by its min/max
+        statistics, every data file written before this run; files from this
+        run's earlier chunks are still read.
+        """
         from dlt_saga.pipelines.native_load.pipeline import (
             NativeLoadPipeline as _NLP,
         )
+
+        if not getattr(spec, "incremental", False):
+            return {}
 
         file_col = _NLP._FILE_NAME_COLUMN
         at_col = _NLP._INGESTED_AT_COLUMN

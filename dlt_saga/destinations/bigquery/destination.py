@@ -3,8 +3,9 @@
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from dlt_saga.destinations.base import TableLayout
 from dlt_saga.destinations.bigquery.base import BigQueryBaseDestination
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 # Retries for an INSERT that BigQuery aborted over a concurrent update to its
 # table (e.g. a parallel native_load chunk adding a column), with backoff.
 _CONFLICT_RETRIES = 3
+
+# Transfer tables carry a full chunk of data, so they expire on their own if a
+# crash skips the drop; well past any single load, since BigQuery jobs end at 6h.
+_TRANSFER_TABLE_EXPIRATION_HOURS = 24
 _CONFLICT_BACKOFF_SECONDS = 2.0
 
 _TARGET_COLUMN_LOCKS: Dict[str, threading.Lock] = {}
@@ -1535,12 +1540,13 @@ class BigQueryDestination(BigQueryBaseDestination):
                 rows_loaded, job_id = self._native_load_create_target(
                     spec, ext_id, ext_cols, query_location=query_location
                 )
+                # The target was just created, so it holds only this chunk.
+                rows_by_uri = self._native_load_rowcounts(spec)
             else:
-                rows_loaded, job_id = self._native_load_insert_into_target(
+                rows_loaded, job_id, rows_by_uri = self._native_load_insert_into_target(
                     spec, ext_id, ext_cols, query_location=query_location
                 )
 
-            rows_by_uri = self._native_load_rowcounts(spec)
             return NativeLoadResult(
                 rows_loaded=rows_loaded, job_id=job_id, rows_by_uri=rows_by_uri
             )
@@ -1712,28 +1718,15 @@ class BigQueryDestination(BigQueryBaseDestination):
         where_sql = self._render_native_load_where(spec, ext_cols)
 
         if query_location:
-            # Cross-cloud: materialize the transformed rows into a
-            # destination-region transfer table (cross-cloud CTAS), then build the
-            # real target from it in-region — so PARTITION BY / CLUSTER BY apply
-            # (a cross-cloud write can't create a clustered table directly).
-            import uuid
-
-            xfer = f"{spec.target_table}__xfer_{uuid.uuid4().hex[:8]}"
-            xfer_id = self.get_full_table_id(spec.target_schema, xfer)
-            ctas = f"CREATE TABLE {xfer_id} AS SELECT {all_select} FROM {ext_id}"
+            # Cross-cloud: build the real target in-region from a transfer
+            # table, so PARTITION BY / CLUSTER BY apply (a cross-cloud write
+            # can't create a clustered table directly).
+            select_sql = f"SELECT {all_select} FROM {ext_id}"
             if where_sql:
-                ctas = f"{ctas} WHERE {where_sql}"
-            self.execute_sql_with_job(
-                ctas, spec.staging_dataset, location=query_location
-            )
-            try:
+                select_sql = f"{select_sql} WHERE {where_sql}"
+            with self._transfer_table(spec, select_sql, query_location) as xfer_id:
                 parts.append(f"AS SELECT * FROM {xfer_id}")
                 _, job_id = self.execute_sql_with_job(" ".join(parts))
-            finally:
-                try:
-                    self.drop_table(spec.target_schema, xfer)
-                except Exception as exc:
-                    logger.warning("Could not drop transfer table %s: %s", xfer, exc)
         else:
             # Same-cloud: one CTAS straight from the external table.
             select_sql = f"AS SELECT {all_select} FROM {ext_id}"
@@ -1754,12 +1747,12 @@ class BigQueryDestination(BigQueryBaseDestination):
         ext_cols: list,
         query_location: Optional[str] = None,
     ) -> tuple:
-        """INSERT INTO existing target. Returns (rows_loaded, job_id).
+        """INSERT INTO existing target. Returns (rows_loaded, job_id, rows_by_uri).
 
-        ``query_location`` runs the INSERT…SELECT in the Omni region for
-        cross-cloud S3 loads (it reads the S3 external table); target column
-        reconciliation (list/add column) touches only the destination-region
-        target and stays on the default location.
+        ``query_location`` runs the read of the external table in the Omni
+        region for cross-cloud S3 loads; target column reconciliation
+        (list/add column) touches only the destination-region target and stays
+        on the default location.
         """
         from google.cloud import bigquery
 
@@ -1780,27 +1773,31 @@ class BigQueryDestination(BigQueryBaseDestination):
         )
         full_select = ", ".join(filter(None, [data_select, derived_select]))
         where_sql = self._render_native_load_where(spec, ext_cols)
-
-        if query_location:
-            return self._native_load_insert_cross_cloud(
-                spec,
-                ext_id,
-                target_id,
-                col_list,
-                full_select,
-                where_sql,
-                query_location,
-            )
-
-        # Same-cloud: one INSERT … SELECT directly from the external table.
-        sql = f"INSERT INTO {target_id} ({col_list}) SELECT {full_select} FROM {ext_id}"
+        select_sql = f"SELECT {full_select} FROM {ext_id}"
         if where_sql:
-            sql = f"{sql} WHERE {where_sql}"
-        job_config = bigquery.QueryJobConfig()
-        job_config.default_dataset = f"{self.config.project_id}.{spec.staging_dataset}"
-        job = self._run_insert(sql, job_config)
-        rows_loaded = job.num_dml_affected_rows or 0
-        return int(rows_loaded), job.job_id
+            select_sql = f"{select_sql} WHERE {where_sql}"
+
+        # A transfer table is needed cross-cloud (one statement can't span the
+        # Omni and destination regions) and pays for itself when per-file counts
+        # are recorded (incremental): counting from it reads only this chunk's
+        # rows instead of scanning the target. Otherwise insert straight from
+        # the external table, reading the source once.
+        if not (query_location or spec.incremental):
+            job_config = bigquery.QueryJobConfig()
+            job_config.default_dataset = (
+                f"{self.config.project_id}.{spec.staging_dataset}"
+            )
+            job = self._run_insert(
+                f"INSERT INTO {target_id} ({col_list}) {select_sql}", job_config
+            )
+            return int(job.num_dml_affected_rows or 0), job.job_id, {}
+
+        with self._transfer_table(spec, select_sql, query_location) as xfer_id:
+            job = self._run_insert(  # destination region
+                f"INSERT INTO {target_id} ({col_list}) SELECT {col_list} FROM {xfer_id}"
+            )
+            rows_by_uri = self._native_load_rowcounts(spec, transfer_id=xfer_id)
+            return int(job.num_dml_affected_rows or 0), job.job_id, rows_by_uri
 
     def _run_insert(self, sql: str, job_config: Any = None) -> Any:
         """Run an INSERT and wait for it, retrying a concurrent-update abort.
@@ -1897,47 +1894,43 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         return insert_col_exprs
 
-    def _native_load_insert_cross_cloud(
-        self,
-        spec: "Any",
-        ext_id: str,
-        target_id: str,
-        col_list: str,
-        full_select: str,
-        where_sql: str,
-        query_location: str,
-    ) -> tuple:
-        """Cross-cloud append via a destination-region transfer table.
+    @contextmanager
+    def _transfer_table(
+        self, spec: "Any", select_sql: str, query_location: Optional[str] = None
+    ) -> Iterator[str]:
+        """Materialize ``select_sql`` into a transient native table; yield its id.
 
-        A single statement can't reference both the Omni-region external table
-        and the destination-region target (BigQuery runs a query in its datasets'
-        location and won't span regions). So materialize the transformed rows into
-        a transfer table in the destination dataset via cross-cloud CTAS (the
-        supported transfer — reads S3 in the Omni region, writes the destination
-        region), then INSERT from it in-region and drop it.
+        Cross-cloud (``query_location`` set) the CTAS reads S3 in the Omni
+        region and writes the destination region, so the table lives in the
+        target dataset. Same-cloud it lives in the staging dataset under the
+        ``__ext_`` prefix, which the pipeline's orphan sweep also reclaims.
+        Either way it is dropped on exit and expires on its own after
+        ``_TRANSFER_TABLE_EXPIRATION_HOURS`` should a crash skip the drop.
         """
         import uuid
 
-        xfer = f"{spec.target_table}__xfer_{uuid.uuid4().hex[:8]}"
-        xfer_id = self.get_full_table_id(spec.target_schema, xfer)
+        suffix = uuid.uuid4().hex[:8]
+        if query_location:
+            dataset, name = spec.target_schema, f"{spec.target_table}__xfer_{suffix}"
+        else:
+            dataset = spec.staging_dataset
+            name = f"{spec.target_table}__ext_xfer_{suffix}"
+        table_id = self.get_full_table_id(dataset, name)
 
-        ctas = f"CREATE TABLE {xfer_id} AS SELECT {full_select} FROM {ext_id}"
-        if where_sql:
-            ctas = f"{ctas} WHERE {where_sql}"
-        self.execute_sql_with_job(ctas, spec.staging_dataset, location=query_location)
-
+        self.execute_sql_with_job(
+            f"CREATE TABLE {table_id} OPTIONS(expiration_timestamp = "
+            f"TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL "
+            f"{_TRANSFER_TABLE_EXPIRATION_HOURS} HOUR)) AS {select_sql}",
+            spec.staging_dataset,
+            location=query_location,
+        )
         try:
-            insert_sql = (
-                f"INSERT INTO {target_id} ({col_list}) SELECT {col_list} FROM {xfer_id}"
-            )
-            job = self._run_insert(insert_sql)  # destination region
-            rows_loaded = job.num_dml_affected_rows or 0
-            return int(rows_loaded), job.job_id
+            yield table_id
         finally:
             try:
-                self.drop_table(spec.target_schema, xfer)
+                self.drop_table(dataset, name)
             except Exception as exc:
-                logger.warning("Could not drop transfer table %s: %s", xfer, exc)
+                logger.warning("Could not drop transfer table %s: %s", name, exc)
 
     def _render_native_load_where(self, spec: "Any", ext_cols: list) -> str:
         """Resolve filter column names against the external table and render WHERE.
@@ -1963,11 +1956,22 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         return self.render_filter(spec.filters, column_resolver=resolve)
 
-    def _native_load_rowcounts(self, spec: "Any") -> dict:
-        """Query per-file row counts from the target using _dlt_source_file_name filter."""
+    def _native_load_rowcounts(
+        self, spec: "Any", transfer_id: Optional[str] = None
+    ) -> dict:
+        """Per-file row counts for the load state, keyed by source URI.
+
+        Only incremental runs record them, so other runs skip the query. Read
+        from the chunk's transfer table when there is one (it holds only this
+        chunk's rows), else from the target filtered to this run's ingest
+        timestamp.
+        """
         from dlt_saga.pipelines.native_load.pipeline import (
             NativeLoadPipeline as _NLP,
         )
+
+        if not getattr(spec, "incremental", False):
+            return {}
 
         file_col = _NLP._FILE_NAME_COLUMN
         at_col = _NLP._INGESTED_AT_COLUMN
@@ -1976,17 +1980,20 @@ class BigQueryDestination(BigQueryBaseDestination):
         if not has_file_col:
             return {}
 
-        at_expr = next(
-            (c.sql_expr for c in spec.derived_columns if c.name == at_col), None
-        )
-        if not at_expr:
-            return {}
+        if transfer_id:
+            source, where = transfer_id, ""
+        else:
+            at_expr = next(
+                (c.sql_expr for c in spec.derived_columns if c.name == at_col), None
+            )
+            if not at_expr:
+                return {}
+            source = self.get_full_table_id(spec.target_schema, spec.target_table)
+            where = f"WHERE {self.quote_identifier(at_col)} = {at_expr} "
 
-        target_id = self.get_full_table_id(spec.target_schema, spec.target_table)
         sql = (
             f"SELECT {self.quote_identifier(file_col)} AS uri, COUNT(*) AS cnt "
-            f"FROM {target_id} "
-            f"WHERE {self.quote_identifier(at_col)} = {at_expr} "
+            f"FROM {source} {where}"
             f"GROUP BY {self.quote_identifier(file_col)}"
         )
         try:
