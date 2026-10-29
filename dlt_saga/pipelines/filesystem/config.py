@@ -4,6 +4,9 @@ from typing import Any, Dict, Optional, Union
 from dlt_saga.pipelines.base_config import BaseConfig
 from dlt_saga.utility.secrets.secret_str import SecretStr, coerce_secret
 
+# Encodings DuckDB reads natively; any other encoding goes through pandas.
+_DUCKDB_CSV_ENCODINGS = ("utf-8", "utf8")
+
 
 @dataclass
 class FilesystemConfig(BaseConfig):
@@ -208,6 +211,11 @@ class FilesystemConfig(BaseConfig):
                 raise ValueError("file_glob is required for filesystem sources")
 
         self._validate_snapshot_config()
+
+    @property
+    def duckdb_reads_encoding(self) -> bool:
+        """Whether DuckDB can read the configured encoding (else pandas does)."""
+        return (self.encoding or "utf-8").lower() in _DUCKDB_CSV_ENCODINGS
 
     def _validate_file_id_config(self) -> None:
         """file_id selects one Drive file, replacing bucket_name + file_glob."""

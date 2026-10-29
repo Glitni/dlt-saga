@@ -345,25 +345,52 @@ def list_pipelines(
 def _report_result_details(results: list) -> None:
     """Print per-config errors and warnings.
 
+    A warning shared by several pipeline configs is printed once, followed by
+    the pipelines it applies to, so a project-wide pattern doesn't repeat per
+    pipeline. An item with a single finding gets it on one line.
+
     Collision findings are omitted here — they're inherently cross-config and
     shown once, grouped, by :func:`_report_project_check_status`. Synthetic
     ``check`` results (a project-wide check that couldn't run) are likewise left
     to the status line.
     """
+    from collections import Counter
+
     from dlt_saga.validate import is_collision_finding
 
-    for result in results:
-        if result.kind == "check":
-            continue
-        visible_errors = [e for e in result.errors if not is_collision_finding(e)]
-        if visible_errors:
-            logger.error("%s:", result.pipeline_name)
-            for error in visible_errors:
-                logger.error("  - %s", error)
-        elif result.warnings:
-            logger.warning("%s:", result.pipeline_name)
-        for warning in result.warnings:
-            logger.warning("  - %s", warning)
+    shown = [result for result in results if result.kind != "check"]
+    pipelines = [result for result in shown if result.kind == "pipeline"]
+    counts = Counter(w for result in pipelines for w in set(result.warnings))
+    shared = {warning for warning, count in counts.items() if count > 1}
+
+    for result in shown:
+        errors = [e for e in result.errors if not is_collision_finding(e)]
+        warnings = result.warnings
+        if result.kind == "pipeline":
+            warnings = [w for w in warnings if w not in shared]
+        _report_findings(result.pipeline_name, errors, warnings)
+
+    for warning in sorted(shared):
+        names = [r.pipeline_name for r in pipelines if warning in r.warnings]
+        logger.warning("%s (%d pipelines):", warning, len(names))
+        for name in names:
+            logger.warning("  - %s", name)
+
+
+def _report_findings(name: str, errors: list, warnings: list) -> None:
+    """Print one config's errors and warnings, inline when there is just one."""
+    if len(errors) + len(warnings) == 1:
+        log = logger.error if errors else logger.warning
+        log("%s: %s", name, (errors or warnings)[0])
+        return
+    if errors:
+        logger.error("%s:", name)
+        for error in errors:
+            logger.error("  - %s", error)
+    elif warnings:
+        logger.warning("%s:", name)
+    for warning in warnings:
+        logger.warning("  - %s", warning)
 
 
 def _report_project_check_status(results: list) -> None:

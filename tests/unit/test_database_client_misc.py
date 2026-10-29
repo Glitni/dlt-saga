@@ -176,3 +176,45 @@ class TestFalsyWatermark:
         ):
             pipeline.extract_data()
         assert captured["incremental_value"] == 100
+
+
+class TestFetchFromDuckdb:
+    """Reads a real DuckDB file into every supported return type."""
+
+    @pytest.fixture
+    def client(self, tmp_path):
+        import duckdb
+
+        path = str(tmp_path / "source.duckdb")
+        with duckdb.connect(path) as conn:
+            conn.execute(
+                "CREATE TABLE t AS SELECT 1 AS id, "
+                "TIMESTAMPTZ '2026-01-01 10:00:00+00' AS ts"
+            )
+        return DatabaseClient(
+            DatabaseConfig(
+                database_type="duckdb", source_database=path, source_table="t"
+            )
+        )
+
+    def test_arrow_strips_timezones(self, client):
+        import pyarrow as pa
+
+        table = client._fetch_from_duckdb("SELECT * FROM t", "arrow")
+        assert table.num_rows == 1
+        assert table.schema.field("ts").type == pa.timestamp("us")
+
+    @pytest.mark.parametrize("return_type", ["pandas", "polars"])
+    def test_dataframes(self, client, return_type):
+        assert len(client._fetch_from_duckdb("SELECT * FROM t", return_type)) == 1
+
+    def test_query_without_result_set_is_rejected(self, client):
+        # DuckDB 1.x returns None from sql() for a statement with no result set
+        conn = MagicMock()
+        conn.sql.return_value = None
+        with (
+            patch("duckdb.connect", return_value=conn),
+            pytest.raises(ValueError, match="no result set"),
+        ):
+            client._fetch_from_duckdb("CREATE TABLE u (id INT)", "arrow")
+        conn.close.assert_called_once()

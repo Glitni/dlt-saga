@@ -476,12 +476,20 @@ class DatabaseClient:
         conn = duckdb.connect(db_path)
 
         try:
-            result_rel = conn.execute(query)
+            # Fetch through a relation: it exports Arrow without the extra copy
+            # a connection result makes, and its fetch methods exist on DuckDB
+            # 1.x and 2.0 (2.0 removed fetch_arrow_table()/pl() from connections).
+            result_rel = conn.sql(query)
+            if result_rel is None:
+                raise ValueError(
+                    f"DuckDB query returned no result set; it must end with a "
+                    f"SELECT: {query}"
+                )
 
             if return_type == "arrow":
                 import pyarrow as pa
 
-                result = result_rel.fetch_arrow_table()
+                result = result_rel.to_arrow_table()
                 # Strip timezone info from timestamp columns to avoid
                 # PyArrow tzdata resolution issues on Windows
                 new_fields = []
@@ -494,7 +502,7 @@ class DatabaseClient:
                         new_fields.append(field)
                 result = result.cast(pa.schema(new_fields))
             elif return_type == "pandas":
-                result = result_rel.fetchdf()
+                result = result_rel.df()
             elif return_type == "polars":
                 result = result_rel.pl()
             else:

@@ -95,8 +95,12 @@ class TestGoldenPath:
         con = duckdb.connect(str(tmp_path / "local.duckdb"))
         try:
             con.execute("use dlt_dev")
-            plans = con.sql("select count(*) from _saga_execution_plans").fetchone()[0]
-            executions = con.sql("select count(*) from _saga_executions").fetchone()[0]
+            plans = con.execute(
+                "select count(*) from _saga_execution_plans"
+            ).fetchone()[0]
+            executions = con.execute(
+                "select count(*) from _saga_executions"
+            ).fetchone()[0]
         finally:
             con.close()
 

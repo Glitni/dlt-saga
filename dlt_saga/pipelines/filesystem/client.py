@@ -9,7 +9,6 @@ from dlt.sources.filesystem import (
     FileItemDict,
     filesystem,
     read_csv,
-    read_csv_duckdb,
     read_jsonl,
     read_parquet,
 )
@@ -23,6 +22,9 @@ logger = logging.getLogger(__name__)
 # peak memory to one chunk instead of materializing the whole file (+ a dict copy)
 # regardless of file size.
 _CSV_METADATA_CHUNK_SIZE = 50_000
+
+# Rows per batch handed to dlt by the DuckDB CSV reader (dlt's own default).
+_CSV_DUCKDB_CHUNK_SIZE = 5_000
 
 # Read-only Drive scope for gdrive sources. The service account must also be
 # shared into the source folder (or file, with file_id): the scope alone grants
@@ -125,6 +127,29 @@ def _iter_csv_records_with_metadata(
         except pd.errors.EmptyDataError:
             logger.debug(f"Skipping empty file: {file_name}")
             return
+
+
+def _iter_csv_duckdb(
+    conn: Any,
+    file_obj: FileItemDict,
+    duckdb_kwargs: Dict[str, Any],
+    chunk_size: int = _CSV_DUCKDB_CHUNK_SIZE,
+) -> Iterator[List[Dict[str, Any]]]:
+    """Stream one CSV file through DuckDB as batches of dict rows.
+
+    Values are typed by DuckDB's CSV sniffing, as with dlt's ``read_csv_duckdb``.
+    Rows are fetched through a cursor on the connection: DuckDB 2.0 removed
+    ``fetchmany()`` from relations, which dlt's reader relies on.
+    """
+    with file_obj.open() as f:
+        # The relation owns the registered file object: keep it referenced while
+        # the cursor reads through the view, or DuckDB loses the file.
+        relation = conn.from_csv_auto(f, **duckdb_kwargs)
+        relation.create_view("_saga_csv", replace=True)
+        cursor = conn.execute("SELECT * FROM _saga_csv")
+        columns = [column[0] for column in cursor.description]
+        while batch := cursor.fetchmany(chunk_size):
+            yield [dict(zip(columns, row)) for row in batch]
 
 
 class FilesystemClient:
@@ -657,15 +682,12 @@ class FilesystemClient:
             csv_kwargs["encoding"] = self.config.encoding
         csv_kwargs.update(kwargs)
 
-        encoding = self.config.encoding or "utf-8"
-        if encoding.lower() in ("utf-8", "utf8"):
-            return fs | read_csv_duckdb(**csv_kwargs, parallel=True).with_name(
-                "read_csv_duckdb"
-            )
+        if self.config.duckdb_reads_encoding:
+            return fs | self._duckdb_csv_reader(csv_kwargs)
         else:
             logger.debug(
-                f"Using pandas reader for non-UTF-8 encoding: {encoding} "
-                "(DuckDB only supports UTF-8)"
+                f"Using pandas reader for encoding {self.config.encoding} "
+                "(DuckDB reads only UTF-8)"
             )
             dtype_map = self._get_pandas_dtypes()
             if dtype_map:
@@ -674,6 +696,40 @@ class FilesystemClient:
                     f"Using dtype hints for {len(dtype_map)} columns to skip type inference"
                 )
             return fs | read_csv(**csv_kwargs).with_name("read_csv")
+
+    def _duckdb_csv_reader(self, csv_kwargs: Dict[str, Any]) -> Any:
+        """DuckDB CSV reader (UTF-8 only); files are read one after another.
+
+        Accepts ``chunk_size`` (rows per batch) besides DuckDB's ``read_csv``
+        options, as dlt's ``read_csv_duckdb`` did.
+
+        Raises:
+            ValueError: For dlt reader options this reader doesn't implement
+                (``use_pyarrow``, ``filename``); DuckDB would otherwise reject
+                them or, for ``filename``, fill in its internal file path.
+        """
+        import duckdb
+
+        duckdb_kwargs = dict(csv_kwargs)
+        unsupported = sorted({"use_pyarrow", "filename"} & duckdb_kwargs.keys())
+        if unsupported:
+            raise ValueError(
+                f"The DuckDB CSV reader doesn't support {', '.join(unsupported)}"
+            )
+        chunk_size = duckdb_kwargs.pop("chunk_size", _CSV_DUCKDB_CHUNK_SIZE)
+        duckdb_kwargs["parallel"] = True
+
+        @dlt.transformer(name="read_csv_duckdb")
+        def read_csv_duckdb(items: Iterator[FileItemDict]) -> Iterator[Any]:
+            # dlt advances readers in turn and a connection holds a single
+            # pending result, so each reader gets a connection of its own.
+            with duckdb.connect() as conn:
+                for file_obj in items:
+                    yield from _iter_csv_duckdb(
+                        conn, file_obj, duckdb_kwargs, chunk_size
+                    )
+
+        return read_csv_duckdb
 
     def _create_file_reader(self, fs, **kwargs):
         """Create appropriate file reader based on file type."""
@@ -722,45 +778,7 @@ class FilesystemClient:
 
     def read_csv(self, **kwargs) -> Any:
         """Read CSV files, optionally with file metadata injection."""
-        # Use metadata-injecting transformer if enabled
-        if self.config.csv_include_file_metadata:
-            logger.debug("Using CSV reader with file metadata injection")
-            fs = self._file_source()
-            return fs | self._get_csv_with_metadata_transformer()
-
-        csv_kwargs: Dict[str, Any] = {}
-        if self.config.csv_separator:
-            csv_kwargs["sep"] = self.config.csv_separator
-        if self.config.encoding:
-            csv_kwargs["encoding"] = self.config.encoding
-
-        csv_kwargs.update(kwargs)
-
-        # DuckDB only supports UTF-8 encoding
-        # Fall back to pandas for non-UTF-8 files (without chunking to avoid encoding issues)
-        encoding = self.config.encoding or "utf-8"
-        if encoding.lower() in ("utf-8", "utf8"):
-            # Use DuckDB reader for better performance with UTF-8 files
-            # parallel=True enables parallel CSV parsing for faster reads
-            return self._file_source() | read_csv_duckdb(
-                **csv_kwargs, parallel=True
-            ).with_name("read_csv_duckdb")
-        else:
-            # Use pandas for non-UTF-8 encoded files (no chunking)
-            logger.debug(
-                f"Using pandas reader for non-UTF-8 encoding: {encoding} "
-                "(DuckDB only supports UTF-8)"
-            )
-
-            # Add dtype hints from config to skip type inference
-            dtype_map = self._get_pandas_dtypes()
-            if dtype_map:
-                csv_kwargs["dtype"] = dtype_map
-                logger.debug(
-                    f"Using dtype hints for {len(dtype_map)} columns to skip type inference"
-                )
-
-            return self._file_source() | read_csv(**csv_kwargs).with_name("read_csv")
+        return self._create_csv_reader(self._file_source(), **kwargs)
 
     def read_parquet(self, **kwargs) -> Any:
         return self._file_source() | read_parquet(**kwargs).with_name("read_parquet")

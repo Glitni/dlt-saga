@@ -79,9 +79,9 @@ class TestStateNew:
             con = duckdb.connect(str(tmp_path / "local.duckdb"))
             try:
                 con.execute("use dlt_dev")
-                return con.sql("select count(*) from _saga_execution_plans").fetchone()[
-                    0
-                ]
+                return con.execute(
+                    "select count(*) from _saga_execution_plans"
+                ).fetchone()[0]
             finally:
                 con.close()
 
