@@ -50,6 +50,18 @@ def _make_dict_predicate(specs: List[Any]):
     return _dict_predicate
 
 
+def local_pipelines_dir(destination_type: str, database: str, schema_name: str) -> str:
+    """Return the local dlt ``pipelines_dir`` for a destination/database/schema.
+
+    Isolating local state per destination, database and schema prevents state
+    conflicts when switching between profiles/destinations. A pipeline's working
+    folder (local dlt state, incl. incremental cursors) is
+    ``<pipelines_dir>/<pipeline_name>``.
+    """
+    suffix = f"{destination_type}_{database}_{schema_name}".replace("-", "_")
+    return os.path.expanduser(f"~/.dlt/pipelines_{suffix}")
+
+
 class BasePipeline:
     def __init__(self, config: Dict[str, Any], log_prefix: Optional[str] = None):
         self.config_dict = config or {}
@@ -189,21 +201,14 @@ class BasePipeline:
         self._apply_replace_strategy(dlt_destination)
         dlt_staging = self.destination.create_dlt_staging()
 
-        # Set pipelines_dir to isolate state per destination, project, and dataset
-        # This prevents state conflicts when switching between profiles/destinations
-        pipelines_dir_suffix = (
-            f"{destination_type}_{self.destination_database}_{schema_name}".replace(
-                "-", "_"
-            )
-        )
-        pipelines_dir = os.path.expanduser(f"~/.dlt/pipelines_{pipelines_dir_suffix}")
-
         pipeline_params = {
             "pipeline_name": self.pipeline_name,
             "dataset_name": schema_name,  # dlt's pipeline kwarg is dataset_name
             "destination": dlt_destination,
             "dev_mode": DEV_MODE,
-            "pipelines_dir": pipelines_dir,
+            "pipelines_dir": local_pipelines_dir(
+                destination_type, self.destination_database, schema_name
+            ),
         }
         if dlt_staging is not None:
             pipeline_params["staging"] = dlt_staging

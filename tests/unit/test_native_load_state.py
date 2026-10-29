@@ -336,6 +336,36 @@ class TestGetLastCursor:
 
 
 @pytest.mark.unit
+class TestHasPipelineState:
+    def test_true_when_rows_exist(self):
+        dest = _make_plain_dest()
+        dest.execute_sql.return_value = [(1,)]
+        mgr = NativeLoadStateManager(dest, "ds")
+        assert mgr.has_pipeline_state("pipeline") is True
+        assert "pipeline_name = 'pipeline'" in dest.execute_sql.call_args[0][0]
+
+    def test_false_when_no_rows(self):
+        dest = _make_plain_dest()
+        dest.execute_sql.return_value = []
+        mgr = NativeLoadStateManager(dest, "ds")
+        assert mgr.has_pipeline_state("pipeline") is False
+
+    def test_false_on_missing_table(self):
+        dest = _make_plain_dest()
+        dest.execute_sql.side_effect = RuntimeError("Table with name x does not exist")
+        mgr = NativeLoadStateManager(dest, "ds")
+        assert mgr.has_pipeline_state("pipeline") is False
+
+    def test_raises_on_other_error(self):
+        # A permission/network error must not read as "nothing to clear".
+        dest = _make_plain_dest()
+        dest.execute_sql.side_effect = RuntimeError("access denied")
+        mgr = NativeLoadStateManager(dest, "ds")
+        with pytest.raises(RuntimeError, match="access denied"):
+            mgr.has_pipeline_state("pipeline")
+
+
+@pytest.mark.unit
 class TestGetLoadedUriGenerations:
     def test_returns_empty_set_on_no_rows(self):
         dest = _make_plain_dest()

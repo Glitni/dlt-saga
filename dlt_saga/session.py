@@ -1657,6 +1657,19 @@ class Session:
         return result
 
     @staticmethod
+    def _describe_ingest_teardown(ingest: Dict[str, Any]) -> List[str]:
+        """Name what an ingest teardown removed, for the per-pipeline summary."""
+        removed = [
+            f"ingest table {table_id} (+ dlt/load state)"
+            for table_id in ingest["table_ids"]
+        ]
+        if ingest.get("native_load_log"):
+            removed.append("native_load log entries")
+        if ingest.get("local_state"):
+            removed.append("local dlt state")
+        return removed
+
+    @staticmethod
     def _execute_single_destroy(
         config: PipelineConfig,
         resource_type: str,
@@ -1681,8 +1694,7 @@ class Session:
                     config, dry_run=dry_run, log_prefix=log_prefix
                 )
                 details["ingest"] = ingest
-                for table_id in ingest["table_ids"]:
-                    removed.append(f"ingest table {table_id} (+ dlt/load state)")
+                removed.extend(Session._describe_ingest_teardown(ingest))
             if resource_type in ("all", "historize"):
                 historize = destroy_historize_footprint(
                     config, dry_run=dry_run, log_prefix=log_prefix

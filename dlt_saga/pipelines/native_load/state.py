@@ -88,8 +88,8 @@ class NativeLoadStateManager:
     """INSERT-only state log for the native_load adapter.
 
     Tracks which source URIs (and their GCS generation) have been loaded for
-    each pipeline. Never UPDATEs or DELETEs except for --full-refresh via
-    clear_pipeline_state().
+    each pipeline. Never UPDATEs or DELETEs except for --full-refresh and
+    ``saga destroy`` via clear_pipeline_state().
     """
 
     def __init__(self, destination: "Destination", schema: str) -> None:
@@ -433,8 +433,26 @@ class NativeLoadStateManager:
             error_message=error,
         )
 
+    def has_pipeline_state(self, pipeline_name: str) -> bool:
+        """Return True when the log holds any row for this pipeline.
+
+        A missing log table means no state. Other errors propagate, so a
+        permission failure is never mistaken for "nothing to clear".
+        """
+        table_id = self._dest.get_full_table_id(self._schema, self._table)
+        pn = self._dest.escape_string_literal(pipeline_name)
+        sql = (
+            f"SELECT 1 AS present FROM {table_id} WHERE pipeline_name = '{pn}' LIMIT 1"
+        )
+        try:
+            return bool(list(self._dest.execute_sql(sql, self._schema)))
+        except Exception as exc:
+            if looks_like_missing_table(exc):
+                return False
+            raise
+
     def clear_pipeline_state(self, pipeline_name: str) -> None:
-        """Delete all log rows for this pipeline. Called from --full-refresh only."""
+        """Delete all log rows for this pipeline (--full-refresh and destroy)."""
         table_id = self._dest.get_full_table_id(self._schema, self._table)
         pn = self._dest.escape_string_literal(pipeline_name)
         self._dest.execute_sql(
