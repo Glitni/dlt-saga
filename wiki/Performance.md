@@ -20,6 +20,8 @@ saga run --workers 8             # Parallel for both phases
 | 10–20 | `--workers 6-8` |
 | 20+ | `--workers 8-12` |
 
+**`native_load` runs chunks in parallel too.** On BigQuery each `native_load` pipeline loads up to `load_concurrency` chunks at once (default 4), on top of `--workers`. With the defaults, one saga process can run up to 16 BigQuery load jobs at a time; lower `load_concurrency` on large pipelines if that runs into project query or table quotas. See [Native Cloud-Storage Loader](Native-Load#load-behaviour).
+
 ## dlt Internal Parallelism
 
 The framework ships sensible defaults (in `dlt_saga/defaults.py`): 4 normalize workers, 2 load workers, etc. These can be overridden in `.dlt/config.toml` or via environment variables:
