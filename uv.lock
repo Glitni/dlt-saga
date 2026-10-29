@@ -753,6 +753,7 @@ source = { editable = "." }
 dependencies = [
     { name = "connectorx" },
     { name = "dlt", extra = ["duckdb", "filesystem", "parquet", "sftp"] },
+    { name = "duckdb" },
     { name = "jinja2" },
     { name = "pandas" },
     { name = "polars" },
@@ -833,6 +834,7 @@ requires-dist = [
     { name = "dlt-saga", extras = ["gcp", "databricks", "azure", "aws"], marker = "extra == 'dev'" },
     { name = "dlt-saga", extras = ["google-sheets"], marker = "extra == 'gcp'" },
     { name = "dlt-saga", extras = ["sharepoint"], marker = "extra == 'azure'" },
+    { name = "duckdb", specifier = "<2.0.0" },
     { name = "gcsfs", marker = "extra == 'gcp'", specifier = ">=2026.1.0" },
     { name = "google-api-python-client", marker = "extra == 'google-sheets'", specifier = ">=2.177.0" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-sheets'", specifier = ">=1.2.2" },
