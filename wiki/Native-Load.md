@@ -1,6 +1,6 @@
 # Native Cloud-Storage Loader
 
-The `native_load` adapter ingests large cloud-storage datasets directly into the warehouse, bypassing dlt's extract/normalize machinery entirely. It uses destination-native bulk load mechanics (`LOAD DATA` / external tables on BigQuery, `COPY INTO` on Databricks) for maximum throughput.
+The `native_load` adapter ingests large cloud-storage datasets directly into the warehouse, bypassing dlt's extract/normalize machinery entirely. It uses destination-native bulk load mechanics (external tables on BigQuery, `COPY INTO` on Databricks) for maximum throughput.
 
 ## When to use this adapter
 
@@ -15,7 +15,7 @@ For smaller or more complex sources (type coercions, multi-sheet, REST APIs), th
 | Adapter | Best for | Throughput model |
 |---|---|---|
 | `filesystem` | < 1 000 files, < 1 GB, needs row transforms | dlt extract → normalize → load |
-| `native_load` | > 1 000 files or > 1 GB, flat copy | Single SQL job per chunk |
+| `native_load` | > 1 000 files or > 1 GB, flat copy | SQL statements per chunk of files; chunks load in parallel on BigQuery |
 
 ---
 
@@ -157,7 +157,7 @@ A pattern that cannot reach below `source_uri` also prunes the listing server-si
 | `autodetect_schema` | `true` | Let the destination infer column types from the files. |
 | `include_file_metadata` | `true` | Inject `_dlt_source_file_name` and (when `filename_date_regex` is set) `_dlt_source_file_date`. |
 | `min_rows` | — | Minimum rows the source must carry. Counted before anything is written; a short source aborts the run with the target untouched. BigQuery only — see [Guarding against short loads](#guarding-against-short-loads-min_rows). |
-| `staging_dataset` | `<target_dataset>_staging` (`_omni_staging` for `s3://`) | BigQuery only: dataset for transient external tables. For `s3://` it is created in the Omni region. |
+| `staging_dataset` | `<target_dataset>_staging` (`_omni_staging` for `s3://`) | BigQuery only: dataset for transient external tables, and for the transfer tables incremental `gs://` appends stage through. For `s3://` it is created in the Omni region. |
 
 ### Amazon S3 (BigQuery Omni)
 
@@ -307,7 +307,7 @@ unchanged. Check the source location and file_pattern before re-running.
 
 **How it counts.** Because this adapter bypasses dlt, there is no staged load to inspect — instead the source itself is counted. On BigQuery that is a transient external table over the discovered files plus one `COUNT(*)`, carrying the same [row filters](#row-filters) the load would apply, so the number is what the target actually ends up holding rather than merely what the files contain.
 
-**All counting happens before any loading.** Large loads are [split into chunks](#load-behaviour), where chunk 1 issues the `CREATE OR REPLACE TABLE` and the rest are appends — so a check interleaved with loading would only notice on chunk 2, after the target had already been rewritten. The count is chunked the same way (a single external table over every discovered URI would exceed the per-statement source-URI limit that `load_batch_size` exists to respect), but every chunk is counted before the first is loaded.
+**All counting happens before any loading.** Large loads are [split into chunks](#load-behaviour), where chunk 1 issues the `CREATE OR REPLACE TABLE` and the rest are appends — so a check interleaved with loading would only notice on chunk 2, after the target had already been rewritten. The count is chunked too, within the same `load_batch_size` bound (a single external table over every discovered URI would exceed the per-statement source-URI limit it exists to respect), but every chunk is counted before the first is loaded.
 
 **Cost.** The count runs only when `min_rows` is set; an unguarded pipeline pays nothing. `COUNT(*)` selects no columns, so on Parquet it reads footer metadata and is close to free. On CSV and JSONL, BigQuery parses the files to count them, making it a genuine second pass over the data — worth weighing against the size of the source. Adding row filters means the count reads those columns too.
 
@@ -442,7 +442,7 @@ Replace the entire ADF pipeline with one YAML file and `saga ingest`.
 | `… failed assuming into your AWS IAM role because the session duration … is smaller than the requested` | AWS role max session duration < 12h | Set the IAM role's maximum session duration to 12 hours. |
 | `Source URI scheme '…' is not supported by destination` | Using a scheme the destination doesn't handle (e.g. `abfss://` on BigQuery) | BigQuery supports `gs://` and `s3://` (S3 via BigQuery Omni); Databricks supports `gs://` and `abfss://`. |
 | `499 … Job execution was cancelled: Job timed out` on `POST …/tables` | Too many URIs in one chunk's external table for BigQuery to create it in time | Lower `load_batch_size`. |
-| BigQuery external table quota errors | Too many tables in staging dataset | Reduce `load_batch_size` to create fewer concurrent tables. |
+| BigQuery external table quota errors | Too many tables in the staging dataset at once | Lower `load_concurrency`: each running chunk holds one external table, plus a transfer table on incremental appends. |
 | `COPY INTO` fails with permission error | UC external location not granted | Verify `GRANT READ FILES` on the external location (see setup above). |
 | Full-refresh PURGE fails | Storage credential missing DELETE permission | Grant DELETE on the external location, or use `--full-refresh` with manual file cleanup. |
 | Columns not appearing after schema evolution | BigQuery: column name in source doesn't normalize to expected name | Check the snake_case normalization of the source column name (e.g. `OrderID` → `order_id`). New columns are always added automatically. |
