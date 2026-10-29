@@ -23,7 +23,7 @@ For smaller or more complex sources (type coercions, multi-sheet, REST APIs), th
 
 | Destination | Mechanic | Supported URI schemes |
 |---|---|---|
-| BigQuery | External table → `INSERT INTO` (or CTAS on first run) | `gs://`, `s3://` (via BigQuery Omni) |
+| BigQuery | External table → `INSERT INTO` (or CTAS on first run); incremental and `s3://` appends stage through a transient transfer table | `gs://`, `s3://` (via BigQuery Omni) |
 | Databricks | `COPY INTO` with `mergeSchema = true` | `gs://`, `abfss://` |
 
 Loading from Amazon S3 into BigQuery uses a BigQuery Omni cross-cloud connection — see [Amazon S3 via BigQuery Omni](#amazon-s3-via-bigquery-omni) below. `s3://` on Databricks is not yet supported.
@@ -198,7 +198,7 @@ validation.
 
 ### Row filters
 
-`filters:` is honoured and **pushed down to SQL** — the warehouse engine drops filtered rows during the `INSERT … SELECT` (BigQuery) or `COPY INTO … FROM (SELECT … WHERE …)` (Databricks). Filtered-out rows never enter the target table or Python.
+`filters:` is honoured and **pushed down to SQL** — the warehouse engine drops filtered rows while reading the external table (BigQuery) or `COPY INTO … FROM (SELECT … WHERE …)` (Databricks). Filtered-out rows never enter the target table or Python.
 
 ```yaml
 filters:

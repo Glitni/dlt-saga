@@ -500,3 +500,28 @@ class TestConcurrentNativeLoadSupport:
         assert (
             DatabricksDestination.native_load_max_files_per_chunk(_make_dest()) == 1000
         )
+
+
+@pytest.mark.unit
+class TestNativeLoadRowcountsDatabricks:
+    def test_counts_this_runs_rows_per_file(self):
+        dest = _make_dest()
+        dest.execute_sql.return_value = [MagicMock(uri="gs://b/f1.parquet", cnt=4)]
+        spec = _make_spec(target_exists=True)
+        spec.incremental = True
+
+        result = DatabricksDestination._native_load_rowcounts(dest, spec, "cat.ds.tbl")
+
+        assert result == {"gs://b/f1.parquet": 4}
+        assert "WHERE `_dlt_ingested_at` =" in dest.execute_sql.call_args[0][0]
+
+    def test_skipped_when_not_incremental(self):
+        """Only incremental runs record per-file counts."""
+        dest = _make_dest()
+
+        result = DatabricksDestination._native_load_rowcounts(
+            dest, _make_spec(target_exists=True), "cat.ds.tbl"
+        )
+
+        assert result == {}
+        dest.execute_sql.assert_not_called()
