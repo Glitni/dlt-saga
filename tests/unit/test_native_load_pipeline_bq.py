@@ -4,7 +4,7 @@ Covers: external-table flow, CTAS on first run, INSERT on subsequent runs,
 framework cols auto-added, schema evolution guard, per-file row counts.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -27,6 +27,12 @@ def _make_dest() -> BigQueryDestination:
     dest.execute_sql_with_job.return_value = ([], "job-001")
     dest.execute_sql.return_value = []
     dest.list_table_columns.return_value = []
+    dest._run_insert.side_effect = lambda sql, job_config=None: (
+        BigQueryDestination._run_insert(dest, sql, job_config)
+    )
+    dest._reconcile_native_load_target_columns.side_effect = lambda spec, ext_cols: (
+        BigQueryDestination._reconcile_native_load_target_columns(dest, spec, ext_cols)
+    )
     # `config` isn't a spec attribute (it's set in __init__), so attach a plain
     # MagicMock and seed the fields read during DDL building.
     dest.config = MagicMock()
@@ -331,6 +337,71 @@ class TestNativeLoadChunkExternalSchema:
 
 
 @pytest.mark.unit
+class TestInsertConflictRetry:
+    """An INSERT BigQuery aborted over a concurrent update committed nothing,
+    so it is rerun; anything else — above all a transport error, after which
+    the job may have committed — is raised as is."""
+
+    def _job(self, state="DONE", message=None):
+        job = MagicMock()
+        job.state = state
+        job.error_result = {"message": message} if message else None
+        if message or state != "DONE":
+            job.result.side_effect = RuntimeError(message or "connection reset")
+        return job
+
+    def _run(self, *jobs):
+        dest = _make_dest()
+        dest._client.return_value.query.side_effect = list(jobs)
+        with patch("dlt_saga.destinations.bigquery.destination.time.sleep") as sleep:
+            result = BigQueryDestination._run_insert(dest, "INSERT ...")
+        return result, dest._client.return_value.query.call_count, sleep
+
+    def test_concurrent_update_abort_is_retried(self):
+        conflict = self._job(
+            message="Transaction is aborted due to concurrent update against table t"
+        )
+        ok = self._job()
+        result, queries, sleep = self._run(conflict, ok)
+        assert result is ok
+        assert queries == 2
+        sleep.assert_called_once()
+
+    def test_other_job_errors_are_not_retried(self):
+        with pytest.raises(RuntimeError, match="Syntax error"):
+            self._run(self._job(message="Syntax error at [1:1]"))
+
+    def test_transport_error_is_not_retried(self):
+        """The job isn't known to be done, so it may still commit."""
+        with pytest.raises(RuntimeError, match="connection reset"):
+            self._run(self._job(state="RUNNING"))
+
+    def test_gives_up_after_the_retry_budget(self):
+        from dlt_saga.destinations.bigquery.destination import _CONFLICT_RETRIES
+
+        conflicts = [
+            self._job(
+                message="Could not serialize access to table due to concurrent update"
+            )
+            for _ in range(_CONFLICT_RETRIES + 1)
+        ]
+        with pytest.raises(RuntimeError, match="concurrent update"):
+            self._run(*conflicts)
+
+
+@pytest.mark.unit
+class TestConcurrentNativeLoadSupport:
+    def test_bigquery_supports_concurrent_chunks(self):
+        assert BigQueryDestination.supports_concurrent_native_load(_make_dest())
+
+    def test_column_lock_is_per_target(self):
+        from dlt_saga.destinations.bigquery.destination import _target_columns_lock
+
+        assert _target_columns_lock("p.d.t") is _target_columns_lock("p.d.t")
+        assert _target_columns_lock("p.d.t") is not _target_columns_lock("p.d.u")
+
+
+@pytest.mark.unit
 class TestNativeLoadInsertCrossCloud:
     """Cross-cloud append: CTAS to a destination-region transfer table, then
     in-region INSERT (a single statement can't span the Omni + destination
@@ -372,6 +443,7 @@ class TestNativeLoadInsertCrossCloud:
         assert insert_sql.startswith("INSERT INTO proj.ds.tbl")
         assert "FROM proj.ds.tbl__xfer_" in insert_sql
         dest._client.assert_called_once_with()  # default (destination) location
+        job.result.assert_called_once_with()  # no client-side timeout
         # 3. Transfer table dropped.
         dest.drop_table.assert_called_once()
         assert rows == 3
@@ -401,6 +473,24 @@ class TestNativeLoadInsertCrossCloud:
         # Direct INSERT ... FROM the external table; no transfer CTAS.
         dest.execute_sql_with_job.assert_not_called()
         dest.drop_table.assert_not_called()
+
+    def test_insert_waits_without_client_timeout(self):
+        """Giving up on a running INSERT client-side would record its files as
+        failed while the job still commits, so the next run duplicates them."""
+        dest = _make_dest()
+        dest.config.project_id = "proj"
+        dest.list_table_columns.return_value = [("col1", "STRING")]
+        job = dest._client.return_value.query.return_value
+        job.num_dml_affected_rows = 1
+
+        BigQueryDestination._native_load_insert_into_target(
+            dest,
+            _make_spec(target_exists=True),
+            "proj.ds_staging.ext",
+            [("col1", "STRING")],
+        )
+
+        job.result.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------

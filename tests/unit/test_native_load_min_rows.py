@@ -36,6 +36,8 @@ def _make_pipeline(*, full_refresh=False, precount=True, **config_overrides):
 
     dest = MagicMock()
     dest.supports_native_load.return_value = True
+    dest.supports_concurrent_native_load.return_value = False
+    dest.native_load_max_files_per_chunk.return_value = None
     dest.supported_native_load_uri_schemes.return_value = {"gs"}
     dest.supports_native_load_precount.return_value = precount
     dest.type_name.side_effect = lambda t: t.upper()
@@ -175,7 +177,7 @@ class TestGuardEnforcement:
     def test_counting_is_chunked_like_the_load(self):
         p = _make_pipeline(min_rows=1000)
         p.destination.native_load_count_rows.return_value = 1
-        p.native_config.load_batch_size = 4  # 10 files -> 4 + 4 + 2
+        p.native_config.load_batch_size = 4  # 10 files -> 4 + 3 + 3
 
         with pytest.raises(MinRowsNotMetError):
             p._enforce_min_rows(_files(10))
@@ -184,7 +186,7 @@ class TestGuardEnforcement:
             len(call[0][0].source_uris)
             for call in p.destination.native_load_count_rows.call_args_list
         ]
-        assert sizes == [4, 4, 2]
+        assert sizes == [4, 3, 3]
         # Every discovered file is counted exactly once.
         counted = [
             uri

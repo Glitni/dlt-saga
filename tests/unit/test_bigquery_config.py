@@ -174,6 +174,24 @@ class TestBigQueryExecuteSqlNoClientTimeout:
         # No timeout kwarg (and no positional) — wait for job completion.
         query_job.result.assert_called_once_with()
 
+    def test_add_column_is_idempotent(self):
+        """A concurrent writer may have just added the column."""
+        dest = self._make_dest()
+        with patch.object(BigQueryDestination, "execute_sql") as execute_sql:
+            dest.add_column("ds", "tbl", "col", "STRING")
+        sql = execute_sql.call_args[0][0]
+        assert "ADD COLUMN IF NOT EXISTS `col` STRING" in sql
+
+    def test_execute_sql_with_job_waits_without_timeout(self):
+        dest = self._make_dest()
+        with patch("google.cloud.bigquery.Client") as mock_client_cls:
+            query_job = mock_client_cls.return_value.query.return_value
+            query_job.result.return_value = ["row"]
+            query_job.job_id = "job-1"
+            rows, job_id = dest.execute_sql_with_job("SELECT 1", schema="ds")
+        assert (rows, job_id) == (["row"], "job-1")
+        query_job.result.assert_called_once_with()
+
 
 @pytest.mark.unit
 class TestApplyNativeHintsPartitionExpiration:

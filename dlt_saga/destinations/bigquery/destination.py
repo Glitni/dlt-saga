@@ -1,6 +1,8 @@
 """BigQuery destination implementation."""
 
 import logging
+import threading
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
@@ -15,6 +17,37 @@ if TYPE_CHECKING:
     from dlt_saga.destinations.base import MaterializationHints
 
 logger = logging.getLogger(__name__)
+
+# Retries for an INSERT that BigQuery aborted over a concurrent update to its
+# table (e.g. a parallel native_load chunk adding a column), with backoff.
+_CONFLICT_RETRIES = 3
+_CONFLICT_BACKOFF_SECONDS = 2.0
+
+_TARGET_COLUMN_LOCKS: Dict[str, threading.Lock] = {}
+_TARGET_COLUMN_LOCKS_GUARD = threading.Lock()
+
+
+def _aborted_by_concurrent_update(job: Any) -> bool:
+    """True when ``job`` finished and BigQuery reports a concurrent-update abort.
+
+    Only a job BigQuery has finished counts: a failed DML statement commits
+    nothing, so running it again is safe. A transport error says nothing about
+    whether the job committed, so it never qualifies.
+    """
+    if job.state != "DONE" or not job.error_result:
+        return False
+    return "concurrent update" in str(job.error_result.get("message", "")).lower()
+
+
+def _target_columns_lock(target_id: str) -> threading.Lock:
+    """Return the lock serializing native_load column reconciliation on a target.
+
+    Concurrent chunks each compare the external table's columns with the
+    target's and add the missing ones; two chunks seeing the same new column
+    would both ALTER, and the second would fail on a column that now exists.
+    """
+    with _TARGET_COLUMN_LOCKS_GUARD:
+        return _TARGET_COLUMN_LOCKS.setdefault(target_id, threading.Lock())
 
 
 def _normalize_ext_cols(
@@ -1013,6 +1046,13 @@ class BigQueryDestination(BigQueryBaseDestination):
     def supports_native_load(self) -> bool:
         return True
 
+    def supports_concurrent_native_load(self) -> bool:
+        # Clients come from a per-thread pool, concurrent INSERTs into one table
+        # don't conflict, and each chunk stages through its own external table.
+        # Column reconciliation is the one shared step; it's serialized per
+        # target (_target_columns_lock).
+        return True
+
     def supported_native_load_uri_schemes(self) -> set:
         return {"gs", "s3"}
 
@@ -1097,8 +1137,11 @@ class BigQueryDestination(BigQueryBaseDestination):
 
     def add_column(self, dataset: str, table: str, column: str, type_name: str) -> None:
         table_id = self.get_full_table_id(dataset, table)
+        # IF NOT EXISTS: a column list read just before can miss a column another
+        # writer (e.g. a concurrent native_load chunk) has only just added.
         self.execute_sql(
-            f"ALTER TABLE {table_id} ADD COLUMN {self.quote_identifier(column)} {type_name}"
+            f"ALTER TABLE {table_id} ADD COLUMN IF NOT EXISTS "
+            f"{self.quote_identifier(column)} {type_name}"
         )
 
     # --- Column / table description reconciliation -------------------------
@@ -1253,7 +1296,9 @@ class BigQueryDestination(BigQueryBaseDestination):
         if schema:
             job_config.default_dataset = f"{self.config.project_id}.{schema}"
         job = client.query(sql, job_config=job_config)
-        rows = list(job.result(timeout=600))
+        # No client-side timeout, for the same reason as execute_sql: the job
+        # would keep running and commit after saga recorded it as failed.
+        rows = list(job.result())
         return rows, job.job_id
 
     def list_tables_by_pattern(
@@ -1719,11 +1764,93 @@ class BigQueryDestination(BigQueryBaseDestination):
         from google.cloud import bigquery
 
         target_id = self.get_full_table_id(spec.target_schema, spec.target_table)
+        with _target_columns_lock(target_id):
+            insert_col_exprs = self._reconcile_native_load_target_columns(
+                spec, ext_cols
+            )
+
+        all_insert_cols = [norm for norm, _ in insert_col_exprs] + [
+            c.name for c in spec.derived_columns
+        ]
+        col_list = ", ".join(self.quote_identifier(c) for c in all_insert_cols)
+        data_select = ", ".join(expr for _, expr in insert_col_exprs)
+        derived_select = ", ".join(
+            f"{c.sql_expr} AS {self.quote_identifier(c.name)}"
+            for c in spec.derived_columns
+        )
+        full_select = ", ".join(filter(None, [data_select, derived_select]))
+        where_sql = self._render_native_load_where(spec, ext_cols)
+
+        if query_location:
+            return self._native_load_insert_cross_cloud(
+                spec,
+                ext_id,
+                target_id,
+                col_list,
+                full_select,
+                where_sql,
+                query_location,
+            )
+
+        # Same-cloud: one INSERT … SELECT directly from the external table.
+        sql = f"INSERT INTO {target_id} ({col_list}) SELECT {full_select} FROM {ext_id}"
+        if where_sql:
+            sql = f"{sql} WHERE {where_sql}"
+        job_config = bigquery.QueryJobConfig()
+        job_config.default_dataset = f"{self.config.project_id}.{spec.staging_dataset}"
+        job = self._run_insert(sql, job_config)
+        rows_loaded = job.num_dml_affected_rows or 0
+        return int(rows_loaded), job.job_id
+
+    def _run_insert(self, sql: str, job_config: Any = None) -> Any:
+        """Run an INSERT and wait for it, retrying a concurrent-update abort.
+
+        Concurrent native_load chunks append to one table while another chunk
+        may be adding a column to it; BigQuery can abort one of those over the
+        concurrent update. Only that abort is retried — see
+        ``_aborted_by_concurrent_update``.
+        """
+        client = self._client()
+        attempt = 0
+        while True:
+            job = client.query(sql, job_config=job_config)
+            try:
+                # No client-side timeout (see execute_sql): giving up on a
+                # running INSERT records its files as failed while it commits.
+                job.result()
+                return job
+            except Exception:
+                if attempt >= _CONFLICT_RETRIES or not _aborted_by_concurrent_update(
+                    job
+                ):
+                    raise
+            attempt += 1
+            delay = _CONFLICT_BACKOFF_SECONDS * 2 ** (attempt - 1)
+            logger.warning(
+                "INSERT %s aborted by a concurrent update to its table; "
+                "retrying in %.1fs (%d/%d)",
+                job.job_id,
+                delay,
+                attempt,
+                _CONFLICT_RETRIES,
+            )
+            time.sleep(delay)
+
+    def _reconcile_native_load_target_columns(
+        self, spec: "Any", ext_cols: list
+    ) -> list:
+        """Add missing columns to the target and pair each with its SELECT expression.
+
+        Returns ``[(target_col_name, select_expr)]`` for the data columns.
+
+        Raises:
+            ValueError: If a source column's type differs from the target's.
+        """
         target_cols = self.list_table_columns(spec.target_schema, spec.target_table)
         target_col_map = {n: t for n, t in target_cols}
         derived_names = {c.name for c in spec.derived_columns}
 
-        # 1. Auto-add framework cols missing from target (independent of schema_evolution)
+        # Auto-add framework cols missing from target (independent of schema_evolution)
         for dc in spec.derived_columns:
             if dc.name not in target_col_map:
                 self.add_column(
@@ -1734,7 +1861,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                     "Added framework column %r to %s", dc.name, spec.target_table
                 )
 
-        # 2. Reconcile data columns using normalized names and hint-driven target types
+        # Reconcile data columns using normalized names and hint-driven target types
         src_ext_cols = [(n, t) for n, t in ext_cols if n not in derived_names]
         normalized = _normalize_ext_cols(src_ext_cols, spec)
         insert_col_exprs: list = []  # [(target_col_name, select_expr)]
@@ -1768,41 +1895,7 @@ class BigQueryDestination(BigQueryBaseDestination):
                 )
                 logger.info("Added new column %r to %s", norm, spec.target_table)
 
-        # 3. Build the column list + transformed SELECT
-        all_insert_cols = [norm for norm, _ in insert_col_exprs] + [
-            c.name for c in spec.derived_columns
-        ]
-        col_list = ", ".join(self.quote_identifier(c) for c in all_insert_cols)
-        data_select = ", ".join(expr for _, expr in insert_col_exprs)
-        derived_select = ", ".join(
-            f"{c.sql_expr} AS {self.quote_identifier(c.name)}"
-            for c in spec.derived_columns
-        )
-        full_select = ", ".join(filter(None, [data_select, derived_select]))
-        where_sql = self._render_native_load_where(spec, ext_cols)
-
-        if query_location:
-            return self._native_load_insert_cross_cloud(
-                spec,
-                ext_id,
-                target_id,
-                col_list,
-                full_select,
-                where_sql,
-                query_location,
-            )
-
-        # Same-cloud: one INSERT … SELECT directly from the external table.
-        sql = f"INSERT INTO {target_id} ({col_list}) SELECT {full_select} FROM {ext_id}"
-        if where_sql:
-            sql = f"{sql} WHERE {where_sql}"
-        client = self._client()
-        job_config = bigquery.QueryJobConfig()
-        job_config.default_dataset = f"{self.config.project_id}.{spec.staging_dataset}"
-        job = client.query(sql, job_config=job_config)
-        job.result(timeout=600)
-        rows_loaded = job.num_dml_affected_rows or 0
-        return int(rows_loaded), job.job_id
+        return insert_col_exprs
 
     def _native_load_insert_cross_cloud(
         self,
@@ -1837,9 +1930,7 @@ class BigQueryDestination(BigQueryBaseDestination):
             insert_sql = (
                 f"INSERT INTO {target_id} ({col_list}) SELECT {col_list} FROM {xfer_id}"
             )
-            client = self._client()  # destination region
-            job = client.query(insert_sql)
-            job.result(timeout=600)
+            job = self._run_insert(insert_sql)  # destination region
             rows_loaded = job.num_dml_affected_rows or 0
             return int(rows_loaded), job.job_id
         finally:
