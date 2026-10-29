@@ -2,7 +2,9 @@
 
 from typing import Optional
 
-from dlt_saga.pipelines.native_load.storage.base import StorageClient
+from dlt_saga.pipelines.native_load.storage.base import StorageClient, StorageObject
+
+__all__ = ["StorageClient", "StorageObject", "get_storage_client"]
 
 
 def get_storage_client(

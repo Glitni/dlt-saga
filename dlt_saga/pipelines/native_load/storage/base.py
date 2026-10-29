@@ -19,6 +19,10 @@ class StorageObject:
 class StorageClient(ABC):
     """Abstract interface for cloud storage listing."""
 
+    #: True when ``list_files`` may be called from several threads at once on
+    #: one instance, letting discovery list date partitions in parallel.
+    supports_concurrent_listing: bool = False
+
     @abstractmethod
     def list_files(
         self,

@@ -486,3 +486,17 @@ class TestReplaceModeExternalTable:
         assert "CREATE TABLE IF NOT EXISTS" in sql
         assert "CREATE OR REPLACE" not in sql
         assert "LOCATION" in sql
+
+
+@pytest.mark.unit
+class TestConcurrentNativeLoadSupport:
+    def test_databricks_loads_one_chunk_at_a_time(self):
+        """Every statement shares one SQL connection, which isn't safe across threads."""
+        assert (
+            DatabricksDestination.supports_concurrent_native_load(_make_dest()) is False
+        )
+
+    def test_copy_into_files_list_caps_chunk_size(self):
+        assert (
+            DatabricksDestination.native_load_max_files_per_chunk(_make_dest()) == 1000
+        )

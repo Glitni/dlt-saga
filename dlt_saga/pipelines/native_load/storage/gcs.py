@@ -20,6 +20,8 @@ class GcsStorageClient(StorageClient):
     for efficient cursor-mode discovery.
     """
 
+    supports_concurrent_listing = True
+
     def __init__(self, billing_project: Optional[str] = None) -> None:
         from google.cloud import storage  # type: ignore[attr-defined]
 

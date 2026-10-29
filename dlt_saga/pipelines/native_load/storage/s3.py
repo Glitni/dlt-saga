@@ -34,6 +34,8 @@ class S3StorageClient(StorageClient):
     connection.
     """
 
+    supports_concurrent_listing = True
+
     def __init__(
         self,
         aws_access_key_id: Optional[str] = None,
