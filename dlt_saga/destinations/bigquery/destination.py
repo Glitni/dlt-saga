@@ -644,7 +644,9 @@ class BigQueryDestination(BigQueryBaseDestination):
         return f"TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"
 
     def hash_expression(self, columns: list[str]) -> str:
-        cols = ", ".join(columns)
+        # Quoted so a reserved-word column (``end``, ``interval``) parses; the
+        # STRUCT field names, and so the JSON and the hash, are unchanged.
+        cols = ", ".join(self.quote_identifier(c) for c in columns)
         return f"FARM_FINGERPRINT(TO_JSON_STRING(STRUCT({cols})))"
 
     def escape_string_literal(self, value: str) -> str:
