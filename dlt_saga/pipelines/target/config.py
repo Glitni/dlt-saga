@@ -295,11 +295,25 @@ class TargetConfig:
     )
     active_record_timestamp: Optional[str] = field(
         default=None,
-        metadata={"description": "Timestamp to use for active records in SCD2"},
+        metadata={
+            "description": (
+                "Value written to valid_to for active SCD2 records (by default dlt "
+                "leaves it NULL). A timestamp without a timezone is read in the "
+                "destination session's timezone; include one (e.g. "
+                "'9999-12-31T00:00:00Z') to make it unambiguous."
+            )
+        },
     )
     boundary_timestamp: Optional[str] = field(
         default=None,
-        metadata={"description": "Boundary timestamp for SCD2 merge operations"},
+        metadata={
+            "description": (
+                "Timestamp at which this load closes replaced SCD2 records and "
+                "opens new ones (by default the load time). A timestamp without a "
+                "timezone is read in the destination session's timezone; include "
+                "one to make it unambiguous."
+            )
+        },
     )
     row_version_column_name: Optional[str] = field(
         default=None, metadata={"description": "Column name for row version tracking"}
