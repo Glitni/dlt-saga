@@ -30,6 +30,16 @@ class TestBigQueryQuoteIdentifier:
 
 
 @pytest.mark.unit
+class TestBigQueryHashExpression:
+    def test_quotes_each_column(self):
+        # Reserved words (Stripe's ``end``, ``interval``) are a syntax error
+        # bare inside STRUCT(...).
+        assert _dest().hash_expression(["id", "end", "interval"]) == (
+            "FARM_FINGERPRINT(TO_JSON_STRING(STRUCT(`id`, `end`, `interval`)))"
+        )
+
+
+@pytest.mark.unit
 class TestBigQueryPartitionClusterDdl:
     def test_partition_ddl_quotes_column(self):
         assert _dest().partition_ddl("event_ts") == "PARTITION BY DATE(`event_ts`)"
