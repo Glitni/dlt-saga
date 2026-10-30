@@ -68,6 +68,9 @@ jobs:
       # accumulates unit + integration into one report (a plain re-run would
       # overwrite unit coverage with integration-only).
       COV: ${{ (matrix.python-version == '3.12' && matrix.dlt-version == 'latest') && '--cov=dlt_saga --cov-report=xml --cov-append' || '' }}
+      # The environment is synced explicitly below; without this, `uv run`
+      # re-syncs it to uv.lock and silently undoes the minimum-dlt pin.
+      UV_NO_SYNC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -84,7 +87,7 @@ jobs:
 
       - name: Pin minimum dlt version
         if: matrix.dlt-version == 'min'
-        run: uv pip install --force-reinstall "dlt[duckdb,filesystem,parquet,sftp]==1.18.0"
+        run: uv pip install --force-reinstall "dlt[duckdb,filesystem,parquet,sftp]==1.30.0"
 
       - name: Run unit tests
         run: uv run pytest -m unit --tb=short $COV
