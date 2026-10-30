@@ -38,7 +38,7 @@ keywords = [
 ]
 dependencies = [
     # Core framework
-    "dlt[duckdb,filesystem,parquet,sftp]>=1.18.0,<2.0.0",
+    "dlt[duckdb,filesystem,parquet,sftp]>=1.30.0,<2.0.0",
     # dlt 1.31 still calls DuckDB APIs that 2.0 removed (read_csv_duckdb,
     # Arrow reads from its DuckDB client). Saga's own code runs on 2.0; lift
     # this once dlt supports it.
@@ -80,7 +80,7 @@ sharepoint = [
 # ---------------------------------------------------------------------------
 gcp = [
     "dlt-saga[google-sheets]",
-    "dlt[bigquery]>=1.18.0,<2.0.0",
+    "dlt[bigquery]>=1.30.0,<2.0.0",
     "google-cloud-bigquery-storage>=2.32.0",
     "google-cloud-secret-manager>=2.24.0",
     "google-cloud-storage>=3.2.0",
@@ -90,7 +90,7 @@ gcp = [
 ]
 databricks = [
     # Databricks SQL Warehouse via dlt (pulls in databricks-sdk transitively)
-    "dlt[databricks]>=1.18.0,<2.0.0",
+    "dlt[databricks]>=1.30.0,<2.0.0",
 ]
 azure = [
     "dlt-saga[sharepoint]",

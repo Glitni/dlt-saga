@@ -47,14 +47,11 @@ def abort_after_terminal_load_failure(pipeline: Any, exc: BaseException) -> bool
         return False
     if not _auto_abort_enabled():
         return False
-    # abort_packages arrived in dlt 1.30, together with the pending-on-failure
-    # behaviour it undoes; drop_pending_packages can't roll state back.
-    abort = getattr(pipeline, "abort_packages", None)
-    if abort is None or not pipeline.has_pending_data:
+    if not pipeline.has_pending_data:
         return False
 
     try:
-        abort()
+        pipeline.abort_packages()
     except Exception as abort_exc:
         logger.warning(
             "Could not abort the load package for %s after a terminal load "

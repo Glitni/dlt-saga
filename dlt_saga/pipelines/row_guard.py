@@ -169,10 +169,9 @@ class RowGuard:
         Discarding is all-or-nothing, so a package left behind by an *earlier*
         crashed run is discarded alongside this one. That is still the better
         of the two outcomes (the alternative is the delayed rewrite above), and
-        it is named rather than swallowed. ``abort_packages`` (dlt >= 1.30)
-        also rolls local state back to before the oldest discarded package, so
-        an incremental source re-extracts it; ``drop_pending_packages`` on older
-        dlt doesn't, which makes the discard real data loss on an ``append``.
+        it is named rather than swallowed. ``abort_packages`` also rolls local
+        state back to before the oldest discarded package, so an incremental
+        source re-extracts it.
 
         Args:
             pipeline: dlt Pipeline instance.
@@ -186,15 +185,8 @@ class RowGuard:
                 len(preexisting),
                 ", ".join(sorted(preexisting)),
             )
-        # dlt 1.30 renamed drop_pending_packages -> abort_packages (the old name
-        # warns until 2.0). Prefer the new one when present so the guard doesn't
-        # emit a DeprecationWarning on every rejected load, while still working
-        # on the versions that only have the old name.
-        discard = getattr(pipeline, "abort_packages", None) or getattr(
-            pipeline, "drop_pending_packages"
-        )
         try:
-            discard()
+            pipeline.abort_packages()
         except Exception as exc:
             # The package is still on disk and the next run will load it, which
             # is exactly the damage this guard exists to prevent. Say so loudly;

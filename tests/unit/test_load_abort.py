@@ -21,12 +21,10 @@ from dlt.pipeline.exceptions import PipelineStepFailed
 from dlt_saga.pipelines.load_abort import abort_after_terminal_load_failure
 
 
-def _pipeline(*, pending=True, has_abort=True):
+def _pipeline(*, pending=True):
     pipeline = MagicMock()
     pipeline.pipeline_name = "group__orders"
     pipeline.has_pending_data = pending
-    if not has_abort:
-        del pipeline.abort_packages
     return pipeline
 
 
@@ -89,13 +87,6 @@ class TestAbortAfterTerminalLoadFailure:
         exc = _failed(pipeline, DatabaseTerminalException(Exception()))
         assert not abort_after_terminal_load_failure(pipeline, exc)
         pipeline.abort_packages.assert_not_called()
-
-    def test_dlt_without_abort_packages_is_a_noop(self):
-        """drop_pending_packages can't roll state back, so it's never used."""
-        pipeline = _pipeline(has_abort=False)
-        exc = _failed(pipeline, DatabaseTerminalException(Exception()))
-        assert not abort_after_terminal_load_failure(pipeline, exc)
-        pipeline.drop_pending_packages.assert_not_called()
 
     def test_abort_failure_warns_and_returns_false(self, caplog):
         pipeline = _pipeline()

@@ -22,29 +22,14 @@ from dlt_saga.pipelines.row_guard import (
 )
 
 
-def _pipeline(row_counts, *, dlt_version="legacy"):
-    """dlt pipeline double whose normalize reports *row_counts*.
-
-    ``dlt_version`` controls which package-discard method exists, because
-    MagicMock invents every attribute asked of it — left alone it would claim
-    to support both, and the version-tolerance logic would go untested.
-    dlt 1.30 renamed ``drop_pending_packages`` to ``abort_packages``.
-    """
+def _pipeline(row_counts):
+    """dlt pipeline double whose normalize reports *row_counts*."""
     pipeline = MagicMock()
     normalize_info = MagicMock()
     normalize_info.row_counts = row_counts
     pipeline.normalize.return_value = normalize_info
     pipeline.load.return_value = "load-info"
-    if dlt_version == "legacy":
-        del pipeline.abort_packages
-    else:
-        del pipeline.drop_pending_packages
     return pipeline
-
-
-def _discard_method(pipeline):
-    """The package-discard mock this double exposes."""
-    return getattr(pipeline, "abort_packages", None) or pipeline.drop_pending_packages
 
 
 @pytest.mark.unit
@@ -75,7 +60,7 @@ class TestRowGuardRun:
         assert guard.run(pipeline, "data") == "load-info"
         pipeline.extract.assert_called_once_with("data")
         pipeline.load.assert_called_once()
-        _discard_method(pipeline).assert_not_called()
+        pipeline.abort_packages.assert_not_called()
 
     def test_empty_replace_is_rejected_before_load(self):
         pipeline = _pipeline({"orders": 0})
@@ -101,7 +86,7 @@ class TestRowGuardRun:
         with pytest.raises(MinRowsNotMetError):
             RowGuard(min_rows=1, table_name="orders").run(pipeline, "data")
 
-        _discard_method(pipeline).assert_called_once()
+        pipeline.abort_packages.assert_called_once()
 
     def test_partial_scd2_batch_is_rejected(self):
         """A batch that merely shrank still retires the absent keys."""
@@ -228,7 +213,7 @@ class TestPendingPackageDisposal:
         with pytest.raises(MinRowsNotMetError):
             RowGuard(min_rows=1, table_name="orders").run(pipeline, "data")
 
-        _discard_method(pipeline).assert_called_once()
+        pipeline.abort_packages.assert_called_once()
 
     def test_preexisting_packages_are_named_when_also_discarded(self, caplog):
         """dlt drops them together, so the collateral loss is stated."""
@@ -255,7 +240,7 @@ class TestPendingPackageDisposal:
         write this guard just refused, with nothing linking the two.
         """
         pipeline = self._pipeline_with_pending()
-        _discard_method(pipeline).side_effect = OSError("permission denied")
+        pipeline.abort_packages.side_effect = OSError("permission denied")
 
         with caplog.at_level(logging.ERROR):
             with pytest.raises(MinRowsNotMetError) as exc:
@@ -281,47 +266,24 @@ class TestPendingPackageDisposal:
         with pytest.raises(MinRowsNotMetError):
             RowGuard(min_rows=1, table_name="orders").run(pipeline, "data")
 
-        _discard_method(pipeline).assert_called_once()
+        pipeline.abort_packages.assert_called_once()
 
     def test_nothing_is_dropped_when_the_guard_passes(self):
         pipeline = _pipeline({"orders": 10})
 
         RowGuard(min_rows=10, table_name="orders").run(pipeline, "data")
 
-        _discard_method(pipeline).assert_not_called()
+        pipeline.abort_packages.assert_not_called()
 
 
 @pytest.mark.unit
-class TestDltVersionTolerance:
-    """dlt 1.30 renamed `drop_pending_packages` to `abort_packages`, warning on
-    the old name until 2.0. The guard must use whichever the installed version
-    exposes — calling the deprecated one emits a warning on every rejected load,
-    and calling the new one on an older dlt would crash instead of discarding.
-    """
-
-    def test_new_dlt_uses_abort_packages(self):
-        pipeline = _pipeline({"orders": 0}, dlt_version="1.30")
-
-        with pytest.raises(MinRowsNotMetError):
-            RowGuard(min_rows=1, table_name="orders").run(pipeline, "data")
-
-        pipeline.abort_packages.assert_called_once()
-
-    def test_legacy_dlt_uses_drop_pending_packages(self):
-        pipeline = _pipeline({"orders": 0}, dlt_version="legacy")
-
-        with pytest.raises(MinRowsNotMetError):
-            RowGuard(min_rows=1, table_name="orders").run(pipeline, "data")
-
-        pipeline.drop_pending_packages.assert_called_once()
-
-    def test_installed_dlt_exposes_one_of_them(self):
-        """Guards against a future dlt removing both names without notice."""
+class TestDltApi:
+    def test_installed_dlt_exposes_abort_packages(self):
+        """The doubles above are MagicMocks, which accept any method name, so
+        only this catches dlt renaming or removing the one the guard calls."""
         from dlt.pipeline.pipeline import Pipeline
 
-        assert hasattr(Pipeline, "abort_packages") or hasattr(
-            Pipeline, "drop_pending_packages"
-        )
+        assert hasattr(Pipeline, "abort_packages")
 
 
 @pytest.mark.unit
