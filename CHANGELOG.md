@@ -1,3 +1,12 @@
+## 0.47.0 — 2026-10-30
+
+### Added
+- Support Python 3.13 and 3.14 (#618)
+
+
+### Fixed
+- Raise dlt floor to 1.30.0 and test it in CI (#619)
+
 ## 0.46.0 — 2026-10-29
 
 ### Fixed
