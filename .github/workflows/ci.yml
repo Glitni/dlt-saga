@@ -53,11 +53,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
-        dlt-version: ["latest", "min"]
+        # Latest dlt on every supported Python; the minimum dlt only at the
+        # oldest and newest Python, where an incompatibility would surface.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        dlt-version: ["latest"]
+        include:
+          - python-version: "3.11"
+            dlt-version: "min"
+          - python-version: "3.14"
+            dlt-version: "min"
     env:
-      # Measure coverage only on the combination we upload; the other three
-      # matrix jobs skip the ~50% coverage-instrumentation overhead. --cov-append
+      # Measure coverage only on the combination we upload; the other matrix
+      # jobs skip the ~50% coverage-instrumentation overhead. --cov-append
       # accumulates unit + integration into one report (a plain re-run would
       # overwrite unit coverage with integration-only).
       COV: ${{ (matrix.python-version == '3.12' && matrix.dlt-version == 'latest') && '--cov=dlt_saga --cov-report=xml --cov-append' || '' }}

@@ -4,7 +4,7 @@ This guide takes you from installation to a running pipeline in under 10 minutes
 
 ## Prerequisites
 
-- Python 3.11 or 3.12
+- Python 3.11+
 - For **BigQuery**: a Google Cloud project with billing enabled and the [`gcloud` CLI](https://cloud.google.com/sdk/docs/install)
 - For **Databricks**: a workspace URL and credentials (PAT, service principal, or browser auth)
 - For **DuckDB**: nothing extra — ideal for trying out dlt-saga locally without any cloud accounts
