@@ -1,3 +1,8 @@
+## 0.47.1 — 2026-10-30
+
+### Fixed
+- Quote column names in BigQuery hash expression (#623)
+
 ## 0.47.0 — 2026-10-30
 
 ### Added
