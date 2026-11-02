@@ -614,13 +614,16 @@ snapshot_sequence AS (
             )
         return checks
 
-    def build_failed_cast_probe_sql(self) -> Optional[str]:
+    def build_failed_cast_probe_sql(
+        self, snapshot_from: Optional[str] = None
+    ) -> Optional[str]:
         """One-row aggregate flagging ``json_columns`` whose values didn't convert.
 
         For the full- and partial-refresh paths, which have no discovery scan
         to fold the check into (an incremental run gets it from
-        ``discover_unprocessed_snapshots``). Reads the whole filtered source;
-        those paths re-read all of it anyway. Flags are aliased by position
+        ``discover_unprocessed_snapshots``). Reads the filtered source, from
+        ``snapshot_from`` on when given, so a ``--historize-from`` run probes
+        only the window it rewrites. Flags are aliased by position
         (:func:`failed_cast_alias`), in :meth:`failed_cast_checks` order.
         ``None`` when nothing is converted.
         """
@@ -631,10 +634,11 @@ snapshot_sequence AS (
             f"MAX(CASE WHEN {condition} THEN 1 ELSE 0 END) AS {failed_cast_alias(i)}"
             for i, (_, condition) in enumerate(checks)
         )
-        return (
-            f"SELECT {flags} FROM {self.source_relation}"
-            f"{filter_where_clause(self.filter_sql)}"
-        )
+        where = self.filter_sql
+        if snapshot_from is not None:
+            safe_from = self.destination.escape_string_literal(snapshot_from)
+            where = and_filter(where, f"{self._snap_src} >= TIMESTAMP '{safe_from}'")
+        return f"SELECT {flags} FROM {self.source_relation}{filter_where_clause(where)}"
 
     def build_full_reprocess_sql(
         self, value_columns: List[str], snapshot_upper_bound: Optional[str] = None

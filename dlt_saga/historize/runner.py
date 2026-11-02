@@ -810,7 +810,7 @@ class HistorizeRunner:
         """
         if self._source_columns_cache is None:
             return None
-        return json.dumps(self._source_columns_cache)
+        return json.dumps(self._source_columns())
 
     def _source_can_reference(self, column: str) -> bool:
         """Whether generated SQL can read ``column`` off the source table.
@@ -917,7 +917,8 @@ class HistorizeRunner:
         Those values are written as NULL — a payload whose format or field
         names drifted would otherwise go unnoticed. An incremental run's
         discovery already checked the rows it found; full and partial
-        refreshes (``discovery`` is None) probe the whole filtered source.
+        refreshes (``discovery`` is None) probe the filtered source, from
+        ``--historize-from`` on when given.
         """
         if discovery is not None:
             failed = discovery.failed_casts
@@ -936,7 +937,9 @@ class HistorizeRunner:
 
     def _probe_failed_casts(self) -> List[str]:
         """Names of the ``json_columns`` with unconvertible values in the source."""
-        probe_sql = self.sql_builder.build_failed_cast_probe_sql()
+        probe_sql = self.sql_builder.build_failed_cast_probe_sql(
+            snapshot_from=self.historize_from
+        )
         if probe_sql is None:
             return []
         rows = list(self.destination.execute_sql(probe_sql, self.schema))
@@ -1392,7 +1395,7 @@ class HistorizeRunner:
                 self.target_schema,
                 self.target_table_name,
                 column,
-                self._source_column_type(column),
+                self._source_column_type(column) or "",
             )
         if added:
             self.logger.info(
@@ -1419,17 +1422,20 @@ class HistorizeRunner:
     ) -> None:
         """Refuse a source column whose type differs from the target's.
 
-        Both types come from the destination's own catalog, and the target's
-        column was created from the source's, so the spellings match unless
-        the type really changed.
+        A table column's type comes from the destination's own catalog, as the
+        target's does, and the target's column was created from the source's,
+        so the spellings match unless the type really changed. A derived
+        column's is the type its ``json_columns`` entry declares, compared
+        through the destination's spelling of it.
         """
+        normalize = self.destination.normalize_type_name
         changed = []
         for column in list(self.config.primary_key) + list(value_columns):
             stored = target_types.get(column.lower())
-            source_type = self._source_column_types.get(column.lower())
+            source_type = self._source_column_type(column)
             if stored is None or source_type is None:
                 continue
-            if self._normalize_type(source_type) != self._normalize_type(stored[1]):
+            if normalize(source_type) != normalize(stored[1]):
                 changed.append((column, stored[1], source_type))
         if not changed:
             return
@@ -1449,21 +1455,17 @@ class HistorizeRunner:
         )
         raise ValueError("\n".join(lines))
 
-    def _source_column_type(self, column: str) -> str:
+    def _source_column_type(self, column: str) -> Optional[str]:
         """The destination type ``column`` has in the source relation.
 
         A table column's comes from the catalog; a derived column's is the
         type its ``json_columns`` entry casts to, the one a full reprocess
-        creates it with.
+        creates it with. ``None`` for a column the relation doesn't have.
         """
         for spec in self.config.json_column_specs:
             if spec.name.lower() == column.lower():
                 return self.destination.dlt_type_to_native(spec.data_type)
-        return self._source_column_types[column.lower()]
-
-    @staticmethod
-    def _normalize_type(type_name: str) -> str:
-        return " ".join(type_name.upper().split())
+        return self._source_column_types.get(column.lower())
 
     def _warn_dropped_columns(self, dropped: List[str]) -> None:
         """Report columns the source no longer has, loudly only the first time.

@@ -36,9 +36,13 @@ class JsonColumn:
     path: Tuple[str, ...]
     data_type: str = "text"
 
-    def fingerprint(self) -> List[Any]:
-        """Canonical form for the config fingerprint (defaults spelled out)."""
-        return [self.name, self.column, list(self.path), self.data_type]
+    def definition(self) -> List[Any]:
+        """What the entry reads and converts, with defaults spelled out.
+
+        The config fingerprint stores it per output name, so redefining an
+        entry is told apart from adding or removing one.
+        """
+        return [self.column, list(self.path), self.data_type]
 
 
 def parse_json_columns(
@@ -441,8 +445,9 @@ class HistorizeConfig:
                 "source column (primary_key, order_by, partition_column, "
                 "cluster_columns, filters, columns). A missing path, JSON null, "
                 "or a value that doesn't convert yields NULL; values that fail "
-                "to convert are warned about. Changing it requires a full "
-                "refresh."
+                "to convert are warned about. Adding or removing an entry is a "
+                "schema change on the historized table; redefining an existing "
+                "entry (column, path or data_type) requires a full refresh."
             ),
             "$ref": "dlt_common.json#/$defs/json_column",
         },
@@ -538,30 +543,6 @@ class HistorizeConfig:
     def json_column_specs(self) -> Tuple[JsonColumn, ...]:
         """The parsed ``json_columns`` entries, in config order."""
         return self._json_column_specs
-
-    @property
-    def keyed_json_column_specs(self) -> Tuple[JsonColumn, ...]:
-        """``json_columns`` entries that a key, ranking, filter or layout names.
-
-        Those decide which rows exist, how versions are told apart or ordered,
-        and where rows land, so redefining one invalidates the stored history.
-        Every other entry is a value column: adding or removing it is schema
-        evolution on the target, like a column the source gains or drops.
-        """
-        referenced = [
-            *self.primary_key,
-            *(self.merge_key or []),
-            *self.effective_order_by,
-            self.snapshot_column,
-            self.arrival_column,
-            *(entry.get("column", "") for entry in self.filters or []),
-            self.partition_column or "",
-            *(self.cluster_columns or []),
-        ]
-        names = {name.lower() for name in referenced if name}
-        return tuple(
-            spec for spec in self._json_column_specs if spec.name.lower() in names
-        )
 
     @property
     def is_full_delivery(self) -> bool:

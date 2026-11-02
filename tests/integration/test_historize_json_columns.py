@@ -71,7 +71,13 @@ def _insert(dest, rows):
 
 
 def _runner(
-    dest, *, full_refresh=False, partial_refresh=False, primary_key=None, **overrides
+    dest,
+    *,
+    full_refresh=False,
+    partial_refresh=False,
+    historize_from=None,
+    primary_key=None,
+    **overrides,
 ):
     primary_key = primary_key or ["landing_key"]
     settings = {
@@ -91,6 +97,7 @@ def _runner(
         config_dict={"write_disposition": "historize", "primary_key": primary_key},
         full_refresh=full_refresh,
         partial_refresh=partial_refresh,
+        historize_from=historize_from,
     )
 
 
@@ -379,21 +386,76 @@ class TestConfigChange:
         }
         stats = _runner(dest, json_columns=retyped).run()
         assert stats["status"] == "failed"
-        assert "json_column_types" in stats["error"]
+        assert "json_columns.amount" in stats["error"]
         assert "--full-refresh" in stats["error"]
 
         _run(dest, json_columns=retyped, full_refresh=True)
 
-    def test_redefining_a_keyed_entry_needs_full_refresh(self, dest):
-        primary_key = ["landing_key", "user_id"]
+    def test_repathing_an_entry_needs_full_refresh(self, dest):
         _insert(dest, [(1, _event("u1"), "2026-01-01 00:00:00", 1)])
-        _run(dest, primary_key=primary_key)
+        _run(dest)
         _insert(dest, [(1, _event("u1"), "2026-01-02 00:00:00", 2)])
-        redefined = {
+        repathed = {
             **JSON_COLUMNS,
-            "user_id": {"column": "payload", "path": "meta.tenant"},
+            "tenant": {"column": "payload", "path": "user_id"},
         }
-        stats = _runner(dest, primary_key=primary_key, json_columns=redefined).run()
+        stats = _runner(dest, json_columns=repathed).run()
         assert stats["status"] == "failed"
-        assert "json_columns" in stats["error"]
+        assert "json_columns.tenant" in stats["error"]
         assert "--full-refresh" in stats["error"]
+        assert len(_rows(dest)) == 1
+
+    def test_readding_an_entry_with_another_type_is_refused(self, dest):
+        """A removed entry's column stays on the target with its old type."""
+        without_amount = {k: v for k, v in JSON_COLUMNS.items() if k != "amount"}
+        _insert(dest, [(1, _event("u1", amount=5), "2026-01-01 00:00:00", 1)])
+        _run(dest)
+        _insert(dest, [(1, _event("u2", amount=5), "2026-01-02 00:00:00", 2)])
+        _run(dest, json_columns=without_amount)
+        before = _rows(dest)
+
+        as_text = {
+            **JSON_COLUMNS,
+            "amount": {"column": "payload", "path": "amount", "data_type": "text"},
+        }
+        _insert(dest, [(1, _event("u3", amount="many"), "2026-01-03 00:00:00", 3)])
+        stats = _runner(dest, json_columns=as_text).run()
+
+        assert stats["status"] == "failed"
+        assert (
+            "amount: BIGINT in the historized table, VARCHAR in the source"
+            in (stats["error"])
+        )
+        assert "--full-refresh" in stats["error"]
+        assert _rows(dest) == before
+
+    def test_removing_an_entry_warns_once(self, dest, caplog):
+        without_amount = {k: v for k, v in JSON_COLUMNS.items() if k != "amount"}
+        _insert(dest, [(1, _event("u1"), "2026-01-01 00:00:00", 1)])
+        _run(dest)
+        _insert(dest, [(1, _event("u2"), "2026-01-02 00:00:00", 2)])
+        with caplog.at_level(logging.WARNING):
+            _run(dest, json_columns=without_amount)
+        assert any(
+            "amount" in r.getMessage() and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
+
+        _insert(dest, [(1, _event("u3"), "2026-01-03 00:00:00", 3)])
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            _run(dest, json_columns=without_amount)
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    def test_historize_from_probes_only_its_window(self, dest, caplog):
+        _insert(dest, [(1, _event("u1", amount="many"), "2026-01-01 00:00:00", 1)])
+        with caplog.at_level(logging.WARNING):
+            _run(dest)
+        assert any("'amount'" in r.getMessage() for r in caplog.records)
+
+        _insert(dest, [(1, _event("u1", amount=5), "2026-01-02 00:00:00", 2)])
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            stats = _run(dest, historize_from="2026-01-02 00:00:00")
+        assert stats["mode"] == "partial_refresh"
+        assert not [r for r in caplog.records if "'amount'" in r.getMessage()]

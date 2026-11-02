@@ -185,8 +185,6 @@ class TestFingerprint:
     @pytest.mark.parametrize(
         "changed",
         [
-            {"user_id": {"column": "payload", "path": "user.id"}},
-            {"user_id": {"column": "envelope", "path": "user_id"}},
             {"uid": {"column": "payload", "path": "user_id"}},
             {
                 "user_id": {"column": "payload", "path": "user_id"},
@@ -195,8 +193,8 @@ class TestFingerprint:
             {},
         ],
     )
-    def test_value_column_edit_is_schema_evolution(self, changed):
-        """Adding, removing or redefining a value-only entry needs no rebuild."""
+    def test_adding_or_removing_an_entry_is_schema_evolution(self, changed):
+        """An entry on one side only is reconciled on the target, not rebuilt."""
         manager = HistorizeStateManager.__new__(HistorizeStateManager)
         before = _config(
             json_columns={"user_id": {"column": "payload", "path": "user_id"}}
@@ -205,74 +203,51 @@ class TestFingerprint:
             _state_for(before), _config(json_columns=changed)
         )
 
-    def test_value_column_retype_blocks(self):
+    @pytest.mark.parametrize(
+        "redefined",
+        [
+            {"column": "payload", "path": "user.id"},
+            {"column": "envelope", "path": "user_id"},
+            {"column": "payload", "path": "user_id", "data_type": "bigint"},
+        ],
+    )
+    def test_redefining_an_entry_blocks(self, redefined):
+        """An entry kept under its name with another definition needs a rebuild."""
         manager = HistorizeStateManager.__new__(HistorizeStateManager)
         before = _config(
             json_columns={"user_id": {"column": "payload", "path": "user_id"}}
         )
-        after = _config(
-            json_columns={
-                "user_id": {
-                    "column": "payload",
-                    "path": "user_id",
-                    "data_type": "bigint",
-                }
-            }
+        changes = manager.fingerprint_changes(
+            _state_for(before), _config(json_columns={"user_id": redefined})
         )
-        changes = manager.fingerprint_changes(_state_for(before), after)
-        assert changes.blocking == ["json_column_types"]
-
-    @pytest.mark.parametrize(
-        "keyed",
-        [
-            {"primary_key": ["id", "user_id"]},
-            {"merge_key": ["user_id"], "track_deletions": True},
-            {"filters": [{"column": "user_id", "op": "eq", "value": "x"}]},
-            {"cluster_columns": ["user_id"]},
-            {"partition_column": "user_id"},
-        ],
-    )
-    def test_keyed_entry_redefinition_blocks(self, keyed):
-        manager = HistorizeStateManager.__new__(HistorizeStateManager)
-        before = _config(
-            json_columns={"user_id": {"column": "payload", "path": "user_id"}},
-            **keyed,
-        )
-        after = _config(
-            json_columns={"user_id": {"column": "payload", "path": "user.id"}},
-            **keyed,
-        )
-        changes = manager.fingerprint_changes(_state_for(before), after)
         assert changes.blocking == ["json_columns"]
+        # Described per entry, naming only the redefined one.
+        (line,) = changes.describe(changes.blocking)
+        assert line.startswith(
+            "  json_columns.user_id: ['payload', ['user_id'], 'text'] → "
+        )
+        assert redefined["column"] in line
 
     def test_adding_to_a_table_historized_before_the_key_existed(self):
-        """A stored fingerprint without the keys reads as 'no json_columns'.
+        """A stored fingerprint without the key reads as 'no json_columns'.
 
-        config_changed skips keys a stored fingerprint lacks, so without the
-        defaults adding a keyed entry would never ask for a rebuild.
+        Such a table has no derived column that could be redefined, so adding
+        entries to it is schema evolution like on any other table.
         """
         import base64
         import json
 
-        legacy = _decoded(_config(cluster_columns=["user_id"]))
+        legacy = _decoded(_config())
         del legacy["json_columns"]
-        del legacy["json_column_types"]
         state = HistorizeStateManager.PipelineState(
             has_successful_run=True,
             config_fingerprint=base64.b64encode(json.dumps(legacy).encode()).decode(),
         )
         manager = HistorizeStateManager.__new__(HistorizeStateManager)
-        assert not manager.config_changed(state, _config(cluster_columns=["user_id"]))
+        assert not manager.config_changed(state, _config())
         assert not manager.config_changed(
             state,
             _config(json_columns={"tenant": {"column": "payload", "path": "tenant"}}),
-        )
-        assert manager.config_changed(
-            state,
-            _config(
-                cluster_columns=["user_id"],
-                json_columns={"user_id": {"column": "payload", "path": "user_id"}},
-            ),
         )
 
 
@@ -390,6 +365,11 @@ class TestSourceRelation:
         assert "MAX(CASE WHEN (EXTRACT(`payload`, eventTime) IS NOT NULL" in sql
         assert "AS _cast_fail_0" in sql
         assert "FROM (\n  SELECT *," in sql
+
+    def test_failed_cast_probe_bounded_by_snapshot_from(self):
+        builder = _builder(_config(json_columns=_SPECS))
+        sql = builder.build_failed_cast_probe_sql(snapshot_from="2026-01-02 00:00:00")
+        assert "WHERE `_dlt_ingested_at` >= TIMESTAMP '2026-01-02 00:00:00'" in sql
 
     def test_no_failed_cast_probe_for_text_only(self):
         builder = _builder(

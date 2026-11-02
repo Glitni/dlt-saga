@@ -444,6 +444,16 @@ class DuckDBDestination(Destination):
     def dlt_type_to_native(self, dlt_type: str) -> str:
         return self.DLT_TO_DUCKDB_TYPE.get(dlt_type.lower(), dlt_type.upper())
 
+    # The catalog spells a few types in their long form.
+    TYPE_NAME_ALIASES = {
+        "TIMESTAMP WITH TIME ZONE": "TIMESTAMPTZ",
+        "TIMESTAMP WITHOUT TIME ZONE": "TIMESTAMP",
+    }
+
+    def normalize_type_name(self, type_name: str) -> str:
+        canonical = super().normalize_type_name(type_name)
+        return self.TYPE_NAME_ALIASES.get(canonical, canonical)
+
     def json_extract_scalar(self, column_sql: str, path: Tuple[str, ...]) -> str:
         # DuckDB's JSON_VALUE returns the scalar JSON-encoded ('"x"'), and every
         # JSON function raises on malformed input rather than returning NULL.

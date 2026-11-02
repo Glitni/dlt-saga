@@ -1113,6 +1113,16 @@ class Destination(ABC):
             f"{self.__class__.__name__} does not implement add_column"
         )
 
+    def normalize_type_name(self, type_name: str) -> str:
+        """Canonical spelling of a SQL type name, for comparing two of them.
+
+        The catalog may spell a type differently from the DDL that created it
+        (an alias, a long form). Two names normalizing equal denote the same
+        type. The default folds case and whitespace; a destination with
+        aliases overrides.
+        """
+        return " ".join(type_name.upper().split())
+
     # =========================================================================
     # Column / table description reconciliation
     #
