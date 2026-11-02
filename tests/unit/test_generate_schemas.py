@@ -594,8 +594,8 @@ class TestGenerateSchemasOutput:
 
         generate_schemas(tmp_path)
         size = (tmp_path / "saga_project_config.json").stat().st_size
-        assert size < 160_000, (
-            f"saga_project_config.json is {size} bytes — expected < 160KB. "
+        assert size < 200_000, (
+            f"saga_project_config.json is {size} bytes — expected < 200KB. "
             "A jump likely means the config-field union is being inlined "
             "instead of referenced via $defs."
         )

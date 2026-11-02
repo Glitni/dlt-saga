@@ -47,8 +47,10 @@ class HistorizeLogEntry:
 LOG_COLUMNS_ADDED_LATER = {"source_columns": "string"}
 
 # Fingerprint keys that only decide which columns the change-detection hash
-# covers; see ``HistorizeStateManager.fingerprint_changes``.
-DETECTION_KEYS = ("track_columns", "ignore_columns")
+# covers; see ``HistorizeStateManager.fingerprint_changes``. An excluded
+# column leaves the output too, but on an existing target that is forward-only
+# schema evolution (the column stays, read as NULL), so it is judged the same way.
+DETECTION_KEYS = ("track_columns", "ignore_columns", "exclude_columns")
 
 
 @dataclass
@@ -258,6 +260,7 @@ class HistorizeStateManager:
             if config.track_columns
             else [],
             "ignore_columns": sorted(config.ignore_columns),
+            "exclude_columns": sorted(config.exclude_columns),
             "snapshot_column": config.snapshot_column,
             "track_deletions": config.track_deletions,
             "table_format": config.table_format or "native",
@@ -305,10 +308,11 @@ class HistorizeStateManager:
         """Decode a base64-encoded config fingerprint back to a dict.
 
         Fingerprints written before ``strategy`` / ``delivery`` /
-        ``json_columns`` existed are scd2 / full-delivery / no-derived-column
-        ones, so those keys are filled in rather than left absent:
-        ``config_changed`` skips keys a stored fingerprint lacks, and changing
-        any of them on such a table must still demand a rebuild.
+        ``json_columns`` / ``exclude_columns`` existed are scd2 /
+        full-delivery / no-derived-column / nothing-excluded ones, so those
+        keys are filled in rather than left absent: ``config_changed`` skips
+        keys a stored fingerprint lacks, and changing any of them on such a
+        table must still be judged.
         """
         import base64
         import json
@@ -318,6 +322,7 @@ class HistorizeStateManager:
         decoded.setdefault("order_by", [])
         decoded.setdefault("delivery", "full")
         decoded.setdefault("json_columns", {})
+        decoded.setdefault("exclude_columns", [])
         return decoded
 
     def fingerprint_changes(
@@ -331,14 +336,15 @@ class HistorizeStateManager:
 
         Most differences invalidate the stored history and block the run until
         a full refresh. One kind doesn't: ``track_columns`` / ``ignore_columns``
-        edited so that change detection only *narrows* (a column added to
-        ``ignore_columns``, one dropped from ``track_columns``). Versions
-        already written were real changes at the time and stay correct; the
-        hash is recomputed from the stored open row on every run, so the next
-        run simply compares without the column. Such an edit is reported as
-        ``narrowed`` and takes effect going forward. Widening (starting to
-        track a column) still blocks: history before the edit has no versions
-        for it, and whether that needs a rebuild is not the framework's call.
+        / ``exclude_columns`` edited so that change detection only *narrows*
+        (a column added to ``ignore_columns`` or ``exclude_columns``, one
+        dropped from ``track_columns``). Versions already written were real
+        changes at the time and stay correct; the hash is recomputed from the
+        stored open row on every run, so the next run simply compares without
+        the column. Such an edit is reported as ``narrowed`` and takes effect
+        going forward. Widening (starting to track a column) still blocks:
+        history before the edit has no versions for it, and whether that needs
+        a rebuild is not the framework's call.
 
         ``json_columns`` blocks only when an entry kept across the edit was
         redefined (another column, path or type): the stored column would
@@ -377,21 +383,26 @@ class HistorizeStateManager:
         """Whether the hashed column set can only have shrunk.
 
         The hashed set is ``track_columns`` (every value column when unset)
-        minus ``ignore_columns``. Decided from config alone: when the new
-        ``track_columns`` is unset the set is "everything but the ignored",
-        which is a subset of the old one only if that was unset too and the
-        ignored columns only grew.
+        minus ``ignore_columns`` and ``exclude_columns``. Decided from config
+        alone: when the new ``track_columns`` is unset the set is "everything
+        but the ignored and excluded", which is a subset of the old one only
+        if that was unset too and the removed columns only grew.
         """
+
+        def removed(fingerprint: dict) -> set:
+            return set(fingerprint.get("ignore_columns") or []) | set(
+                fingerprint.get("exclude_columns") or []
+            )
+
         prev_track = set(previous.get("track_columns") or [])
         cur_track = set(current.get("track_columns") or [])
-        prev_ignore = set(previous.get("ignore_columns") or [])
-        cur_ignore = set(current.get("ignore_columns") or [])
+        prev_removed, cur_removed = removed(previous), removed(current)
         if not cur_track:
-            return not prev_track and prev_ignore <= cur_ignore
-        hashed_now = cur_track - cur_ignore
+            return not prev_track and prev_removed <= cur_removed
+        hashed_now = cur_track - cur_removed
         if not prev_track:
-            return not (hashed_now & prev_ignore)
-        return hashed_now <= prev_track - prev_ignore
+            return not (hashed_now & prev_removed)
+        return hashed_now <= prev_track - prev_removed
 
     def config_changed(
         self, state: "HistorizeStateManager.PipelineState", config: Any

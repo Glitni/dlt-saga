@@ -1185,7 +1185,7 @@ class Destination(ABC):
             descriptions: {column_name: desired_description}. Keys are normalized
                 to dlt's snake_case before matching stored columns; entries for
                 columns not present in the table are skipped (e.g. columns the
-                historized table drops via ignore_columns).
+                historized table leaves out via exclude_columns).
             table_description: Desired table description, or None to leave the
                 table description untouched.
         """

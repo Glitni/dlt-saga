@@ -225,9 +225,26 @@ class HistorizeConfig:
         metadata={
             "description": (
                 "Columns to exclude from change detection. These columns are still present in the "
-                "output table but do not trigger a new SCD2 record when their value changes. "
+                "output table but do not trigger a new SCD2 record when their value changes "
+                "(to leave a column out of the output table, use exclude_columns). "
                 "Applied after track_columns when both are set. Adding a column here applies from "
                 "the next run; removing one requires a full refresh."
+            )
+        },
+    )
+
+    exclude_columns: List[str] = field(
+        default_factory=list,
+        metadata={
+            "description": (
+                "Source columns left out of the historized table, and so out of change "
+                "detection (ignore_columns keeps a column in the output and only stops it "
+                "from opening versions). Works under both strategies. Cannot name a key, "
+                "snapshot, order_by, partition or cluster column, a column also listed in "
+                "track_columns or ignore_columns, or a json_columns output name. Adding a "
+                "column here applies from the next run: a column already on the historized "
+                "table keeps its history and new versions carry NULL in it. Removing one "
+                "requires a full refresh."
             )
         },
     )
@@ -507,6 +524,7 @@ class HistorizeConfig:
             "classification",
             "track_columns",
             "ignore_columns",
+            "exclude_columns",
             "cluster_columns",
             "merge_key",
             "order_by",
@@ -540,6 +558,7 @@ class HistorizeConfig:
                 )
             },
         )
+        self._validate_exclude_columns()
 
     @property
     def json_column_specs(self) -> Tuple[JsonColumn, ...]:
@@ -696,11 +715,49 @@ class HistorizeConfig:
             "merge_key",
             "track_columns",
             "ignore_columns",
+            "exclude_columns",
             "order_by",
         ):
             for col in getattr(self, attr) or []:
                 if not _SQL_IDENT.match(col):
                     raise ValueError(f"{attr} contains invalid SQL identifier: '{col}'")
+
+    def _validate_exclude_columns(self) -> None:
+        """Refuse ``exclude_columns`` entries the historized table has to carry.
+
+        An excluded column isn't on the target, so nothing that reads the
+        target can name it: the SQL's own columns, the table's layout, or a
+        detection list (which would then say two things about one column).
+        Keys are checked in ``validate()``, once ``primary_key`` may have been
+        inherited.
+        """
+        if not self.exclude_columns:
+            return
+        excluded = {c.lower() for c in self.exclude_columns}
+        conflicts = []
+        for attr in (
+            "snapshot_column",
+            "order_by",
+            "partition_column",
+            "cluster_columns",
+            "track_columns",
+            "ignore_columns",
+        ):
+            value = getattr(self, attr)
+            columns = [value] if isinstance(value, str) else value or []
+            conflicts += [(attr, c) for c in columns if c.lower() in excluded]
+        conflicts += [
+            ("json_columns", spec.name)
+            for spec in self._json_column_specs
+            if spec.name.lower() in excluded
+        ]
+        if conflicts:
+            listed = ", ".join(f"'{col}' ({attr})" for attr, col in conflicts)
+            raise ValueError(
+                f"historize.exclude_columns leaves column(s) out of the historized "
+                f"table that other settings read from it: {listed}. Remove them "
+                f"from exclude_columns or from the other setting."
+            )
 
     @classmethod
     def from_dict(
@@ -762,6 +819,14 @@ class HistorizeConfig:
             raise ValueError(
                 "track_columns must be either omitted (track all columns) or a "
                 "non-empty list. To track specific columns, list them explicitly."
+            )
+
+        excluded = {c.lower() for c in self.exclude_columns}
+        excluded_keys = [pk for pk in self.primary_key if pk.lower() in excluded]
+        if excluded_keys:
+            raise ValueError(
+                f"historize.exclude_columns cannot name primary_key column(s) "
+                f"{excluded_keys}: every version is identified by its key."
             )
 
         if self.merge_key:

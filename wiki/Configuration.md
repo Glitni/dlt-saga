@@ -542,6 +542,7 @@ historize:
 | `primary_key` | list | inherited | Inherits from top-level `primary_key` |
 | `track_columns` | list | — | Opt-in allowlist for change detection (all columns still in output) |
 | `ignore_columns` | list | `[]` | Columns excluded from change detection (still in output) |
+| `exclude_columns` | list | `[]` | Source columns left out of the historized table (and so out of change detection) |
 | `partition_column` | string | — | Partition the output table |
 | `cluster_columns` | list | — | Cluster the output table |
 | `delivery` | string | `full` | `full`: each snapshot is a complete copy of the source; `incremental`: each holds only the records sent in it (no deletion or gap detection) |
