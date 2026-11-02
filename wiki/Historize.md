@@ -431,7 +431,7 @@ historize:
 
 **A subtlety with `track_deletions: true`.** A row whose `tenant_id` mutates between snapshots (e.g. from `tenant_a` to `tenant_b`) registers as a delete in tenant A's history and an insert in tenant B's history. From each tenant's view that's the correct semantic — the row is gone from theirs and appears in the other's — but worth knowing if you rely on `_dlt_is_deleted` markers downstream.
 
-**Config-change detection.** The filter list is part of the historize config fingerprint. Changing `historize.filters:` between runs triggers the same prompt as changing `primary_key` or `ignore_columns` — you'll be told to run `saga historize --full-refresh` so the existing historized table is rebuilt against the new predicate.
+**Config-change detection.** The filter list is part of the historize config fingerprint. Changing `historize.filters:` between runs triggers the same prompt as changing `primary_key` or `snapshot_column` — you'll be told to run `saga historize --full-refresh` so the existing historized table is rebuilt against the new predicate.
 
 ---
 
@@ -682,7 +682,7 @@ The historized table is created from the source's columns on the first run. When
 
 **Column type changed.** The run is refused before any write, naming the column and both types, and points at `--full-refresh`, which rebuilds the history with the new type from what the source still holds. A widening the destination would accept is refused too: it changes the change-detection hash of every stored row.
 
-For sources ingested by saga, only the added case arises: dlt never drops or retypes a raw table's columns (a value that no longer fits its column lands in a variant column such as `price__v_text`, and a column dropped upstream is simply `NULL` from then on). Dropped and retyped columns come from [external deliveries](#external-data-historize-only) whose table someone else maintains.
+For sources ingested by saga, only the added case arises: dlt never drops or retypes a raw table's columns (a value that no longer fits its column lands in a variant column such as `price__v_text`, and a column dropped upstream is simply `NULL` from then on). Dropped and retyped columns come from [external deliveries](#external-data-historize-only) whose table someone else maintains, or from [`json_columns`](#columns-from-a-json-source-column) entries you remove or redefine.
 
 ---
 

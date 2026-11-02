@@ -214,7 +214,8 @@ class HistorizeConfig:
             "description": (
                 "Columns to include in change detection. When set, only these columns are hashed; "
                 "all other non-PK columns are ignored for change detection but still appear in the output. "
-                "Applied before ignore_columns."
+                "Applied before ignore_columns. Dropping a column from this list applies from the "
+                "next run; adding one requires a full refresh."
             )
         },
     )
@@ -225,7 +226,8 @@ class HistorizeConfig:
             "description": (
                 "Columns to exclude from change detection. These columns are still present in the "
                 "output table but do not trigger a new SCD2 record when their value changes. "
-                "Applied after track_columns when both are set."
+                "Applied after track_columns when both are set. Adding a column here applies from "
+                "the next run; removing one requires a full refresh."
             )
         },
     )
