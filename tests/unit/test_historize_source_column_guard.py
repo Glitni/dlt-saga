@@ -31,6 +31,7 @@ def _make_runner(columns, **config_kwargs) -> HistorizeRunner:
     runner.destination = dest
     runner.schema = "ds"
     runner.source_table_id = "proj.ds.src"
+    runner.source_relation = "proj.ds.src"
     runner.config = HistorizeConfig(primary_key=["id"], **config_kwargs)
     runner._source_columns_cache = list(columns)
     return runner

@@ -11,7 +11,12 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from dlt_saga.historize.config import HistorizeConfig
-from dlt_saga.historize.sql import HistorizeSqlBuilder, snapshot_range_filter
+from dlt_saga.historize.sql import (
+    HistorizeSqlBuilder,
+    build_source_relation,
+    failed_cast_alias,
+    snapshot_range_filter,
+)
 from dlt_saga.historize.state import (
     FingerprintChanges,
     HistorizeLogEntry,
@@ -100,6 +105,13 @@ class HistorizeRunner:
                 schema, source_table_name
             )
 
+        # Every source read selects from this: the table, or the derived
+        # relation adding historize.json_columns. source_table_id stays the
+        # identity used in logs, state rows and messages.
+        self.source_relation = build_source_relation(
+            destination, self.source_table_id, self.config.json_column_specs
+        )
+
         # Target table in same schema (or override)
         target_schema = self.config.schema_name or schema
         self.target_schema = target_schema
@@ -134,6 +146,7 @@ class HistorizeRunner:
             target_table_name=target_table_name,
             target_schema=target_schema,
             filter_sql=self._filter_sql,
+            source_relation=self.source_relation,
         )
 
     @property
@@ -464,10 +477,11 @@ class HistorizeRunner:
         if not self.full_refresh and not is_partial and state.has_successful_run:
             discovery = self.state_manager.discover_unprocessed_snapshots(
                 state=state,
-                source_table_id=self.source_table_id,
+                source_table_id=self.source_relation,
                 snapshot_column=self.config.snapshot_column,
                 filter_sql=self._filter_sql,
                 primary_key=self.config.primary_key,
+                cast_checks=self.sql_builder.failed_cast_checks(),
             )
             new_snapshots = discovery.snapshots
 
@@ -495,6 +509,7 @@ class HistorizeRunner:
         # Runs before mode selection, so a full refresh refuses *before*
         # clear_log_entries + CREATE OR REPLACE destroy the existing history.
         self._guard_null_primary_keys(discovery)
+        self._warn_failed_casts(discovery)
 
         value_columns = self._discover_value_columns()
         if self.config.is_scd1:
@@ -652,11 +667,12 @@ class HistorizeRunner:
 
         replay = self.state_manager.discover_unprocessed_snapshots(
             state=state,
-            source_table_id=self.source_table_id,
+            source_table_id=self.source_relation,
             snapshot_column=self.config.snapshot_column,
             filter_sql=self._filter_sql,
             primary_key=self.config.primary_key,
             min_snapshot_inclusive=late.min_snapshot,
+            cast_checks=self.sql_builder.failed_cast_checks(),
         )
         if self.config.is_scd1:
             # scd1 ranks every version against the stored one, so re-merging
@@ -751,7 +767,7 @@ class HistorizeRunner:
             return None
         return self.state_manager.find_late_arrivals(
             state=state,
-            source_table_id=self.source_table_id,
+            source_table_id=self.source_relation,
             snapshot_column=cfg.snapshot_column,
             arrival_column=cfg.arrival_column,
             filter_sql=self._filter_sql,
@@ -759,14 +775,22 @@ class HistorizeRunner:
         )
 
     def _source_columns(self) -> List[str]:
-        """The source table's columns, read once per run and cached.
+        """The source relation's columns: the table's, then any ``json_columns``.
 
         Every column-dependent check in the run (the config guard, value-column
         discovery, the arrival-column probe) filters this one result, so a
-        column can't be visible to one of them and absent from another. The
-        destination's ``columns_query`` contract limits this to materializable
-        columns; pseudo-columns are absent by design and are handled separately
-        by the checks that accept one.
+        column can't be visible to one of them and absent from another — and
+        a derived column counts as a source column everywhere.
+        """
+        derived = [spec.name for spec in self.config.json_column_specs]
+        return self._table_columns() + derived
+
+    def _table_columns(self) -> List[str]:
+        """The source table's own columns, read once per run and cached.
+
+        The destination's ``columns_query`` contract limits this to
+        materializable columns; pseudo-columns are absent by design and are
+        handled separately by the checks that accept one.
         """
         if self._source_columns_cache is None:
             sql = self.destination.columns_query(
@@ -786,7 +810,7 @@ class HistorizeRunner:
         """
         if self._source_columns_cache is None:
             return None
-        return json.dumps(self._source_columns_cache)
+        return json.dumps(self._source_columns())
 
     def _source_can_reference(self, column: str) -> bool:
         """Whether generated SQL can read ``column`` off the source table.
@@ -816,13 +840,14 @@ class HistorizeRunner:
         primary key is materialized into the historized table, and a
         destination that reserves the name for pseudo-columns rejects it there.
         """
-        source_columns = self._source_columns()
-        if not source_columns:
+        if not self._table_columns():
             raise ValueError(
                 f"Source table {self.source_table_id} has no columns. "
                 f"Check that it exists and that the pipeline's source "
                 f"configuration points at the right table."
             )
+        self._guard_json_columns()
+        source_columns = self._source_columns()
 
         referenced = [
             ("snapshot_column", [self.config.snapshot_column], True),
@@ -855,6 +880,76 @@ class HistorizeRunner:
                 )
         lines.append(f"Available columns: {', '.join(source_columns)}")
         raise ValueError("\n".join(lines))
+
+    def _guard_json_columns(self) -> None:
+        """Refuse ``json_columns`` that don't fit the source table.
+
+        Each must read a column of the table itself — not another derived one,
+        which the relation computes alongside — and its output name must not
+        shadow one of the table's columns.
+        """
+        table_columns = {col.lower() for col in self._table_columns()}
+        problems = []
+        for spec in self.config.json_column_specs:
+            if spec.name.lower() in table_columns:
+                problems.append(
+                    f"  - '{spec.name}' is already a column of the source; "
+                    f"choose another output name"
+                )
+            if spec.column.lower() not in table_columns:
+                problems.append(
+                    f"  - '{spec.name}' reads column '{spec.column}', which is "
+                    f"not a column of the source"
+                )
+        if not problems:
+            return
+        lines = [
+            f"historize.json_columns for '{self.pipeline_name}' doesn't fit "
+            f"{self.source_table_id}:",
+            *problems,
+            f"Available columns: {', '.join(self._table_columns())}",
+        ]
+        raise ValueError("\n".join(lines))
+
+    def _warn_failed_casts(self, discovery: Optional[SnapshotDiscovery]) -> None:
+        """Warn about ``json_columns`` holding values that didn't convert.
+
+        Those values are written as NULL — a payload whose format or field
+        names drifted would otherwise go unnoticed. An incremental run's
+        discovery already checked the rows it found; full and partial
+        refreshes (``discovery`` is None) probe the filtered source, from
+        ``--historize-from`` on when given.
+        """
+        if discovery is not None:
+            failed = discovery.failed_casts
+        else:
+            failed = self._probe_failed_casts()
+        specs = {spec.name: spec for spec in self.config.json_column_specs}
+        for name in failed:
+            spec = specs[name]
+            location = f"{spec.column}.{'.'.join(spec.path)}"
+            self.logger.warning(
+                f"{self.pipeline_name}: json_columns '{name}' has values at "
+                f"'{location}' that don't convert to {spec.data_type}; they are "
+                f"written as NULL. Check the source format, or declare another "
+                f"data_type (text keeps the raw value)."
+            )
+
+    def _probe_failed_casts(self) -> List[str]:
+        """Names of the ``json_columns`` with unconvertible values in the source."""
+        probe_sql = self.sql_builder.build_failed_cast_probe_sql(
+            snapshot_from=self.historize_from
+        )
+        if probe_sql is None:
+            return []
+        rows = list(self.destination.execute_sql(probe_sql, self.schema))
+        if not rows:
+            return []
+        return [
+            name
+            for i, (name, _) in enumerate(self.sql_builder.failed_cast_checks())
+            if getattr(rows[0], failed_cast_alias(i), 0)
+        ]
 
     def _source_can_reference_real(self, column: str) -> bool:
         """Whether ``column`` is a real (materializable) column of the source."""
@@ -910,7 +1005,7 @@ class HistorizeRunner:
         base_where = f"{q_snapshot} < TIMESTAMP '{safe_min}'"
         sql = f"""
             SELECT {cast_expr} AS baseline_snapshot
-            FROM {self.source_table_id}
+            FROM {self.source_relation}
             WHERE {and_filter(self._filter_sql, base_where)}
         """
         rows = list(self.destination.execute_sql(sql, self.schema))
@@ -957,6 +1052,7 @@ class HistorizeRunner:
     def _validate_destination_capabilities(self) -> None:
         """Validate that the destination supports the configured historize options."""
         dest_type = type(self.destination).__name__
+        self._validate_json_columns_on_destination()
 
         if (
             self.config.partition_column
@@ -980,6 +1076,34 @@ class HistorizeRunner:
                 f"pipeline '{self.pipeline_name}', or use table_format: delta_uniform "
                 f"if you need both Delta and Iceberg compatibility."
             )
+
+    def _validate_json_columns_on_destination(self) -> None:
+        """Reject ``json_columns`` combinations the destination can't read.
+
+        The derived relation is a subquery, and a pseudo-column survives
+        neither ``SELECT *`` nor a projection, so a pseudo-column snapshot or
+        arrival column can't be read through it. An output name the
+        destination reserves for pseudo-columns can't be created.
+        """
+        specs = self.config.json_column_specs
+        if not specs:
+            return
+        for spec in specs:
+            if self.destination.is_pseudo_column(spec.name):
+                raise ValueError(
+                    f"historize.json_columns.{spec.name}: the destination "
+                    f"reserves this name for pseudo-columns; choose another "
+                    f"output name"
+                )
+        for key in ("snapshot_column", "arrival_column"):
+            column = getattr(self.config, key)
+            if self.destination.is_pseudo_column(column):
+                raise ValueError(
+                    f"historize.json_columns can't be combined with the "
+                    f"pseudo-column {key} '{column}' in '{self.pipeline_name}': "
+                    f"the source is read through a subquery, which doesn't "
+                    f"carry pseudo-columns. Use a real column as {key}."
+                )
 
     def _is_databricks_iceberg(self) -> bool:
         table_format = self.config.table_format or "native"
@@ -1271,7 +1395,7 @@ class HistorizeRunner:
                 self.target_schema,
                 self.target_table_name,
                 column,
-                self._source_column_types[column.lower()],
+                self._source_column_type(column) or "",
             )
         if added:
             self.logger.info(
@@ -1298,17 +1422,20 @@ class HistorizeRunner:
     ) -> None:
         """Refuse a source column whose type differs from the target's.
 
-        Both types come from the destination's own catalog, and the target's
-        column was created from the source's, so the spellings match unless
-        the type really changed.
+        A table column's type comes from the destination's own catalog, as the
+        target's does, and the target's column was created from the source's,
+        so the spellings match unless the type really changed. A derived
+        column's is the type its ``json_columns`` entry declares, compared
+        through the destination's spelling of it.
         """
+        normalize = self.destination.normalize_type_name
         changed = []
         for column in list(self.config.primary_key) + list(value_columns):
             stored = target_types.get(column.lower())
-            source_type = self._source_column_types.get(column.lower())
+            source_type = self._source_column_type(column)
             if stored is None or source_type is None:
                 continue
-            if self._normalize_type(source_type) != self._normalize_type(stored[1]):
+            if normalize(source_type) != normalize(stored[1]):
                 changed.append((column, stored[1], source_type))
         if not changed:
             return
@@ -1328,9 +1455,17 @@ class HistorizeRunner:
         )
         raise ValueError("\n".join(lines))
 
-    @staticmethod
-    def _normalize_type(type_name: str) -> str:
-        return " ".join(type_name.upper().split())
+    def _source_column_type(self, column: str) -> Optional[str]:
+        """The destination type ``column`` has in the source relation.
+
+        A table column's comes from the catalog; a derived column's is the
+        type its ``json_columns`` entry casts to, the one a full reprocess
+        creates it with. ``None`` for a column the relation doesn't have.
+        """
+        for spec in self.config.json_column_specs:
+            if spec.name.lower() == column.lower():
+                return self.destination.dlt_type_to_native(spec.data_type)
+        return self._source_column_types.get(column.lower())
 
     def _warn_dropped_columns(self, dropped: List[str]) -> None:
         """Report columns the source no longer has, loudly only the first time.
@@ -1405,7 +1540,7 @@ class HistorizeRunner:
         cast_max = self.destination.cast_to_string(f"MAX({q_snapshot})")
         max_sql = (
             f"SELECT {cast_max} AS last_snapshot "
-            f"FROM {self.source_table_id}{filter_where_clause(self._filter_sql)}"
+            f"FROM {self.source_relation}{filter_where_clause(self._filter_sql)}"
         )
         max_rows = list(self.destination.execute_sql(max_sql, self.schema))
         return max_rows[0].last_snapshot if max_rows else None
@@ -1836,6 +1971,7 @@ class HistorizeRunner:
                 source_schema=self._src_schema,
                 source_table=self._src_table,
                 filter_sql=self._filter_sql,
+                source_relation=self.source_relation,
             )
 
             self._rollback_staging(
@@ -2037,7 +2173,7 @@ class HistorizeRunner:
             - effective_from_date_str: ISO timestamp string (format: YYYY-MM-DD HH:MM:SS)
             - was_clamped: True if historize_from was adjusted to min_raw_snapshot
         """
-        src = self.source_table_id
+        src = self.source_relation
         snapshot_col = self.destination.quote_identifier(self.config.snapshot_column)
         target_schema = self.config.schema_name or self.schema
 
@@ -2084,7 +2220,7 @@ class HistorizeRunner:
             - snapshots_list: Chronologically ordered list of snapshot values >= boundary
             - lag_reference: Last snapshot value before the boundary, or None
         """
-        src = self.source_table_id
+        src = self.source_relation
         snapshot_col = self.destination.quote_identifier(self.config.snapshot_column)
         cast_expr = self.destination.cast_to_string(snapshot_col)
         safe_date = self.destination.escape_string_literal(effective_from_date)

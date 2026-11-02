@@ -7,9 +7,11 @@ tables holding only the latest version per key.
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from dlt_saga.utility.filters import filter_field_metadata as _filter_field_metadata
+from dlt_saga.utility.filters import parse_json_path
+from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS, SNAPSHOT_ALIAS
 
 # Bare SQL identifier: letters/underscore start, then letters/digits/underscore.
 # Column names interpolated into historize SQL are checked against this so a
@@ -18,6 +20,105 @@ _SQL_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 STRATEGIES = ("scd2", "scd1")
 DELIVERIES = ("full", "incremental")
+
+# dlt logical types a json_columns entry may convert to. Scalars only: the
+# extraction yields NULL for an object or array.
+JSON_COLUMN_TYPES = ("text", "bigint", "double", "bool", "timestamp", "date")
+_JSON_COLUMN_KEYS = {"column", "path", "data_type"}
+
+
+@dataclass(frozen=True)
+class JsonColumn:
+    """One ``historize.json_columns`` entry, with its defaults resolved."""
+
+    name: str
+    column: str
+    path: Tuple[str, ...]
+    data_type: str = "text"
+
+    def definition(self) -> List[Any]:
+        """What the entry reads and converts, with defaults spelled out.
+
+        The config fingerprint stores it per output name, so redefining an
+        entry is told apart from adding or removing one.
+        """
+        return [self.column, list(self.path), self.data_type]
+
+
+def parse_json_columns(
+    raw: Any, reserved: Optional[set] = None
+) -> Tuple[JsonColumn, ...]:
+    """Parse and validate the ``historize.json_columns`` mapping.
+
+    Args:
+        raw: The mapping from YAML (output name → ``{column, path, data_type}``).
+        reserved: Lower-cased names an output column may not take, beyond the
+            framework's system columns.
+
+    Raises:
+        ValueError: Malformed entry, unknown key or type, or a duplicate or
+            reserved output name.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        raise ValueError(
+            "historize.json_columns must be a mapping of output column name to "
+            f"{{column, path, data_type}}, got {type(raw).__name__}"
+        )
+    taken = {c.lower() for c in HISTORIZE_SYSTEM_COLUMNS | {SNAPSHOT_ALIAS}}
+    taken |= reserved or set()
+    seen: Dict[str, str] = {}
+    specs = []
+    for name, entry in raw.items():
+        label = f"historize.json_columns.{name}"
+        if not isinstance(name, str) or not _SQL_IDENT.match(name):
+            raise ValueError(f"{label}: output name must be a valid SQL identifier")
+        if name.lower() in seen:
+            raise ValueError(
+                f"{label}: duplicates '{seen[name.lower()]}' (column names are "
+                f"case-insensitive)"
+            )
+        if name.lower() in taken:
+            raise ValueError(
+                f"{label}: '{name}' is reserved for historize's own columns; choose "
+                f"another output name"
+            )
+        seen[name.lower()] = name
+        specs.append(_parse_json_column(name, entry, label))
+    return tuple(specs)
+
+
+def _parse_json_column(name: str, entry: Any, label: str) -> JsonColumn:
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"{label}: must be a mapping with 'column', 'path' (and optionally "
+            f"'data_type'), got {type(entry).__name__}"
+        )
+    unknown = sorted(set(entry) - _JSON_COLUMN_KEYS)
+    if unknown:
+        raise ValueError(
+            f"{label}: unknown key(s) {unknown}. Valid: {sorted(_JSON_COLUMN_KEYS)}"
+        )
+    column = entry.get("column")
+    if not isinstance(column, str) or not _SQL_IDENT.match(column):
+        raise ValueError(
+            f"{label}: 'column' is required and must be a valid SQL identifier "
+            f"naming the source's JSON column"
+        )
+    if entry.get("path") is None:
+        raise ValueError(
+            f"{label}: 'path' is required — the dotted path (or list of keys) "
+            f"to the value inside '{column}'"
+        )
+    path = parse_json_path(entry["path"], label)
+    data_type = entry.get("data_type", "text")
+    if data_type not in JSON_COLUMN_TYPES:
+        raise ValueError(
+            f"{label}: data_type must be one of {', '.join(JSON_COLUMN_TYPES)}, "
+            f"got '{data_type}'"
+        )
+    return JsonColumn(name=name, column=column, path=path, data_type=data_type)
 
 
 @dataclass
@@ -113,7 +214,8 @@ class HistorizeConfig:
             "description": (
                 "Columns to include in change detection. When set, only these columns are hashed; "
                 "all other non-PK columns are ignored for change detection but still appear in the output. "
-                "Applied before ignore_columns."
+                "Applied before ignore_columns. Dropping a column from this list applies from the "
+                "next run; adding one requires a full refresh."
             )
         },
     )
@@ -124,7 +226,8 @@ class HistorizeConfig:
             "description": (
                 "Columns to exclude from change detection. These columns are still present in the "
                 "output table but do not trigger a new SCD2 record when their value changes. "
-                "Applied after track_columns when both are set."
+                "Applied after track_columns when both are set. Adding a column here applies from "
+                "the next run; removing one requires a full refresh."
             )
         },
     )
@@ -331,6 +434,27 @@ class HistorizeConfig:
         ),
     )
 
+    json_columns: Optional[Dict[str, Dict[str, Any]]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Typed columns extracted from a JSON column of the source, keyed "
+                "by output column name: {column, path, data_type}. 'column' "
+                "and 'path' (dotted string or list, as in filters) are required; "
+                "'data_type' (text, bigint, double, bool, timestamp, date) "
+                "defaults to text. They are added to the source's columns — the "
+                "JSON column itself is still carried — and can be used like any "
+                "source column (primary_key, order_by, partition_column, "
+                "cluster_columns, filters, columns). A missing path, JSON null, "
+                "or a value that doesn't convert yields NULL; values that fail "
+                "to convert are warned about. Adding or removing an entry is a "
+                "schema change on the historized table; redefining an existing "
+                "entry (column, path or data_type) requires a full refresh."
+            ),
+            "$ref": "dlt_common.json#/$defs/json_column",
+        },
+    )
+
     description: Optional[str] = field(
         default=None,
         metadata={
@@ -405,6 +529,22 @@ class HistorizeConfig:
                 f"got {self.late_arrival_window_days}"
             )
         self._validate_column_identifiers()
+        self._json_column_specs = parse_json_columns(
+            self.json_columns,
+            reserved={
+                c.lower()
+                for c in (
+                    self.valid_from_column,
+                    self.valid_to_column,
+                    self.is_deleted_column,
+                )
+            },
+        )
+
+    @property
+    def json_column_specs(self) -> Tuple[JsonColumn, ...]:
+        """The parsed ``json_columns`` entries, in config order."""
+        return self._json_column_specs
 
     @property
     def is_full_delivery(self) -> bool:

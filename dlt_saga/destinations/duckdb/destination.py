@@ -8,7 +8,7 @@ import logging
 import threading
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import duckdb
 
@@ -425,6 +425,44 @@ class DuckDBDestination(Destination):
 
     def cast_to_string(self, expression: str) -> str:
         return f"CAST({expression} AS VARCHAR)"
+
+    # dlt logical types → DuckDB SQL types, matching what dlt creates on DuckDB
+    # (timestamp is zone-aware, so an offset in a cast string is honoured).
+    DLT_TO_DUCKDB_TYPE = {
+        "text": "VARCHAR",
+        "double": "DOUBLE",
+        "bool": "BOOLEAN",
+        "timestamp": "TIMESTAMPTZ",
+        "bigint": "BIGINT",
+        "date": "DATE",
+        "time": "TIME",
+        "decimal": "DECIMAL",
+        "binary": "BLOB",
+        "json": "JSON",
+    }
+
+    def dlt_type_to_native(self, dlt_type: str) -> str:
+        return self.DLT_TO_DUCKDB_TYPE.get(dlt_type.lower(), dlt_type.upper())
+
+    # The catalog spells a few types in their long form.
+    TYPE_NAME_ALIASES = {
+        "TIMESTAMP WITH TIME ZONE": "TIMESTAMPTZ",
+        "TIMESTAMP WITHOUT TIME ZONE": "TIMESTAMP",
+    }
+
+    def normalize_type_name(self, type_name: str) -> str:
+        canonical = super().normalize_type_name(type_name)
+        return self.TYPE_NAME_ALIASES.get(canonical, canonical)
+
+    def json_extract_scalar(self, column_sql: str, path: Tuple[str, ...]) -> str:
+        # DuckDB's JSON_VALUE returns the scalar JSON-encoded ('"x"'), and every
+        # JSON function raises on malformed input rather than returning NULL.
+        # Guard with json_valid and unwrap the scalar with ->> '$'.
+        path_literal = self.escape_string_literal("$." + ".".join(path))
+        return (
+            f"CASE WHEN json_valid({column_sql}) "
+            f"THEN json_value({column_sql}, '{path_literal}') ->> '$' END"
+        )
 
     def columns_query(self, database: str, schema: str, table: str) -> str:
         safe_schema = self.escape_string_literal(schema)

@@ -10,19 +10,14 @@ Adapts patterns from:
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dlt_saga.destinations.base import MaterializationHints
-from dlt_saga.historize.config import HistorizeConfig
+from dlt_saga.historize.config import HistorizeConfig, JsonColumn
 from dlt_saga.utility.filters import and_filter, filter_where_clause
-from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS
+from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS, SNAPSHOT_ALIAS
 
 logger = logging.getLogger(__name__)
-
-
-# Internal alias a pseudo-column snapshot value is projected under; see
-# HistorizeSqlBuilder._snap. Prefixed so it can't collide with a source column.
-SNAPSHOT_ALIAS = "_saga_snapshot"
 
 # Stamp for "present before this batch" in scd1 deletion detection: earlier than
 # any real snapshot, never written to the target.
@@ -77,6 +72,46 @@ def null_pk_alias(index: int) -> str:
     return f"_null_pk_{index}"
 
 
+def failed_cast_alias(index: int) -> str:
+    """Result alias for flag ``index`` of ``HistorizeSqlBuilder.failed_cast_checks``.
+
+    Positional for the same reason as :func:`null_pk_alias`, which it is
+    emitted beside.
+    """
+    return f"_cast_fail_{index}"
+
+
+def json_column_expression(destination: Any, spec: JsonColumn) -> str:
+    """SQL for one ``json_columns`` entry: the extracted scalar, converted."""
+    extracted = destination.json_extract_scalar(
+        destination.quote_identifier(spec.column), spec.path
+    )
+    return destination.safe_cast(extracted, spec.data_type)
+
+
+def build_source_relation(
+    destination: Any, source_table_id: str, json_columns: Sequence[JsonColumn]
+) -> str:
+    """What historize reads the source through: the table, or a derived relation.
+
+    With ``json_columns``, a subquery adding each derived column to the
+    table's own. Every source read uses it in place of the table, so derived
+    columns are visible to filters, keys, ranking and value columns alike.
+    Without, the table id itself — the generated SQL is unchanged.
+
+    Unaliased: every supported destination accepts a derived table without
+    one, and read sites append their own WHERE.
+    """
+    if not json_columns:
+        return source_table_id
+    derived = ",\n    ".join(
+        f"{json_column_expression(destination, spec)} AS "
+        f"{destination.quote_identifier(spec.name)}"
+        for spec in json_columns
+    )
+    return f"(\n  SELECT *,\n    {derived}\n  FROM {source_table_id}\n)"
+
+
 class HistorizeSqlBuilder:
     """Generates SQL for historizing snapshot data into SCD2 format.
 
@@ -98,10 +133,14 @@ class HistorizeSqlBuilder:
         target_table_name: str = "",
         target_schema: str = "",
         filter_sql: Optional[str] = None,
+        source_relation: Optional[str] = None,
     ):
         self.config = config
         self.destination = destination
         self.source_table_id = source_table_id
+        # What every source read selects from: the table itself, or the derived
+        # relation adding json_columns (see build_source_relation).
+        self.source_relation = source_relation or source_table_id
         self.target_table_id = target_table_id
         self.primary_key = primary_key
         self.source_database = source_database
@@ -364,7 +403,7 @@ snapshot_sequence AS (
             dataset: Dataset/schema where the affected-keys table will be created.
         """
         tgt = self.target_table_id
-        src = self.source_table_id
+        src = self.source_relation
         q_snapshot = self._snap_src
         safe_date = self.destination.escape_string_literal(effective_from_date)
 
@@ -462,7 +501,7 @@ snapshot_sequence AS (
         create_stmt = (
             "CREATE OR REPLACE TABLE" if replace else "CREATE TABLE IF NOT EXISTS"
         )
-        src = self.source_table_id
+        src = self.source_relation
         tgt = self.target_table_id
         ts_type = self.destination.type_name("timestamp")
         bool_type = self.destination.type_name("bool")
@@ -489,6 +528,10 @@ snapshot_sequence AS (
             source_database=self.source_database,
             source_schema=self.source_schema,
             source_table=self.source_table,
+            derived_columns=[
+                (spec.name, self.destination.dlt_type_to_native(spec.data_type))
+                for spec in self.config.json_column_specs
+            ],
             valid_from_column=self.valid_from,
             valid_to_column=None if self.config.is_scd1 else self.valid_to,
             is_deleted_column=self.is_deleted if self._has_deleted_column else None,
@@ -546,7 +589,56 @@ snapshot_sequence AS (
         )
         any_null = " OR ".join(f"{self._q(pk)} IS NULL" for pk in self.primary_key)
         where = and_filter(self.filter_sql, f"({any_null})")
-        return f"SELECT {flags} FROM {self.source_table_id} WHERE {where} LIMIT 1"
+        return f"SELECT {flags} FROM {self.source_relation} WHERE {where} LIMIT 1"
+
+    def failed_cast_checks(self) -> List[Tuple[str, str]]:
+        """``(json column name, condition)`` per converted ``json_columns`` entry.
+
+        The condition holds on a row of the source relation where the path held
+        a value that didn't convert to the declared type. Text needs no
+        conversion, so it never fails and gets no check; empty when nothing is
+        converted.
+        """
+        checks = []
+        for spec in self.config.json_column_specs:
+            if spec.data_type == "text":
+                continue
+            extracted = self.destination.json_extract_scalar(
+                self._q(spec.column), spec.path
+            )
+            checks.append(
+                (
+                    spec.name,
+                    f"({extracted} IS NOT NULL AND {self._q(spec.name)} IS NULL)",
+                )
+            )
+        return checks
+
+    def build_failed_cast_probe_sql(
+        self, snapshot_from: Optional[str] = None
+    ) -> Optional[str]:
+        """One-row aggregate flagging ``json_columns`` whose values didn't convert.
+
+        For the full- and partial-refresh paths, which have no discovery scan
+        to fold the check into (an incremental run gets it from
+        ``discover_unprocessed_snapshots``). Reads the filtered source, from
+        ``snapshot_from`` on when given, so a ``--historize-from`` run probes
+        only the window it rewrites. Flags are aliased by position
+        (:func:`failed_cast_alias`), in :meth:`failed_cast_checks` order.
+        ``None`` when nothing is converted.
+        """
+        checks = self.failed_cast_checks()
+        if not checks:
+            return None
+        flags = ", ".join(
+            f"MAX(CASE WHEN {condition} THEN 1 ELSE 0 END) AS {failed_cast_alias(i)}"
+            for i, (_, condition) in enumerate(checks)
+        )
+        where = self.filter_sql
+        if snapshot_from is not None:
+            safe_from = self.destination.escape_string_literal(snapshot_from)
+            where = and_filter(where, f"{self._snap_src} >= TIMESTAMP '{safe_from}'")
+        return f"SELECT {flags} FROM {self.source_relation}{filter_where_clause(where)}"
 
     def build_full_reprocess_sql(
         self, value_columns: List[str], snapshot_upper_bound: Optional[str] = None
@@ -581,7 +673,7 @@ snapshot_sequence AS (
         all_output_cols = list(self.primary_key) + list(value_columns)
         output_cols_from_c = ", ".join(f"c.{self._q(col)}" for col in all_output_cols)
         all_columns_sql = self._all_columns_sql(value_columns)
-        src = self.source_table_id
+        src = self.source_relation
         tgt = self.target_table_id
 
         track_deletions_sql = ""
@@ -777,7 +869,7 @@ disappearances AS (
         hash_expr = self.destination.hash_expression(hash_columns)
         all_output_cols = list(self.primary_key) + list(value_columns)
         output_cols_from_c = ", ".join(f"c.{self._q(col)}" for col in all_output_cols)
-        src = self.source_table_id
+        src = self.source_relation
         tgt = self.target_table_id
 
         # New-snapshot rows are read from the source; the change-detection
@@ -1110,7 +1202,7 @@ deletion_rows AS (
         all_cols_sql = self._qcols(all_cols)
         q_vf = self._q(self.valid_from)
         q_del = self._q(self.is_deleted)
-        src = self.source_table_id
+        src = self.source_relation
         tgt = self.target_table_id
 
         if snapshots is not None:

@@ -28,6 +28,7 @@ def _make_runner(detect: bool | None, has_column: bool) -> HistorizeRunner:
     runner.config_dict = {"write_disposition": "append+historize"}
     runner.state_manager = MagicMock()
     runner.source_table_id = "proj.ds.src"
+    runner.source_relation = "proj.ds.src"
     runner._filter_sql = None
     runner._source_can_reference = lambda column: has_column
     return runner

@@ -26,6 +26,10 @@ def _make_runner(source, target, previous=None, **config_kwargs) -> HistorizeRun
     dest.list_table_columns.return_value = list(target)
     dest.quote_identifier.side_effect = lambda n: f'"{n}"'
     dest.is_pseudo_column.return_value = False
+    dest.normalize_type_name.side_effect = lambda t: " ".join(t.upper().split())
+    dest.dlt_type_to_native.side_effect = lambda t: {"text": "VARCHAR"}.get(
+        t, t.upper()
+    )
 
     runner = object.__new__(HistorizeRunner)
     runner.logger = logging.getLogger("dlt_saga.historize.runner")
@@ -174,6 +178,30 @@ class TestTypeChange:
         )
         with pytest.raises(ValueError, match="id: INTEGER in the historized table"):
             runner._reconcile_target_columns(_value_columns(runner))
+
+    def test_derived_column_is_checked_against_its_declared_type(self):
+        runner = _make_runner(
+            source=[("id", "INTEGER"), ("snap", "TIMESTAMP"), ("payload", "VARCHAR")],
+            target=[
+                ("id", "INTEGER"),
+                ("payload", "VARCHAR"),
+                ("amount", "VARCHAR"),
+                *SYSTEM,
+            ],
+            json_columns={
+                "amount": {"column": "payload", "path": "amount", "data_type": "bigint"}
+            },
+        )
+        with pytest.raises(ValueError, match="amount: VARCHAR in the historized"):
+            runner._reconcile_target_columns(_value_columns(runner))
+
+    def test_duckdb_spells_its_catalog_aliases_canonically(self):
+        from dlt_saga.destinations.duckdb.destination import DuckDBDestination
+
+        dest = object.__new__(DuckDBDestination)
+        assert dest.normalize_type_name("TIMESTAMP WITH TIME ZONE") == "TIMESTAMPTZ"
+        assert dest.normalize_type_name("timestamptz") == "TIMESTAMPTZ"
+        assert dest.normalize_type_name("DECIMAL(12, 2)") == "DECIMAL(12, 2)"
 
     def test_spelling_differences_are_not_a_change(self):
         runner = _make_runner(

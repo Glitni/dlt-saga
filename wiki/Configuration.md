@@ -546,6 +546,7 @@ historize:
 | `cluster_columns` | list | — | Cluster the output table |
 | `delivery` | string | `full` | `full`: each snapshot is a complete copy of the source; `incremental`: each holds only the records sent in it (no deletion or gap detection) |
 | `track_deletions` | bool | `true` (`scd2`, `full`) | Detect rows deleted between snapshots (`scd1`: opt-in, flags the key's row). Requires `delivery: full` |
+| `json_columns` | map | — | Typed columns extracted from a JSON source column, keyed by output name: `{column, path, data_type}` — see [Historize](Historize#columns-from-a-json-source-column) |
 | `table_format` | string | inherited | Table format override for this pipeline's historized table |
 | `schema_name` | string | — | Write the historized table to a different schema (used directly in prod, sandbox-composed in dev). Legacy alias: `output_schema` |
 | `table_name` | string | — | Explicit name for the historized output table. Legacy alias: `output_table` |

@@ -239,6 +239,7 @@ starts from what the source still holds.
 | `table_name` | `historize:` | — | Explicit name for the historized output table (overrides the auto-generated name). Legacy alias: `output_table` |
 | `table_suffix` | `historize:` | `_historized` | Suffix appended to the source table name when `table_name` is not set. Legacy alias: `output_table_suffix` |
 | `filters` | `historize:` | — | Declarative row filter applied only during historize — see [Filtering the source](#filtering-the-source) |
+| `json_columns` | `historize:` | — | Typed columns extracted from a JSON source column (`{column, path, data_type}` per output name) — see [Columns from a JSON source column](#columns-from-a-json-source-column) |
 | `description` | `historize:` | inherited | Table description for the historized table (overrides top-level `description`) — see [Descriptions & classification](#descriptions--classification) |
 | `classification` | `historize:` | inherited | Table classification for the historized table (overrides top-level `classification`) |
 | `columns` | `historize:` | inherited | Per-column description/classification overrides, merged over top-level `columns` (override only the keys you set) |
@@ -430,7 +431,64 @@ historize:
 
 **A subtlety with `track_deletions: true`.** A row whose `tenant_id` mutates between snapshots (e.g. from `tenant_a` to `tenant_b`) registers as a delete in tenant A's history and an insert in tenant B's history. From each tenant's view that's the correct semantic — the row is gone from theirs and appears in the other's — but worth knowing if you rely on `_dlt_is_deleted` markers downstream.
 
-**Config-change detection.** The filter list is part of the historize config fingerprint. Changing `historize.filters:` between runs triggers the same prompt as changing `primary_key` or `ignore_columns` — you'll be told to run `saga historize --full-refresh` so the existing historized table is rebuilt against the new predicate.
+**Config-change detection.** The filter list is part of the historize config fingerprint. Changing `historize.filters:` between runs triggers the same prompt as changing `primary_key` or `snapshot_column` — you'll be told to run `saga historize --full-refresh` so the existing historized table is rebuilt against the new predicate.
+
+---
+
+## Columns from a JSON source column
+
+Streaming landing tables usually carry a few envelope columns plus the event itself as JSON. `historize.json_columns` projects fields out of such a column into real, typed columns of the historized table:
+
+```yaml
+# configs/streams/events.yml
+write_disposition: historize
+primary_key: [landing_key]
+source_schema: streams
+source_table: events_v1
+
+historize:
+  strategy: scd1
+  snapshot_column: ingested_at
+  order_by: [ingested_at, landing_offset]
+  json_columns:
+    event_time: { column: payload, path: eventTime, data_type: timestamp }
+    user_id: { column: payload, path: user_id }
+    tenant: { column: payload, path: meta.tenant }   # dotted string or list of keys
+  partition_column: event_time
+```
+
+Each entry maps an output column name to:
+
+| Key | Default | Description |
+|---|---|---|
+| `column` | required | Source column holding the JSON: a JSON-typed column, or a string containing JSON |
+| `path` | required | Keys from the root to a scalar value, as a dotted string (`meta.tenant`) or a list (`[meta, tenant]`). Parsed the same way as a filter's `path` |
+| `data_type` | `text` | `text`, `bigint`, `double`, `bool`, `timestamp` or `date` |
+
+**They are added columns.** The derived columns come after the source's own, and the JSON column itself is still carried into the historized table, so fields you haven't extracted stay available in the history. Adding one later is a schema change on the historized table (see below).
+
+**They behave like source columns.** Use them as `primary_key`, `order_by`, `snapshot_column`, `arrival_column`, `partition_column`, `cluster_columns`, in `historize.filters`, and in `columns` docs/classification. They take part in change detection like any value column. The JSON column changes whenever an extracted field does, so under `scd2` add it to `ignore_columns` if only the extracted fields should open versions.
+
+**Missing and invalid values are NULL.** A missing path, a JSON `null`, an object or array, input that isn't valid JSON, or a value that doesn't convert to `data_type` is written as `NULL` — the query never fails on it. Values that are present but don't convert (`"many"` as `bigint`, epoch numbers as `timestamp`) are reported with a warning naming the column, since a payload whose format drifted would otherwise go unnoticed. Timestamps convert from ISO-8601 strings (an offset is honoured); `date` expects `YYYY-MM-DD`. On Databricks, a `text` column whose path leads to an object or array holds its JSON text rather than `NULL`.
+
+**Filters on a derived column compare typed.** A path-based filter always compares as text (`value: true` matches the string `'true'`); a filter naming a derived column compares with its declared type. Path filters still suit a condition on a field you don't want as a column.
+
+```yaml
+historize:
+  json_columns:
+    amount: { column: payload, data_type: bigint }
+  filters:
+    - column: amount         # bigint comparison
+      op: in
+      value: [50, 100]
+    - column: payload        # text comparison, no column added
+      path: meta.tenant
+      value: t1
+```
+
+**Rejected configs.** An output name equal to a column of the source, one historize writes itself (`_dlt_*`, the configured `valid_from_column`/`valid_to_column`/`is_deleted_column`), or one the destination reserves (BigQuery's `_PARTITION…`); a `column` that isn't a column of the source table (derived columns can't read each other); and a pseudo-column `snapshot_column`/`arrival_column` such as `_PARTITIONTIME` — the source is read through a subquery, which doesn't carry pseudo-columns.
+
+**Adding, removing and changing entries.** An entry is a value column like any other, so adding or removing one is a [schema change](#schema-changes): a new entry is added to the historized table (rows written before it hold `NULL`, nothing is backfilled), and a removed one is kept with its history and `NULL` from then on. Redefining an entry that already exists (its `column`, `path` or `data_type`) prompts for `saga historize --full-refresh`: the stored column would otherwise change meaning mid-history under one name, and a type can't change in place. Removing an entry and re-adding it under the same name with another type is refused the way a source column's type change is, since the column kept its old type on the target. Spelling out `data_type: text` or reordering entries is not a change.
 
 ---
 
@@ -608,7 +666,7 @@ Notes:
 saga historize --full-refresh --select "filesystem__snapshots__companies"
 ```
 
-Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when any of these changes: `primary_key`, `snapshot_column`, `strategy`, `order_by`, `delivery` (`scd2` only), `track_columns`, `ignore_columns`, `track_deletions`, `merge_key`, `filters`, `table_format`, or the output column names (`valid_from_column`, `valid_to_column`, `is_deleted_column`).
+Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when any of these changes: `primary_key`, `snapshot_column`, `strategy`, `order_by`, `delivery` (`scd2` only), `track_columns`, `ignore_columns`, `track_deletions`, `merge_key`, `filters`, a `json_columns` entry's `column`, `path` or `data_type` (adding or removing an entry is a [schema change](#schema-changes)), `table_format`, or the output column names (`valid_from_column`, `valid_to_column`, `is_deleted_column`).
 
 One kind of edit is exempt: **narrowing change detection**, i.e. adding a column to `ignore_columns` or dropping one from `track_columns`. Versions already written were real changes at the time and stay correct, and the hash is recomputed on every run, so the edit simply applies from the next run on and is logged at info level. Widening detection again (removing a column from `ignore_columns`, adding one to `track_columns`) still prompts, since history before the edit has no versions for that column.
 
@@ -624,7 +682,7 @@ The historized table is created from the source's columns on the first run. When
 
 **Column type changed.** The run is refused before any write, naming the column and both types, and points at `--full-refresh`, which rebuilds the history with the new type from what the source still holds. A widening the destination would accept is refused too: it changes the change-detection hash of every stored row.
 
-For sources ingested by saga, only the added case arises: dlt never drops or retypes a raw table's columns (a value that no longer fits its column lands in a variant column such as `price__v_text`, and a column dropped upstream is simply `NULL` from then on). Dropped and retyped columns come from [external deliveries](#external-data-historize-only) whose table someone else maintains.
+For sources ingested by saga, only the added case arises: dlt never drops or retypes a raw table's columns (a value that no longer fits its column lands in a variant column such as `price__v_text`, and a column dropped upstream is simply `NULL` from then on). Dropped and retyped columns come from [external deliveries](#external-data-historize-only) whose table someone else maintains, or from [`json_columns`](#columns-from-a-json-source-column) entries you remove or redefine.
 
 ---
 

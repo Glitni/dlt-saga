@@ -5,8 +5,8 @@ detects primary key configuration changes, and determines what work needs to be 
 """
 
 import logging
-from dataclasses import dataclass
-from typing import Any, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Sequence, Tuple
 
 from dlt_saga.utility.cli.logging import PrefixedLoggerAdapter
 from dlt_saga.utility.sql import looks_like_missing_table
@@ -66,8 +66,24 @@ class FingerprintChanges:
     current: dict
 
     def describe(self, keys: List[str]) -> List[str]:
-        """``key: old → new`` lines for the given keys."""
-        return [f"  {key}: {self.previous[key]} → {self.current[key]}" for key in keys]
+        """``key: old → new`` lines for the given keys.
+
+        A key holding a mapping on both sides (``json_columns``) is described
+        per differing entry, so the line names what changed rather than
+        restating every entry.
+        """
+        lines = []
+        for key in keys:
+            before, after = self.previous[key], self.current[key]
+            if isinstance(before, dict) and isinstance(after, dict):
+                for name in sorted(set(before) | set(after)):
+                    if before.get(name) != after.get(name):
+                        lines.append(
+                            f"  {key}.{name}: {before.get(name)} → {after.get(name)}"
+                        )
+            else:
+                lines.append(f"  {key}: {before} → {after}")
+        return lines
 
 
 @dataclass
@@ -96,11 +112,14 @@ class SnapshotDiscovery:
     rows the run will process, with the same filter — checking the primary key
     for NULLs there costs no extra query, and the offending snapshot is known.
     Empty when no primary key was passed or every key value is populated.
+    ``failed_casts`` rides along the same way: the ``json_columns`` whose
+    values didn't convert to their declared type somewhere in those rows.
     """
 
     snapshots: List[str]
     null_pk_columns: List[str]
     null_pk_snapshot: Optional[str] = None
+    failed_casts: List[str] = field(default_factory=list)
 
 
 class HistorizeStateManager:
@@ -268,6 +287,16 @@ class HistorizeStateManager:
             # would, requires full), so it is pinned there: describing the
             # source differently must not force a rebuild that changes nothing.
             "delivery": "full" if config.is_scd1 else config.delivery,
+            # Each derived column's definition, by output name. An entry present
+            # on both sides with another definition redefines what a stored
+            # column holds, so it blocks (see fingerprint_changes); an entry on
+            # one side only is schema evolution on the target, like a column
+            # the source gains or drops. Defaults are spelled out, so
+            # restating one isn't a change.
+            "json_columns": {
+                spec.name.lower(): spec.definition()
+                for spec in config.json_column_specs
+            },
         }
         return base64.b64encode(json.dumps(fingerprint_data).encode()).decode()
 
@@ -275,10 +304,11 @@ class HistorizeStateManager:
     def decode_fingerprint(encoded: str) -> dict:
         """Decode a base64-encoded config fingerprint back to a dict.
 
-        Fingerprints written before ``strategy`` / ``delivery`` existed are
-        scd2 / full-delivery ones, so those keys are filled in rather than left
-        absent: ``config_changed`` skips keys a stored fingerprint lacks, and
-        switching such a table must still demand a rebuild.
+        Fingerprints written before ``strategy`` / ``delivery`` /
+        ``json_columns`` existed are scd2 / full-delivery / no-derived-column
+        ones, so those keys are filled in rather than left absent:
+        ``config_changed`` skips keys a stored fingerprint lacks, and changing
+        any of them on such a table must still demand a rebuild.
         """
         import base64
         import json
@@ -287,6 +317,7 @@ class HistorizeStateManager:
         decoded.setdefault("strategy", "scd2")
         decoded.setdefault("order_by", [])
         decoded.setdefault("delivery", "full")
+        decoded.setdefault("json_columns", {})
         return decoded
 
     def fingerprint_changes(
@@ -308,6 +339,11 @@ class HistorizeStateManager:
         ``narrowed`` and takes effect going forward. Widening (starting to
         track a column) still blocks: history before the edit has no versions
         for it, and whether that needs a rebuild is not the framework's call.
+
+        ``json_columns`` blocks only when an entry kept across the edit was
+        redefined (another column, path or type): the stored column would
+        otherwise change meaning mid-history under one name. Adding or
+        removing an entry is schema evolution, reconciled on the target.
         """
         if not state.has_successful_run:
             return FingerprintChanges([], [], {}, {})
@@ -318,12 +354,23 @@ class HistorizeStateManager:
             for key, value in current.items()
             if key in previous and previous[key] != value
         ]
+        if "json_columns" in differing and not self._json_column_redefined(
+            previous, current
+        ):
+            differing.remove("json_columns")
         detection = [key for key in differing if key in DETECTION_KEYS]
         narrowed: List[str] = []
         if detection and self._detection_narrowed(previous, current):
             narrowed = detection
             differing = [key for key in differing if key not in detection]
         return FingerprintChanges(differing, narrowed, previous, current)
+
+    @staticmethod
+    def _json_column_redefined(previous: dict, current: dict) -> bool:
+        """Whether a derived column present before and after changed definition."""
+        before = previous.get("json_columns") or {}
+        after = current.get("json_columns") or {}
+        return any(before[name] != after[name] for name in before.keys() & after)
 
     @staticmethod
     def _detection_narrowed(previous: dict, current: dict) -> bool:
@@ -556,12 +603,14 @@ class HistorizeStateManager:
         filter_sql: Optional[str] = None,
         primary_key: Optional[List[str]] = None,
         min_snapshot_inclusive: Optional[str] = None,
+        cast_checks: Optional[Sequence[Tuple[str, str]]] = None,
     ) -> SnapshotDiscovery:
         """Discover snapshot values in the raw table that haven't been historized yet.
 
         Args:
             state: Pre-fetched pipeline state from get_pipeline_state()
-            source_table_id: Fully qualified source table ID
+            source_table_id: What to read the source from — the table id, or
+                the derived relation when ``json_columns`` are configured
             snapshot_column: Column containing snapshot timestamps
             filter_sql: Optional pre-rendered SQL WHERE body (no leading
                 ``WHERE``) applied to the source read so the discovered
@@ -575,18 +624,22 @@ class HistorizeStateManager:
                 replay window for a late-arrival rewind (see
                 :meth:`find_late_arrivals`). Includes already-historized
                 snapshots by design: the rewind replays them.
+            cast_checks: ``(json column name, condition)`` pairs; the same scan
+                reports the names whose condition held on some row (see
+                ``HistorizeSqlBuilder.failed_cast_checks``).
 
         Returns:
             A :class:`SnapshotDiscovery` whose ``snapshots`` are ordered
             chronologically.
         """
-        from dlt_saga.historize.sql import null_pk_alias
+        from dlt_saga.historize.sql import failed_cast_alias, null_pk_alias
         from dlt_saga.utility.filters import and_filter, filter_where_clause
 
         src = source_table_id
         q_snapshot = self.destination.quote_identifier(snapshot_column)
         cast_expr = self.destination.cast_to_string(q_snapshot)
         pk_cols = list(primary_key or [])
+        checks = list(cast_checks or [])
 
         # DISTINCT vs GROUP BY on the same expression are equivalent; grouping is
         # what lets the NULL-key flags ride along per snapshot. The GROUP BY
@@ -597,8 +650,13 @@ class HistorizeStateManager:
             f"THEN 1 ELSE 0 END) AS {null_pk_alias(i)}"
             for i, pk in enumerate(pk_cols)
         )
-        projection = f"{cast_expr} AS snapshot_val{null_flags}"
-        grouping = f"GROUP BY {cast_expr}" if pk_cols else ""
+        cast_flags = "".join(
+            f", MAX(CASE WHEN {condition} THEN 1 ELSE 0 END) AS {failed_cast_alias(i)}"
+            for i, (_, condition) in enumerate(checks)
+        )
+        projection = f"{cast_expr} AS snapshot_val{null_flags}{cast_flags}"
+        grouped = bool(pk_cols or checks)
+        grouping = f"GROUP BY {cast_expr}" if grouped else ""
 
         if min_snapshot_inclusive is not None:
             safe_val = self.destination.escape_string_literal(min_snapshot_inclusive)
@@ -611,7 +669,7 @@ class HistorizeStateManager:
             base_where = f"{q_snapshot} > TIMESTAMP '{safe_val}'"
             where = f" WHERE {and_filter(filter_sql, base_where)}"
 
-        distinct = "" if pk_cols else "DISTINCT "
+        distinct = "" if grouped else "DISTINCT "
         sql = f"""
             SELECT {distinct}{projection}
             FROM {src}{where}
@@ -634,10 +692,17 @@ class HistorizeStateManager:
                 null_pk_snapshot = row.snapshot_val
                 break
 
+        failed_casts = [
+            name
+            for i, (name, _) in enumerate(checks)
+            if any(getattr(row, failed_cast_alias(i), 0) for row in rows)
+        ]
+
         return SnapshotDiscovery(
             snapshots=snapshots,
             null_pk_columns=null_pk_columns,
             null_pk_snapshot=null_pk_snapshot,
+            failed_casts=failed_casts,
         )
 
     def find_late_arrivals(
