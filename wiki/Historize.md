@@ -223,6 +223,7 @@ starts from what the source still holds.
 | `snapshot_column` | `historize:` | `_dlt_ingested_at` | Column identifying each delivery (a complete snapshot under `delivery: full`); its value becomes `_dlt_valid_from` |
 | `track_columns` | `historize:` | — | Opt-in allowlist: only these columns drive change detection (all columns still appear in output) |
 | `ignore_columns` | `historize:` | `[]` | Columns excluded from change detection (still appear in output) |
+| `exclude_columns` | `historize:` | `[]` | Source columns left out of the historized table, and so out of change detection. Works under both strategies — see [Leaving columns out](#leaving-columns-out) |
 | `partition_column` | `historize:` | — | Partition the SCD2 output table. Unset by default — see [Table layout](#table-layout) |
 | `cluster_columns` | `historize:` | `[valid_to, valid_from]` at create | Cluster the SCD2 output table. Explicit values are enforced on existing tables; `[]` removes clustering — see [Table layout](#table-layout) |
 | `delivery` | `historize:` | `full` | `full`: each snapshot is a complete copy of the source; `incremental`: each holds only the records sent in it. See [Delivery: full vs incremental](#delivery-full-vs-incremental) |
@@ -465,7 +466,7 @@ Each entry maps an output column name to:
 | `path` | required | Keys from the root to a scalar value, as a dotted string (`meta.tenant`) or a list (`[meta, tenant]`). Parsed the same way as a filter's `path` |
 | `data_type` | `text` | `text`, `bigint`, `double`, `bool`, `timestamp` or `date` |
 
-**They are added columns.** The derived columns come after the source's own, and the JSON column itself is still carried into the historized table, so fields you haven't extracted stay available in the history. Adding one later is a schema change on the historized table (see below).
+**They are added columns.** The derived columns come after the source's own, and the JSON column itself is still carried into the historized table, so fields you haven't extracted stay available in the history. Adding one later is a schema change on the historized table (see below). If the extracted fields are all you need, list the JSON column in [`exclude_columns`](#leaving-columns-out) — the derived columns still read it from the source.
 
 **They behave like source columns.** Use them as `primary_key`, `order_by`, `snapshot_column`, `arrival_column`, `partition_column`, `cluster_columns`, in `historize.filters`, and in `columns` docs/classification. They take part in change detection like any value column. The JSON column changes whenever an extracted field does, so under `scd2` add it to `ignore_columns` if only the extracted fields should open versions.
 
@@ -666,9 +667,9 @@ Notes:
 saga historize --full-refresh --select "filesystem__snapshots__companies"
 ```
 
-Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when any of these changes: `primary_key`, `snapshot_column`, `strategy`, `order_by`, `delivery` (`scd2` only), `track_columns`, `ignore_columns`, `track_deletions`, `merge_key`, `filters`, a `json_columns` entry's `column`, `path` or `data_type` (adding or removing an entry is a [schema change](#schema-changes)), `table_format`, or the output column names (`valid_from_column`, `valid_to_column`, `is_deleted_column`).
+Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when any of these changes: `primary_key`, `snapshot_column`, `strategy`, `order_by`, `delivery` (`scd2` only), `track_columns`, `ignore_columns`, `exclude_columns`, `track_deletions`, `merge_key`, `filters`, a `json_columns` entry's `column`, `path` or `data_type` (adding or removing an entry is a [schema change](#schema-changes)), `table_format`, or the output column names (`valid_from_column`, `valid_to_column`, `is_deleted_column`).
 
-One kind of edit is exempt: **narrowing change detection**, i.e. adding a column to `ignore_columns` or dropping one from `track_columns`. Versions already written were real changes at the time and stay correct, and the hash is recomputed on every run, so the edit simply applies from the next run on and is logged at info level. Widening detection again (removing a column from `ignore_columns`, adding one to `track_columns`) still prompts, since history before the edit has no versions for that column.
+One kind of edit is exempt: **narrowing change detection**, i.e. adding a column to `ignore_columns` or `exclude_columns`, or dropping one from `track_columns`. Versions already written were real changes at the time and stay correct, and the hash is recomputed on every run, so the edit simply applies from the next run on and is logged at info level. Widening detection again (removing a column from `ignore_columns` or `exclude_columns`, adding one to `track_columns`) still prompts, since history before the edit has no versions for that column.
 
 ---
 
@@ -683,6 +684,21 @@ The historized table is created from the source's columns on the first run. When
 **Column type changed.** The run is refused before any write, naming the column and both types, and points at `--full-refresh`, which rebuilds the history with the new type from what the source still holds. A widening the destination would accept is refused too: it changes the change-detection hash of every stored row.
 
 For sources ingested by saga, only the added case arises: dlt never drops or retypes a raw table's columns (a value that no longer fits its column lands in a variant column such as `price__v_text`, and a column dropped upstream is simply `NULL` from then on). Dropped and retyped columns come from [external deliveries](#external-data-historize-only) whose table someone else maintains, or from [`json_columns`](#columns-from-a-json-source-column) entries you remove or redefine.
+
+### Leaving columns out
+
+By default every source column ends up in the historized table. `exclude_columns` leaves the listed columns out — for a column that belongs in the raw table but not in history: a sensitive field the raw table's retention already bounds, a large payload nobody queries historically, or the JSON column behind your [`json_columns`](#columns-from-a-json-source-column) once the fields you need are extracted.
+
+```yaml
+historize:
+  exclude_columns: [raw_payload, national_id]
+```
+
+An excluded column is out of change detection too — a column that isn't in the output can't be compared — so unlike `ignore_columns` (which keeps the column in the output and only stops it from opening versions) it works under `scd1` as well as `scd2`. It can't name a column the historized table has to carry: `primary_key`/`merge_key`, `snapshot_column`, `order_by`, `partition_column`, `cluster_columns`, a `json_columns` output name, or a column also in `track_columns` or `ignore_columns` (two settings about one column).
+
+**Adding a column to `exclude_columns`** after the historized table exists is forward-only, like a [dropped source column](#schema-changes): the column stays on the table with its history, new versions get `NULL` in it, and no versions open because of the exclusion. It stops the column from being *collected*, not *retained* — the open row of a key keeps its value until that key next changes. To remove the column's values, run `--full-refresh` (rebuilds without it) or drop the column from the historized table by hand; after either, the run has nothing more to do with it. The hand drop is the way to go when a rebuild would lose history: a `replace` source only holds its latest snapshot, and a raw table past partition expiration no longer holds every snapshot.
+
+**Removing a column from `exclude_columns`** prompts for `--full-refresh`, like any widening of change detection.
 
 ---
 

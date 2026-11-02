@@ -215,15 +215,16 @@ class HistorizeSqlBuilder:
         """Return the subset of value_columns used for change-detection hashing.
 
         If track_columns is set, only those columns are considered (applied first).
-        ignore_columns are then subtracted from the result.
+        ignore_columns are then subtracted from the result, as are
+        exclude_columns: an excluded column still on an existing target is
+        read as NULL (see ``set_absent_source_columns``), and hashing it would
+        open one version per key the moment it was excluded.
         """
+        unhashed = set(self.config.ignore_columns) | set(self.config.exclude_columns)
         if self.config.track_columns:
-            candidate_set = set(self.config.track_columns) - set(
-                self.config.ignore_columns
-            )
+            candidate_set = set(self.config.track_columns) - unhashed
             return [c for c in value_columns if c in candidate_set]
-        ignore_set = set(self.config.ignore_columns)
-        return [c for c in value_columns if c not in ignore_set]
+        return [c for c in value_columns if c not in unhashed]
 
     def _snapshot_projection(self) -> str:
         """Snapshot value as projected by a CTE that reads the source directly."""
@@ -460,14 +461,19 @@ snapshot_sequence AS (
     def select_value_columns(self, source_columns: List[str]) -> List[str]:
         """Return the source columns carried into the historized target.
 
-        Drops the primary key (emitted separately, ahead of the value columns)
-        and the framework's system columns. Source order is preserved.
+        Drops the primary key (emitted separately, ahead of the value columns),
+        the framework's system columns and the config's ``exclude_columns``.
+        Source order is preserved.
 
         Takes the column list rather than querying for it: the runner reads the
         source's columns once per run and every consumer filters that one
         result, so a column can't be visible to one check and not another.
         """
-        exclude = self._output_exclude | set(self.primary_key)
+        exclude = (
+            self._output_exclude
+            | set(self.primary_key)
+            | set(self.config.exclude_columns)
+        )
         return [col for col in source_columns if col not in exclude]
 
     @property

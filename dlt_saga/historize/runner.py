@@ -307,8 +307,8 @@ class HistorizeRunner:
         is its only source of descriptions. Source-column docs come from the
         pipeline config (reusing ``TargetConfig`` so composition matches the
         ingest table exactly); SCD2 system columns get canned descriptions.
-        Columns dropped by ``ignore_columns`` simply aren't in the table, so the
-        reconcile skips them. Best-effort — never fails the historize run.
+        Columns left out by ``exclude_columns`` simply aren't in the table, so
+        the reconcile skips them. Best-effort — never fails the historize run.
         """
         if not self.destination.supports_description_reconcile():
             return
@@ -1243,10 +1243,17 @@ class HistorizeRunner:
         if changes.blocking:
             self._raise_config_changed_error(changes)
         if changes.narrowed:
+            lines = changes.describe(changes.narrowed)
+            if "exclude_columns" in changes.narrowed:
+                lines.append(
+                    f"  (an excluded column already on {self._target_display} "
+                    f"keeps its history and gets NULL in new versions; "
+                    f"'{self._rebuild_command}' or dropping the column by hand "
+                    f"removes it)"
+                )
             self.logger.info(
                 f"Change detection narrowed for {self.pipeline_name}; applies "
-                f"from this run on, existing versions are kept:\n"
-                + "\n".join(changes.describe(changes.narrowed))
+                f"from this run on, existing versions are kept:\n" + "\n".join(lines)
             )
 
     def _raise_config_changed_error(self, changes: "FingerprintChanges") -> None:
@@ -1286,10 +1293,12 @@ class HistorizeRunner:
         columns = self.sql_builder.select_value_columns(self._source_columns())
 
         if not columns:
-            raise ValueError(
-                f"No value columns found in {self.source_table_id}. "
-                f"Check that the table exists and has non-system columns."
+            hint = (
+                f" exclude_columns {self.config.exclude_columns} leaves none."
+                if self.config.exclude_columns
+                else " Check that the table exists and has non-system columns."
             )
+            raise ValueError(f"No value columns found in {self.source_table_id}.{hint}")
 
         hash_columns = self.sql_builder._get_hash_columns(columns)
         if not hash_columns:
@@ -1374,7 +1383,10 @@ class HistorizeRunner:
           history, and is read from the source as a typed NULL
           (``HistorizeSqlBuilder.set_absent_source_columns``), so a key's next
           version carries NULL rather than a value the source no longer
-          delivers. Warned about the first run it is missing.
+          delivers. Warned about the first run it is missing. A column added
+          to ``exclude_columns`` after the target was built goes the same way,
+          minus the warning — and minus the hash, so excluding it opens no
+          versions.
         - A column whose type changed is refused: the stored history can't
           take the new type in place, and a widening the destination would
           accept still changes the string-serialised hash of every row.
@@ -1406,16 +1418,28 @@ class HistorizeRunner:
         carried = {c.lower() for c in value_columns}
         carried |= {c.lower() for c in self.config.primary_key}
         carried |= {c.lower() for c in self.sql_builder._output_exclude}
-        dropped = [
+        absent = [
             (name, dtype)
             for lower, (name, dtype) in target_types.items()
             if lower not in carried
         ]
-        if not dropped:
+        if not absent:
             return value_columns
-        self._warn_dropped_columns([name for name, _ in dropped])
-        self.sql_builder.set_absent_source_columns(dict(dropped))
-        return list(value_columns) + [name for name, _ in dropped]
+        # A column the target has and the source read doesn't is read as NULL
+        # either way; only the reporting differs. Excluded by config is a
+        # choice, announced once by the fingerprint check when it took effect.
+        excluded = {c.lower() for c in self.config.exclude_columns}
+        dropped = [name for name, _ in absent if name.lower() not in excluded]
+        if dropped:
+            self._warn_dropped_columns(dropped)
+        kept = [name for name, _ in absent if name.lower() in excluded]
+        if kept:
+            self.logger.debug(
+                f"Column(s) {kept} are in exclude_columns but still on "
+                f"{self._target_display}; read as NULL"
+            )
+        self.sql_builder.set_absent_source_columns(dict(absent))
+        return list(value_columns) + [name for name, _ in absent]
 
     def _guard_column_types(
         self, target_types: Dict[str, Tuple[str, str]], value_columns: List[str]
