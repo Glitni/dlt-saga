@@ -232,6 +232,25 @@ class TestScd2DroppedColumn:
         # NULL → NULL is not a change.
         assert len(_versions(dest, 1)) == 2
 
+    def test_partial_refresh_reads_the_column_as_null(self, dest):
+        _insert(dest, S1, [(1, "a")])
+        _run(dest, "scd2", full_refresh=True)
+        _insert(dest, S2, [(1, "b")])
+        _run(dest, "scd2")
+
+        # The clone-and-swap reads the source through its own SQL builder,
+        # which must project the dropped column the same way the main one does.
+        _sql(dest, f"ALTER TABLE {SOURCE} DROP COLUMN payload")
+        _insert(dest, S3, [(1,)], ("id",))
+        stats = _run(dest, "scd2", historize_from=S2)
+
+        assert stats["mode"] == "partial_refresh"
+        one = _versions(dest, 1)
+        assert [(r["payload"], str(r["_dlt_valid_from"])) for r in one] == [
+            ("a", S1),
+            (None, S2),
+        ]
+
     def test_full_refresh_rebuilds_without_the_column(self, dest):
         _insert(dest, S1, [(1, "a")])
         _run(dest, "scd2", full_refresh=True)

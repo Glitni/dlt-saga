@@ -1997,6 +1997,12 @@ class HistorizeRunner:
                 filter_sql=self._filter_sql,
                 source_relation=self.source_relation,
             )
+            # The clone has every column the target has, so the staging read
+            # must project the ones the source no longer delivers the same way
+            # the reconcile declared them on the main builder.
+            staging_builder.set_absent_source_columns(
+                self.sql_builder.absent_source_columns
+            )
 
             self._rollback_staging(
                 staging_builder, effective_from_date, run_id, target_schema
