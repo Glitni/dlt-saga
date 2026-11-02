@@ -46,6 +46,29 @@ class HistorizeLogEntry:
 # needs it (see ``write_log_entry``).
 LOG_COLUMNS_ADDED_LATER = {"source_columns": "string"}
 
+# Fingerprint keys that only decide which columns the change-detection hash
+# covers; see ``HistorizeStateManager.fingerprint_changes``.
+DETECTION_KEYS = ("track_columns", "ignore_columns")
+
+
+@dataclass
+class FingerprintChanges:
+    """How the config differs from the fingerprint of the last successful run.
+
+    ``blocking`` keys invalidate the stored history (full refresh needed);
+    ``narrowed`` keys only shrink change detection and apply going forward.
+    ``previous``/``current`` are the decoded fingerprints, for messages.
+    """
+
+    blocking: List[str]
+    narrowed: List[str]
+    previous: dict
+    current: dict
+
+    def describe(self, keys: List[str]) -> List[str]:
+        """``key: old → new`` lines for the given keys."""
+        return [f"  {key}: {self.previous[key]} → {self.current[key]}" for key in keys]
+
 
 @dataclass
 class LateArrivals:
@@ -266,23 +289,68 @@ class HistorizeStateManager:
         decoded.setdefault("delivery", "full")
         return decoded
 
-    def config_changed(
+    def fingerprint_changes(
         self, state: "HistorizeStateManager.PipelineState", config: Any
-    ) -> bool:
-        """Check if historization-affecting config has changed since last run.
+    ) -> "FingerprintChanges":
+        """Fingerprint keys whose stored value differs from the config's.
 
         Comparison is done key-by-key against the stored fingerprint so that
         newly added fingerprint keys (e.g. table_format) don't produce false
         positives for pipelines whose stored fingerprint pre-dates the key.
+
+        Most differences invalidate the stored history and block the run until
+        a full refresh. One kind doesn't: ``track_columns`` / ``ignore_columns``
+        edited so that change detection only *narrows* (a column added to
+        ``ignore_columns``, one dropped from ``track_columns``). Versions
+        already written were real changes at the time and stay correct; the
+        hash is recomputed from the stored open row on every run, so the next
+        run simply compares without the column. Such an edit is reported as
+        ``narrowed`` and takes effect going forward. Widening (starting to
+        track a column) still blocks: history before the edit has no versions
+        for it, and whether that needs a rebuild is not the framework's call.
         """
         if not state.has_successful_run:
-            return False
+            return FingerprintChanges([], [], {}, {})
         previous = self.decode_fingerprint(state.config_fingerprint)
         current = self.decode_fingerprint(self.compute_fingerprint(config))
-        for key, value in current.items():
-            if key in previous and previous[key] != value:
-                return True
-        return False
+        differing = [
+            key
+            for key, value in current.items()
+            if key in previous and previous[key] != value
+        ]
+        detection = [key for key in differing if key in DETECTION_KEYS]
+        narrowed: List[str] = []
+        if detection and self._detection_narrowed(previous, current):
+            narrowed = detection
+            differing = [key for key in differing if key not in detection]
+        return FingerprintChanges(differing, narrowed, previous, current)
+
+    @staticmethod
+    def _detection_narrowed(previous: dict, current: dict) -> bool:
+        """Whether the hashed column set can only have shrunk.
+
+        The hashed set is ``track_columns`` (every value column when unset)
+        minus ``ignore_columns``. Decided from config alone: when the new
+        ``track_columns`` is unset the set is "everything but the ignored",
+        which is a subset of the old one only if that was unset too and the
+        ignored columns only grew.
+        """
+        prev_track = set(previous.get("track_columns") or [])
+        cur_track = set(current.get("track_columns") or [])
+        prev_ignore = set(previous.get("ignore_columns") or [])
+        cur_ignore = set(current.get("ignore_columns") or [])
+        if not cur_track:
+            return not prev_track and prev_ignore <= cur_ignore
+        hashed_now = cur_track - cur_ignore
+        if not prev_track:
+            return not (hashed_now & prev_ignore)
+        return hashed_now <= prev_track - prev_ignore
+
+    def config_changed(
+        self, state: "HistorizeStateManager.PipelineState", config: Any
+    ) -> bool:
+        """Whether a config change blocks the run until a full refresh."""
+        return bool(self.fingerprint_changes(state, config).blocking)
 
     def write_log_entry(self, entry: HistorizeLogEntry) -> None:
         """Write a single log entry to the historize log table."""
