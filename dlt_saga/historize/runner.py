@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.sql import HistorizeSqlBuilder, snapshot_range_filter
 from dlt_saga.historize.state import (
+    FingerprintChanges,
     HistorizeLogEntry,
     HistorizeStateManager,
     LateArrivals,
@@ -450,12 +451,7 @@ class HistorizeRunner:
         t = time.time()
         state = self.state_manager.get_pipeline_state(self.pipeline_name)
 
-        # Config-changed guard runs for ALL modes (including partial refresh).
-        # PK/track_columns/ignore_columns changes affect ALL SCD2 records — partial refresh
-        # is not a substitute for a full-refresh after semantic config changes.
-        if self.state_manager.config_changed(state, self.config):
-            if not self.full_refresh:
-                self._raise_config_changed_error(state)
+        self._check_config_changes(state)
 
         is_partial = self.partial_refresh or self.historize_from is not None
 
@@ -1107,20 +1103,34 @@ class HistorizeRunner:
             list(desired) or "none",
         )
 
-    def _raise_config_changed_error(self, state) -> None:
+    def _check_config_changes(self, state) -> None:
+        """Refuse a run whose config no longer matches the stored history.
+
+        Runs for every mode, partial refresh included: a change to the keys,
+        the strategy or the hashed columns affects every stored row, and a
+        partial refresh is no substitute for the full refresh that applies it.
+        A full refresh applies the new config by rebuilding, so it passes. An
+        edit that only narrows change detection is not refused; it applies
+        from this run on and is logged so the point it took effect is visible.
+        """
+        changes = self.state_manager.fingerprint_changes(state, self.config)
+        if self.full_refresh:
+            return
+        if changes.blocking:
+            self._raise_config_changed_error(changes)
+        if changes.narrowed:
+            self.logger.info(
+                f"Change detection narrowed for {self.pipeline_name}; applies "
+                f"from this run on, existing versions are kept:\n"
+                + "\n".join(changes.describe(changes.narrowed))
+            )
+
+    def _raise_config_changed_error(self, changes: "FingerprintChanges") -> None:
         """Raise a ValueError with a human-readable diff of config changes."""
-        previous = self.state_manager.decode_fingerprint(state.config_fingerprint)
-        current = self.state_manager.decode_fingerprint(
-            self.state_manager.compute_fingerprint(self.config)
-        )
-        changes = []
-        for key in current:
-            # Skip keys absent from previous (new fingerprint keys added after first run —
-            # these are reported by config_changed only when both dicts have the key)
-            if key in previous and previous[key] != current[key]:
-                changes.append(f"  {key}: {previous[key]} → {current[key]}")
+        previous, current = changes.previous, changes.current
+        lines = changes.describe(changes.blocking + changes.narrowed)
         if previous.get("strategy") == "scd1" and current.get("strategy") == "scd2":
-            changes.append(
+            lines.append(
                 "  (scd1 kept only the latest version per key — the rebuilt "
                 "scd2 history starts from what the source still holds)"
             )
@@ -1129,18 +1139,18 @@ class HistorizeRunner:
             and current.get("delivery") == "incremental"
             and previous.get("track_deletions") != current.get("track_deletions")
         ):
-            changes.append(
+            lines.append(
                 "  (track_deletions follows delivery unless set; incremental "
                 "deliveries have no deletions, so the rebuilt history has no "
                 "deletion markers)"
             )
-        diff = "\n".join(changes)
+        diff = "\n".join(lines)
         rebuild_cmd = f"Run '{self._rebuild_command}' to rebuild."
         is_partial = self.partial_refresh or self.historize_from is not None
         if is_partial:
             suffix = (
                 "Note: --partial-refresh and --historize-from are not substitutes "
-                "for semantic config changes (PK, track_columns, ignore_columns).\n"
+                "for semantic config changes (PK, strategy, tracked columns).\n"
                 + rebuild_cmd
             )
         else:

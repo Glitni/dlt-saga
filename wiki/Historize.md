@@ -610,13 +610,15 @@ saga historize --full-refresh --select "filesystem__snapshots__companies"
 
 Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when any of these changes: `primary_key`, `snapshot_column`, `strategy`, `order_by`, `delivery` (`scd2` only), `track_columns`, `ignore_columns`, `track_deletions`, `merge_key`, `filters`, `table_format`, or the output column names (`valid_from_column`, `valid_to_column`, `is_deleted_column`).
 
+One kind of edit is exempt: **narrowing change detection**, i.e. adding a column to `ignore_columns` or dropping one from `track_columns`. Versions already written were real changes at the time and stay correct, and the hash is recomputed on every run, so the edit simply applies from the next run on and is logged at info level. Widening detection again (removing a column from `ignore_columns`, adding one to `track_columns`) still prompts, since history before the edit has no versions for that column.
+
 ---
 
 ## Schema changes
 
 The historized table is created from the source's columns on the first run. When the source's columns change later, every run that writes into the existing table (incremental, partial refresh, a late-arrival replay) reconciles the target first, before anything is written. A schema change is not a config change: it never prompts for `--full-refresh`.
 
-**Column added.** The column is added to the historized table with the source's type, logged at info level. Rows written before it existed hold `NULL`; nothing is backfilled. A key's next version with a value in the new column opens as usual, since going from unknown to known is a change: under `scd2` every key that arrives with a value gets a new version at that snapshot, under `scd1` its `_dlt_valid_from` moves there. A key that arrives with `NULL` in the new column is unchanged. A column listed in `ignore_columns` (or absent from `track_columns`) is carried like any other untracked column and opens no versions.
+**Column added.** The column is added to the historized table with the source's type, logged at info level. Rows written before it existed hold `NULL`; nothing is backfilled. A key's next version with a value in the new column opens as usual, since going from unknown to known is a change: under `scd2` every key that arrives with a value gets a new version at that snapshot, under `scd1` its `_dlt_valid_from` moves there. A key that arrives with `NULL` in the new column is unchanged. A column listed in `ignore_columns` (or absent from `track_columns`) is carried like any other untracked column and opens no versions, so a noisy new column is silenced by adding it to `ignore_columns`; that narrows change detection and needs no rebuild.
 
 **Column dropped.** The historized table keeps the column and its history. The source is read as if it still had the column, with `NULL` in it, so a key's next version carries `NULL` instead of a value the source no longer delivers; under `scd1` that is the updated row. Keys the source doesn't re-deliver are untouched. The run warns the first time the column is missing (the log records each run's source columns, so the warning doesn't repeat), since a drop is often unintended upstream. A `--full-refresh` rebuilds from the source's current columns, without the dropped one.
 
