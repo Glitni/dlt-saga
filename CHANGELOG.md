@@ -1,3 +1,15 @@
+## 0.48.0 — 2026-11-02
+
+### Added
+- Historize exclude_columns — leave source columns out of the historized table (#632)
+- Historize json_columns — typed columns from a JSON source column (#627)
+- Narrowing historize change detection no longer requires --full-refresh (#630)
+- Historize schema evolution for added, dropped and retyped source columns (#629)
+
+
+### Fixed
+- Scd2 partial refresh after a dropped or excluded source column (#634)
+
 ## 0.47.1 — 2026-10-30
 
 ### Fixed
