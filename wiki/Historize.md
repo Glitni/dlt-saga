@@ -612,6 +612,20 @@ Historize detects config changes via a fingerprint stored in `_saga_historize_lo
 
 ---
 
+## Schema changes
+
+The historized table is created from the source's columns on the first run. When the source's columns change later, every run that writes into the existing table (incremental, partial refresh, a late-arrival replay) reconciles the target first, before anything is written. A schema change is not a config change: it never prompts for `--full-refresh`.
+
+**Column added.** The column is added to the historized table with the source's type, logged at info level. Rows written before it existed hold `NULL`; nothing is backfilled. A key's next version with a value in the new column opens as usual, since going from unknown to known is a change: under `scd2` every key that arrives with a value gets a new version at that snapshot, under `scd1` its `_dlt_valid_from` moves there. A key that arrives with `NULL` in the new column is unchanged. A column listed in `ignore_columns` (or absent from `track_columns`) is carried like any other untracked column and opens no versions.
+
+**Column dropped.** The historized table keeps the column and its history. The source is read as if it still had the column, with `NULL` in it, so a key's next version carries `NULL` instead of a value the source no longer delivers; under `scd1` that is the updated row. Keys the source doesn't re-deliver are untouched. The run warns the first time the column is missing (the log records each run's source columns, so the warning doesn't repeat), since a drop is often unintended upstream. A `--full-refresh` rebuilds from the source's current columns, without the dropped one.
+
+**Column type changed.** The run is refused before any write, naming the column and both types, and points at `--full-refresh`, which rebuilds the history with the new type from what the source still holds. A widening the destination would accept is refused too: it changes the change-detection hash of every stored row.
+
+For sources ingested by saga, only the added case arises: dlt never drops or retypes a raw table's columns (a value that no longer fits its column lands in a variant column such as `price__v_text`, and a column dropped upstream is simply `NULL` from then on). Dropped and retyped columns come from [external deliveries](#external-data-historize-only) whose table someone else maintains.
+
+---
+
 ## External data (historize-only)
 
 When data arrives in the destination from an external process (no dlt ingest step):
@@ -639,6 +653,7 @@ Historize state is recorded in `_saga_historize_log` with:
 
 - Which snapshots have been processed (prevents reprocessing)
 - A config fingerprint — detects changes requiring a full refresh
+- The source's columns as each run saw them — a dropped column is warned about once, not every run
 - Timing information per historize run
 
 ---

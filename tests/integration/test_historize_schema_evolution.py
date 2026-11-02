@@ -1,0 +1,306 @@
+"""Integration tests for historize schema evolution on DuckDB.
+
+The historized table is created from the source's columns on the first run.
+When the source later gains or loses a column, an incremental run reconciles
+the target before writing: a gained column is added (earlier rows hold NULL),
+a lost column stays with its history and is read from the source as NULL, and
+a changed type is refused with a pointer at ``--full-refresh``. None of it is a
+config change, so none of it trips the full-refresh prompt.
+"""
+
+import logging
+
+import pytest
+
+from dlt_saga.destinations.duckdb.config import DuckDBDestinationConfig
+from dlt_saga.destinations.duckdb.destination import DuckDBDestination
+from dlt_saga.historize.config import HistorizeConfig
+from dlt_saga.historize.runner import HistorizeRunner
+
+SCHEMA = "test_evolution"
+SOURCE_TABLE = "events"
+TARGET_TABLE = "events_historized"
+SOURCE = f'"{SCHEMA}"."{SOURCE_TABLE}"'
+
+S1 = "2026-01-01 00:00:00"
+S2 = "2026-01-02 00:00:00"
+S3 = "2026-01-03 00:00:00"
+
+
+@pytest.fixture
+def dest():
+    cfg = DuckDBDestinationConfig(
+        project_id="test",
+        location="local",
+        schema_name=SCHEMA,
+        database_path=":memory:",
+    )
+    destination = DuckDBDestination(cfg)
+    destination.execute_sql(
+        f"""
+        CREATE TABLE {SOURCE} (
+            id INTEGER,
+            payload VARCHAR,
+            other VARCHAR,
+            snapshot_at TIMESTAMP
+        )
+        """,
+        SCHEMA,
+    )
+    yield destination
+    destination.close()
+
+
+def _sql(dest, sql):
+    dest.execute_sql(sql, SCHEMA)
+
+
+def _literal(value):
+    if value is None:
+        return "NULL"
+    if isinstance(value, str):
+        return repr(value)
+    return str(value)
+
+
+def _insert(dest, snapshot, rows, columns=("id", "payload")):
+    """Insert rows for one snapshot; ``rows`` match ``columns`` positionally."""
+    col_list = ", ".join(f'"{c}"' for c in (*columns, "snapshot_at"))
+    values = ", ".join(
+        f"({', '.join(_literal(v) for v in row)}, TIMESTAMP '{snapshot}')"
+        for row in rows
+    )
+    _sql(dest, f"INSERT INTO {SOURCE} ({col_list}) VALUES {values}")
+
+
+def _runner(dest, strategy, **kwargs):
+    overrides = {
+        k: kwargs.pop(k)
+        for k in list(kwargs)
+        if k not in ("full_refresh", "partial_refresh", "historize_from")
+    }
+    settings = {
+        "strategy": strategy,
+        "primary_key": ["id"],
+        "snapshot_column": "snapshot_at",
+        **overrides,
+    }
+    if strategy == "scd1":
+        settings.setdefault("track_deletions", False)
+    return HistorizeRunner(
+        pipeline_name="test__events",
+        historize_config=HistorizeConfig(**settings),
+        destination=dest,
+        database="test",
+        schema=SCHEMA,
+        source_table_name=SOURCE_TABLE,
+        target_table_name=TARGET_TABLE,
+        config_dict={"write_disposition": "historize", "primary_key": ["id"]},
+        **kwargs,
+    )
+
+
+def _run(dest, strategy, **kwargs):
+    stats = _runner(dest, strategy, **kwargs).run()
+    assert stats["status"] == "completed", stats.get("error")
+    return stats
+
+
+def _target(dest):
+    result = dest.connection.execute(
+        f'SELECT * FROM "{SCHEMA}"."{TARGET_TABLE}" ORDER BY id, _dlt_valid_from'
+    )
+    cols = [c[0] for c in result.description]
+    return [dict(zip(cols, r)) for r in result.fetchall()]
+
+
+def _columns(dest, table):
+    return {name: dtype for name, dtype in dest.list_table_columns(SCHEMA, table)}
+
+
+def _log(dest):
+    result = dest.connection.execute(
+        f'SELECT status, config_fingerprint, source_columns FROM "{SCHEMA}".'
+        f'"_saga_historize_log" ORDER BY started_at'
+    )
+    return [
+        dict(zip(("status", "fingerprint", "source_columns"), r))
+        for r in result.fetchall()
+    ]
+
+
+def _versions(dest, key):
+    return [r for r in _target(dest) if r["id"] == key]
+
+
+class TestScd2AddedColumn:
+    def test_column_added_and_versioned_from_first_value(self, dest):
+        _insert(dest, S1, [(1, "a"), (2, "b")])
+        _run(dest, "scd2", full_refresh=True)
+        assert "extra" not in _columns(dest, TARGET_TABLE)
+
+        _sql(dest, f"ALTER TABLE {SOURCE} ADD COLUMN extra VARCHAR")
+        _insert(dest, S2, [(1, "a", "x"), (2, "b", None)], ("id", "payload", "extra"))
+        stats = _run(dest, "scd2")
+
+        assert stats["mode"] == "incremental"
+        assert _columns(dest, TARGET_TABLE)["extra"] == "VARCHAR"
+        # Key 1 gained a value: unknown → known is a change, versioned at S2.
+        one = _versions(dest, 1)
+        assert [(r["extra"], str(r["_dlt_valid_to"])) for r in one] == [
+            (None, S2),
+            ("x", "None"),
+        ]
+        # Key 2 is still unknown in the new column: nothing changed.
+        two = _versions(dest, 2)
+        assert len(two) == 1 and two[0]["extra"] is None
+
+    def test_not_a_config_change(self, dest):
+        _insert(dest, S1, [(1, "a")])
+        _run(dest, "scd2", full_refresh=True)
+        _sql(dest, f"ALTER TABLE {SOURCE} ADD COLUMN extra VARCHAR")
+        _insert(dest, S2, [(1, "a", "x")], ("id", "payload", "extra"))
+        _run(dest, "scd2")
+
+        log = _log(dest)
+        assert [e["status"] for e in log] == ["completed", "completed"]
+        assert log[0]["fingerprint"] == log[1]["fingerprint"]
+        assert '"extra"' in log[1]["source_columns"]
+
+    def test_ignored_column_is_carried_but_opens_no_version(self, dest):
+        _insert(dest, S1, [(1, "a")])
+        _run(dest, "scd2", full_refresh=True, ignore_columns=["extra"])
+        _sql(dest, f"ALTER TABLE {SOURCE} ADD COLUMN extra VARCHAR")
+        _insert(dest, S2, [(1, "a", "x")], ("id", "payload", "extra"))
+        _run(dest, "scd2", ignore_columns=["extra"])
+
+        assert "extra" in _columns(dest, TARGET_TABLE)
+        one = _versions(dest, 1)
+        assert len(one) == 1 and one[0]["extra"] is None
+
+    def test_partial_refresh_reconciles_before_cloning(self, dest):
+        _insert(dest, S1, [(1, "a")])
+        _run(dest, "scd2", full_refresh=True)
+        _insert(dest, S2, [(1, "b")])
+        _run(dest, "scd2")
+
+        _sql(dest, f"ALTER TABLE {SOURCE} ADD COLUMN extra VARCHAR")
+        _sql(dest, f"UPDATE {SOURCE} SET extra = 'x' WHERE snapshot_at = '{S2}'")
+        stats = _run(dest, "scd2", partial_refresh=True, historize_from=S2)
+
+        assert stats["mode"] == "partial_refresh"
+        one = _versions(dest, 1)
+        assert [(r["payload"], r["extra"]) for r in one] == [("a", None), ("b", "x")]
+
+
+class TestScd2DroppedColumn:
+    def test_next_version_carries_null_and_history_is_kept(self, dest, caplog):
+        _insert(dest, S1, [(1, "a"), (2, "b")])
+        _run(dest, "scd2", full_refresh=True)
+
+        _sql(dest, f"ALTER TABLE {SOURCE} DROP COLUMN payload")
+        _insert(dest, S2, [(1,), (2,)], ("id",))
+        with caplog.at_level(logging.WARNING):
+            _run(dest, "scd2")
+
+        assert "payload" in _columns(dest, TARGET_TABLE)
+        one = _versions(dest, 1)
+        assert [(r["payload"], str(r["_dlt_valid_from"])) for r in one] == [
+            ("a", S1),
+            (None, S2),
+        ]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("payload" in r.getMessage() for r in warnings)
+
+    def test_warns_only_the_first_time(self, dest, caplog):
+        _insert(dest, S1, [(1, "a")])
+        _run(dest, "scd2", full_refresh=True)
+        _sql(dest, f"ALTER TABLE {SOURCE} DROP COLUMN payload")
+        _insert(dest, S2, [(1,)], ("id",))
+        _run(dest, "scd2")
+
+        _insert(dest, S3, [(1,)], ("id",))
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="dlt_saga.historize.runner"):
+            _run(dest, "scd2")
+
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            "payload" in r.getMessage() and r.levelno == logging.DEBUG
+            for r in caplog.records
+        )
+        # NULL → NULL is not a change.
+        assert len(_versions(dest, 1)) == 2
+
+    def test_full_refresh_rebuilds_without_the_column(self, dest):
+        _insert(dest, S1, [(1, "a")])
+        _run(dest, "scd2", full_refresh=True)
+        _sql(dest, f"ALTER TABLE {SOURCE} DROP COLUMN payload")
+        _run(dest, "scd2", full_refresh=True)
+
+        assert "payload" not in _columns(dest, TARGET_TABLE)
+
+
+class TestScd1:
+    def test_added_column_moves_valid_from_only_where_a_value_arrived(self, dest):
+        _insert(dest, S1, [(1, "a"), (2, "b")])
+        _run(dest, "scd1", full_refresh=True)
+
+        _sql(dest, f"ALTER TABLE {SOURCE} ADD COLUMN extra VARCHAR")
+        _insert(dest, S2, [(1, "a", "x"), (2, "b", None)], ("id", "payload", "extra"))
+        _run(dest, "scd1")
+
+        rows = {r["id"]: r for r in _target(dest)}
+        assert rows[1]["extra"] == "x"
+        assert str(rows[1]["_dlt_valid_from"]) == S2
+        assert rows[2]["extra"] is None
+        assert str(rows[2]["_dlt_valid_from"]) == S1
+
+    def test_dropped_column_is_nulled_on_the_updated_row(self, dest, caplog):
+        _insert(dest, S1, [(1, "a"), (2, "b")])
+        _run(dest, "scd1", full_refresh=True)
+
+        _sql(dest, f"ALTER TABLE {SOURCE} DROP COLUMN payload")
+        _insert(dest, S2, [(1,)], ("id",))
+        with caplog.at_level(logging.WARNING):
+            _run(dest, "scd1")
+
+        rows = {r["id"]: r for r in _target(dest)}
+        # Key 1 was re-delivered without the column: its current row says so.
+        assert rows[1]["payload"] is None
+        assert str(rows[1]["_dlt_valid_from"]) == S2
+        # Key 2 wasn't touched; its row still describes the version it holds.
+        assert rows[2]["payload"] == "b"
+        assert str(rows[2]["_dlt_valid_from"]) == S1
+        assert any("payload" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("strategy", ["scd2", "scd1"])
+class TestTypeChange:
+    def test_refused_before_any_write(self, dest, strategy):
+        _insert(dest, S1, [(1, "a")])
+        _run(dest, strategy, full_refresh=True)
+        before = _target(dest)
+
+        _sql(dest, f"ALTER TABLE {SOURCE} DROP COLUMN payload")
+        _sql(dest, f"ALTER TABLE {SOURCE} ADD COLUMN payload INTEGER")
+        _insert(dest, S2, [(1, 7)])
+        stats = _runner(dest, strategy).run()
+
+        assert stats["status"] == "failed"
+        assert "payload" in stats["error"]
+        assert "VARCHAR" in stats["error"] and "INTEGER" in stats["error"]
+        assert "--full-refresh" in stats["error"]
+        assert _target(dest) == before
+        assert [e["status"] for e in _log(dest)] == ["completed", "failed"]
+
+    def test_full_refresh_takes_the_new_type(self, dest, strategy):
+        _insert(dest, S1, [(1, "a")])
+        _run(dest, strategy, full_refresh=True)
+        _sql(dest, f"ALTER TABLE {SOURCE} DROP COLUMN payload")
+        _sql(dest, f"ALTER TABLE {SOURCE} ADD COLUMN payload INTEGER")
+        _insert(dest, S2, [(1, 7)])
+
+        _run(dest, strategy, full_refresh=True)
+
+        assert _columns(dest, TARGET_TABLE)["payload"] == "INTEGER"
