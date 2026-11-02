@@ -238,6 +238,7 @@ class TestHistorizeRunnerAllColumnsIgnored:
         runner.destination = dest
         runner.schema = "test"
         runner.source_table_id = "test.source"
+        runner.source_relation = "test.source"
         runner._source_columns_cache = None
         runner._src_database = ""
         runner._src_schema = "test"
@@ -290,6 +291,7 @@ class TestHistorizeRunnerAllColumnsIgnored:
         runner.destination = dest
         runner.schema = "test"
         runner.source_table_id = "test.source"
+        runner.source_relation = "test.source"
         runner._source_columns_cache = None
         runner._src_database = ""
         runner._src_schema = "test"

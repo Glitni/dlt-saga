@@ -23,3 +23,8 @@ HISTORIZE_SYSTEM_COLUMNS = frozenset(
         "_dlt_ingested_at",
     }
 )
+
+# Internal alias the historize SQL projects a pseudo-column snapshot value under
+# (see HistorizeSqlBuilder._snap). Prefixed so it can't collide with a source
+# column; a configured column name may not take it either.
+SNAPSHOT_ALIAS = "_saga_snapshot"

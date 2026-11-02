@@ -203,20 +203,35 @@ def _parse_value(entry: dict, op: str, i: int) -> Any:
 def _parse_path(raw: Any, index: int) -> Optional[Tuple[str, ...]]:
     if raw is None:
         return None
+    return parse_json_path(raw, f"filters[{index}]")
+
+
+def parse_json_path(raw: Any, label: str) -> Tuple[str, ...]:
+    """Parse a JSON path given as a dotted string or a list of segments.
+
+    The one parser for every config key that addresses a value inside a JSON
+    column (``filters`` and ``historize.json_columns``), so a path means the
+    same thing everywhere.
+
+    Args:
+        raw: ``"a.b"`` or ``["a", "b"]``.
+        label: Config location prefixed to error messages.
+
+    Raises:
+        ValueError: The path is empty or not a string/list of strings.
+    """
     if isinstance(raw, str):
         segments = [seg for seg in raw.split(".") if seg]
         if not segments:
-            raise ValueError(f"filters[{index}]: 'path' is empty")
+            raise ValueError(f"{label}: 'path' is empty")
         return tuple(segments)
     if isinstance(raw, list):
         if not raw or not all(isinstance(s, str) and s for s in raw):
             raise ValueError(
-                f"filters[{index}]: 'path' must be a non-empty list of non-empty strings"
+                f"{label}: 'path' must be a non-empty list of non-empty strings"
             )
         return tuple(raw)
-    raise ValueError(
-        f"filters[{index}]: 'path' must be a dotted string or list of strings"
-    )
+    raise ValueError(f"{label}: 'path' must be a dotted string or list of strings")
 
 
 # ---------------------------------------------------------------------------

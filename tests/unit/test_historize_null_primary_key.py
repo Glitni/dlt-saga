@@ -171,6 +171,7 @@ def _make_runner(probe_rows, primary_key=None):
     runner.pipeline_name = "grp__tbl"
     runner.schema = "ds"
     runner.source_table_id = "proj.ds.src"
+    runner.source_relation = "proj.ds.src"
     return runner, dest
 
 

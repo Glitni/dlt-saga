@@ -685,6 +685,9 @@ class BigQueryDestination(BigQueryBaseDestination):
         }
         return type_map.get(logical_type, logical_type.upper())
 
+    def safe_cast(self, expression: str, dlt_type: str) -> str:
+        return f"SAFE_CAST({expression} AS {self.dlt_type_to_native(dlt_type)})"
+
     def ensure_schema_exists(self, schema: str) -> None:
         """Ensure a BigQuery dataset exists, creating it with the configured location.
 
@@ -838,6 +841,7 @@ class BigQueryDestination(BigQueryBaseDestination):
             for row in rows:
                 if row.column_name not in excludes:
                     col_defs.append(f"  `{row.column_name}` {row.data_type}")
+        col_defs.extend(f"  `{name}` {typ}" for name, typ in hints.derived_columns)
 
         col_defs.extend(f"  `{name}` {typ}" for name, typ in system_cols)
 

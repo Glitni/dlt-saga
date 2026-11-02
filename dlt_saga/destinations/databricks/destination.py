@@ -6,7 +6,7 @@ import logging
 import threading
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from dlt_saga.destinations.base import Destination, TableLayout
 from dlt_saga.destinations.databricks.config import DatabricksDestinationConfig
@@ -1142,13 +1142,27 @@ class DatabricksDestination(Destination):
     def parse_json_expression(self, value_expr: str) -> str:
         return value_expr  # Databricks stores JSON as STRING — no parse needed
 
-    def _render_filter_column(self, spec: Any, resolve: Any) -> str:
-        col = resolve(spec.column)
-        if not spec.path:
-            return col
-        # Databricks colon notation works on both STRING (auto-parsed) and
-        # VARIANT columns and is faster than get_json_object.
-        return col + ":" + ".".join(spec.path)
+    def json_extract_scalar(self, column_sql: str, path: Tuple[str, ...]) -> str:
+        # Colon notation works on both STRING (auto-parsed) and VARIANT columns
+        # and is faster than get_json_object. Unlike JSON_VALUE it returns an
+        # object or array at the path as JSON text rather than NULL.
+        return column_sql + ":" + ".".join(path)
+
+    # dlt logical types → Databricks SQL types.
+    DLT_TO_DATABRICKS_TYPE = {
+        "text": "STRING",
+        "double": "DOUBLE",
+        "bool": "BOOLEAN",
+        "timestamp": "TIMESTAMP",
+        "bigint": "BIGINT",
+        "date": "DATE",
+        "decimal": "DECIMAL",
+        "binary": "BINARY",
+        "json": "STRING",
+    }
+
+    def dlt_type_to_native(self, dlt_type: str) -> str:
+        return self.DLT_TO_DATABRICKS_TYPE.get(dlt_type.lower(), dlt_type.upper())
 
     def _render_regex_match(self, col_sql: str, pattern: str) -> str:
         return f"{col_sql} RLIKE '{self.escape_string_literal(pattern)}'"

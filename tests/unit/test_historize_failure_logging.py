@@ -18,6 +18,7 @@ def _runner():
     runner.source_table_name = "tbl"
     runner.target_table_name = "tbl_historized"
     runner.source_table_id = "db.schema.tbl"
+    runner.source_relation = "db.schema.tbl"
     runner.target_table_id = "db.schema.tbl_historized"
     runner.full_refresh = False
     runner.config = MagicMock()

@@ -8,7 +8,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +142,12 @@ class MaterializationHints:
     source_database: str = ""
     source_schema: str = ""
     source_table: str = ""
+
+    # Columns the historize source relation derives on top of the source
+    # table's own (``historize.json_columns``), as ``(name, native_type)``.
+    # The source table's catalog doesn't list them, so destinations emitting
+    # explicit column DDL append them after the source columns.
+    derived_columns: List[Tuple[str, str]] = field(default_factory=list)
 
     # Historize system column names.  Only destinations that emit explicit
     # column DDL (BigQuery Iceberg today) consult these; CTAS paths read the
@@ -815,16 +821,47 @@ class Destination(ABC):
     def _render_filter_column(self, spec: Any, resolve: Any) -> str:
         """Render the column reference part of a filter.
 
-        Plain column → ``resolve(col)``.  When a path is set, the default
-        wraps the column with the ANSI/SQL-2016 ``JSON_VALUE`` function;
-        destinations whose JSON access uses a different shape (e.g. a
-        colon operator, ``->>``, ``get_json_object``) should override.
+        Plain column → ``resolve(col)``; with a path, the scalar at that path
+        via :meth:`json_extract_scalar`.
         """
         col = resolve(spec.column)
         if not spec.path:
             return col
-        path_literal = "$." + ".".join(spec.path)
-        return f"JSON_VALUE({col}, '{self.escape_string_literal(path_literal)}')"
+        return self.json_extract_scalar(col, spec.path)
+
+    def json_extract_scalar(self, column_sql: str, path: Tuple[str, ...]) -> str:
+        """Return SQL extracting the scalar at ``path`` inside a JSON value, as text.
+
+        The result is the scalar's text without JSON quoting (``x``, not
+        ``"x"``), and NULL when the path is missing, holds JSON ``null``, or the
+        value isn't valid JSON. Shared by path-based filters and
+        ``historize.json_columns``, so both read a path the same way.
+
+        The default is the ANSI/SQL-2016 ``JSON_VALUE``, which also yields NULL
+        for an object or array; destinations whose JSON access has a different
+        shape override.
+
+        Args:
+            column_sql: Already-quoted column reference holding the JSON (a
+                JSON-typed column or a string containing JSON).
+            path: Object keys from the root, e.g. ``("aid", "legal_entity")``.
+        """
+        path_literal = "$." + ".".join(path)
+        return f"JSON_VALUE({column_sql}, '{self.escape_string_literal(path_literal)}')"
+
+    def safe_cast(self, expression: str, dlt_type: str) -> str:
+        """Return SQL casting ``expression`` to a dlt logical type, NULL on failure.
+
+        A value that can't be converted becomes NULL instead of failing the
+        query. Default is ``TRY_CAST``; destinations spelling it differently
+        override.
+
+        Args:
+            expression: SQL expression to convert.
+            dlt_type: dlt logical type (``text``, ``bigint``, ``timestamp``, …),
+                mapped through :meth:`dlt_type_to_native`.
+        """
+        return f"TRY_CAST({expression} AS {self.dlt_type_to_native(dlt_type)})"
 
     def _render_sql_literal(self, value: Any) -> str:
         """Render a Python value as a SQL literal.

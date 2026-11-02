@@ -361,7 +361,7 @@ class TestRenderFilterDefault:
         assert dest.render_filter(specs) == '"x" = 1 AND "y" = 2'
 
     def test_default_json_path(self):
-        """Default dialect uses JSON_VALUE — works on BigQuery/DuckDB/Postgres."""
+        """Default dialect uses JSON_VALUE — works on BigQuery/Postgres."""
         dest = _BaseDestination()
         specs = parse_filters(
             [{"column": "config", "path": "aid.legal_entity", "value": "bm"}]
@@ -460,6 +460,54 @@ class TestRenderFilterDatabricks:
         dest = self._make_dest()
         specs = parse_filters([{"column": "x", "op": "matches", "value": "^foo"}])
         assert dest.render_filter(specs) == "`x` RLIKE '^foo'"
+
+
+@pytest.mark.unit
+class TestRenderFilterDuckDB:
+    """Runs the rendered predicate on DuckDB, whose JSON_VALUE keeps JSON quoting."""
+
+    @pytest.fixture
+    def dest(self):
+        from dlt_saga.destinations.duckdb.config import DuckDBDestinationConfig
+        from dlt_saga.destinations.duckdb.destination import DuckDBDestination
+
+        destination = DuckDBDestination(
+            DuckDBDestinationConfig(
+                project_id="test",
+                location="local",
+                schema_name="main",
+                database_path=":memory:",
+            )
+        )
+        destination.connection.execute(
+            "CREATE TABLE t AS SELECT * FROM (VALUES "
+            """(1, '{"aid": {"legal_entity": "bm"}, "n": 5}'), """
+            """(2, '{"aid": {"legal_entity": "ap"}}'), """
+            "(3, 'not json'), (4, NULL)) v(id, config)"
+        )
+        yield destination
+        destination.close()
+
+    def _ids(self, dest, filters):
+        where = dest.render_filter(parse_filters(filters))
+        rows = dest.connection.execute(
+            f"SELECT id FROM t WHERE {where} ORDER BY id"
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def test_string_path_matches_unquoted_value(self, dest):
+        assert self._ids(
+            dest, [{"column": "config", "path": "aid.legal_entity", "value": "bm"}]
+        ) == [1]
+
+    def test_number_path_compares_as_string(self, dest):
+        assert self._ids(dest, [{"column": "config", "path": "n", "value": 5}]) == [1]
+
+    def test_malformed_json_reads_as_null(self, dest):
+        """A row that isn't JSON neither matches nor fails the query."""
+        assert self._ids(
+            dest, [{"column": "config", "path": "aid.legal_entity", "op": "is_null"}]
+        ) == [3, 4]
 
 
 # ---------------------------------------------------------------------------
