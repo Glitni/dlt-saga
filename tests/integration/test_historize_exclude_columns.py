@@ -173,6 +173,24 @@ class TestExcludedAfterTheFact:
             (None, "c"),
         ]
 
+    def test_partial_refresh_reads_it_as_null(self, dest):
+        _insert(dest, S1, [(1, "a", "p1"), (2, "b", "p1")])
+        _run(dest, full_refresh=True)
+        _insert(dest, S2, [(1, "a", "p2"), (2, "b", "p2")])
+        _run(dest)
+        _insert(dest, S3, [(1, "a", "p3"), (2, "c", "p3")])
+
+        stats = _run(dest, historize_from=S2, exclude_columns=["payload"])
+        assert stats["mode"] == "partial_refresh"
+        assert "payload" in _columns(dest)
+        # Replayed from S2 without the column: key 1 never changes, and key 2's
+        # new version carries NULL like an incremental run would write.
+        assert [(r["payload"], r["name"]) for r in _versions(dest, 1)] == [("p1", "a")]
+        assert [(r["payload"], r["name"]) for r in _versions(dest, 2)] == [
+            ("p1", "b"),
+            (None, "c"),
+        ]
+
     def test_full_refresh_rebuilds_without_the_column(self, dest):
         _insert(dest, S1, [(1, "a", "p1")])
         _run(dest, full_refresh=True)

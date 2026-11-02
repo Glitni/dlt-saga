@@ -196,6 +196,11 @@ class HistorizeSqlBuilder:
         """
         self._absent_source_columns = dict(columns)
 
+    @property
+    def absent_source_columns(self) -> Dict[str, str]:
+        """The declared absent columns, for a builder reading the same source."""
+        return dict(self._absent_source_columns)
+
     def _source_cols_sql(self, cols: List[str]) -> str:
         """Column list for a read of the source table itself.
 
