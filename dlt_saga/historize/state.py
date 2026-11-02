@@ -35,6 +35,39 @@ class HistorizeLogEntry:
     started_at: Any
     finished_at: Any
     status: str  # 'completed' | 'failed'
+    # JSON list of the source's column names as read by this run. Lets the
+    # next run tell a column that just disappeared (worth a warning) from one
+    # that has been gone for a while.
+    source_columns: Optional[str] = None
+
+
+# Columns added to the log table after its first release, with their logical
+# type. A table created before one existed gets it on the first write that
+# needs it (see ``write_log_entry``).
+LOG_COLUMNS_ADDED_LATER = {"source_columns": "string"}
+
+# Fingerprint keys that only decide which columns the change-detection hash
+# covers; see ``HistorizeStateManager.fingerprint_changes``.
+DETECTION_KEYS = ("track_columns", "ignore_columns")
+
+
+@dataclass
+class FingerprintChanges:
+    """How the config differs from the fingerprint of the last successful run.
+
+    ``blocking`` keys invalidate the stored history (full refresh needed);
+    ``narrowed`` keys only shrink change detection and apply going forward.
+    ``previous``/``current`` are the decoded fingerprints, for messages.
+    """
+
+    blocking: List[str]
+    narrowed: List[str]
+    previous: dict
+    current: dict
+
+    def describe(self, keys: List[str]) -> List[str]:
+        """``key: old → new`` lines for the given keys."""
+        return [f"  {key}: {self.previous[key]} → {self.current[key]}" for key in keys]
 
 
 @dataclass
@@ -124,7 +157,8 @@ class HistorizeStateManager:
                 is_full_reprocess {d.type_name("bool")},
                 started_at {d.type_name("timestamp")},
                 finished_at {d.type_name("timestamp")},
-                status {d.type_name("string")}
+                status {d.type_name("string")},
+                source_columns {d.type_name("string")}
             )
             {d.partition_cluster_ddl("started_at", LOG_CLUSTER_COLUMNS)}
         """
@@ -266,23 +300,68 @@ class HistorizeStateManager:
         decoded.setdefault("json_columns", [])
         return decoded
 
-    def config_changed(
+    def fingerprint_changes(
         self, state: "HistorizeStateManager.PipelineState", config: Any
-    ) -> bool:
-        """Check if historization-affecting config has changed since last run.
+    ) -> "FingerprintChanges":
+        """Fingerprint keys whose stored value differs from the config's.
 
         Comparison is done key-by-key against the stored fingerprint so that
         newly added fingerprint keys (e.g. table_format) don't produce false
         positives for pipelines whose stored fingerprint pre-dates the key.
+
+        Most differences invalidate the stored history and block the run until
+        a full refresh. One kind doesn't: ``track_columns`` / ``ignore_columns``
+        edited so that change detection only *narrows* (a column added to
+        ``ignore_columns``, one dropped from ``track_columns``). Versions
+        already written were real changes at the time and stay correct; the
+        hash is recomputed from the stored open row on every run, so the next
+        run simply compares without the column. Such an edit is reported as
+        ``narrowed`` and takes effect going forward. Widening (starting to
+        track a column) still blocks: history before the edit has no versions
+        for it, and whether that needs a rebuild is not the framework's call.
         """
         if not state.has_successful_run:
-            return False
+            return FingerprintChanges([], [], {}, {})
         previous = self.decode_fingerprint(state.config_fingerprint)
         current = self.decode_fingerprint(self.compute_fingerprint(config))
-        for key, value in current.items():
-            if key in previous and previous[key] != value:
-                return True
-        return False
+        differing = [
+            key
+            for key, value in current.items()
+            if key in previous and previous[key] != value
+        ]
+        detection = [key for key in differing if key in DETECTION_KEYS]
+        narrowed: List[str] = []
+        if detection and self._detection_narrowed(previous, current):
+            narrowed = detection
+            differing = [key for key in differing if key not in detection]
+        return FingerprintChanges(differing, narrowed, previous, current)
+
+    @staticmethod
+    def _detection_narrowed(previous: dict, current: dict) -> bool:
+        """Whether the hashed column set can only have shrunk.
+
+        The hashed set is ``track_columns`` (every value column when unset)
+        minus ``ignore_columns``. Decided from config alone: when the new
+        ``track_columns`` is unset the set is "everything but the ignored",
+        which is a subset of the old one only if that was unset too and the
+        ignored columns only grew.
+        """
+        prev_track = set(previous.get("track_columns") or [])
+        cur_track = set(current.get("track_columns") or [])
+        prev_ignore = set(previous.get("ignore_columns") or [])
+        cur_ignore = set(current.get("ignore_columns") or [])
+        if not cur_track:
+            return not prev_track and prev_ignore <= cur_ignore
+        hashed_now = cur_track - cur_ignore
+        if not prev_track:
+            return not (hashed_now & prev_ignore)
+        return hashed_now <= prev_track - prev_ignore
+
+    def config_changed(
+        self, state: "HistorizeStateManager.PipelineState", config: Any
+    ) -> bool:
+        """Whether a config change blocks the run until a full refresh."""
+        return bool(self.fingerprint_changes(state, config).blocking)
 
     def write_log_entry(self, entry: HistorizeLogEntry) -> None:
         """Write a single log entry to the historize log table."""
@@ -304,7 +383,8 @@ class HistorizeStateManager:
             INSERT INTO {q}
             (pipeline_name, source_table, target_table, snapshot_value,
              new_or_changed_rows, deleted_rows,
-             config_fingerprint, is_full_reprocess, started_at, finished_at, status)
+             config_fingerprint, is_full_reprocess, started_at, finished_at, status,
+             source_columns)
             VALUES (
                 {_fmt(entry.pipeline_name)},
                 {_fmt(entry.source_table)},
@@ -316,10 +396,81 @@ class HistorizeStateManager:
                 {_fmt(entry.is_full_reprocess)},
                 {_fmt(entry.started_at)},
                 {_fmt(entry.finished_at)},
-                {_fmt(entry.status)}
+                {_fmt(entry.status)},
+                {_fmt(entry.source_columns)}
             )
         """
-        self.destination.execute_sql(sql, self.schema)
+        try:
+            self.destination.execute_sql(sql, self.schema)
+        except Exception:
+            # A log table created before a column existed rejects the insert.
+            # Migrating only on failure keeps the happy path free of catalog
+            # reads; nothing was written, so retrying once is safe. Any other
+            # failure re-raises unchanged.
+            if not self._add_missing_log_columns():
+                raise
+            self.destination.execute_sql(sql, self.schema)
+
+    def _add_missing_log_columns(self) -> bool:
+        """Add the columns in ``LOG_COLUMNS_ADDED_LATER`` the log table lacks.
+
+        Returns whether any column was added.
+        """
+        existing = {
+            name.lower()
+            for name, _ in self.destination.list_table_columns(
+                self.schema, self.log_table_name
+            )
+        }
+        added = False
+        for column, logical_type in LOG_COLUMNS_ADDED_LATER.items():
+            if column in existing:
+                continue
+            self.destination.add_column(
+                self.schema,
+                self.log_table_name,
+                column,
+                self.destination.type_name(logical_type),
+            )
+            self.logger.info(f"Added column {column} to {self.log_table_id}")
+            added = True
+        return added
+
+    def get_last_source_columns(self, pipeline_name: str) -> Optional[List[str]]:
+        """The source column names the last successful run recorded.
+
+        ``None`` when unknown: no successful run, a run logged before the
+        column existed, or a log table that doesn't have it yet. Only steers
+        how loudly a dropped column is reported, so it never raises.
+        """
+        import json
+
+        q = self.log_table_id
+        safe_name = self.destination.escape_string_literal(pipeline_name)
+        sql = f"""
+            SELECT source_columns
+            FROM {q}
+            WHERE pipeline_name = '{safe_name}'
+              AND status = 'completed'
+              AND snapshot_value IS NOT NULL
+            ORDER BY finished_at DESC
+            LIMIT 1
+        """
+        try:
+            rows = list(self.destination.execute_sql(sql, self.schema))
+        except Exception as exc:
+            self.logger.debug(
+                f"Could not read the last run's source columns for "
+                f"{pipeline_name}: {exc}"
+            )
+            return None
+        if not rows or not rows[0].source_columns:
+            return None
+        try:
+            columns = json.loads(rows[0].source_columns)
+        except ValueError:
+            return None
+        return [str(c) for c in columns] if isinstance(columns, list) else None
 
     def get_historized_targets(self, pipeline_name: str) -> List[str]:
         """Return the distinct target tables this pipeline's historize layer wrote.

@@ -10,7 +10,7 @@ Adapts patterns from:
 """
 
 import logging
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dlt_saga.destinations.base import MaterializationHints
 from dlt_saga.historize.config import HistorizeConfig, JsonColumn
@@ -180,6 +180,36 @@ class HistorizeSqlBuilder:
         # no historize.filters: block is configured.  Spliced at each source-read
         # site via the module-level ``filter_where_clause`` / ``and_filter`` helpers.
         self.filter_sql: Optional[str] = filter_sql or None
+        # Value columns the historized table carries but the source no longer
+        # has (name → the target's type); see ``set_absent_source_columns``.
+        self._absent_source_columns: Dict[str, str] = {}
+
+    def set_absent_source_columns(self, columns: Dict[str, str]) -> None:
+        """Declare value columns the target holds that the source has dropped.
+
+        Each source read projects them as ``CAST(NULL AS <type>)`` under the
+        column's name, so downstream SQL sees the source with the target's full
+        column set: the hash sees the NULL, a key whose value was dropped gets a
+        version carrying NULL, and no statement has to special-case drift.
+        ``columns`` maps the column name (as listed in the value columns) to the
+        type the target stores it as.
+        """
+        self._absent_source_columns = dict(columns)
+
+    def _source_cols_sql(self, cols: List[str]) -> str:
+        """Column list for a read of the source table itself.
+
+        Like ``_qcols``, except that a column the source no longer has is
+        projected as a typed NULL (see ``set_absent_source_columns``).
+        """
+        parts = []
+        for col in cols:
+            null_type = self._absent_source_columns.get(col)
+            if null_type is None:
+                parts.append(self._q(col))
+            else:
+                parts.append(f"CAST(NULL AS {null_type}) AS {self._q(col)}")
+        return ", ".join(parts)
 
     def _get_hash_columns(self, value_columns: List[str]) -> List[str]:
         """Return the subset of value_columns used for change-detection hashing.
@@ -933,7 +963,7 @@ WITH
 -- the baseline from the target (not the source) is what keeps replace-mode
 -- sources from re-versioning every unchanged row.
 source_rows AS (
-  SELECT {self._qcols(all_output_cols)}, {self._snapshot_projection()}
+  SELECT {self._source_cols_sql(all_output_cols)}, {self._snapshot_projection()}
   FROM {src}
   WHERE {and_filter(self.filter_sql, new_snapshot_filter)}{baseline_union}
 ),
@@ -1266,7 +1296,7 @@ CREATE OR REPLACE TEMP TABLE _historize_scd1 AS
 WITH
 -- Source rows in scope; the snapshot value becomes the version's valid_from.
 batch AS (
-  SELECT {self._qcols(data_cols)}, {self._snap_src} AS {q_vf}{batch_deleted},
+  SELECT {self._source_cols_sql(data_cols)}, {self._snap_src} AS {q_vf}{batch_deleted},
     1 AS _saga_from_batch{rank_at}
   FROM {src}{filter_where_clause(source_filter)}
 ),

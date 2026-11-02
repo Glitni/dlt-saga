@@ -21,6 +21,7 @@ def _runner():
     runner.source_relation = "db.schema.tbl"
     runner.target_table_id = "db.schema.tbl_historized"
     runner.full_refresh = False
+    runner._source_columns_cache = None
     runner.config = MagicMock()
     runner.state_manager = MagicMock()
     runner.state_manager.compute_fingerprint.return_value = "fp"
