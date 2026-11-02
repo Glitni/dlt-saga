@@ -699,8 +699,11 @@ class DatabricksDestination(Destination):
         safe_catalog = self.escape_string_literal(catalog)
         safe_schema = self.escape_string_literal(schema)
         safe_table = self.escape_string_literal(table)
+        # full_data_type is the complete specification (decimal(12,2),
+        # array<string>); data_type is the bare name (DECIMAL, ARRAY), which
+        # can't recreate the column — historize adds columns with this type.
         return f"""
-            SELECT column_name, data_type
+            SELECT column_name, full_data_type AS data_type
             FROM system.information_schema.columns
             WHERE table_catalog = '{safe_catalog}'
               AND table_schema   = '{safe_schema}'

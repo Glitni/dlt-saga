@@ -4,6 +4,7 @@ Coordinates state management, SQL generation, and execution to transform
 raw snapshot data into SCD2 historized tables.
 """
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -117,6 +118,8 @@ class HistorizeRunner:
 
         # Populated by the first _source_columns() call; see that method.
         self._source_columns_cache: Optional[List[str]] = None
+        # Lower-cased column name → the catalog's type, read with the names.
+        self._source_column_types: Dict[str, str] = {}
 
         self.sql_builder = HistorizeSqlBuilder(
             config=self.config,
@@ -422,6 +425,7 @@ class HistorizeRunner:
                     started_at=started_at,
                     finished_at=datetime.now(timezone.utc),
                     status="failed",
+                    source_columns=self._recorded_source_columns(),
                 )
             )
         except Exception as log_exc:  # noqa: BLE001 — best-effort, never mask
@@ -508,7 +512,7 @@ class HistorizeRunner:
         # - full_refresh or first run → full reprocess
         # - otherwise → incremental
         needs_full = self.full_refresh or not state.has_successful_run
-        self._guard_target_exists(needs_full)
+        value_columns = self._prepare_existing_target(needs_full, value_columns)
 
         timings["init"] = time.time() - t
 
@@ -774,7 +778,19 @@ class HistorizeRunner:
             )
             rows = list(self.destination.execute_sql(sql, self.schema))
             self._source_columns_cache = [row.column_name for row in rows]
+            self._source_column_types = {
+                row.column_name.lower(): row.data_type for row in rows
+            }
         return self._source_columns_cache
+
+    def _recorded_source_columns(self) -> Optional[str]:
+        """The source's column names as a JSON list, for the log entry.
+
+        ``None`` when the run never read them (it failed before doing so).
+        """
+        if self._source_columns_cache is None:
+            return None
+        return json.dumps(self._source_columns_cache)
 
     def _source_can_reference(self, column: str) -> bool:
         """Whether generated SQL can read ``column`` off the source table.
@@ -1191,6 +1207,146 @@ class HistorizeRunner:
             f"{', '.join(value_columns)}"
         )
 
+    def _prepare_existing_target(
+        self, needs_full: bool, value_columns: List[str]
+    ) -> List[str]:
+        """Check and reconcile the target a non-full run is about to write into.
+
+        A full reprocess recreates the target from the source's columns, so
+        it needs neither; every other mode writes into the existing table,
+        which must exist and be brought in line with what the source has
+        become. Returns the value columns to write.
+        """
+        self._guard_target_exists(needs_full)
+        if needs_full:
+            return value_columns
+        return self._reconcile_target_columns(value_columns)
+
+    def _reconcile_target_columns(self, value_columns: List[str]) -> List[str]:
+        """Bring the existing target's value columns in line with the source.
+
+        The target was created from the source's columns at the time and
+        every write lists columns by name, so source schema drift would
+        otherwise fail the run or, under scd1, leave a dropped column's stale
+        value on an updated row. Runs before any write, in every mode that
+        writes into the existing table (incremental, partial refresh, a
+        late-arrival replay):
+
+        - A column the source gained is added to the target with the source's
+          type. Rows written before it existed hold NULL; the next version of
+          a key with a value opens as usual, since from unknown to known is a
+          change.
+        - A column the source dropped stays on the target, keeping its
+          history, and is read from the source as a typed NULL
+          (``HistorizeSqlBuilder.set_absent_source_columns``), so a key's next
+          version carries NULL rather than a value the source no longer
+          delivers. Warned about the first run it is missing.
+        - A column whose type changed is refused: the stored history can't
+          take the new type in place, and a widening the destination would
+          accept still changes the string-serialised hash of every row.
+
+        Returns the value columns to write: the source's, followed by the
+        dropped ones. Schema drift is not a config change, so it never trips
+        the full-refresh prompt.
+        """
+        target_columns = self.destination.list_table_columns(
+            self.target_schema, self.target_table_name
+        )
+        target_types = {name.lower(): (name, dtype) for name, dtype in target_columns}
+        self._guard_column_types(target_types, value_columns)
+
+        added = [c for c in value_columns if c.lower() not in target_types]
+        for column in added:
+            self.destination.add_column(
+                self.target_schema,
+                self.target_table_name,
+                column,
+                self._source_column_types[column.lower()],
+            )
+        if added:
+            self.logger.info(
+                f"Added column(s) {added} to {self._target_display}: new in "
+                f"{self.source_table_id}; rows written before now hold NULL"
+            )
+
+        carried = {c.lower() for c in value_columns}
+        carried |= {c.lower() for c in self.config.primary_key}
+        carried |= {c.lower() for c in self.sql_builder._output_exclude}
+        dropped = [
+            (name, dtype)
+            for lower, (name, dtype) in target_types.items()
+            if lower not in carried
+        ]
+        if not dropped:
+            return value_columns
+        self._warn_dropped_columns([name for name, _ in dropped])
+        self.sql_builder.set_absent_source_columns(dict(dropped))
+        return list(value_columns) + [name for name, _ in dropped]
+
+    def _guard_column_types(
+        self, target_types: Dict[str, Tuple[str, str]], value_columns: List[str]
+    ) -> None:
+        """Refuse a source column whose type differs from the target's.
+
+        Both types come from the destination's own catalog, and the target's
+        column was created from the source's, so the spellings match unless
+        the type really changed.
+        """
+        changed = []
+        for column in list(self.config.primary_key) + list(value_columns):
+            stored = target_types.get(column.lower())
+            source_type = self._source_column_types.get(column.lower())
+            if stored is None or source_type is None:
+                continue
+            if self._normalize_type(source_type) != self._normalize_type(stored[1]):
+                changed.append((column, stored[1], source_type))
+        if not changed:
+            return
+        lines = [
+            f"Source {self.source_table_id} changed the type of column(s) the "
+            f"historized table {self._target_display} already holds:"
+        ]
+        lines += [
+            f"  - {column}: {stored_type} in the historized table, "
+            f"{source_type} in the source"
+            for column, stored_type, source_type in changed
+        ]
+        lines.append(
+            f"A column's type can't be changed in place. Revert the source, or "
+            f"run '{self._rebuild_command}' to rebuild the history with the new "
+            f"type from what the source still holds."
+        )
+        raise ValueError("\n".join(lines))
+
+    @staticmethod
+    def _normalize_type(type_name: str) -> str:
+        return " ".join(type_name.upper().split())
+
+    def _warn_dropped_columns(self, dropped: List[str]) -> None:
+        """Report columns the source no longer has, loudly only the first time.
+
+        A drop is often unintended upstream, but it is permanent: without the
+        last run's column list the warning would repeat on every run and be
+        tuned out. Unknown (older log rows) counts as first time.
+        """
+        previous = self.state_manager.get_last_source_columns(self.pipeline_name)
+        previous_lower = None if previous is None else {c.lower() for c in previous}
+        new = [
+            c for c in dropped if previous_lower is None or c.lower() in previous_lower
+        ]
+        if new:
+            self.logger.warning(
+                f"Source {self.source_table_id} no longer has column(s) {new}. "
+                f"{self._target_display} keeps them with their history; new "
+                f"versions carry NULL."
+            )
+        old = [c for c in dropped if c not in new]
+        if old:
+            self.logger.debug(
+                f"Column(s) {old} still absent from {self.source_table_id}; "
+                f"read as NULL"
+            )
+
     def _create_target_table(
         self, value_columns: List[str], replace: bool = False
     ) -> None:
@@ -1542,6 +1698,7 @@ class HistorizeRunner:
                 started_at=started_at,
                 finished_at=finished_at or datetime.now(timezone.utc),
                 status="completed",
+                source_columns=self._recorded_source_columns(),
             )
         )
 

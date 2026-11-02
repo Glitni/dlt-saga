@@ -35,6 +35,16 @@ class HistorizeLogEntry:
     started_at: Any
     finished_at: Any
     status: str  # 'completed' | 'failed'
+    # JSON list of the source's column names as read by this run. Lets the
+    # next run tell a column that just disappeared (worth a warning) from one
+    # that has been gone for a while.
+    source_columns: Optional[str] = None
+
+
+# Columns added to the log table after its first release, with their logical
+# type. A table created before one existed gets it on the first write that
+# needs it (see ``write_log_entry``).
+LOG_COLUMNS_ADDED_LATER = {"source_columns": "string"}
 
 
 @dataclass
@@ -121,7 +131,8 @@ class HistorizeStateManager:
                 is_full_reprocess {d.type_name("bool")},
                 started_at {d.type_name("timestamp")},
                 finished_at {d.type_name("timestamp")},
-                status {d.type_name("string")}
+                status {d.type_name("string")},
+                source_columns {d.type_name("string")}
             )
             {d.partition_cluster_ddl("started_at", LOG_CLUSTER_COLUMNS)}
         """
@@ -293,7 +304,8 @@ class HistorizeStateManager:
             INSERT INTO {q}
             (pipeline_name, source_table, target_table, snapshot_value,
              new_or_changed_rows, deleted_rows,
-             config_fingerprint, is_full_reprocess, started_at, finished_at, status)
+             config_fingerprint, is_full_reprocess, started_at, finished_at, status,
+             source_columns)
             VALUES (
                 {_fmt(entry.pipeline_name)},
                 {_fmt(entry.source_table)},
@@ -305,10 +317,81 @@ class HistorizeStateManager:
                 {_fmt(entry.is_full_reprocess)},
                 {_fmt(entry.started_at)},
                 {_fmt(entry.finished_at)},
-                {_fmt(entry.status)}
+                {_fmt(entry.status)},
+                {_fmt(entry.source_columns)}
             )
         """
-        self.destination.execute_sql(sql, self.schema)
+        try:
+            self.destination.execute_sql(sql, self.schema)
+        except Exception:
+            # A log table created before a column existed rejects the insert.
+            # Migrating only on failure keeps the happy path free of catalog
+            # reads; nothing was written, so retrying once is safe. Any other
+            # failure re-raises unchanged.
+            if not self._add_missing_log_columns():
+                raise
+            self.destination.execute_sql(sql, self.schema)
+
+    def _add_missing_log_columns(self) -> bool:
+        """Add the columns in ``LOG_COLUMNS_ADDED_LATER`` the log table lacks.
+
+        Returns whether any column was added.
+        """
+        existing = {
+            name.lower()
+            for name, _ in self.destination.list_table_columns(
+                self.schema, self.log_table_name
+            )
+        }
+        added = False
+        for column, logical_type in LOG_COLUMNS_ADDED_LATER.items():
+            if column in existing:
+                continue
+            self.destination.add_column(
+                self.schema,
+                self.log_table_name,
+                column,
+                self.destination.type_name(logical_type),
+            )
+            self.logger.info(f"Added column {column} to {self.log_table_id}")
+            added = True
+        return added
+
+    def get_last_source_columns(self, pipeline_name: str) -> Optional[List[str]]:
+        """The source column names the last successful run recorded.
+
+        ``None`` when unknown: no successful run, a run logged before the
+        column existed, or a log table that doesn't have it yet. Only steers
+        how loudly a dropped column is reported, so it never raises.
+        """
+        import json
+
+        q = self.log_table_id
+        safe_name = self.destination.escape_string_literal(pipeline_name)
+        sql = f"""
+            SELECT source_columns
+            FROM {q}
+            WHERE pipeline_name = '{safe_name}'
+              AND status = 'completed'
+              AND snapshot_value IS NOT NULL
+            ORDER BY finished_at DESC
+            LIMIT 1
+        """
+        try:
+            rows = list(self.destination.execute_sql(sql, self.schema))
+        except Exception as exc:
+            self.logger.debug(
+                f"Could not read the last run's source columns for "
+                f"{pipeline_name}: {exc}"
+            )
+            return None
+        if not rows or not rows[0].source_columns:
+            return None
+        try:
+            columns = json.loads(rows[0].source_columns)
+        except ValueError:
+            return None
+        return [str(c) for c in columns] if isinstance(columns, list) else None
 
     def get_historized_targets(self, pipeline_name: str) -> List[str]:
         """Return the distinct target tables this pipeline's historize layer wrote.
