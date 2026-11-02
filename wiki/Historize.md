@@ -488,7 +488,7 @@ historize:
 
 **Rejected configs.** An output name equal to a column of the source, one historize writes itself (`_dlt_*`, the configured `valid_from_column`/`valid_to_column`/`is_deleted_column`), or one the destination reserves (BigQuery's `_PARTITION…`); a `column` that isn't a column of the source table (derived columns can't read each other); and a pseudo-column `snapshot_column`/`arrival_column` such as `_PARTITIONTIME` — the source is read through a subquery, which doesn't carry pseudo-columns.
 
-**Config-change detection.** `json_columns` is part of the config fingerprint: adding, removing or changing an entry prompts for `saga historize --full-refresh`, since the historized table's columns and values change. Spelling out `data_type: text` or reordering entries is not a change.
+**Adding, removing and changing entries.** An entry is a value column like any other, so adding or removing one is a [schema change](#schema-changes): a new entry is added to the historized table (rows written before it hold `NULL`, nothing is backfilled), and a removed one is kept with its history and `NULL` from then on. Changing an entry's `path` or `column` applies from the next run on. Changing its `data_type` prompts for `saga historize --full-refresh`, as a source column's type change is refused. An entry that `primary_key`, `merge_key`, `order_by`, `snapshot_column`, `arrival_column`, `filters`, `partition_column` or `cluster_columns` names is different: it decides which rows exist and how versions compare, so adding, removing or changing it prompts for a full refresh. Spelling out `data_type: text` or reordering entries is not a change.
 
 ---
 
@@ -666,7 +666,7 @@ Notes:
 saga historize --full-refresh --select "filesystem__snapshots__companies"
 ```
 
-Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when any of these changes: `primary_key`, `snapshot_column`, `strategy`, `order_by`, `delivery` (`scd2` only), `track_columns`, `ignore_columns`, `track_deletions`, `merge_key`, `filters`, `json_columns`, `table_format`, or the output column names (`valid_from_column`, `valid_to_column`, `is_deleted_column`).
+Historize detects config changes via a fingerprint stored in `_saga_historize_log` and prompts for a full refresh when any of these changes: `primary_key`, `snapshot_column`, `strategy`, `order_by`, `delivery` (`scd2` only), `track_columns`, `ignore_columns`, `track_deletions`, `merge_key`, `filters`, a `json_columns` entry's `data_type` (or any part of an entry a key, ranking, filter or layout names — see [Columns from a JSON source column](#columns-from-a-json-source-column)), `table_format`, or the output column names (`valid_from_column`, `valid_to_column`, `is_deleted_column`).
 
 One kind of edit is exempt: **narrowing change detection**, i.e. adding a column to `ignore_columns` or dropping one from `track_columns`. Versions already written were real changes at the time and stay correct, and the hash is recomputed on every run, so the edit simply applies from the next run on and is logged at info level. Widening detection again (removing a column from `ignore_columns`, adding one to `track_columns`) still prompts, since history before the edit has no versions for that column.
 

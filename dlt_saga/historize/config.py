@@ -540,6 +540,30 @@ class HistorizeConfig:
         return self._json_column_specs
 
     @property
+    def keyed_json_column_specs(self) -> Tuple[JsonColumn, ...]:
+        """``json_columns`` entries that a key, ranking, filter or layout names.
+
+        Those decide which rows exist, how versions are told apart or ordered,
+        and where rows land, so redefining one invalidates the stored history.
+        Every other entry is a value column: adding or removing it is schema
+        evolution on the target, like a column the source gains or drops.
+        """
+        referenced = [
+            *self.primary_key,
+            *(self.merge_key or []),
+            *self.effective_order_by,
+            self.snapshot_column,
+            self.arrival_column,
+            *(entry.get("column", "") for entry in self.filters or []),
+            self.partition_column or "",
+            *(self.cluster_columns or []),
+        ]
+        names = {name.lower() for name in referenced if name}
+        return tuple(
+            spec for spec in self._json_column_specs if spec.name.lower() in names
+        )
+
+    @property
     def is_full_delivery(self) -> bool:
         """Whether each snapshot holds every record that exists at that time."""
         return self.delivery == "full"

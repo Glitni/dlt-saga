@@ -1392,7 +1392,7 @@ class HistorizeRunner:
                 self.target_schema,
                 self.target_table_name,
                 column,
-                self._source_column_types[column.lower()],
+                self._source_column_type(column),
             )
         if added:
             self.logger.info(
@@ -1448,6 +1448,18 @@ class HistorizeRunner:
             f"type from what the source still holds."
         )
         raise ValueError("\n".join(lines))
+
+    def _source_column_type(self, column: str) -> str:
+        """The destination type ``column`` has in the source relation.
+
+        A table column's comes from the catalog; a derived column's is the
+        type its ``json_columns`` entry casts to, the one a full reprocess
+        creates it with.
+        """
+        for spec in self.config.json_column_specs:
+            if spec.name.lower() == column.lower():
+                return self.destination.dlt_type_to_native(spec.data_type)
+        return self._source_column_types[column.lower()]
 
     @staticmethod
     def _normalize_type(type_name: str) -> str:

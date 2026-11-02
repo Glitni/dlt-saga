@@ -346,25 +346,54 @@ class TestGuards:
 
 @pytest.mark.integration
 class TestConfigChange:
-    def test_changing_json_columns_needs_full_refresh(self, dest):
+    def test_adding_an_entry_adds_the_column(self, dest):
+        without_amount = {k: v for k, v in JSON_COLUMNS.items() if k != "amount"}
+        _insert(dest, [(1, _event("u1", amount=5), "2026-01-01 00:00:00", 1)])
+        _run(dest, json_columns=without_amount)
+        _insert(dest, [(1, _event("u1", amount=5), "2026-01-02 00:00:00", 2)])
+
+        _run(dest)
+
+        rows = _rows(dest)
+        assert [r["amount"] for r in rows] == [None, 5]
+        assert rows[0]["_dlt_valid_to"] == rows[1]["_dlt_valid_from"]
+
+    def test_removing_an_entry_keeps_its_history(self, dest):
+        without_amount = {k: v for k, v in JSON_COLUMNS.items() if k != "amount"}
+        _insert(dest, [(1, _event("u1", amount=5), "2026-01-01 00:00:00", 1)])
+        _run(dest)
+        _insert(dest, [(1, _event("u2", amount=5), "2026-01-02 00:00:00", 2)])
+
+        _run(dest, json_columns=without_amount)
+
+        rows = _rows(dest)
+        assert [(r["user_id"], r["amount"]) for r in rows] == [("u1", 5), ("u2", None)]
+
+    def test_retyping_an_entry_needs_full_refresh(self, dest):
         _insert(dest, [(1, _event("u1"), "2026-01-01 00:00:00", 1)])
         _run(dest)
         _insert(dest, [(1, _event("u1"), "2026-01-02 00:00:00", 2)])
-        changed = {
+        retyped = {
             **JSON_COLUMNS,
             "amount": {"column": "payload", "path": "amount", "data_type": "double"},
         }
-        stats = _runner(dest, json_columns=changed).run()
+        stats = _runner(dest, json_columns=retyped).run()
+        assert stats["status"] == "failed"
+        assert "json_column_types" in stats["error"]
+        assert "--full-refresh" in stats["error"]
+
+        _run(dest, json_columns=retyped, full_refresh=True)
+
+    def test_redefining_a_keyed_entry_needs_full_refresh(self, dest):
+        primary_key = ["landing_key", "user_id"]
+        _insert(dest, [(1, _event("u1"), "2026-01-01 00:00:00", 1)])
+        _run(dest, primary_key=primary_key)
+        _insert(dest, [(1, _event("u1"), "2026-01-02 00:00:00", 2)])
+        redefined = {
+            **JSON_COLUMNS,
+            "user_id": {"column": "payload", "path": "meta.tenant"},
+        }
+        stats = _runner(dest, primary_key=primary_key, json_columns=redefined).run()
         assert stats["status"] == "failed"
         assert "json_columns" in stats["error"]
         assert "--full-refresh" in stats["error"]
-
-        _run(dest, json_columns=changed, full_refresh=True)
-
-    def test_adding_json_columns_needs_full_refresh(self, dest):
-        _insert(dest, [(1, _event("u1"), "2026-01-01 00:00:00", 1)])
-        _run(dest, json_columns=None)
-        _insert(dest, [(1, _event("u1"), "2026-01-02 00:00:00", 2)])
-        stats = _runner(dest).run()
-        assert stats["status"] == "failed"
-        assert "json_columns" in stats["error"]

@@ -271,12 +271,20 @@ class HistorizeStateManager:
             # would, requires full), so it is pinned there: describing the
             # source differently must not force a rebuild that changes nothing.
             "delivery": "full" if config.is_scd1 else config.delivery,
-            # Derived columns change the target's columns and values. Defaults
-            # are spelled out, so restating one isn't a change.
+            # Derived columns a key, ranking, filter or layout names decide
+            # which rows exist and how versions compare, so redefining one
+            # needs a rebuild. The rest are value columns: adding or removing
+            # one is schema evolution on the target, and only their types are
+            # kept, since a retyped column can't change in place (see
+            # fingerprint_changes). Defaults are spelled out, so restating one
+            # isn't a change.
             "json_columns": sorted(
-                (spec.fingerprint() for spec in config.json_column_specs),
+                (spec.fingerprint() for spec in config.keyed_json_column_specs),
                 key=lambda entry: entry[0].lower(),
             ),
+            "json_column_types": {
+                spec.name.lower(): spec.data_type for spec in config.json_column_specs
+            },
         }
         return base64.b64encode(json.dumps(fingerprint_data).encode()).decode()
 
@@ -298,6 +306,7 @@ class HistorizeStateManager:
         decoded.setdefault("order_by", [])
         decoded.setdefault("delivery", "full")
         decoded.setdefault("json_columns", [])
+        decoded.setdefault("json_column_types", {})
         return decoded
 
     def fingerprint_changes(
@@ -319,6 +328,11 @@ class HistorizeStateManager:
         ``narrowed`` and takes effect going forward. Widening (starting to
         track a column) still blocks: history before the edit has no versions
         for it, and whether that needs a rebuild is not the framework's call.
+
+        ``json_column_types`` blocks only when a derived column kept across
+        the edit changed type — the target column can't take the new type in
+        place, the same refusal a source column's type change gets. Adding or
+        removing one is schema evolution, reconciled on the target.
         """
         if not state.has_successful_run:
             return FingerprintChanges([], [], {}, {})
@@ -329,12 +343,23 @@ class HistorizeStateManager:
             for key, value in current.items()
             if key in previous and previous[key] != value
         ]
+        if "json_column_types" in differing and not self._json_column_retyped(
+            previous, current
+        ):
+            differing.remove("json_column_types")
         detection = [key for key in differing if key in DETECTION_KEYS]
         narrowed: List[str] = []
         if detection and self._detection_narrowed(previous, current):
             narrowed = detection
             differing = [key for key in differing if key not in detection]
         return FingerprintChanges(differing, narrowed, previous, current)
+
+    @staticmethod
+    def _json_column_retyped(previous: dict, current: dict) -> bool:
+        """Whether a derived column present before and after changed type."""
+        before = previous.get("json_column_types") or {}
+        after = current.get("json_column_types") or {}
+        return any(before[name] != after[name] for name in before.keys() & after)
 
     @staticmethod
     def _detection_narrowed(previous: dict, current: dict) -> bool:
