@@ -1,3 +1,12 @@
+## 0.50.0 — 2026-11-03
+
+### Added
+- Structured JSON console logging with pipeline and execution context (#647)
+
+
+### Fixed
+- Preload pandas and polars before parallel ingest threads start (#649)
+
 ## 0.49.0 — 2026-11-03
 
 ### Added
