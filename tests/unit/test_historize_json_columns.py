@@ -520,6 +520,11 @@ class TestDialects:
         dest = BigQueryDestination.__new__(BigQueryDestination)
         dest.config = MagicMock()
         assert dest.json_extract_scalar("`p`", ("a", "b")) == "JSON_VALUE(`p`, '$.a.b')"
+        # The JSONPath's \" survives GoogleSQL's own backslash escaping of the
+        # literal (a " needs none inside a single-quoted literal).
+        assert dest.json_extract_scalar("`p`", ("content-type", 'q"k')) == (
+            'JSON_VALUE(`p`, \'$."content-type"."q\\\\"k"\')'
+        )
         assert dest.safe_cast("x", "timestamp") == "SAFE_CAST(x AS TIMESTAMP)"
         assert dest.safe_cast("x", "text") == "SAFE_CAST(x AS STRING)"
         assert dest.dlt_type_to_native("json") == "JSON"
@@ -557,6 +562,10 @@ class TestDialects:
         dest.config = MagicMock()
         assert dest.json_extract_scalar("`p`", ("a", "b")) == "`p`:a.b"
         assert dest.json_extract_text("`p`", ("a", "b"), "string") == "`p`:a.b"
+        # Backticks for a key that isn't a plain identifier, doubled inside.
+        assert dest.json_extract_scalar("`p`", ("content-type", "a`b")) == (
+            "`p`:`content-type`.`a``b`"
+        )
         assert dest.json_extract_document("`p`", ("a",), "string") == (
             "TRY_CAST(`p`:a AS STRING)"
         )

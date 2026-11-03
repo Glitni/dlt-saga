@@ -156,7 +156,7 @@
           "description": "Source column holding the JSON (a JSON-typed column or a string containing JSON)."
         },
         "path": {
-          "description": "Dotted JSON path to the value inside the column (e.g. 'meta.tenant'), or a list of keys.",
+          "description": "JSON path to the value inside the column, as a dotted string ('meta.tenant') or a list of keys. Keys that aren't plain identifiers ('content-type') are quoted for the destination; a key containing '.' needs the list form.",
           "oneOf": [
             {"type": "string"},
             {"type": "array", "items": {"type": "string"}}

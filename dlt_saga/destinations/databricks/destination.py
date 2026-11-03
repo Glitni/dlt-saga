@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from dlt_saga.destinations.base import Destination, TableLayout
+from dlt_saga.destinations.base import _PLAIN_JSON_KEY, Destination, TableLayout
 from dlt_saga.destinations.databricks.config import DatabricksDestinationConfig
 from dlt_saga.utility.sql import looks_like_missing_table
 
@@ -1148,8 +1148,16 @@ class DatabricksDestination(Destination):
     def json_extract_scalar(self, column_sql: str, path: Tuple[str, ...]) -> str:
         # Colon notation works on both STRING (auto-parsed) and VARIANT columns
         # and is faster than get_json_object. Unlike JSON_VALUE it returns an
-        # object or array at the path as JSON text rather than NULL.
-        return column_sql + ":" + ".".join(path)
+        # object or array at the path as JSON text rather than NULL. A key that
+        # isn't a plain identifier goes in backticks, which keep the bare
+        # form's case-insensitive match (brackets would make it case-sensitive).
+        return column_sql + ":" + ".".join(map(self._json_path_segment, path))
+
+    @staticmethod
+    def _json_path_segment(key: str) -> str:
+        if _PLAIN_JSON_KEY.match(key):
+            return key
+        return "`" + key.replace("`", "``") + "`"
 
     def json_extract_text(
         self, column_sql: str, path: Tuple[str, ...], column_type: str
