@@ -510,6 +510,7 @@ historize:
 - Apply hints via adapters: `bigquery_adapter()`, not manual SQL
 - Leverage dlt's write dispositions: `append`, `merge`, `replace`
 - Use dlt's incremental loading: `dlt.sources.incremental`
+- dlt recognises a pandas/polars/pyarrow item by reading `sys.modules` (`dlt.common.libs`), which bypasses the import lock: a thread midway through a lazy `import pandas` (filesystem CSV reader, database client return types, any adapter) leaves a half-built module another pipeline's extract reads as `partially initialized module 'pandas'`. `utility/dataframe_libs.preload_dataframe_libs()` imports all three on the launching thread before every ingest pool (`Session._execute_pipelines_tracked`, worker `_execute_worker_ingest`); lazy imports inside pipelines are fine, they're no-ops after it
 
 ## Future-Proofing
 - Design for extensibility: new source types, destination types, config sources
