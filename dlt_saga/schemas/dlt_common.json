@@ -156,7 +156,7 @@
           "description": "Source column holding the JSON (a JSON-typed column or a string containing JSON)."
         },
         "path": {
-          "description": "Dotted JSON path to a scalar inside the column (e.g. 'meta.tenant'), or a list of keys.",
+          "description": "Dotted JSON path to the value inside the column (e.g. 'meta.tenant'), or a list of keys.",
           "oneOf": [
             {"type": "string"},
             {"type": "array", "items": {"type": "string"}}
@@ -164,9 +164,9 @@
         },
         "data_type": {
           "type": "string",
-          "enum": ["text", "bigint", "double", "bool", "timestamp", "date"],
+          "enum": ["text", "bigint", "double", "bool", "timestamp", "date", "json"],
           "default": "text",
-          "description": "dlt logical type the value is converted to. A value that doesn't convert becomes NULL (and is warned about)."
+          "description": "Type of the column. text holds the value as text (a scalar unquoted, an object or array as its JSON text); bigint, double, bool, timestamp and date convert that text, and a value that doesn't convert becomes NULL (and is warned about); json keeps the value as a JSON document in the destination's JSON type (a value column only: it can't be a key, snapshot, order_by, partition or cluster column, or compared by a filter without a path)."
         }
       },
       "required": ["column", "path"],

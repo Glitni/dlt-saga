@@ -688,6 +688,39 @@ class BigQueryDestination(BigQueryBaseDestination):
     def safe_cast(self, expression: str, dlt_type: str) -> str:
         return f"SAFE_CAST({expression} AS {self.dlt_type_to_native(dlt_type)})"
 
+    def json_extract_text(
+        self, column_sql: str, path: Tuple[str, ...], column_type: str
+    ) -> str:
+        # JSON_VALUE reads a JSON column and a JSON string alike but drops an
+        # object or array; JSON_QUERY keeps one, in the input's own type — a
+        # JSON value from a JSON column (JSON null included, which JSON_TYPE
+        # tells apart), the text from a string column ('null' for JSON null).
+        path_literal = self._json_path_literal(path)
+        scalar = f"JSON_VALUE({column_sql}, '{path_literal}')"
+        document = f"JSON_QUERY({column_sql}, '{path_literal}')"
+        if self._is_json_typed(column_type):
+            return (
+                f"CASE WHEN JSON_TYPE({document}) IN ('object', 'array') "
+                f"THEN TO_JSON_STRING({document}) ELSE {scalar} END"
+            )
+        return f"COALESCE({scalar}, NULLIF({document}, 'null'))"
+
+    def json_extract_document(
+        self, column_sql: str, path: Tuple[str, ...], column_type: str
+    ) -> str:
+        # JSON_QUERY of a string column is the document's text, parsed here so
+        # the column is JSON whatever the source holds it as. Numbers too wide
+        # for the JSON type are rounded rather than failing the parse.
+        document = f"JSON_QUERY({column_sql}, '{self._json_path_literal(path)}')"
+        if self._is_json_typed(column_type):
+            return f"CASE WHEN JSON_TYPE({document}) = 'null' THEN NULL ELSE {document} END"
+        return (
+            f"SAFE.PARSE_JSON(NULLIF({document}, 'null'), wide_number_mode => 'round')"
+        )
+
+    def _is_json_typed(self, column_type: str) -> bool:
+        return self.normalize_type_name(column_type) == "JSON"
+
     def ensure_schema_exists(self, schema: str) -> None:
         """Ensure a BigQuery dataset exists, creating it with the configured location.
 

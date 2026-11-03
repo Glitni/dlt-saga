@@ -10,7 +10,7 @@ Adapts patterns from:
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from dlt_saga.destinations.base import MaterializationHints
 from dlt_saga.historize.config import HistorizeConfig, JsonColumn
@@ -81,16 +81,38 @@ def failed_cast_alias(index: int) -> str:
     return f"_cast_fail_{index}"
 
 
-def json_column_expression(destination: Any, spec: JsonColumn) -> str:
-    """SQL for one ``json_columns`` entry: the extracted scalar, converted."""
-    extracted = destination.json_extract_scalar(
-        destination.quote_identifier(spec.column), spec.path
+def json_column_text(destination: Any, spec: JsonColumn, column_type: str) -> str:
+    """SQL for the value a ``json_columns`` entry reads, as text.
+
+    What a scalar entry converts (:meth:`Destination.json_extract_text`);
+    ``column_type`` is the source column's catalog type, which decides how
+    the destination reads it.
+    """
+    return destination.json_extract_text(
+        destination.quote_identifier(spec.column), spec.path, column_type
     )
-    return destination.safe_cast(extracted, spec.data_type)
+
+
+def json_column_expression(destination: Any, spec: JsonColumn, column_type: str) -> str:
+    """SQL for one ``json_columns`` entry, in its declared type.
+
+    A ``json`` entry is the value kept as a JSON document; any other entry
+    is the value's text converted to the declared type.
+    """
+    if spec.is_document:
+        return destination.json_extract_document(
+            destination.quote_identifier(spec.column), spec.path, column_type
+        )
+    return destination.safe_cast(
+        json_column_text(destination, spec, column_type), spec.data_type
+    )
 
 
 def build_source_relation(
-    destination: Any, source_table_id: str, json_columns: Sequence[JsonColumn]
+    destination: Any,
+    source_table_id: str,
+    json_columns: Sequence[JsonColumn],
+    column_types: Optional[Mapping[str, str]] = None,
 ) -> str:
     """What historize reads the source through: the table, or a derived relation.
 
@@ -99,17 +121,38 @@ def build_source_relation(
     columns are visible to filters, keys, ranking and value columns alike.
     Without, the table id itself — the generated SQL is unchanged.
 
+    ``column_types`` maps each source column name (lower-cased) to its catalog
+    type; an entry's expression depends on whether the column it reads is
+    JSON-typed or a string, so it is required with ``json_columns``.
+
     Unaliased: every supported destination accepts a derived table without
     one, and read sites append their own WHERE.
     """
     if not json_columns:
         return source_table_id
     derived = ",\n    ".join(
-        f"{json_column_expression(destination, spec)} AS "
-        f"{destination.quote_identifier(spec.name)}"
+        f"{json_column_expression(destination, spec, _column_type(column_types, spec))}"
+        f" AS {destination.quote_identifier(spec.name)}"
         for spec in json_columns
     )
     return f"(\n  SELECT *,\n    {derived}\n  FROM {source_table_id}\n)"
+
+
+def _column_type(column_types: Optional[Mapping[str, str]], spec: JsonColumn) -> str:
+    """The catalog type of the column ``spec`` reads.
+
+    The runner checks every entry reads a column of the table before the
+    relation is built, so a missing type is a programming error, not a
+    config error.
+    """
+    column_type = (column_types or {}).get(spec.column.lower())
+    if column_type is None:
+        raise RuntimeError(
+            f"json_columns.{spec.name}: no catalog type for column "
+            f"'{spec.column}'; the source relation needs the source's column "
+            f"types"
+        )
+    return column_type
 
 
 class HistorizeSqlBuilder:
@@ -134,13 +177,16 @@ class HistorizeSqlBuilder:
         target_schema: str = "",
         filter_sql: Optional[str] = None,
         source_relation: Optional[str] = None,
+        source_column_types: Optional[Mapping[str, str]] = None,
     ):
         self.config = config
         self.destination = destination
         self.source_table_id = source_table_id
         # What every source read selects from: the table itself, or the derived
-        # relation adding json_columns (see build_source_relation).
+        # relation adding json_columns (see build_source_relation), and the
+        # source's catalog types the relation was built with.
         self.source_relation = source_relation or source_table_id
+        self.source_column_types: Dict[str, str] = dict(source_column_types or {})
         self.target_table_id = target_table_id
         self.primary_key = primary_key
         self.source_database = source_database
@@ -183,6 +229,18 @@ class HistorizeSqlBuilder:
         # Value columns the historized table carries but the source no longer
         # has (name → the target's type); see ``set_absent_source_columns``.
         self._absent_source_columns: Dict[str, str] = {}
+
+    def set_source_relation(
+        self, source_relation: str, source_column_types: Mapping[str, str]
+    ) -> None:
+        """Bind the relation every source read selects from.
+
+        The runner builds it once the source's catalog types are known, since
+        a ``json_columns`` expression depends on the type of the column it
+        reads; ``source_column_types`` is kept for the conversion checks.
+        """
+        self.source_relation = source_relation
+        self.source_column_types = dict(source_column_types)
 
     def set_absent_source_columns(self, columns: Dict[str, str]) -> None:
         """Declare value columns the target holds that the source has dropped.
@@ -606,16 +664,18 @@ snapshot_sequence AS (
         """``(json column name, condition)`` per converted ``json_columns`` entry.
 
         The condition holds on a row of the source relation where the path held
-        a value that didn't convert to the declared type. Text needs no
-        conversion, so it never fails and gets no check; empty when nothing is
-        converted.
+        a value that didn't convert to the declared type. ``text`` and ``json``
+        keep the value as it is, so they never fail and get no check; empty
+        when nothing is converted.
         """
         checks = []
         for spec in self.config.json_column_specs:
-            if spec.data_type == "text":
+            if spec.data_type == "text" or spec.is_document:
                 continue
-            extracted = self.destination.json_extract_scalar(
-                self._q(spec.column), spec.path
+            extracted = json_column_text(
+                self.destination,
+                spec,
+                _column_type(self.source_column_types, spec),
             )
             checks.append(
                 (

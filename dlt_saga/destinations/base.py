@@ -834,8 +834,7 @@ class Destination(ABC):
 
         The result is the scalar's text without JSON quoting (``x``, not
         ``"x"``), and NULL when the path is missing, holds JSON ``null``, or the
-        value isn't valid JSON. Shared by path-based filters and
-        ``historize.json_columns``, so both read a path the same way.
+        value isn't valid JSON. What a path-based filter compares.
 
         The default is the ANSI/SQL-2016 ``JSON_VALUE``, which also yields NULL
         for an object or array; destinations whose JSON access has a different
@@ -846,8 +845,59 @@ class Destination(ABC):
                 JSON-typed column or a string containing JSON).
             path: Object keys from the root, e.g. ``("aid", "legal_entity")``.
         """
-        path_literal = "$." + ".".join(path)
-        return f"JSON_VALUE({column_sql}, '{self.escape_string_literal(path_literal)}')"
+        return f"JSON_VALUE({column_sql}, '{self._json_path_literal(path)}')"
+
+    def json_extract_text(
+        self, column_sql: str, path: Tuple[str, ...], column_type: str
+    ) -> str:
+        """Return SQL reading the value at ``path`` inside a JSON value, as text.
+
+        What a scalar ``historize.json_columns`` entry converts: a scalar as
+        its text without JSON quoting, an object or array as its JSON text,
+        and NULL when the path is missing, holds JSON ``null``, or the value
+        isn't valid JSON — so a path that leads to a document is never silently
+        NULL, and a conversion of it fails visibly.
+
+        There is no portable spelling (SQL-2016 ``JSON_VALUE`` drops a
+        document and ``JSON_QUERY`` keeps a scalar quoted), so each
+        destination supplies its own.
+
+        Args:
+            column_sql: Already-quoted column reference holding the JSON.
+            path: Object keys from the root.
+            column_type: The column's catalog type, for destinations whose
+                JSON functions read a JSON-typed column and a string
+                differently.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement json_extract_text"
+        )
+
+    def json_extract_document(
+        self, column_sql: str, path: Tuple[str, ...], column_type: str
+    ) -> str:
+        """Return SQL reading the value at ``path`` as a JSON document.
+
+        What a ``data_type: json`` entry of ``historize.json_columns`` holds:
+        any JSON value — object, array or scalar — in the type
+        ``dlt_type_to_native("json")`` names, and NULL when the path is
+        missing, holds JSON ``null``, or the value isn't valid JSON. The
+        expression's type must be that one whatever the column's own type,
+        since the historized table is created from it and later runs compare
+        the two.
+
+        Args:
+            column_sql: Already-quoted column reference holding the JSON.
+            path: Object keys from the root.
+            column_type: The column's catalog type.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement json_extract_document"
+        )
+
+    def _json_path_literal(self, path: Tuple[str, ...]) -> str:
+        """The JSONPath for object keys ``path``, escaped for a string literal."""
+        return self.escape_string_literal("$." + ".".join(path))
 
     def safe_cast(self, expression: str, dlt_type: str) -> str:
         """Return SQL casting ``expression`` to a dlt logical type, NULL on failure.

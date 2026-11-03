@@ -463,14 +463,24 @@ Each entry maps an output column name to:
 | Key | Default | Description |
 |---|---|---|
 | `column` | required | Source column holding the JSON: a JSON-typed column, or a string containing JSON |
-| `path` | required | Keys from the root to a scalar value, as a dotted string (`meta.tenant`) or a list (`[meta, tenant]`). Parsed the same way as a filter's `path` |
-| `data_type` | `text` | `text`, `bigint`, `double`, `bool`, `timestamp` or `date` |
+| `path` | required | Keys from the root to the value, as a dotted string (`meta.tenant`) or a list (`[meta, tenant]`). Parsed the same way as a filter's `path` |
+| `data_type` | `text` | `text`, `bigint`, `double`, `bool`, `timestamp`, `date` or `json` |
+
+**`text` is the value as text, whatever it is**: a scalar unquoted (`hi`, `5`, `true`), an object or array as its JSON text. The other scalar types convert that text, so an object under `bigint` is a failed conversion (`NULL`, warned about — see below), never a silent one. **`json` keeps the value as a JSON document** — object, array or scalar — in the destination's JSON type: `JSON` on BigQuery and DuckDB, `STRING` on Databricks (where it is the same as `text`). Use it to carry a sub-document as its own column, typically with the envelope in [`exclude_columns`](#leaving-columns-out) so that change detection sees only that part of the payload:
+
+```yaml
+historize:
+  json_columns:
+    identity: { column: payload, path: identity, data_type: json }
+    event_type: { column: payload, path: type }
+  exclude_columns: [payload]     # a volatile field elsewhere in the payload opens no versions
+```
 
 **They are added columns.** The derived columns come after the source's own, and the JSON column itself is still carried into the historized table, so fields you haven't extracted stay available in the history. Adding one later is a schema change on the historized table (see below). If the extracted fields are all you need, list the JSON column in [`exclude_columns`](#leaving-columns-out) — the derived columns still read it from the source.
 
-**They behave like source columns.** Use them as `primary_key`, `order_by`, `snapshot_column`, `arrival_column`, `partition_column`, `cluster_columns`, in `historize.filters`, and in `columns` docs/classification. They take part in change detection like any value column. The JSON column changes whenever an extracted field does, so under `scd2` add it to `ignore_columns` if only the extracted fields should open versions.
+**They behave like source columns.** Use them as `primary_key`, `order_by`, `snapshot_column`, `arrival_column`, `partition_column`, `cluster_columns`, in `historize.filters`, and in `columns` docs/classification. They take part in change detection like any value column. The JSON column changes whenever an extracted field does, so under `scd2` add it to `ignore_columns` if only the extracted fields should open versions. A `json` entry is a value column only: a JSON document can't be compared, ordered or clustered on every destination, so it is refused as a key, `snapshot_column`, `arrival_column`, `order_by`, partition or cluster column, and in a filter without a `path` (`is_null`/`is_not_null` aside) — extract the scalar you need as its own entry, or filter on a path inside it.
 
-**Missing and invalid values are NULL.** A missing path, a JSON `null`, an object or array, input that isn't valid JSON, or a value that doesn't convert to `data_type` is written as `NULL` — the query never fails on it. Values that are present but don't convert (`"many"` as `bigint`, epoch numbers as `timestamp`) are reported with a warning naming the column, since a payload whose format drifted would otherwise go unnoticed. Timestamps convert from ISO-8601 strings (an offset is honoured); `date` expects `YYYY-MM-DD`. On Databricks, a `text` column whose path leads to an object or array holds its JSON text rather than `NULL`.
+**Missing and invalid values are NULL.** A missing path, a JSON `null`, input that isn't valid JSON, or a value that doesn't convert to `data_type` is written as `NULL` — the query never fails on it. Values that are present but don't convert (`"many"` or an object as `bigint`, epoch numbers as `timestamp`) are reported with a warning naming the column, since a payload whose format drifted would otherwise go unnoticed. Timestamps convert from ISO-8601 strings (an offset is honoured); `date` expects `YYYY-MM-DD`.
 
 **Filters on a derived column compare typed.** A path-based filter always compares as text (`value: true` matches the string `'true'`); a filter naming a derived column compares with its declared type. Path filters still suit a condition on a field you don't want as a column.
 
@@ -487,7 +497,7 @@ historize:
       value: t1
 ```
 
-**Rejected configs.** An output name equal to a column of the source, one historize writes itself (`_dlt_*`, the configured `valid_from_column`/`valid_to_column`/`is_deleted_column`), or one the destination reserves (BigQuery's `_PARTITION…`); a `column` that isn't a column of the source table (derived columns can't read each other); and a pseudo-column `snapshot_column`/`arrival_column` such as `_PARTITIONTIME` — the source is read through a subquery, which doesn't carry pseudo-columns.
+**Rejected configs.** An output name equal to a column of the source, one historize writes itself (`_dlt_*`, the configured `valid_from_column`/`valid_to_column`/`is_deleted_column`), or one the destination reserves (BigQuery's `_PARTITION…`); a `column` that isn't a column of the source table (derived columns can't read each other); a `json` entry anywhere it would be compared (see above); and a pseudo-column `snapshot_column`/`arrival_column` such as `_PARTITIONTIME` — the source is read through a subquery, which doesn't carry pseudo-columns.
 
 **Adding, removing and changing entries.** An entry is a value column like any other, so adding or removing one is a [schema change](#schema-changes): a new entry is added to the historized table (rows written before it hold `NULL`, nothing is backfilled), and a removed one is kept with its history and `NULL` from then on. Redefining an entry that already exists (its `column`, `path` or `data_type`) prompts for `saga historize --full-refresh`: the stored column would otherwise change meaning mid-history under one name, and a type can't change in place. Removing an entry and re-adding it under the same name with another type is refused the way a source column's type change is, since the column kept its old type on the target. Spelling out `data_type: text` or reordering entries is not a change.
 

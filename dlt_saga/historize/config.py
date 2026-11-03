@@ -21,9 +21,11 @@ _SQL_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 STRATEGIES = ("scd2", "scd1")
 DELIVERIES = ("full", "incremental")
 
-# dlt logical types a json_columns entry may convert to. Scalars only: the
-# extraction yields NULL for an object or array.
-JSON_COLUMN_TYPES = ("text", "bigint", "double", "bool", "timestamp", "date")
+# dlt logical types a json_columns entry may take. The scalar types convert
+# the value's text (an object or array is JSON text, so only ``text`` keeps
+# it); ``json`` keeps the value as a JSON document in the destination's JSON
+# type.
+JSON_COLUMN_TYPES = ("text", "bigint", "double", "bool", "timestamp", "date", "json")
 _JSON_COLUMN_KEYS = {"column", "path", "data_type"}
 
 
@@ -35,6 +37,15 @@ class JsonColumn:
     column: str
     path: Tuple[str, ...]
     data_type: str = "text"
+
+    @property
+    def is_document(self) -> bool:
+        """Whether the entry keeps the value as a JSON document (``json``).
+
+        Such a column can't be compared, ordered or grouped on every
+        destination, so it is a value column only.
+        """
+        return self.data_type == "json"
 
     def definition(self) -> List[Any]:
         """What the entry reads and converts, with defaults spelled out.
@@ -458,15 +469,22 @@ class HistorizeConfig:
                 "Typed columns extracted from a JSON column of the source, keyed "
                 "by output column name: {column, path, data_type}. 'column' "
                 "and 'path' (dotted string or list, as in filters) are required; "
-                "'data_type' (text, bigint, double, bool, timestamp, date) "
-                "defaults to text. They are added to the source's columns — the "
-                "JSON column itself is still carried — and can be used like any "
-                "source column (primary_key, order_by, partition_column, "
-                "cluster_columns, filters, columns). A missing path, JSON null, "
-                "or a value that doesn't convert yields NULL; values that fail "
-                "to convert are warned about. Adding or removing an entry is a "
-                "schema change on the historized table; redefining an existing "
-                "entry (column, path or data_type) requires a full refresh."
+                "'data_type' defaults to text. text holds the value as text — a "
+                "scalar unquoted, an object or array as its JSON text; bigint, "
+                "double, bool, timestamp and date convert that text; json keeps "
+                "the value as a JSON document in the destination's JSON type "
+                "(JSON on BigQuery and DuckDB, STRING on Databricks). They are "
+                "added to the source's columns — the JSON column itself is "
+                "still carried — and can be used like any source column "
+                "(primary_key, order_by, partition_column, cluster_columns, "
+                "filters, columns), except that a json entry is a value column "
+                "only: it can't be a key, snapshot, order_by, partition or "
+                "cluster column, or compared by a filter without a path. A "
+                "missing path, JSON null, or a value that doesn't convert "
+                "yields NULL; values that fail to convert are warned about. "
+                "Adding or removing an entry is a schema change on the "
+                "historized table; redefining an existing entry (column, path "
+                "or data_type) requires a full refresh."
             ),
             "$ref": "dlt_common.json#/$defs/json_column",
         },
@@ -559,6 +577,7 @@ class HistorizeConfig:
             },
         )
         self._validate_exclude_columns()
+        self._validate_json_document_columns()
 
     @property
     def json_column_specs(self) -> Tuple[JsonColumn, ...]:
@@ -759,6 +778,52 @@ class HistorizeConfig:
                 f"from exclude_columns or from the other setting."
             )
 
+    def _json_document_columns(self) -> set:
+        """Lower-cased output names of the ``data_type: json`` entries."""
+        return {
+            spec.name.lower() for spec in self._json_column_specs if spec.is_document
+        }
+
+    def _validate_json_document_columns(self) -> None:
+        """Refuse settings that compare, order or group on a ``json`` entry.
+
+        A JSON document can't be compared on every destination (BigQuery's
+        ``JSON`` has no equality, ordering or clustering), so such an entry
+        is a value column only. Keys are checked in ``validate()``, once
+        ``primary_key`` may have been inherited.
+        """
+        documents = self._json_document_columns()
+        if not documents:
+            return
+        conflicts = []
+        for attr in (
+            "snapshot_column",
+            "arrival_column",
+            "order_by",
+            "partition_column",
+            "cluster_columns",
+        ):
+            value = getattr(self, attr)
+            columns = [value] if isinstance(value, str) else value or []
+            conflicts += [(attr, c) for c in columns if c.lower() in documents]
+        for entry in self.filters or []:
+            if not isinstance(entry, dict) or entry.get("path"):
+                continue
+            column = entry.get("column")
+            op = entry.get("op", "eq")
+            if isinstance(column, str) and column.lower() in documents:
+                if op not in ("is_null", "is_not_null"):
+                    conflicts.append(("filters", column))
+        if conflicts:
+            listed = ", ".join(f"'{col}' ({attr})" for attr, col in conflicts)
+            raise ValueError(
+                f"historize.json_columns entries with data_type: json hold a JSON "
+                f"document, which can't be compared, ordered or clustered on: "
+                f"{listed}. Extract the scalar you need as its own entry (a "
+                f"filter can also read a path inside the column), or declare a "
+                f"scalar data_type."
+            )
+
     @classmethod
     def from_dict(
         cls,
@@ -821,13 +886,7 @@ class HistorizeConfig:
                 "non-empty list. To track specific columns, list them explicitly."
             )
 
-        excluded = {c.lower() for c in self.exclude_columns}
-        excluded_keys = [pk for pk in self.primary_key if pk.lower() in excluded]
-        if excluded_keys:
-            raise ValueError(
-                f"historize.exclude_columns cannot name primary_key column(s) "
-                f"{excluded_keys}: every version is identified by its key."
-            )
+        self._validate_key_columns()
 
         if self.merge_key:
             pk_set = set(self.primary_key or [])
@@ -849,3 +908,27 @@ class HistorizeConfig:
                     "External source requires both source_schema and source_table. "
                     "source_schema is missing."
                 )
+
+    def _validate_key_columns(self) -> None:
+        """Refuse key columns the historized table can't identify a version by.
+
+        Checked here rather than in ``__post_init__`` because ``primary_key``
+        may still be inherited from the top-level config after construction.
+        """
+        excluded = {c.lower() for c in self.exclude_columns}
+        excluded_keys = [pk for pk in self.primary_key or [] if pk.lower() in excluded]
+        if excluded_keys:
+            raise ValueError(
+                f"historize.exclude_columns cannot name primary_key column(s) "
+                f"{excluded_keys}: every version is identified by its key."
+            )
+
+        documents = self._json_document_columns()
+        document_keys = [pk for pk in self.primary_key or [] if pk.lower() in documents]
+        if document_keys:
+            raise ValueError(
+                f"primary_key column(s) {document_keys} are json_columns entries "
+                f"with data_type: json. A JSON document can't be compared, so it "
+                f"can't identify a key; extract the scalar you need as its own "
+                f"entry."
+            )

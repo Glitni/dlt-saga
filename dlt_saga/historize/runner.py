@@ -106,11 +106,10 @@ class HistorizeRunner:
             )
 
         # Every source read selects from this: the table, or the derived
-        # relation adding historize.json_columns. source_table_id stays the
-        # identity used in logs, state rows and messages.
-        self.source_relation = build_source_relation(
-            destination, self.source_table_id, self.config.json_column_specs
-        )
+        # relation adding historize.json_columns, bound once the source's
+        # catalog types are read (see _bind_source_relation). source_table_id
+        # stays the identity used in logs, state rows and messages.
+        self.source_relation = self.source_table_id
 
         # Target table in same schema (or override)
         target_schema = self.config.schema_name or schema
@@ -146,7 +145,6 @@ class HistorizeRunner:
             target_table_name=target_table_name,
             target_schema=target_schema,
             filter_sql=self._filter_sql,
-            source_relation=self.source_relation,
         )
 
     @property
@@ -459,6 +457,7 @@ class HistorizeRunner:
         timings = {}
 
         self._guard_source_columns()
+        self._bind_source_relation()
 
         # Init phase: fetch state (creates log table on first access if needed)
         t = time.time()
@@ -880,6 +879,24 @@ class HistorizeRunner:
                 )
         lines.append(f"Available columns: {', '.join(source_columns)}")
         raise ValueError("\n".join(lines))
+
+    def _bind_source_relation(self) -> None:
+        """Build the relation every source read selects from.
+
+        A ``json_columns`` expression depends on the catalog type of the
+        column it reads, so this follows :meth:`_guard_source_columns`, which
+        reads the source's columns and checks that every entry reads one of
+        them.
+        """
+        self.source_relation = build_source_relation(
+            self.destination,
+            self.source_table_id,
+            self.config.json_column_specs,
+            self._source_column_types,
+        )
+        self.sql_builder.set_source_relation(
+            self.source_relation, self._source_column_types
+        )
 
     def _guard_json_columns(self) -> None:
         """Refuse ``json_columns`` that don't fit the source table.
@@ -1996,6 +2013,7 @@ class HistorizeRunner:
                 source_table=self._src_table,
                 filter_sql=self._filter_sql,
                 source_relation=self.source_relation,
+                source_column_types=self._source_column_types,
             )
             # The clone has every column the target has, so the staging read
             # must project the ones the source no longer delivers the same way
