@@ -190,6 +190,13 @@ class TestDocumentColumns:
         config = _config(json_columns=_DOCUMENT, **setting)
         config.validate()
 
+    def test_filter_check_reads_the_filter_grammar(self):
+        """A malformed filter is the filter parser's error, not a misread."""
+        with pytest.raises(ValueError, match="filters"):
+            _config(
+                json_columns=_DOCUMENT, filters=[{"column": "identity", "path": ""}]
+            )
+
 
 # ---------------------------------------------------------------------------
 # Fingerprint
@@ -489,6 +496,23 @@ class TestSourceRelation:
 
 @pytest.mark.unit
 class TestDialects:
+    def test_base_defaults_are_sql_2016(self):
+        """A destination without overrides still reads a path, as for filters."""
+        from dlt_saga.destinations.base import Destination
+
+        bare = type(
+            "Bare",
+            (Destination,),
+            {name: lambda *a, **k: None for name in Destination.__abstractmethods__},
+        )
+        dest = bare.__new__(bare)
+        assert dest.json_extract_text('"p"', ("a", "b"), "JSON") == (
+            "COALESCE(JSON_VALUE(\"p\", '$.a.b'), JSON_QUERY(\"p\", '$.a.b'))"
+        )
+        assert dest.json_extract_document('"p"', ("a",), "JSON") == (
+            "JSON_QUERY(\"p\", '$.a')"
+        )
+
     def test_bigquery(self):
         pytest.importorskip("google.cloud.bigquery")
         from dlt_saga.destinations.bigquery.destination import BigQueryDestination

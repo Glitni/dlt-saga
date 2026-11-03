@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from dlt_saga.utility.filters import filter_field_metadata as _filter_field_metadata
-from dlt_saga.utility.filters import parse_json_path
+from dlt_saga.utility.filters import parse_filters, parse_json_path
 from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS, SNAPSHOT_ALIAS
 
 # Bare SQL identifier: letters/underscore start, then letters/digits/underscore.
@@ -806,14 +806,12 @@ class HistorizeConfig:
             value = getattr(self, attr)
             columns = [value] if isinstance(value, str) else value or []
             conflicts += [(attr, c) for c in columns if c.lower() in documents]
-        for entry in self.filters or []:
-            if not isinstance(entry, dict) or entry.get("path"):
+        # The filter grammar has one reader; a null check doesn't compare.
+        for spec in parse_filters(self.filters, context="historize.filters"):
+            if spec.path or spec.column.lower() not in documents:
                 continue
-            column = entry.get("column")
-            op = entry.get("op", "eq")
-            if isinstance(column, str) and column.lower() in documents:
-                if op not in ("is_null", "is_not_null"):
-                    conflicts.append(("filters", column))
+            if spec.op not in ("is_null", "is_not_null"):
+                conflicts.append(("filters", spec.column))
         if conflicts:
             listed = ", ".join(f"'{col}' ({attr})" for attr, col in conflicts)
             raise ValueError(

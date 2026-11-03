@@ -1163,7 +1163,9 @@ class DatabricksDestination(Destination):
         self, column_sql: str, path: Tuple[str, ...], column_type: str
     ) -> str:
         # JSON is stored as STRING, so the document is its text; the cast
-        # keeps a VARIANT column's value in that type too.
+        # keeps a VARIANT column's value in that type too. Colon notation
+        # unquotes a scalar at the path, so only an object or array comes out
+        # as parseable JSON — the same reading as text, as documented.
         return f"TRY_CAST({self.json_extract_scalar(column_sql, path)} AS STRING)"
 
     # dlt logical types → Databricks SQL types.
