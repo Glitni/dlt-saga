@@ -858,9 +858,10 @@ class Destination(ABC):
         isn't valid JSON — so a path that leads to a document is never silently
         NULL, and a conversion of it fails visibly.
 
-        There is no portable spelling (SQL-2016 ``JSON_VALUE`` drops a
-        document and ``JSON_QUERY`` keeps a scalar quoted), so each
-        destination supplies its own.
+        The default is the SQL-2016 pair: ``JSON_VALUE`` for a scalar, else
+        ``JSON_QUERY`` for the document. Each supported destination overrides
+        it, since the standard leaves the JSON ``null`` case and the result
+        type of ``JSON_QUERY`` to the implementation.
 
         Args:
             column_sql: Already-quoted column reference holding the JSON.
@@ -869,8 +870,10 @@ class Destination(ABC):
                 JSON functions read a JSON-typed column and a string
                 differently.
         """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement json_extract_text"
+        path_literal = self._json_path_literal(path)
+        return (
+            f"COALESCE(JSON_VALUE({column_sql}, '{path_literal}'), "
+            f"JSON_QUERY({column_sql}, '{path_literal}'))"
         )
 
     def json_extract_document(
@@ -886,14 +889,15 @@ class Destination(ABC):
         since the historized table is created from it and later runs compare
         the two.
 
+        The default is the SQL-2016 ``JSON_QUERY``; each supported destination
+        overrides it for the same reasons as :meth:`json_extract_text`.
+
         Args:
             column_sql: Already-quoted column reference holding the JSON.
             path: Object keys from the root.
             column_type: The column's catalog type.
         """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement json_extract_document"
-        )
+        return f"JSON_QUERY({column_sql}, '{self._json_path_literal(path)}')"
 
     def _json_path_literal(self, path: Tuple[str, ...]) -> str:
         """The JSONPath for object keys ``path``, escaped for a string literal."""
