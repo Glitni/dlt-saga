@@ -56,6 +56,7 @@ class TestNativeLoadStateManager:
         dest.get_full_table_id.side_effect = lambda d, t: f"`proj.{d}.{t}`"
         dest.execute_sql.return_value = []
         dest.create_or_replace_view.return_value = None
+        dest.table_exists.return_value = False
         dest.timestamp_n_days_ago.return_value = (
             "TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)"
         )
@@ -72,6 +73,19 @@ class TestNativeLoadStateManager:
         mgr = NativeLoadStateManager(dest, "my_dataset")
         mgr.ensure_table_exists()
         dest.create_or_replace_view.assert_called_once()
+
+    def test_ensure_table_exists_writes_nothing_when_table_exists(self):
+        # Every native_load pipeline in a schema shares one log table, and on
+        # BigQuery each CREATE against it is a rate-limited table update: a
+        # task group fanning out hit the limit on the view rewrite alone. An
+        # existing table must cost one metadata read and no DDL.
+        dest = self._make_dest()
+        dest.table_exists.return_value = True
+        mgr = NativeLoadStateManager(dest, "my_dataset")
+        mgr.ensure_table_exists()
+        dest.table_exists.assert_called_once_with("my_dataset", mgr._table)
+        dest.execute_sql.assert_not_called()
+        dest.create_or_replace_view.assert_not_called()
 
     def test_log_table_clustered_on_read_predicates(self):
         # Reads filter on pipeline_name (+ cursor_value in date mode), never on
@@ -262,6 +276,7 @@ def _make_plain_dest() -> MagicMock:
     dest.get_full_table_id.side_effect = lambda d, t: f"`proj.{d}.{t}`"
     dest.execute_sql.return_value = []
     dest.create_or_replace_view.return_value = None
+    dest.table_exists.return_value = False
     dest.timestamp_n_days_ago.return_value = "CURRENT_TIMESTAMP() - INTERVAL '1' DAY"
     return dest
 
