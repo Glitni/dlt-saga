@@ -29,6 +29,7 @@ from dlt_saga.project_config import get_config_source_settings
 from dlt_saga.utility.auth.providers import get_auth_provider
 from dlt_saga.utility.cli.common import flatten_configs
 from dlt_saga.utility.cli.context import execution_context_scope
+from dlt_saga.utility.cli.logging import log_context
 from dlt_saga.utility.cli.pipeline_state import (
     build_state_resolver,
     layer_for_resource_type,
@@ -1261,59 +1262,60 @@ class Session:
         )
 
         prefix = f"{log_prefix} " if log_prefix else ""
-        fire_pipeline_start(config, "ingest")
-        try:
-            load_info = execute_pipeline(config, log_prefix=log_prefix)
-            if isinstance(load_info, list):
-                summary = summarize_load_info(load_info)
-                # `summarize_load_info([])` returns ""; previously this
-                # produced an empty `[N/total] ` line — visible whenever a
-                # pipeline returned `[]` (e.g. native_load skipping its run
-                # in update-access mode, or any pipeline with no resources
-                # to load).
-                if summary:
-                    logger.info("%s%s", prefix, summary)
-            fire_pipeline_complete(config, "ingest", load_info)
-            return PipelineResult(
-                pipeline_name=config.pipeline_name,
-                success=True,
-                load_info=load_info,
-                config=config,
-            )
-        except Exception as e:
-            # Classified by phase, not type: a ValueError while preparing the
-            # pipeline (PipelineConfigError) means the run never started —
-            # developer feedback, not recorded as a run outcome. Anything raised
-            # by the run itself is a run failure and is recorded, ValueError
-            # included (an API error, undecodable data, a source-state check).
-            from dlt_saga.pipelines.row_guard import MinRowsNotMetError
-
-            config_error = isinstance(e, PipelineConfigError)
-            # A ValueError's message is written to be actionable, and a tripped
-            # row guard's says what happened and what to check — a traceback
-            # would only add noise.
-            expected_failure = isinstance(e, (ValueError, MinRowsNotMetError))
-            # Failure display is single-sourced through the CLI end-of-run summary
-            # (_exit_if_failures), which lists every failure on stderr. The inline
-            # log here exists for the *traceback* on a genuine failure; anything
-            # whose message stands on its own is left to the summary alone, or the
-            # same sentence prints twice.
-            if not expected_failure:
-                logger.error(
-                    "%sPipeline %s failed: %s",
-                    prefix,
-                    config.pipeline_name,
-                    e,
-                    exc_info=True,
+        with log_context(pipeline=config.pipeline_name, command="ingest"):
+            fire_pipeline_start(config, "ingest")
+            try:
+                load_info = execute_pipeline(config, log_prefix=log_prefix)
+                if isinstance(load_info, list):
+                    summary = summarize_load_info(load_info)
+                    # `summarize_load_info([])` returns ""; previously this
+                    # produced an empty `[N/total] ` line — visible whenever a
+                    # pipeline returned `[]` (e.g. native_load skipping its run
+                    # in update-access mode, or any pipeline with no resources
+                    # to load).
+                    if summary:
+                        logger.info("%s%s", prefix, summary)
+                fire_pipeline_complete(config, "ingest", load_info)
+                return PipelineResult(
+                    pipeline_name=config.pipeline_name,
+                    success=True,
+                    load_info=load_info,
+                    config=config,
                 )
-            fire_pipeline_error(config, "ingest", e)
-            return PipelineResult(
-                pipeline_name=config.pipeline_name,
-                success=False,
-                error=str(e),
-                config=config,
-                config_error=config_error,
-            )
+            except Exception as e:
+                # Classified by phase, not type: a ValueError while preparing the
+                # pipeline (PipelineConfigError) means the run never started —
+                # developer feedback, not recorded as a run outcome. Anything raised
+                # by the run itself is a run failure and is recorded, ValueError
+                # included (an API error, undecodable data, a source-state check).
+                from dlt_saga.pipelines.row_guard import MinRowsNotMetError
+
+                config_error = isinstance(e, PipelineConfigError)
+                # A ValueError's message is written to be actionable, and a tripped
+                # row guard's says what happened and what to check — a traceback
+                # would only add noise.
+                expected_failure = isinstance(e, (ValueError, MinRowsNotMetError))
+                # Failure display is single-sourced through the CLI end-of-run summary
+                # (_exit_if_failures), which lists every failure on stderr. The inline
+                # log here exists for the *traceback* on a genuine failure; anything
+                # whose message stands on its own is left to the summary alone, or the
+                # same sentence prints twice.
+                if not expected_failure:
+                    logger.error(
+                        "%sPipeline %s failed: %s",
+                        prefix,
+                        config.pipeline_name,
+                        e,
+                        exc_info=True,
+                    )
+                fire_pipeline_error(config, "ingest", e)
+                return PipelineResult(
+                    pipeline_name=config.pipeline_name,
+                    success=False,
+                    error=str(e),
+                    config=config,
+                    config_error=config_error,
+                )
 
     # -------------------------------------------------------------------
     # Internal: historize execution
@@ -1417,90 +1419,93 @@ class Session:
         )
 
         prefix = f"{log_prefix} " if log_prefix else ""
-        fire_pipeline_start(config, "historize")
-        try:
-            from dlt_saga.historize.factory import build_historize_runner
-
+        with log_context(pipeline=config.pipeline_name, command="historize"):
+            fire_pipeline_start(config, "historize")
             try:
-                runner = build_historize_runner(
-                    config,
-                    full_refresh,
-                    partial_refresh,
-                    historize_from,
-                    log_prefix=log_prefix,
+                from dlt_saga.historize.factory import build_historize_runner
+
+                try:
+                    runner = build_historize_runner(
+                        config,
+                        full_refresh,
+                        partial_refresh,
+                        historize_from,
+                        log_prefix=log_prefix,
+                    )
+                except ValueError as e:
+                    # Config resolution failed — the run never started. Left to the
+                    # end-of-run summary, unrecorded (as an ingest PipelineConfigError).
+                    fire_pipeline_error(config, "historize", e)
+                    return PipelineResult(
+                        pipeline_name=config.pipeline_name,
+                        success=False,
+                        error=str(e),
+                        config=config,
+                        config_error=True,
+                    )
+                run_result = runner.run()
+
+                if run_result["status"] == "completed":
+                    mode = run_result["mode"]
+                    duration = run_result.get("duration", 0)
+                    timings = run_result.get("timings", {})
+                    timing_parts = ", ".join(
+                        f"{k}: {v:.1f}s" for k, v in timings.items()
+                    )
+                    detail = (
+                        "all snapshots"
+                        if mode == "full_reprocess"
+                        else f"{run_result['snapshots_processed']} snapshot(s)"
+                    )
+                    stats_parts = []
+                    # A run that processed snapshots reports its row count even when
+                    # it is 0 — "nothing changed" is a result, not an absent one.
+                    if run_result.get("snapshots_processed"):
+                        rows = run_result.get("new_or_changed_rows") or 0
+                        stats_parts.append(f"{rows} rows")
+                    if run_result.get("deleted_rows"):
+                        stats_parts.append(f"{run_result['deleted_rows']} deletions")
+                    stats_str = f", {', '.join(stats_parts)}" if stats_parts else ""
+                    msg = f"{config.pipeline_name}: {mode} ({detail}{stats_str}, {duration:.1f}s [{timing_parts}])"
+                    logger.info("%s%s", prefix, msg)
+                    fire_pipeline_complete(config, "historize", run_result)
+                    return PipelineResult(
+                        pipeline_name=config.pipeline_name,
+                        success=True,
+                        load_info=run_result,
+                        config=config,
+                    )
+                else:
+                    # No inline logging here: the runner already logged a traceback for
+                    # genuine failures, and the CLI end-of-run summary (_exit_if_failures)
+                    # surfaces every failure — including config errors — so this branch
+                    # just returns the structured result. Logging again would duplicate
+                    # the message the summary already prints.
+                    error = run_result.get("error", "Unknown error")
+                    fire_pipeline_error(config, "historize", RuntimeError(error))
+                    return PipelineResult(
+                        pipeline_name=config.pipeline_name,
+                        success=False,
+                        error=error,
+                        config=config,
+                        config_error=run_result.get("config_error", False),
+                    )
+
+            except Exception as e:
+                logger.error(
+                    "%sHistorization failed for %s: %s",
+                    prefix,
+                    config.pipeline_name,
+                    e,
+                    exc_info=True,
                 )
-            except ValueError as e:
-                # Config resolution failed — the run never started. Left to the
-                # end-of-run summary, unrecorded (as an ingest PipelineConfigError).
                 fire_pipeline_error(config, "historize", e)
                 return PipelineResult(
                     pipeline_name=config.pipeline_name,
                     success=False,
                     error=str(e),
                     config=config,
-                    config_error=True,
                 )
-            run_result = runner.run()
-
-            if run_result["status"] == "completed":
-                mode = run_result["mode"]
-                duration = run_result.get("duration", 0)
-                timings = run_result.get("timings", {})
-                timing_parts = ", ".join(f"{k}: {v:.1f}s" for k, v in timings.items())
-                detail = (
-                    "all snapshots"
-                    if mode == "full_reprocess"
-                    else f"{run_result['snapshots_processed']} snapshot(s)"
-                )
-                stats_parts = []
-                # A run that processed snapshots reports its row count even when
-                # it is 0 — "nothing changed" is a result, not an absent one.
-                if run_result.get("snapshots_processed"):
-                    rows = run_result.get("new_or_changed_rows") or 0
-                    stats_parts.append(f"{rows} rows")
-                if run_result.get("deleted_rows"):
-                    stats_parts.append(f"{run_result['deleted_rows']} deletions")
-                stats_str = f", {', '.join(stats_parts)}" if stats_parts else ""
-                msg = f"{config.pipeline_name}: {mode} ({detail}{stats_str}, {duration:.1f}s [{timing_parts}])"
-                logger.info("%s%s", prefix, msg)
-                fire_pipeline_complete(config, "historize", run_result)
-                return PipelineResult(
-                    pipeline_name=config.pipeline_name,
-                    success=True,
-                    load_info=run_result,
-                    config=config,
-                )
-            else:
-                # No inline logging here: the runner already logged a traceback for
-                # genuine failures, and the CLI end-of-run summary (_exit_if_failures)
-                # surfaces every failure — including config errors — so this branch
-                # just returns the structured result. Logging again would duplicate
-                # the message the summary already prints.
-                error = run_result.get("error", "Unknown error")
-                fire_pipeline_error(config, "historize", RuntimeError(error))
-                return PipelineResult(
-                    pipeline_name=config.pipeline_name,
-                    success=False,
-                    error=error,
-                    config=config,
-                    config_error=run_result.get("config_error", False),
-                )
-
-        except Exception as e:
-            logger.error(
-                "%sHistorization failed for %s: %s",
-                prefix,
-                config.pipeline_name,
-                e,
-                exc_info=True,
-            )
-            fire_pipeline_error(config, "historize", e)
-            return PipelineResult(
-                pipeline_name=config.pipeline_name,
-                success=False,
-                error=str(e),
-                config=config,
-            )
 
     # -------------------------------------------------------------------
     # Internal: combined run

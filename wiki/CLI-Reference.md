@@ -606,6 +606,29 @@ File logging is **off** in Cloud Run, in distributed worker mode (`SAGA_WORKER_M
 | `SAGA_LOG_DIR` | `./logs` | Directory for log files |
 | `SAGA_LOG_RETENTION` | `10` | Number of recent log files to keep; older files are pruned on each run |
 | `SAGA_DEBUG_LOGGING` | off | Set to `true` to flip the terminal to DEBUG without passing `--verbose` |
+| `SAGA_LOG_FORMAT` | `text` | Terminal format: `text`, or `json` for one JSON object per line (see below). `saga --log-format json <command>` overrides it for one invocation |
+
+### Structured (JSON) logging
+
+For a log collector rather than a terminal — Cloud Run, a container platform, an orchestrator capturing stdout — set `SAGA_LOG_FORMAT=json`, or pass the app-level flag before the command: `saga --log-format json ingest`. Every record is then one JSON object on its own line:
+
+```json
+{"time": "2026-11-03T06:00:12.481Z", "severity": "INFO", "message": "[3/12] google_sheets__budget: 1 243 rows loaded", "logger": "dlt_saga.session", "execution_id": "c1f0…", "pipeline": "google_sheets__budget", "command": "ingest"}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `time` | UTC timestamp, RFC 3339 |
+| `severity` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` |
+| `message` | The rendered message, exactly as the text format prints it |
+| `logger` | Python logger name (`dlt_saga.…`, or `dlt` for dlt's own records) |
+| `pipeline`, `command` | Present on every record emitted while a pipeline runs, including records from dlt and HTTP libraries inside it, so interleaved output from parallel pipelines filters cleanly by pipeline |
+| `execution_id`, `task_index` | Present in orchestrated runs (`saga plan`, `--orchestrate`, `saga worker`), so one fan-out run can be followed across its worker containers |
+| `exception` | Formatted traceback, when the record carries one |
+
+`time`, `severity` and `message` are the names Cloud Logging's structured-log parser reads natively, so a Cloud Run job with `SAGA_LOG_FORMAT=json` gets correct severities and filterable `jsonPayload.pipeline` / `jsonPayload.execution_id` fields with no agent configuration. The names are also the OpenTelemetry log data model's, so any OTLP-aware collector maps them one-to-one.
+
+The debug log file in `logs/` stays plain text regardless. Under the JSON format the end-of-run failure summary is emitted as log records (one per failed pipeline, with its `pipeline` field) instead of being echoed to stderr as text. Secrets are redacted before formatting, as in the text format.
 
 ---
 

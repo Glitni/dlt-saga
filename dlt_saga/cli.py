@@ -33,9 +33,14 @@ from dlt_saga.utility.cli.common import (
 from dlt_saga.utility.cli.context import get_execution_context
 from dlt_saga.utility.cli.logging import (
     FILE_ONLY,
+    LogFormat,
+    bind_log_context,
     configure_cli_logging,
     ensure_utf8_streams,
+    get_console_format,
+    log_context,
     reenable_saga_loggers,
+    set_console_format,
 )
 from dlt_saga.utility.cli.pipeline_state import (
     StateSelectorError,
@@ -98,13 +103,26 @@ def _app_callback(
         callback=_version_callback,
         is_eager=True,
     ),
+    log_format: Optional[LogFormat] = typer.Option(
+        None,
+        "--log-format",
+        help=(
+            "Console log format: text (default) or json — one JSON object per "
+            "line, for log collectors. Overrides SAGA_LOG_FORMAT. "
+            "Goes before the command: saga --log-format json ingest"
+        ),
+        case_sensitive=False,
+    ),
 ):
     """saga data pipeline framework."""
+    if log_format is not None:
+        set_console_format(log_format.value)
 
 
 # ---------------------------------------------------------------------------
 # Selector/help strings shared across commands
 # ---------------------------------------------------------------------------
+
 
 _SELECT_HELP = (
     "Select pipelines using dbt-style selectors "
@@ -245,6 +263,10 @@ def _exit_if_failures(result: "SessionResult", command_name: str) -> None:
     Each failure is also logged ``FILE_ONLY``: many are deliberately never
     logged as they happen (no traceback adds anything to their message), so
     without this the log file records a failed run but not why it failed.
+
+    Under ``--log-format json`` the summary is ordinary log records instead
+    (one per failure, stamped with its pipeline): the echo would put bare text
+    in the JSON stream, and a collector reads records, not a terminal.
     """
     if not result.has_failures:
         return
@@ -253,6 +275,19 @@ def _exit_if_failures(result: "SessionResult", command_name: str) -> None:
         f"{command_name} failed: {result.failed}/{len(result.pipeline_results)} "
         "pipeline(s) failed"
     )
+    if get_console_format() == LogFormat.json.value:
+        # The stderr echo would be bare text in the JSON stream: emit one
+        # record per failure instead, each carrying its pipeline, through the
+        # handlers (console and file alike).
+        logger.error(headline)
+        for failure in result.failures:
+            with log_context(pipeline=failure.pipeline_name):
+                logger.error(
+                    "%s: %s",
+                    failure.pipeline_name,
+                    failure.error or "(no error message)",
+                )
+        raise typer.Exit(1)
     typer.echo(headline, err=True)
     logger.error(headline, extra=FILE_ONLY)
     for failure in result.failures:
@@ -1531,6 +1566,7 @@ def plan(
         resolved_execution_id = plan_manager.create_execution_plan(
             all_configs, metadata=metadata, execution_id=execution_id
         )
+        bind_log_context(execution_id=resolved_execution_id)
 
         output = {
             "execution_id": resolved_execution_id,
