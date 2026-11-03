@@ -78,6 +78,54 @@ class TestBigQueryClientPool:
         mock_cls.assert_called_once_with(project="proj", location=None)
 
 
+class _RecordingSession:
+    """Stands in for the client's AuthorizedSession; records request kwargs."""
+
+    def __init__(self):
+        self.calls = []
+
+    def request(self, method, url, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return "response"
+
+
+@pytest.mark.unit
+class TestBigQueryRequestTimeout:
+    """Every request a pooled client sends carries a socket timeout.
+
+    google-cloud-bigquery's own default is no timeout on jobs.insert,
+    jobs.getQueryResults and the metadata reads, so one silently dead
+    connection blocked its thread for good — and a worker task waiting on
+    that thread never finished.
+    """
+
+    def _pooled_session(self, project: str) -> _RecordingSession:
+        import dlt_saga.utility.gcp.client_pool as client_pool
+
+        fake_client = MagicMock()
+        fake_client._http = _RecordingSession()
+        with patch("google.cloud.bigquery.Client", return_value=fake_client):
+            client = client_pool.bigquery_pool.get_client(project, "EU")
+        return client._http
+
+    def test_unset_timeout_gets_default(self):
+        import dlt_saga.utility.gcp.client_pool as client_pool
+
+        session = self._pooled_session("proj-timeout-unset")
+        session.request("POST", "https://bq/jobs", data="{}", timeout=None)
+        session.request("GET", "https://bq/tables")
+        for _, kwargs in session.calls:
+            assert kwargs["timeout"] == client_pool.BIGQUERY_REQUEST_TIMEOUT_SECONDS
+
+    def test_explicit_timeout_wins(self):
+        session = self._pooled_session("proj-timeout-explicit")
+        session.request("GET", "https://bq/jobs/1", timeout=128)
+        session.request("GET", "https://bq/jobs/2", None, None, None, 7)
+        assert session.calls[0][1]["timeout"] == 128
+        assert session.calls[1][0] == (None, None, None, 7)
+        assert "timeout" not in session.calls[1][1]
+
+
 @pytest.mark.unit
 class TestBigQueryDestinationConfig:
     def test_partition_expiration_defaults_to_none(self):

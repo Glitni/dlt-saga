@@ -258,7 +258,7 @@ historize:
 
 ## State log
 
-When `incremental: true`, every loaded URI is recorded in `_saga_native_load_log` (configurable via `log_tables.native_load_log` in `saga_project.yml`). A companion `_saga_native_load_log_latest` view shows the most recent run per pipeline.
+When `incremental: true`, every loaded URI is recorded in `_saga_native_load_log` (configurable via `log_tables.native_load_log` in `saga_project.yml`). A companion `_saga_native_load_log_latest` view shows the most recent event per file. Both are created on the first run that needs them and never rewritten afterwards — every native_load pipeline in a schema shares one log table, and on BigQuery each DDL against it counts toward the per-table update rate limit.
 
 The state log prevents duplicate loads: a URI that already has a `success` row is skipped on subsequent runs. If a file is overwritten in cloud storage (new generation, same path), its new generation ID triggers a re-load.
 

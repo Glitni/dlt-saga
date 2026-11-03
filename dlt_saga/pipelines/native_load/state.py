@@ -103,11 +103,25 @@ class NativeLoadStateManager:
     # ------------------------------------------------------------------
 
     def ensure_table_exists(self) -> None:
-        """Idempotent CREATE TABLE + companion view.
+        """Create the state log and its companion view on first use.
 
-        Table schema uses destination-portable type names and partition/cluster DDL.
+        Gated on a metadata read: when the log table already exists, nothing
+        is written. The CREATE statements are idempotent on their own, but on
+        BigQuery each is a table-update operation against the one log table
+        every native_load pipeline in a schema shares, and those are
+        rate-limited per table — a task group starting several pipelines at
+        once tripped the limit on the view rewrite, and each pipeline then sat
+        in the client's job-retry loop for most of a minute before loading
+        anything.
+
+        The view is created together with the table and never rewritten by a
+        run. Table schema uses destination-portable type names and
+        partition/cluster DDL.
         """
         d = self._dest
+        if d.table_exists(self._schema, self._table):
+            logger.debug("State log %s.%s already exists", self._schema, self._table)
+            return
         t_str = d.type_name("string")
         t_int = d.type_name("int64")
         t_ts = d.type_name("timestamp")

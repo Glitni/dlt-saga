@@ -15,6 +15,17 @@ from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Socket timeout, in seconds, for every request a pooled BigQuery client sends
+# when the caller passes none. google-cloud-bigquery's own default is ``None``
+# (no timeout) on jobs.insert, jobs.getQueryResults and the metadata reads, so a
+# request whose connection died silently blocked its thread for good — and a
+# worker task waiting on that thread never finished. This is the value
+# google-auth applies when left to choose its own. It bounds one request, not a
+# job: ``result()`` keeps polling for as long as the server keeps answering, and
+# the client library retries a request that times out (job ids are
+# client-generated, so a retried insert cannot start a second job).
+BIGQUERY_REQUEST_TIMEOUT_SECONDS = 120.0
+
 
 def _get_google_secrets_value(key: str) -> Optional[str]:
     """Get a value from the google_secrets provider config in saga_project.yml.
@@ -290,6 +301,7 @@ class BigQueryClientPool:
 
             # Create new client for this thread and (project, location)
             client = bigquery.Client(project=project_id, location=location)
+            _apply_request_timeout(client, BIGQUERY_REQUEST_TIMEOUT_SECONDS)
             self._clients[client_key] = client
             logger.debug(
                 f"Created BigQuery client for thread {thread_id}, project "
@@ -305,6 +317,29 @@ class BigQueryClientPool:
                 client.close()
             self._clients.clear()
             logger.info("Cleared BigQuery client pool cache")
+
+
+def _apply_request_timeout(client: Any, timeout: float) -> None:
+    """Give *client*'s HTTP session a default per-request timeout.
+
+    Wraps the session the client already built rather than passing one in:
+    constructing the ``AuthorizedSession`` ourselves would mean resolving
+    credentials, quota project and mTLS outside the client, where the client
+    does all three for us. ``_http`` is the property ``google.cloud.client``
+    exposes for exactly that session.
+    """
+    session = client._http
+    send = session.request
+
+    def request(method: str, url: str, *args: Any, **kwargs: Any) -> Any:
+        # ``timeout`` is the fourth positional parameter after method/url
+        # (data, headers, max_allowed_time, timeout); fill it in only when the
+        # caller left it unset, so an explicit value still wins.
+        if len(args) < 4 and kwargs.get("timeout") is None:
+            kwargs["timeout"] = timeout
+        return send(method, url, *args, **kwargs)
+
+    session.request = request
 
 
 class SecretManagerClientPool:
