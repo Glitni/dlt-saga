@@ -458,10 +458,32 @@ class DuckDBDestination(Destination):
         # DuckDB's JSON_VALUE returns the scalar JSON-encoded ('"x"'), and every
         # JSON function raises on malformed input rather than returning NULL.
         # Guard with json_valid and unwrap the scalar with ->> '$'.
-        path_literal = self.escape_string_literal("$." + ".".join(path))
+        path_literal = self._json_path_literal(path)
         return (
             f"CASE WHEN json_valid({column_sql}) "
             f"THEN json_value({column_sql}, '{path_literal}') ->> '$' END"
+        )
+
+    def json_extract_text(
+        self, column_sql: str, path: Tuple[str, ...], column_type: str
+    ) -> str:
+        # json_extract_string reads a JSON and a VARCHAR column alike: a scalar
+        # unquoted, an object or array as its JSON text, JSON null as NULL.
+        return (
+            f"CASE WHEN json_valid({column_sql}) "
+            f"THEN json_extract_string({column_sql}, '{self._json_path_literal(path)}') END"
+        )
+
+    def json_extract_document(
+        self, column_sql: str, path: Tuple[str, ...], column_type: str
+    ) -> str:
+        # json_extract keeps JSON null as the JSON value null; json_type names
+        # it 'NULL' (and is NULL itself for a missing path).
+        path_literal = self._json_path_literal(path)
+        return (
+            f"CASE WHEN json_valid({column_sql}) "
+            f"AND json_type({column_sql}, '{path_literal}') <> 'NULL' "
+            f"THEN json_extract({column_sql}, '{path_literal}') END"
         )
 
     def columns_query(self, database: str, schema: str, table: str) -> str:

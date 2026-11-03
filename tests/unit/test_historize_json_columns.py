@@ -81,11 +81,11 @@ class TestValidation:
             ({"x": {"column": "pay load", "path": "x"}}, "'column' is required"),
             ({"x": {"column": "p", "type": "text"}}, r"unknown key\(s\) \['type'\]"),
             (
-                {"x": {"column": "p", "path": "x", "data_type": "json"}},
+                {"x": {"column": "p", "path": "x", "data_type": "decimal"}},
                 "data_type must be one of",
             ),
             (
-                {"x": {"column": "p", "path": "x", "data_type": "decimal"}},
+                {"x": {"column": "p", "path": "x", "data_type": "JSON"}},
                 "data_type must be one of",
             ),
             ({"x": {"column": "p", "path": ""}}, "'path' is empty"),
@@ -133,6 +133,62 @@ class TestValidation:
             },
         )
         assert config.json_column_specs[0].name == "event_time"
+
+
+_DOCUMENT = {"identity": {"column": "payload", "path": "identity", "data_type": "json"}}
+
+
+@pytest.mark.unit
+class TestDocumentColumns:
+    """A ``data_type: json`` entry is a value column only."""
+
+    def test_parsed(self):
+        (spec,) = _config(json_columns=_DOCUMENT).json_column_specs
+        assert spec.is_document
+        assert spec.definition() == ["payload", ["identity"], "json"]
+
+    @pytest.mark.parametrize(
+        "setting",
+        [
+            {"snapshot_column": "identity"},
+            {"arrival_column": "identity"},
+            {"strategy": "scd1", "order_by": ["identity"]},
+            {"partition_column": "identity"},
+            {"cluster_columns": ["identity"]},
+            {"filters": [{"column": "identity", "value": "x"}]},
+            {"filters": [{"column": "IDENTITY", "op": "in", "value": ["x"]}]},
+        ],
+    )
+    def test_cannot_be_compared_ordered_or_clustered(self, setting):
+        with pytest.raises(ValueError, match="can't be compared, ordered or clustered"):
+            _config(json_columns=_DOCUMENT, **setting)
+
+    def test_cannot_be_a_key(self):
+        config = _config(primary_key=["identity"], json_columns=_DOCUMENT)
+        with pytest.raises(ValueError, match="can't be compared, so it can't identify"):
+            config.validate()
+
+    def test_cannot_be_an_inherited_key(self):
+        config = HistorizeConfig.from_dict(
+            {"json_columns": _DOCUMENT}, top_level_primary_key=["identity"]
+        )
+        with pytest.raises(ValueError, match="can't identify a key"):
+            config.validate()
+
+    @pytest.mark.parametrize(
+        "setting",
+        [
+            {"filters": [{"column": "identity", "op": "is_null"}]},
+            {"filters": [{"column": "identity", "op": "is_not_null"}]},
+            {"filters": [{"column": "identity", "path": "source", "value": "x"}]},
+            {"ignore_columns": ["identity"]},
+            {"track_columns": ["identity"]},
+            {"exclude_columns": ["payload"]},
+        ],
+    )
+    def test_value_column_uses_allowed(self, setting):
+        config = _config(json_columns=_DOCUMENT, **setting)
+        config.validate()
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +265,7 @@ class TestFingerprint:
             {"column": "payload", "path": "user.id"},
             {"column": "envelope", "path": "user_id"},
             {"column": "payload", "path": "user_id", "data_type": "bigint"},
+            {"column": "payload", "path": "user_id", "data_type": "json"},
         ],
     )
     def test_redefining_an_entry_blocks(self, redefined):
@@ -261,14 +318,21 @@ def _stub_destination():
     dest.quote_identifier.side_effect = lambda s: f"`{s}`"
     dest.escape_string_literal.side_effect = lambda s: s
     dest.is_pseudo_column.return_value = False
-    dest.json_extract_scalar.side_effect = lambda col, path: (
-        f"EXTRACT({col}, {'.'.join(path)})"
+    dest.json_extract_text.side_effect = lambda col, path, col_type: (
+        f"TEXT({col}, {'.'.join(path)}, {col_type})"
+    )
+    dest.json_extract_document.side_effect = lambda col, path, col_type: (
+        f"DOC({col}, {'.'.join(path)}, {col_type})"
     )
     dest.safe_cast.side_effect = lambda expr, t: f"SAFE({expr} AS {t})"
     dest.dlt_type_to_native.side_effect = lambda t: t.upper()
     dest.type_name.side_effect = lambda t: t.upper()
     dest.build_historize_create_table_sql.side_effect = lambda **kw: kw
     return dest
+
+
+# The source's catalog types, as the runner reads them before binding.
+_TYPES = {"payload": "STRING"}
 
 
 def _builder(config, dest=None):
@@ -280,8 +344,9 @@ def _builder(config, dest=None):
         target_table_id="proj.ds.tgt",
         primary_key=["id"],
         source_relation=build_source_relation(
-            dest, "proj.ds.src", config.json_column_specs
+            dest, "proj.ds.src", config.json_column_specs, _TYPES
         ),
+        source_column_types=_TYPES,
     )
 
 
@@ -297,6 +362,38 @@ class TestSourceRelation:
         assert build_source_relation(_stub_destination(), "proj.ds.src", ()) == (
             "proj.ds.src"
         )
+
+    def test_relation_needs_the_source_column_types(self):
+        specs = _config(json_columns=_SPECS).json_column_specs
+        with pytest.raises(RuntimeError, match="no catalog type for column 'payload'"):
+            build_source_relation(_stub_destination(), "proj.ds.src", specs)
+
+    def test_document_entry_is_not_converted(self):
+        specs = _config(json_columns={**_SPECS, **_DOCUMENT}).json_column_specs
+        relation = build_source_relation(
+            _stub_destination(), "proj.ds.src", specs, {"payload": "JSON"}
+        )
+        assert "DOC(`payload`, identity, JSON) AS `identity`" in relation
+        assert "SAFE(DOC" not in relation
+        # The column's own type reaches every entry.
+        assert "SAFE(TEXT(`payload`, user_id, JSON) AS text) AS `user_id`" in relation
+
+    def test_sql_builder_binds_the_relation_later(self):
+        """The runner binds the relation once the catalog types are read."""
+        dest = _stub_destination()
+        builder = HistorizeSqlBuilder(
+            config=_config(json_columns=_SPECS),
+            destination=dest,
+            source_table_id="proj.ds.src",
+            target_table_id="proj.ds.tgt",
+            primary_key=["id"],
+        )
+        assert builder.source_relation == "proj.ds.src"
+        builder.set_source_relation("(derived)", {"payload": "JSON"})
+        assert builder.build_null_pk_probe_sql().startswith(
+            "SELECT CASE WHEN `id` IS NULL THEN 1 ELSE 0 END AS _null_pk_0 FROM (derived)"
+        )
+        assert "TEXT(`payload`, eventTime, JSON)" in builder.failed_cast_checks()[0][1]
 
     def test_without_json_columns_sql_is_unchanged(self):
         dest = _stub_destination()
@@ -317,11 +414,12 @@ class TestSourceRelation:
             _stub_destination(),
             "proj.ds.src",
             _config(json_columns=_SPECS).json_column_specs,
+            _TYPES,
         )
         assert relation == (
             "(\n  SELECT *,\n"
-            "    SAFE(EXTRACT(`payload`, eventTime) AS timestamp) AS `event_time`,\n"
-            "    SAFE(EXTRACT(`payload`, user_id) AS text) AS `user_id`\n"
+            "    SAFE(TEXT(`payload`, eventTime, STRING) AS timestamp) AS `event_time`,\n"
+            "    SAFE(TEXT(`payload`, user_id, STRING) AS text) AS `user_id`\n"
             "  FROM proj.ds.src\n)"
         )
 
@@ -342,27 +440,33 @@ class TestSourceRelation:
         assert joined.count("FROM proj.ds.src") == joined.count("FROM proj.ds.src\n)")
 
     def test_create_table_hints_carry_derived_columns(self):
-        hints = _builder(_config(json_columns=_SPECS)).build_create_target_table_sql(
-            ["payload", "event_time", "user_id"]
+        hints = _builder(
+            _config(json_columns={**_SPECS, **_DOCUMENT})
+        ).build_create_target_table_sql(
+            ["payload", "event_time", "user_id", "identity"]
         )["hints"]
         assert hints.derived_columns == [
             ("event_time", "TIMESTAMP"),
             ("user_id", "TEXT"),
+            ("identity", "JSON"),
         ]
 
-    def test_failed_cast_checks_skip_text(self):
-        checks = _builder(_config(json_columns=_SPECS)).failed_cast_checks()
+    def test_failed_cast_checks_skip_text_and_json(self):
+        checks = _builder(
+            _config(json_columns={**_SPECS, **_DOCUMENT})
+        ).failed_cast_checks()
         assert checks == [
             (
                 "event_time",
-                "(EXTRACT(`payload`, eventTime) IS NOT NULL AND `event_time` IS NULL)",
+                "(TEXT(`payload`, eventTime, STRING) IS NOT NULL "
+                "AND `event_time` IS NULL)",
             )
         ]
 
     def test_failed_cast_probe(self):
         builder = _builder(_config(json_columns=_SPECS))
         sql = builder.build_failed_cast_probe_sql()
-        assert "MAX(CASE WHEN (EXTRACT(`payload`, eventTime) IS NOT NULL" in sql
+        assert "MAX(CASE WHEN (TEXT(`payload`, eventTime, STRING) IS NOT NULL" in sql
         assert "AS _cast_fail_0" in sql
         assert "FROM (\n  SELECT *," in sql
 
@@ -394,6 +498,32 @@ class TestDialects:
         assert dest.json_extract_scalar("`p`", ("a", "b")) == "JSON_VALUE(`p`, '$.a.b')"
         assert dest.safe_cast("x", "timestamp") == "SAFE_CAST(x AS TIMESTAMP)"
         assert dest.safe_cast("x", "text") == "SAFE_CAST(x AS STRING)"
+        assert dest.dlt_type_to_native("json") == "JSON"
+
+    def test_bigquery_reads_a_json_column_and_a_string_apart(self):
+        """JSON_QUERY keeps the input's type, so the two need different SQL."""
+        pytest.importorskip("google.cloud.bigquery")
+        from dlt_saga.destinations.bigquery.destination import BigQueryDestination
+
+        dest = BigQueryDestination.__new__(BigQueryDestination)
+        dest.config = MagicMock()
+        assert dest.json_extract_text("`p`", ("a",), "JSON") == (
+            "CASE WHEN JSON_TYPE(JSON_QUERY(`p`, '$.a')) IN ('object', 'array') "
+            "THEN TO_JSON_STRING(JSON_QUERY(`p`, '$.a')) ELSE JSON_VALUE(`p`, '$.a') END"
+        )
+        assert dest.json_extract_text("`p`", ("a",), "STRING") == (
+            "COALESCE(JSON_VALUE(`p`, '$.a'), NULLIF(JSON_QUERY(`p`, '$.a'), 'null'))"
+        )
+        assert dest.json_extract_document("`p`", ("a",), "JSON") == (
+            "CASE WHEN JSON_TYPE(JSON_QUERY(`p`, '$.a')) = 'null' "
+            "THEN NULL ELSE JSON_QUERY(`p`, '$.a') END"
+        )
+        assert dest.json_extract_document("`p`", ("a",), "STRING") == (
+            "SAFE.PARSE_JSON(NULLIF(JSON_QUERY(`p`, '$.a'), 'null'), "
+            "wide_number_mode => 'round')"
+        )
+        # The catalog's spelling of the type decides, however it is cased.
+        assert dest.json_extract_document("`p`", ("a",), "json").startswith("CASE")
 
     def test_databricks(self):
         pytest.importorskip("databricks.sql")
@@ -402,6 +532,11 @@ class TestDialects:
         dest = DatabricksDestination.__new__(DatabricksDestination)
         dest.config = MagicMock()
         assert dest.json_extract_scalar("`p`", ("a", "b")) == "`p`:a.b"
+        assert dest.json_extract_text("`p`", ("a", "b"), "string") == "`p`:a.b"
+        assert dest.json_extract_document("`p`", ("a",), "string") == (
+            "TRY_CAST(`p`:a AS STRING)"
+        )
+        assert dest.dlt_type_to_native("json") == "STRING"
         assert dest.safe_cast("x", "text") == "TRY_CAST(x AS STRING)"
         assert dest.safe_cast("x", "bool") == "TRY_CAST(x AS BOOLEAN)"
 
@@ -411,6 +546,14 @@ class TestDialects:
         dest = DuckDBDestination.__new__(DuckDBDestination)
         assert dest.safe_cast("x", "timestamp") == "TRY_CAST(x AS TIMESTAMPTZ)"
         assert "json_valid" in dest.json_extract_scalar('"p"', ("a",))
+        assert dest.json_extract_text('"p"', ("a",), "VARCHAR") == (
+            'CASE WHEN json_valid("p") THEN json_extract_string("p", \'$.a\') END'
+        )
+        assert dest.json_extract_document('"p"', ("a",), "VARCHAR") == (
+            "CASE WHEN json_valid(\"p\") AND json_type(\"p\", '$.a') <> 'NULL' "
+            "THEN json_extract(\"p\", '$.a') END"
+        )
+        assert dest.dlt_type_to_native("json") == "JSON"
 
 
 # ---------------------------------------------------------------------------

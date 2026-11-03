@@ -1151,6 +1151,21 @@ class DatabricksDestination(Destination):
         # object or array at the path as JSON text rather than NULL.
         return column_sql + ":" + ".".join(path)
 
+    def json_extract_text(
+        self, column_sql: str, path: Tuple[str, ...], column_type: str
+    ) -> str:
+        # Colon notation already reads the way this contract asks: a scalar
+        # unquoted, an object or array as its JSON text, and NULL for JSON
+        # null, a missing path or malformed input.
+        return self.json_extract_scalar(column_sql, path)
+
+    def json_extract_document(
+        self, column_sql: str, path: Tuple[str, ...], column_type: str
+    ) -> str:
+        # JSON is stored as STRING, so the document is its text; the cast
+        # keeps a VARIANT column's value in that type too.
+        return f"TRY_CAST({self.json_extract_scalar(column_sql, path)} AS STRING)"
+
     # dlt logical types → Databricks SQL types.
     DLT_TO_DATABRICKS_TYPE = {
         "text": "STRING",

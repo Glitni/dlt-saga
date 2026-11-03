@@ -377,12 +377,15 @@ historize:
   # Optional: typed columns extracted from a JSON source column, keyed by output
   # name. Added to the source's columns (the JSON column is still carried) and
   # usable as primary_key/order_by/partition_column/filters like any column.
-  # column and path are required; data_type (text, bigint, double, bool,
-  # timestamp, date) defaults to text. Missing/unconvertible values become NULL (with a
-  # warning when a value fails to convert).
+  # column and path are required; data_type defaults to text, which holds the
+  # value as text (an object or array as its JSON text). bigint, double, bool,
+  # timestamp and date convert that text (unconvertible values become NULL, with
+  # a warning); json keeps the value as a JSON document (a value column only —
+  # not a key, snapshot, order_by, partition/cluster or path-less filter column).
   # json_columns:
   #   event_time: { column: payload, path: eventTime, data_type: timestamp }
   #   tenant: { column: payload, path: meta.tenant }
+  #   identity: { column: payload, path: identity, data_type: json }
 ```
 
 Renaming an SCD2 column or changing `merge_key` (or redefining a `json_columns` entry: its `column`, `path` or `data_type`) after the historized table exists is part of the config fingerprint — the framework will refuse the run and prompt for `saga historize --full-refresh`. Narrowing change detection (a column added to `ignore_columns` or `exclude_columns`, one dropped from `track_columns`) is exempt and applies from the next run; widening still prompts. Source schema changes are not config changes: a column the source gains (or a new `json_columns` entry) is added to the historized table (earlier rows `NULL`), a column it drops is kept with its history and read as `NULL` from then on (warned once), and a changed type is refused with a pointer at `--full-refresh`. A column added to `exclude_columns` after the table exists goes the dropped-column way (kept with its history, `NULL` in new versions, no versions opened by the exclusion); `--full-refresh` or a hand `DROP COLUMN` removes it.
