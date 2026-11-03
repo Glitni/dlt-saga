@@ -39,6 +39,7 @@ from dlt_saga.utility.cli.profiles import ProfileTarget, get_profiles_config
 from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.cli.selectors import PipelineSelector, format_selection
 from dlt_saga.utility.collisions import check_target_collisions
+from dlt_saga.utility.dataframe_libs import preload_dataframe_libs
 from dlt_saga.utility.secrets.redaction import redact
 from dlt_saga.utility.task_groups import (
     check_task_concurrency,
@@ -1183,6 +1184,7 @@ class Session:
         results: List[PipelineResult] = []
         total = len(configs)
 
+        preload_dataframe_libs()
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_config = submit_with_group_caps(
                 executor,

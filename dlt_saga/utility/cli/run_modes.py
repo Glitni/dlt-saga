@@ -29,6 +29,7 @@ from dlt_saga.utility.cli.context import get_execution_context
 from dlt_saga.utility.cli.logging import bind_log_context, log_context
 from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.collisions import TargetCollisionError, check_target_collisions
+from dlt_saga.utility.dataframe_libs import preload_dataframe_libs
 from dlt_saga.utility.env import get_env
 from dlt_saga.utility.naming import get_environment
 from dlt_saga.utility.secrets.redaction import redact
@@ -617,6 +618,7 @@ def _execute_worker_ingest(
 ) -> List[tuple[str, str]]:
     """Execute ingest for assigned pipelines."""
     configs = [c for c in pipeline_configs if c.ingest_enabled]
+    preload_dataframe_libs()
     return _execute_worker_parallel(
         configs,
         task_index,
