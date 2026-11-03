@@ -126,6 +126,8 @@ saga worker \
 
 Workers do not write the local debug-log file — their stdout is already captured by the platform. If you run a worker on a host with persistent storage and want the file anyway, set `SAGA_LOG_FILE=1` (and optionally `SAGA_LOG_DIR=/mnt/logs`). See [CLI Reference → Logging & debugging](CLI-Reference#logging--debugging).
 
+Set `SAGA_LOG_FORMAT=json` on the job so the platform's log collector receives structured records: Cloud Logging then shows the right severity per entry and lets you filter a run by `jsonPayload.execution_id` and a pipeline by `jsonPayload.pipeline`, across every task of the fan-out. See [CLI Reference → Structured (JSON) logging](CLI-Reference#structured-json-logging).
+
 ---
 
 ## Containerisation

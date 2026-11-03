@@ -26,6 +26,7 @@ import typer
 from dlt_saga.pipeline_config import PipelineConfig
 from dlt_saga.utility.cli.common import get_config_source
 from dlt_saga.utility.cli.context import get_execution_context
+from dlt_saga.utility.cli.logging import bind_log_context, log_context
 from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.collisions import TargetCollisionError, check_target_collisions
 from dlt_saga.utility.env import get_env
@@ -175,25 +176,27 @@ def _run_pipeline_safe(
     )
     from dlt_saga.pipelines.executor import execute_pipeline
 
-    fire_pipeline_start(pipeline_config, "ingest")
-    try:
-        result = execute_pipeline(pipeline_config, log_prefix)
-        if result:
-            if isinstance(result, dict) and result.get("operation") == "update_access":
-                table_name = result.get("table_name", "Unknown")
-                tables_updated = result.get("tables_updated", [])
-                message = (
-                    f"Updated access for {table_name} ({len(tables_updated)} table(s))"
-                )
-                logger.info("%s %s", log_prefix, message)
-            else:
-                logger.info("%s %s", log_prefix, summarize_load_info(result))
-        fire_pipeline_complete(pipeline_config, "ingest", result)
-        return None
-    except Exception as e:
-        logger.error("%s %s", log_prefix, e)
-        fire_pipeline_error(pipeline_config, "ingest", e)
-        return _format_run_error(e)
+    with log_context(pipeline=pipeline_config.pipeline_name, command="ingest"):
+        fire_pipeline_start(pipeline_config, "ingest")
+        try:
+            result = execute_pipeline(pipeline_config, log_prefix)
+            if result:
+                if (
+                    isinstance(result, dict)
+                    and result.get("operation") == "update_access"
+                ):
+                    table_name = result.get("table_name", "Unknown")
+                    tables_updated = result.get("tables_updated", [])
+                    message = f"Updated access for {table_name} ({len(tables_updated)} table(s))"
+                    logger.info("%s %s", log_prefix, message)
+                else:
+                    logger.info("%s %s", log_prefix, summarize_load_info(result))
+            fire_pipeline_complete(pipeline_config, "ingest", result)
+            return None
+        except Exception as e:
+            logger.error("%s %s", log_prefix, e)
+            fire_pipeline_error(pipeline_config, "ingest", e)
+            return _format_run_error(e)
 
 
 def _build_historize_runner(
@@ -223,49 +226,52 @@ def _run_historize_safe(
         fire_pipeline_start,
     )
 
-    fire_pipeline_start(pipeline_config, "historize")
-    try:
-        runner = _build_historize_runner(pipeline_config, full_refresh)
-        result = runner.run()
+    with log_context(pipeline=pipeline_config.pipeline_name, command="historize"):
+        fire_pipeline_start(pipeline_config, "historize")
+        try:
+            runner = _build_historize_runner(pipeline_config, full_refresh)
+            result = runner.run()
 
-        if result["status"] == "completed":
-            mode = result["mode"]
-            duration = result.get("duration", 0)
-            timings = result.get("timings", {})
-            timing_parts = ", ".join(f"{k}: {v:.1f}s" for k, v in timings.items())
-            detail = (
-                "all snapshots"
-                if mode == "full_reprocess"
-                else f"{result['snapshots_processed']} snapshot(s)"
+            if result["status"] == "completed":
+                mode = result["mode"]
+                duration = result.get("duration", 0)
+                timings = result.get("timings", {})
+                timing_parts = ", ".join(f"{k}: {v:.1f}s" for k, v in timings.items())
+                detail = (
+                    "all snapshots"
+                    if mode == "full_reprocess"
+                    else f"{result['snapshots_processed']} snapshot(s)"
+                )
+                stats_parts = []
+                if result.get("new_or_changed_rows"):
+                    stats_parts.append(f"{result['new_or_changed_rows']} rows")
+                if result.get("deleted_rows"):
+                    stats_parts.append(f"{result['deleted_rows']} deletions")
+                stats_str = f", {', '.join(stats_parts)}" if stats_parts else ""
+                msg = f"{pipeline_config.pipeline_name}: {mode} ({detail}{stats_str}, {duration:.1f}s [{timing_parts}])"
+                logger.info("%s %s", log_prefix, msg)
+                fire_pipeline_complete(pipeline_config, "historize", result)
+                return None
+            else:
+                error = str(result.get("error", "Unknown error"))
+                logger.error(
+                    "%s %s: %s", log_prefix, pipeline_config.pipeline_name, error
+                )
+                # A runner that reports a failed status rather than raising is still
+                # a failed pipeline, as it is in `Session`.
+                fire_pipeline_error(pipeline_config, "historize", RuntimeError(error))
+                return error
+
+        except Exception as e:
+            logger.error(
+                "%s Historization failed for %s: %s",
+                log_prefix,
+                pipeline_config.pipeline_name,
+                e,
+                exc_info=True,
             )
-            stats_parts = []
-            if result.get("new_or_changed_rows"):
-                stats_parts.append(f"{result['new_or_changed_rows']} rows")
-            if result.get("deleted_rows"):
-                stats_parts.append(f"{result['deleted_rows']} deletions")
-            stats_str = f", {', '.join(stats_parts)}" if stats_parts else ""
-            msg = f"{pipeline_config.pipeline_name}: {mode} ({detail}{stats_str}, {duration:.1f}s [{timing_parts}])"
-            logger.info("%s %s", log_prefix, msg)
-            fire_pipeline_complete(pipeline_config, "historize", result)
-            return None
-        else:
-            error = str(result.get("error", "Unknown error"))
-            logger.error("%s %s: %s", log_prefix, pipeline_config.pipeline_name, error)
-            # A runner that reports a failed status rather than raising is still
-            # a failed pipeline, as it is in `Session`.
-            fire_pipeline_error(pipeline_config, "historize", RuntimeError(error))
-            return error
-
-    except Exception as e:
-        logger.error(
-            "%s Historization failed for %s: %s",
-            log_prefix,
-            pipeline_config.pipeline_name,
-            e,
-            exc_info=True,
-        )
-        fire_pipeline_error(pipeline_config, "historize", e)
-        return _format_run_error(e)
+            fire_pipeline_error(pipeline_config, "historize", e)
+            return _format_run_error(e)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +443,7 @@ def run_orchestrator_mode(
         end_value_override=end_value_override,
     )
     execution_id = plan_manager.create_execution_plan(all_configs, metadata=metadata)
+    bind_log_context(execution_id=execution_id)
 
     task_count = _calculate_task_count(all_configs)
     logger.info("Task allocation: %d total tasks", task_count)
@@ -902,6 +909,7 @@ def run_worker_mode(
     from dlt_saga.utility.orchestration.execution_plan import ExecutionPlanManager
 
     execution_id, task_index = _get_worker_environment(execution_id, task_index)
+    bind_log_context(execution_id=execution_id, task_index=task_index)
     worker_command = worker_command or get_env("SAGA_WORKER_COMMAND", "ingest")
     full_refresh = get_execution_context().full_refresh
     max_workers = _resolve_worker_concurrency(workers)

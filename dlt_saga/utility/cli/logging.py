@@ -1,10 +1,16 @@
+import json
 import logging
 import os
 import sys
 import warnings
-from datetime import datetime
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Iterator, Mapping, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class PrefixedLoggerAdapter(logging.LoggerAdapter):
@@ -68,6 +74,190 @@ class _ColoredFormatter(logging.Formatter):
             return super().format(record)
         finally:
             record.levelname = levelname
+
+
+# ---------------------------------------------------------------------------
+# Log context — fields stamped on every record emitted while a pipeline runs
+# ---------------------------------------------------------------------------
+
+_pipeline_context: ContextVar[Mapping[str, str]] = ContextVar(
+    "saga_log_context", default={}
+)
+_process_context: Dict[str, str] = {}
+
+
+def bind_log_context(**fields: Optional[Any]) -> None:
+    """Attach process-wide fields (e.g. ``execution_id``) to every log record.
+
+    A ``None`` value removes the field. Process-wide because the value holds
+    for the whole invocation: a worker executes one plan, an orchestrator
+    creates one.
+    """
+    for key, value in fields.items():
+        if value is None:
+            _process_context.pop(key, None)
+        else:
+            _process_context[key] = str(value)
+
+
+@contextmanager
+def log_context(**fields: Optional[Any]) -> Iterator[None]:
+    """Stamp ``fields`` on every record emitted while the block runs.
+
+    Bound around each pipeline's execution (``pipeline``, ``command``) in the
+    thread that runs it, so interleaved output from a parallel run stays
+    attributable to a pipeline without parsing the ``[1/N]`` prefix — and so
+    records from dlt or ``requests`` inside the run carry the pipeline too.
+    A context variable is per thread, and the reset keeps a pool thread from
+    carrying one pipeline's fields into the next task it picks up.
+    """
+    merged = dict(_pipeline_context.get())
+    merged.update({k: str(v) for k, v in fields.items() if v is not None})
+    token = _pipeline_context.set(merged)
+    try:
+        yield
+    finally:
+        _pipeline_context.reset(token)
+
+
+def current_log_context() -> Dict[str, str]:
+    """The fields the active record context carries (process-wide + thread)."""
+    return {**_process_context, **_pipeline_context.get()}
+
+
+class _LogContextFilter(logging.Filter):
+    """Copy the active log context onto the record as ``saga_context``.
+
+    Handler-level, like the redaction filter, so it sees every logger's
+    records. The record is shared by every handler; the first stamp wins,
+    which is the same context either way.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "saga_context"):
+            record.saga_context = current_log_context()
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Console format — text for a terminal, JSON lines for a log collector
+# ---------------------------------------------------------------------------
+
+
+class LogFormat(str, Enum):
+    """Console log format: ``text`` (default) or ``json``, one object per line."""
+
+    text = "text"
+    json = "json"
+
+
+_CONSOLE_LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
+_console_format: str = LogFormat.text.value
+
+
+class _JsonFormatter(logging.Formatter):
+    """One JSON object per record, for log collectors.
+
+    ``time``, ``severity`` and ``message`` are the field names collectors parse
+    without configuration (Cloud Logging's structured-log parser reads them
+    natively; they map one-to-one onto the OpenTelemetry log data model). The
+    log context (``pipeline``, ``command``, ``execution_id``) and ``logger``
+    land as plain payload fields, so a collector can filter on them.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        created = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        payload: Dict[str, Any] = {
+            "time": created.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "severity": record.levelname,
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+        context = getattr(record, "saga_context", None)
+        payload.update(context if context is not None else current_log_context())
+        if record.exc_info and not record.exc_text:
+            # Cache like logging.Formatter does, so the file handler's text
+            # formatter and the redaction filter see the same rendering.
+            record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            payload["exception"] = record.exc_text
+        if record.stack_info:
+            payload["stack"] = self.formatStack(record.stack_info)
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _resolve_log_format() -> tuple[str, Optional[str]]:
+    """Console format from ``SAGA_LOG_FORMAT``, and the rejected value if any.
+
+    An unknown value falls back to text. The warning about it is the caller's
+    to log once the console handler exists; nothing is attached yet here.
+    """
+    raw = (os.getenv("SAGA_LOG_FORMAT") or "").strip().lower()
+    if not raw:
+        return LogFormat.text.value, None
+    try:
+        return LogFormat(raw).value, None
+    except ValueError:
+        return LogFormat.text.value, raw
+
+
+def _build_console_formatter(fmt: str) -> logging.Formatter:
+    if fmt == LogFormat.json.value:
+        return _JsonFormatter()
+    if _is_cloud_run():
+        return logging.Formatter(_CONSOLE_LOG_FORMAT)
+    return _ColoredFormatter(_CONSOLE_LOG_FORMAT)
+
+
+def set_console_format(fmt: str) -> None:
+    """Switch the console handler's format (``--log-format``).
+
+    The file handler keeps its text format: it is the human-readable
+    transcript, and a collector never reads it.
+    """
+    global _console_format
+    fmt = LogFormat(fmt).value
+    if _console_handler is not None:
+        _console_handler.setFormatter(_build_console_formatter(fmt))
+    _console_format = fmt
+
+
+def get_console_format() -> str:
+    """The active console format, ``text`` or ``json``."""
+    return _console_format
+
+
+class _DltLogBridge(logging.Handler):
+    """Route dlt's own log records through saga's root handlers.
+
+    dlt builds its ``dlt`` logger on first use with ``propagate = False`` and
+    its own stderr handler in its own text format, and rebuilds it whenever
+    its runtime re-initialises — reusing whichever handler is first on the
+    logger and re-setting that handler's formatter. Installed before dlt's
+    first initialisation, this is the handler it reuses, so dlt's records go
+    through saga's console and file handlers (one format, the redaction and
+    noise filters, the log file) rather than forming a second stream in
+    another shape — which under the JSON format would be bare text lines in
+    the middle of the JSON output.
+    """
+
+    def setFormatter(self, fmt: Optional[logging.Formatter]) -> None:
+        # dlt sets its own formatter on the handler it reuses; the root
+        # handlers format the record, so the one it hands us is irrelevant.
+        pass
+
+    def emit(self, record: logging.LogRecord) -> None:
+        logging.getLogger().handle(record)
+
+
+def _install_dlt_log_bridge() -> None:
+    dlt_logger = logging.getLogger("dlt")
+    for handler in list(dlt_logger.handlers):
+        dlt_logger.removeHandler(handler)
+    dlt_logger.addHandler(_DltLogBridge())
+    # Until dlt initialises, the logger still propagates: the bridge would
+    # forward the record and propagation would deliver it a second time.
+    dlt_logger.propagate = False
 
 
 class _OAuth2ClientFilter(logging.Filter):
@@ -240,8 +430,7 @@ def configure_cli_logging() -> None:
     When enabled, a DEBUG-level file handler is attached so that re-running
     with ``--verbose`` is not required to diagnose a failure after the fact.
     """
-    global _console_handler
-    log_format = "%(asctime)s - %(levelname)s - %(message)s"
+    global _console_handler, _console_format
 
     from dlt_saga.utility.secrets.redaction import SecretRedactingFilter
 
@@ -251,6 +440,9 @@ def configure_cli_logging() -> None:
     # exception). Attached per handler so it covers every logger, saga's and
     # third-party alike — a logger-level filter would miss propagated records.
     redaction_filter = SecretRedactingFilter()
+    # Stamps the pipeline/command/execution context on each record; the JSON
+    # formatter emits it, the text formatters ignore it.
+    context_filter = _LogContextFilter()
 
     root = logging.getLogger()
     # Clear any handlers that a prior call (e.g. in tests) installed so this
@@ -258,21 +450,26 @@ def configure_cli_logging() -> None:
     for h in list(root.handlers):
         root.removeHandler(h)
 
-    if _is_cloud_run():
-        console = logging.StreamHandler()
-        console.setFormatter(logging.Formatter(log_format))
-    else:
-        console = logging.StreamHandler()
-        console.setFormatter(_ColoredFormatter(log_format))
+    _console_format, rejected_format = _resolve_log_format()
+    console = logging.StreamHandler()
+    console.setFormatter(_build_console_formatter(_console_format))
 
     console.setLevel(logging.INFO)
     for f in noise_filters:
         console.addFilter(f)
     console.addFilter(redaction_filter)
+    console.addFilter(context_filter)
     console.addFilter(_FileOnlyFilter())
 
     root.addHandler(console)
     _console_handler = console
+    _install_dlt_log_bridge()
+    if rejected_format is not None:
+        logger.warning(
+            "Unknown SAGA_LOG_FORMAT %r, expected one of %s; using text",
+            rejected_format,
+            ", ".join(f.value for f in LogFormat),
+        )
 
     file_handler: Optional[logging.FileHandler] = None
     if _file_logging_enabled():
@@ -282,6 +479,7 @@ def configure_cli_logging() -> None:
             for f in noise_filters:
                 file_handler.addFilter(f)
             file_handler.addFilter(redaction_filter)
+            file_handler.addFilter(context_filter)
             root.addHandler(file_handler)
             _cleanup_old_log_files(log_dir, _resolve_retention(), _log_file_path)
 
