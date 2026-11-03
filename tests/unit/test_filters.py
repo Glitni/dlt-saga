@@ -391,6 +391,22 @@ class TestRenderFilterDefault:
             dest.render_filter(specs) == "JSON_VALUE(\"config\", '$.enabled') = 'true'"
         )
 
+    def test_path_quotes_keys_that_are_not_plain_identifiers(self):
+        """A hyphen, a space, a dot or a leading digit can't be a bare JSONPath key."""
+        dest = _BaseDestination()
+        specs = parse_filters(
+            [
+                {
+                    "column": "config",
+                    "path": ["headers", "content-type", "a.b", "2024", 'q"k'],
+                    "value": "x",
+                }
+            ]
+        )
+        assert dest.render_filter(specs) == (
+            'JSON_VALUE("config", \'$.headers."content-type"."a.b"."2024"."q\\"k"\') = \'x\''
+        )
+
     def test_path_in_renders_values_as_strings(self):
         dest = _BaseDestination()
         specs = parse_filters(

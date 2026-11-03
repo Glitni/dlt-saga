@@ -218,6 +218,50 @@ class TestExtraction:
         )
 
 
+@pytest.mark.integration
+class TestKeysThatAreNotIdentifiers:
+    """A key with a hyphen, a space or a dot is quoted for the destination."""
+
+    def test_json_columns_and_filter(self, dest):
+        _insert(
+            dest,
+            [
+                (
+                    1,
+                    {"headers": {"content-type": "text/html", "a.b": 1}},
+                    "2026-01-01",
+                    1,
+                ),
+                (
+                    2,
+                    {"headers": {"content-type": "text/csv", "a.b": 2}},
+                    "2026-01-01",
+                    2,
+                ),
+            ],
+        )
+        _run(
+            dest,
+            json_columns={
+                "content_type": {"column": "payload", "path": "headers.content-type"},
+                "dotted": {
+                    "column": "payload",
+                    "path": ["headers", "a.b"],
+                    "data_type": "bigint",
+                },
+            },
+            filters=[
+                {
+                    "column": "payload",
+                    "path": "headers.content-type",
+                    "value": "text/csv",
+                }
+            ],
+        )
+        (row,) = _rows(dest)
+        assert (row["content_type"], row["dotted"]) == ("text/csv", 2)
+
+
 DOCUMENT_COLUMNS = {
     "meta": {"column": "payload", "path": "meta", "data_type": "json"},
     "user_id": {"column": "payload", "path": "user_id"},

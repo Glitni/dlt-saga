@@ -5,12 +5,26 @@ must follow, enabling support for multiple data warehouses (BigQuery, Snowflake,
 """
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# A JSON object key every destination's path syntax takes bare; any other key
+# is quoted in the destination's own form.
+_PLAIN_JSON_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _json_path_key(key: str) -> str:
+    """One JSONPath step for object key ``key``: ``.key``, or ``."key"`` quoted."""
+    if _PLAIN_JSON_KEY.match(key):
+        return "." + key
+    escaped = key.replace("\\", "\\\\").replace('"', '\\"')
+    return f'."{escaped}"'
+
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.config import DestinationConfig
@@ -900,8 +914,14 @@ class Destination(ABC):
         return f"JSON_QUERY({column_sql}, '{self._json_path_literal(path)}')"
 
     def _json_path_literal(self, path: Tuple[str, ...]) -> str:
-        """The JSONPath for object keys ``path``, escaped for a string literal."""
-        return self.escape_string_literal("$." + ".".join(path))
+        """The JSONPath for object keys ``path``, escaped for a string literal.
+
+        A key that isn't a plain identifier (``content-type``, ``zip code``,
+        ``a.b``) is double-quoted, the form BigQuery and DuckDB share, with
+        any ``"`` or ``\\`` inside it backslash-escaped; a plain key stays
+        bare, so the common path reads as before.
+        """
+        return self.escape_string_literal("$" + "".join(map(_json_path_key, path)))
 
     def safe_cast(self, expression: str, dlt_type: str) -> str:
         """Return SQL casting ``expression`` to a dlt logical type, NULL on failure.

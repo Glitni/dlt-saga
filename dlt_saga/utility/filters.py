@@ -48,7 +48,7 @@ FILTER_ENTRY_SCHEMA: Dict[str, Any] = {
             "description": "Source column name (case-sensitive for most paths).",
         },
         "path": {
-            "description": "Optional dotted JSON path inside the column's value (e.g., 'aid.legal_entity').",
+            "description": "Optional JSON path inside the column's value, as a dotted string ('aid.legal_entity') or a list of keys. Keys that aren't plain identifiers ('content-type') are quoted for the destination; a key containing '.' needs the list form.",
             "oneOf": [
                 {"type": "string"},
                 {"type": "array", "items": {"type": "string"}},
