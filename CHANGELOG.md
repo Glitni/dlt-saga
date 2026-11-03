@@ -1,3 +1,14 @@
+## 0.49.0 — 2026-11-03
+
+### Added
+- Historize json_columns data_type json and text that keeps a document (#639)
+
+
+### Fixed
+- Quote JSON path keys that aren't plain identifiers (#644)
+- Json_columns destination defaults, filter grammar reuse and Databricks json note (#643)
+- Gate native_load state-log DDL on existence and give BigQuery requests a socket timeout (#637)
+
 ## 0.48.0 — 2026-11-02
 
 ### Added
