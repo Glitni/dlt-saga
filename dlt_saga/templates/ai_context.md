@@ -464,6 +464,9 @@ default:
       location: EU
       environment: prod
       partition_expiration_days: 365   # BigQuery default for any pipeline targeting this profile; pipeline-level value (above) wins.
+      job_labels:                      # BigQuery job labels beside saga's own (app, saga-command, saga-pipeline, saga-environment, ...)
+        team: data-platform
+        scheduler-run: "{{ env_var('SCHEDULER_RUN_ID', '') }}"   # empty value = label left out
 ```
 
 Switch targets with `--target prod`. Environment affects naming:

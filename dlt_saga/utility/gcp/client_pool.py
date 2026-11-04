@@ -13,6 +13,8 @@ import logging
 import threading
 from typing import Any, Dict, Optional, Tuple
 
+from dlt_saga.utility.gcp.job_labels import label_bigquery_jobs
+
 logger = logging.getLogger(__name__)
 
 # Socket timeout, in seconds, for every request a pooled BigQuery client sends
@@ -302,6 +304,9 @@ class BigQueryClientPool:
             # Create new client for this thread and (project, location)
             client = bigquery.Client(project=project_id, location=location)
             _apply_request_timeout(client, BIGQUERY_REQUEST_TIMEOUT_SECONDS)
+            # Per-call, not a client default: this client serves every pipeline
+            # its thread runs in turn, and the labels name the current one.
+            label_bigquery_jobs(client)
             self._clients[client_key] = client
             logger.debug(
                 f"Created BigQuery client for thread {thread_id}, project "

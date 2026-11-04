@@ -188,3 +188,29 @@ class TestProfileFieldAliases:
         )
         assert "destination_type" not in target.destination_config
         assert "dataset" not in target.destination_config
+
+
+@pytest.mark.unit
+class TestNestedTemplateRendering:
+    """Templates render inside nested destination_config values, not only strings."""
+
+    def test_job_labels_values_rendered(self, monkeypatch):
+        monkeypatch.setenv("SCHEDULER_RUN_ID", "scheduled__2026-11-04")
+        monkeypatch.delenv("SCHEDULER_DAG_ID", raising=False)
+        target = ProfileTarget.from_dict(
+            "prod",
+            {
+                "type": "bigquery",
+                "database": "my-project",
+                "job_labels": {
+                    "team": "data",
+                    "scheduler-run": "{{ env_var('SCHEDULER_RUN_ID', '') }}",
+                    "scheduler-dag": "{{ env_var('SCHEDULER_DAG_ID', '') }}",
+                },
+            },
+        )
+        assert target.destination_config["job_labels"] == {
+            "team": "data",
+            "scheduler-run": "scheduled__2026-11-04",
+            "scheduler-dag": "",
+        }

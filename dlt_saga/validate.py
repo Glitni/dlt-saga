@@ -397,6 +397,43 @@ def _validate_task_concurrency(
             result.errors.extend(messages)
 
 
+def _validate_profile_job_labels() -> List[ValidationResult]:
+    """Check the active target's ``job_labels`` against its destination's rules.
+
+    The same check the destination config applies at run time, surfaced
+    offline so a reserved or malformed key is caught before a scheduled run
+    fails on it. A destination that doesn't tag jobs gets a warning that the
+    key has no effect. Returns one ``kind="project"`` result, or none.
+    """
+    from dlt_saga.destinations.factory import DestinationFactory
+    from dlt_saga.utility.cli.context import get_execution_context
+
+    target = get_execution_context().profile_target
+    if target is None:
+        return []
+    declared = target.destination_config.get("job_labels")
+    if not declared:
+        return []
+    name = f"profile target '{target.name}'"
+    try:
+        config_class = DestinationFactory.get_config_class(target.destination_type)
+        supported = config_class.validate_job_labels(declared, "job_labels")
+    except ValueError as exc:
+        return [ValidationResult(pipeline_name=name, errors=[str(exc)], kind="project")]
+    if supported is None:
+        return [
+            ValidationResult(
+                pipeline_name=name,
+                warnings=[
+                    f"job_labels has no effect on a {target.destination_type} "
+                    "target: this destination doesn't tag its warehouse jobs"
+                ],
+                kind="project",
+            )
+        ]
+    return []
+
+
 def _validate_legacy_keys(
     configs: List[PipelineConfig],
     source: ConfigSource,
@@ -449,6 +486,9 @@ def validate_pipeline_configs(
     * **Deprecated config keys** — legacy alias keys in the selected config files
       and in ``saga_project.yml`` / ``profiles.yml`` (warnings; aliases still
       resolve).
+    * **Job labels** — the active target's ``job_labels`` against its
+      destination's rules (errors on a key it can't take; a warning when the
+      destination doesn't tag jobs at all).
 
     Every check is offline — no warehouse connection or credentials. This is the
     complete correctness gate behind ``saga validate`` and
@@ -475,5 +515,6 @@ def validate_pipeline_configs(
     collision_results = _validate_collisions(configs, source, environments, by_name)
     _validate_task_concurrency(configs, source, by_name)
     project_results = _validate_legacy_keys(configs, source, by_name)
+    label_results = _validate_profile_job_labels()
 
-    return results + collision_results + project_results
+    return results + collision_results + project_results + label_results

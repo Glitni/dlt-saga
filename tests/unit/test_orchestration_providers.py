@@ -61,7 +61,15 @@ class TestStdoutProvider:
 
         assert output["command"] == "ingest"
         assert output["worker_concurrency"] is None
+        assert output["job_labels"] == {}
         assert result.execution_reference == "stdout:x"
+
+    def test_trigger_outputs_job_labels(self, capsys):
+        StdoutProvider().trigger(
+            execution_id="x", task_count=1, job_labels={"team": "t"}
+        )
+        output = json.loads(capsys.readouterr().out)
+        assert output["job_labels"] == {"team": "t"}
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +154,7 @@ class TestCloudRunProvider:
             worker_command="historize",
             force=False,
             worker_concurrency=None,
+            job_labels=None,
         )
         assert (
             result.execution_reference == "projects/p/locations/r/jobs/j/executions/e"
@@ -172,7 +181,22 @@ class TestCloudRunProvider:
             worker_command="ingest",
             force=False,
             worker_concurrency=2,
+            job_labels=None,
         )
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("dlt_saga.utility.orchestration.cloud_run_trigger.CloudRunJobTrigger")
+    def test_trigger_forwards_job_labels(self, mock_trigger_cls):
+        mock_instance = MagicMock()
+        mock_instance.trigger_execution.return_value = "ref"
+        mock_trigger_cls.return_value = mock_instance
+
+        provider = CloudRunProvider(project_id="p", region="r", job_name="j")
+        provider.trigger(execution_id="exec-1", task_count=1, job_labels={"team": "t"})
+
+        assert mock_instance.trigger_execution.call_args.kwargs["job_labels"] == {
+            "team": "t"
+        }
 
 
 # ---------------------------------------------------------------------------

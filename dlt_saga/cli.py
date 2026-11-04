@@ -95,6 +95,7 @@ app = typer.Typer(help="saga data pipeline framework")
 
 @app.callback(invoke_without_command=True)
 def _app_callback(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False,
         "--version",
@@ -117,6 +118,9 @@ def _app_callback(
     """saga data pipeline framework."""
     if log_format is not None:
         set_console_format(log_format.value)
+    # The subcommand is the process's command; a pipeline's own context
+    # (ingest/historize) overrides it for the records and jobs inside its run.
+    bind_log_context(command=ctx.invoked_subcommand)
 
 
 # ---------------------------------------------------------------------------

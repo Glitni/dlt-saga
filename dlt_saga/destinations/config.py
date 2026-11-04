@@ -68,3 +68,20 @@ class DestinationConfig:
         Each destination subclass overrides this.
         """
         raise NotImplementedError(f"{cls.__name__} must implement from_dict()")
+
+    @classmethod
+    def validate_job_labels(cls, labels: Any, where: str) -> Optional[Dict[str, str]]:
+        """Check a profile target's ``job_labels`` against this destination's rules.
+
+        A destination that tags its warehouse jobs with the context from
+        :mod:`dlt_saga.utility.job_labels` declares the ``job_labels`` profile
+        field on its config class and overrides this to return the labels in
+        the form it sends them, raising ``ValueError`` for a declaration it
+        can't use. The base returns ``None``: this destination doesn't tag
+        jobs, and ``saga validate`` warns that the key has no effect.
+
+        Args:
+            labels: The raw ``job_labels`` value from the profile target.
+            where: Where it was declared, for the error message.
+        """
+        return None

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from dlt_saga.destinations.config import DestinationConfig
+from dlt_saga.utility.gcp import job_labels as bq_job_labels
 
 if TYPE_CHECKING:
     from dlt_saga.utility.cli.context import ExecutionContext
@@ -71,6 +72,25 @@ class BigQueryDestinationConfig(DestinationConfig):
             ),
         },
     )
+    # Labels on every BigQuery job this target's runs issue, beside saga's
+    # own (`app`, `saga-*`). Values are rendered at load time, so a label can
+    # carry an env var from the scheduler that started saga.
+    job_labels: Dict[str, str] = field(
+        default_factory=dict,
+        metadata={
+            "profile_field": True,
+            "description": (
+                "BigQuery only. Labels added to every BigQuery job saga issues for "
+                "this target (dlt loads, historize and native_load SQL, state "
+                "tables), beside saga's built-in 'app' and 'saga-*' labels, so jobs "
+                "are traceable in INFORMATION_SCHEMA.JOBS. Keys: lowercase letters, "
+                "digits, '_' or '-', starting with a letter. Values are lowercased, "
+                "characters outside [a-z0-9_-] become '-', cut at 63; an empty value "
+                "(e.g. an unset env var) drops the label. Supports "
+                "{{ env_var('VAR', '') }}."
+            ),
+        },
+    )
 
     @property
     def database(self) -> str:
@@ -104,6 +124,13 @@ class BigQueryDestinationConfig(DestinationConfig):
                 f"partition_expiration_days must be >= 1, got {self.partition_expiration_days}"
             )
 
+        self.job_labels = self.validate_job_labels(self.job_labels, "job_labels")
+
+    @classmethod
+    def validate_job_labels(cls, labels: Any, where: str) -> Dict[str, str]:
+        """BigQuery label rules: validated keys, cleaned values, at most 64 per job."""
+        return bq_job_labels.validate_job_labels(labels, where)
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> BigQueryDestinationConfig:
         """Create BigQuery config from dictionary.
@@ -125,6 +152,7 @@ class BigQueryDestinationConfig(DestinationConfig):
             table_format=data.get("table_format", "native"),
             storage_path=data.get("storage_path"),
             partition_expiration_days=data.get("partition_expiration_days"),
+            job_labels=data.get("job_labels") or {},
         )
 
     @classmethod
@@ -142,6 +170,7 @@ class BigQueryDestinationConfig(DestinationConfig):
             table_format: config_dict > context (profile) > "native"
             storage_path: context (profile) — required for iceberg
             schema_access: config_dict (from saga_project.yml)
+            job_labels: context (profile) — one set per target, never per pipeline
         """
         from dlt_saga.utility.env import get_env
 
@@ -181,6 +210,13 @@ class BigQueryDestinationConfig(DestinationConfig):
                 "partition_expiration_days"
             )
 
+        job_labels: Dict[str, str] = {}
+        if context.profile_target:
+            job_labels = cls.validate_job_labels(
+                context.profile_target.destination_config.get("job_labels"),
+                f"profile target '{context.profile_target.name}': job_labels",
+            )
+
         return cls(
             destination_type="bigquery",
             project_id=project_id,
@@ -192,4 +228,5 @@ class BigQueryDestinationConfig(DestinationConfig):
             table_format=table_format,
             storage_path=storage_path,
             partition_expiration_days=partition_expiration_days,
+            job_labels=job_labels,
         )

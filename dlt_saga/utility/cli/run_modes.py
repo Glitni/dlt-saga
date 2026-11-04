@@ -31,6 +31,7 @@ from dlt_saga.utility.cli.reporting import summarize_load_info
 from dlt_saga.utility.collisions import TargetCollisionError, check_target_collisions
 from dlt_saga.utility.dataframe_libs import preload_dataframe_libs
 from dlt_saga.utility.env import get_env
+from dlt_saga.utility.job_labels import user_job_labels
 from dlt_saga.utility.naming import get_environment
 from dlt_saga.utility.secrets.redaction import redact
 from dlt_saga.utility.task_groups import (
@@ -459,6 +460,7 @@ def run_orchestrator_mode(
             debug=debug_logging,
             force=force,
             worker_concurrency=resolved_workers,
+            job_labels=user_job_labels(),
         )
         logger.info(
             "Triggered execution: %s (worker concurrency: %d)",
