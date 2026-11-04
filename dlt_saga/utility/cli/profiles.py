@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from dlt_saga.utility.env import get_env
-from dlt_saga.utility.templating import render_template_str
+from dlt_saga.utility.templating import render_template_str, render_templates
 from dlt_saga.utility.yaml_io import load_yaml
 
 logger = logging.getLogger(__name__)
@@ -255,14 +255,16 @@ class ProfileTarget:
             for k, v in historize_raw.items()
         }
 
-        # Everything not in _CORE_FIELDS goes into destination_config
+        # Everything not in _CORE_FIELDS goes into destination_config, with
+        # templates rendered inside nested mappings/lists (e.g. job_labels) as
+        # well as plain strings.
         dest_config: Dict[str, Any] = {}
         for key, value in config.items():
             if key not in _CORE_FIELDS:
                 if isinstance(value, str):
                     dest_config[key] = interpolate_env_vars(value)
                 else:
-                    dest_config[key] = value
+                    dest_config[key] = render_templates(value)
 
         return cls(
             name=name,

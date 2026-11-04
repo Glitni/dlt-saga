@@ -491,6 +491,27 @@ class TestForcePropagation:
         names = {e["name"]: e["value"] for e in env}
         assert names.get("SAGA_WORKER_CONCURRENCY") == "2"
 
+    def test_cloud_run_trigger_emits_job_labels_env_var(self):
+        """The orchestrator's resolved labels reach workers as SAGA_JOB_LABELS."""
+        request = self._run_trigger_with_fake_run_v2(
+            execution_id="exec-4",
+            task_count=1,
+            job_labels={"team": "t", "airflow-run": "r"},
+        )
+        env = request.overrides.container_overrides[0].env
+        names = {e["name"]: e["value"] for e in env}
+        assert json.loads(names["SAGA_JOB_LABELS"]) == {
+            "team": "t",
+            "airflow-run": "r",
+        }
+
+    def test_cloud_run_trigger_omits_job_labels_when_empty(self):
+        request = self._run_trigger_with_fake_run_v2(
+            execution_id="exec-5", task_count=1, job_labels={}
+        )
+        env = request.overrides.container_overrides[0].env
+        assert "SAGA_JOB_LABELS" not in {e["name"] for e in env}
+
     def test_cloud_run_trigger_omits_worker_concurrency_when_none(self):
         """When worker_concurrency is unset, no env var is sent (worker uses defaults)."""
         request = self._run_trigger_with_fake_run_v2(

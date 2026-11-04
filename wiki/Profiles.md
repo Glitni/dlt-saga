@@ -82,6 +82,37 @@ prod:
 | `database` | Yes | — | GCP project ID (aliases: `project`, `project_id`) |
 | `location` | No | `EU` | BigQuery location |
 | `partition_expiration_days` | No | — | Default partition expiration (in days) for partitioned tables created by pipelines targeting this profile. Maps to BigQuery's `time_partitioning.expiration_ms`. Honored on `CREATE TABLE` and reconciled on every subsequent run (changing or unsetting the value ALTERs the existing table); can be overridden per-pipeline. Only applies to native tables — Iceberg ignores it. |
+| `job_labels` | No | — | Labels added to every BigQuery job saga issues for this target, beside saga's built-in ones. See [BigQuery job labels](#bigquery-job-labels). |
+
+#### BigQuery job labels
+
+Every BigQuery job a saga process issues — dlt's load and merge jobs, historize and native_load SQL, the `_saga_*` state tables, IAM sync — carries one set of labels, so saga's jobs are traceable in `INFORMATION_SCHEMA.JOBS` (and `JOBS_BY_ORGANIZATION`) next to the jobs other tools issue:
+
+| Label | Value |
+|-------|-------|
+| `app` | always `dlt-saga` |
+| `saga-command` | `ingest` / `historize` for a pipeline's own jobs; otherwise the CLI subcommand (`notify`, `report`, `maintenance`, ...) |
+| `saga-pipeline` | the pipeline name, e.g. `google_sheets__sales` |
+| `saga-environment` | `dev` / `prod` |
+| `saga-execution-id` | the execution plan ID (orchestrated runs only) |
+| `saga-task` | the task index (worker runs only) |
+
+A target adds its own labels with `job_labels`. Values are rendered at load time, so a label can carry what the scheduler that started saga put in the environment — the same values it puts on its own jobs — and a label whose value renders empty is left out:
+
+```yaml
+prod:
+  type: bigquery
+  database: your-gcp-project
+  environment: prod
+  job_labels:
+    team: data-platform
+    scheduler-dag: "{{ env_var('SCHEDULER_DAG_ID', '') }}"
+    scheduler-run: "{{ env_var('SCHEDULER_RUN_ID', '') }}"
+```
+
+Keys must be valid BigQuery label keys (lowercase letters, digits, `_` or `-`, starting with a letter, at most 63 characters); `app` and `saga-*` are reserved, and `saga validate` reports a key saga can't use. On a destination that doesn't tag its jobs (DuckDB, Databricks today) the key has no effect, and `saga validate` warns. Values are cleaned the way BigQuery requires — lowercased, any character outside `[a-z0-9_-]` replaced by `-`, cut at 63 — so a value like `scheduled__2026-11-04T10:00:00+00:00` becomes `scheduled__2026-11-04t10-00-00-00-00`, the same rewrite other tools apply, and the label matches across them.
+
+With `--orchestrate`, the labels resolved on the orchestrator are forwarded to the workers it starts (as `SAGA_JOB_LABELS`, a JSON object merged over the worker's own `job_labels`), so a worker labels its jobs with the run that started it rather than with its own, emptier, environment. A worker started any other way renders its own profile.
 
 ### Databricks Fields
 

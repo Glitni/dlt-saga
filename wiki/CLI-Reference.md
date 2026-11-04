@@ -622,7 +622,8 @@ For a log collector rather than a terminal — Cloud Run, a container platform, 
 | `severity` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` |
 | `message` | The rendered message, exactly as the text format prints it |
 | `logger` | Python logger name (`dlt_saga.…`, or `dlt` for dlt's own records) |
-| `pipeline`, `command` | Present on every record emitted while a pipeline runs, including records from dlt and HTTP libraries inside it, so interleaved output from parallel pipelines filters cleanly by pipeline |
+| `command` | The CLI subcommand (`notify`, `report`, `run`, ...) on every record; `ingest` / `historize` on records emitted while a pipeline runs |
+| `pipeline` | Present on every record emitted while a pipeline runs, including records from dlt and HTTP libraries inside it, so interleaved output from parallel pipelines filters cleanly by pipeline |
 | `execution_id`, `task_index` | Present in orchestrated runs (`saga plan`, `--orchestrate`, `saga worker`), so one fan-out run can be followed across its worker containers |
 | `exception` | Formatted traceback, when the record carries one |
 

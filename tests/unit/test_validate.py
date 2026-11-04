@@ -533,3 +533,51 @@ class TestValidateConfigsTaskConcurrency:
             [selected], _collision_source(project), environments=["dev"]
         )
         assert self._errors(results, "google_sheets__a")
+
+
+@pytest.mark.unit
+class TestValidateConfigsJobLabels:
+    """The active BigQuery target's job_labels are checked offline."""
+
+    def _run(self, destination_config, destination_type="bigquery"):
+        from dlt_saga.utility.cli.context import execution_context_scope
+        from dlt_saga.utility.cli.profiles import ProfileTarget
+
+        target = ProfileTarget(
+            name="prod",
+            environment="prod",
+            destination_type=destination_type,
+            destination_config=destination_config,
+        )
+        configs = [_gs_config("google_sheets__a", "a")]
+        with execution_context_scope(target):
+            return validate_pipeline_configs(
+                configs, _collision_source(configs), environments=["dev"]
+            )
+
+    def test_reserved_key_is_a_project_error(self):
+        results = self._run({"database": "p", "job_labels": {"saga-task": "x"}})
+        project = [r for r in results if r.kind == "project"]
+        assert len(project) == 1
+        assert project[0].pipeline_name == "profile target 'prod'"
+        assert not project[0].is_valid
+        assert "reserved" in project[0].errors[0]
+        assert results[0].is_valid  # the pipeline config itself is fine
+
+    def test_valid_labels_add_nothing(self):
+        results = self._run({"database": "p", "job_labels": {"team": "t"}})
+        assert all(r.kind == "pipeline" for r in results)
+
+    def test_destination_without_job_tagging_warns(self):
+        results = self._run(
+            {"database_path": "x.duckdb", "job_labels": {"team": "t"}},
+            destination_type="duckdb",
+        )
+        project = [r for r in results if r.kind == "project"]
+        assert len(project) == 1
+        assert project[0].is_valid
+        assert "no effect on a duckdb target" in project[0].warnings[0]
+
+    def test_no_declaration_adds_nothing(self):
+        results = self._run({"database": "p"})
+        assert all(r.kind == "pipeline" for r in results)

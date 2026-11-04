@@ -4,12 +4,14 @@ This module handles triggering Cloud Run Jobs with specific task counts
 for distributed pipeline execution.
 """
 
+import json
 import logging
 import os
-from typing import Optional
+from typing import Dict, Optional
 
 from dlt_saga.utility.cli.logging import YELLOW, colorize
 from dlt_saga.utility.env import get_env
+from dlt_saga.utility.job_labels import ENV_JOB_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ class CloudRunJobTrigger:
         worker_command: str = "ingest",
         force: bool = False,
         worker_concurrency: Optional[int] = None,
+        job_labels: Optional[Dict[str, str]] = None,
     ) -> str:
         """Trigger a Cloud Run Job execution with specified task count.
 
@@ -66,6 +69,9 @@ class CloudRunJobTrigger:
             worker_concurrency: Per-task concurrency cap. Forwarded as
                 ``SAGA_WORKER_CONCURRENCY`` so workers receiving a multi-
                 pipeline ``task_group`` cap in-task parallelism.
+            job_labels: Forwarded as ``SAGA_JOB_LABELS`` (a JSON object) so
+                workers tag their warehouse jobs with the orchestrator's
+                project-declared labels.
 
         Returns:
             execution_name: Full resource name of the created execution
@@ -100,6 +106,11 @@ class CloudRunJobTrigger:
                 run_v2.EnvVar(
                     name="SAGA_WORKER_CONCURRENCY", value=str(worker_concurrency)
                 )
+            )
+
+        if job_labels:
+            env_vars.append(
+                run_v2.EnvVar(name=ENV_JOB_LABELS, value=json.dumps(job_labels))
             )
 
         # Create container overrides with environment variables

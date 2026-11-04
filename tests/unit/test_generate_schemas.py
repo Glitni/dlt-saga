@@ -905,3 +905,39 @@ class TestSecretSupportNote:
         assert "secret URI" in props["certificate"]["description"]
         # Non-secret field untouched.
         assert "secret URI" not in props["file_type"]["description"]
+
+
+@pytest.mark.unit
+class TestDestinationProfileProps:
+    def test_dict_profile_field_becomes_object(self):
+        from typing import Dict
+
+        from dlt_saga.utility.generate_schemas import _destination_profile_props
+
+        @dataclass
+        class Config:
+            plain: Optional[int] = field(
+                default=None, metadata={"profile_field": True, "minimum": 1}
+            )
+            labels: Dict[str, str] = field(
+                default_factory=dict,
+                metadata={"profile_field": True, "description": "labels"},
+            )
+            internal: str = ""
+
+        props = _destination_profile_props(Config)
+        assert props["plain"] == {"type": "integer", "minimum": 1}
+        assert props["labels"] == {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": "labels",
+        }
+        assert "internal" not in props
+
+    def test_bigquery_job_labels_in_profile_schema(self):
+        from dlt_saga.destinations.bigquery.config import BigQueryDestinationConfig
+        from dlt_saga.utility.generate_schemas import _destination_profile_props
+
+        props = _destination_profile_props(BigQueryDestinationConfig)
+        assert props["job_labels"]["type"] == "object"
+        assert props["job_labels"]["additionalProperties"] == {"type": "string"}

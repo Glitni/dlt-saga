@@ -1023,3 +1023,28 @@ class TestNativeLoadCountRowsBQ:
 
     def test_precount_is_advertised_as_supported(self):
         assert BigQueryDestination.supports_native_load_precount(_make_dest()) is True
+
+
+@pytest.mark.unit
+class TestLoadChunksConcurrentlyContext:
+    """Chunk threads run under the submitting thread's context."""
+
+    def test_chunks_see_the_pipeline_log_context(self):
+        from dlt_saga.pipelines.native_load.pipeline import NativeLoadPipeline
+        from dlt_saga.utility.cli.logging import current_log_context, log_context
+
+        seen = {}
+
+        def load_chunk(chunk, chunk_num, total_chunks):
+            seen[chunk_num] = current_log_context().get("pipeline")
+            return len(chunk)
+
+        pipeline = NativeLoadPipeline.__new__(NativeLoadPipeline)
+        pipeline._load_chunk = load_chunk
+        with log_context(pipeline="native_load__events", command="ingest"):
+            total = pipeline._load_chunks_concurrently(
+                [(1, ["a", "b"]), (2, ["c"]), (3, ["d"])], 3, 2
+            )
+        assert total == 4
+        assert seen == {n: "native_load__events" for n in (1, 2, 3)}
+        assert current_log_context().get("pipeline") is None

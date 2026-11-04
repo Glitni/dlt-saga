@@ -10,6 +10,10 @@ import os
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from dlt_saga.destinations.base import Destination
+from dlt_saga.utility.gcp.job_labels import (
+    attach_job_labels_to_dlt_destination,
+    current_job_labels,
+)
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.bigquery.access import BigQueryAccessManager
@@ -209,7 +213,11 @@ class BigQueryBaseDestination(Destination):
         # Add destination-specific kwargs
         kwargs.update(self._get_bigquery_destination_kwargs())
 
-        return bigquery(**kwargs)
+        dlt_destination = bigquery(**kwargs)
+        # Resolved here, on the pipeline's thread, where the log context names
+        # the pipeline: dlt opens its client on its own pool threads.
+        attach_job_labels_to_dlt_destination(dlt_destination, current_job_labels())
+        return dlt_destination
 
     def get_access_manager(self) -> Any:
         """Get BigQuery access manager for IAM-based access control.

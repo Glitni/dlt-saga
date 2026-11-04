@@ -431,3 +431,50 @@ class TestCreateDltDestinationProjectId:
         with patch("dlt.destinations.bigquery") as mock_bq:
             dest.create_dlt_destination()
         assert mock_bq.call_args.kwargs["project_id"] == "only-proj"
+
+
+@pytest.mark.unit
+class TestJobLabels:
+    """job_labels: a profile-target field, validated as a config error."""
+
+    def _make_context(self, job_labels=None):
+        ctx = MagicMock()
+        ctx.get_database.return_value = "proj"
+        ctx.get_location.return_value = "EU"
+        ctx.get_table_format.return_value = "native"
+        ctx.get_storage_path.return_value = None
+        ctx.profile_target.name = "prod"
+        ctx.profile_target.destination_config = (
+            {"job_labels": job_labels} if job_labels is not None else {}
+        )
+        ctx.profile_target.billing_project = None
+        return ctx
+
+    def test_from_context_reads_profile_labels_cleaned(self):
+        ctx = self._make_context({"team": "Data Platform", "unset": ""})
+        cfg = BigQueryDestinationConfig.from_context(ctx, {})
+        assert cfg.job_labels == {"team": "data-platform"}
+
+    def test_from_context_without_labels(self):
+        cfg = BigQueryDestinationConfig.from_context(self._make_context(), {})
+        assert cfg.job_labels == {}
+
+    def test_from_context_rejects_reserved_key_naming_the_target(self):
+        ctx = self._make_context({"saga-pipeline": "x"})
+        with pytest.raises(ValueError, match="profile target 'prod': job_labels"):
+            BigQueryDestinationConfig.from_context(ctx, {})
+
+    def test_pipeline_config_cannot_set_labels(self):
+        ctx = self._make_context()
+        cfg = BigQueryDestinationConfig.from_context(ctx, {"job_labels": {"a": "b"}})
+        assert cfg.job_labels == {}
+
+    def test_from_dict_validates(self):
+        cfg = BigQueryDestinationConfig.from_dict(
+            {"project_id": "p", "job_labels": {"team": "T"}}
+        )
+        assert cfg.job_labels == {"team": "t"}
+        with pytest.raises(ValueError, match="is invalid"):
+            BigQueryDestinationConfig.from_dict(
+                {"project_id": "p", "job_labels": {"Bad": "v"}}
+            )

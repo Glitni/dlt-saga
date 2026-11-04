@@ -114,6 +114,16 @@ class DestinationFactory:
         return destination_class(config)
 
     @classmethod
+    def get_config_class(cls, destination_type: str) -> Type[DestinationConfig]:
+        """Return the config class registered for a destination type.
+
+        Raises:
+            ValueError: If the destination type is not registered.
+        """
+        cls._check_registered(destination_type)
+        return cls._config_registry[destination_type]
+
+    @classmethod
     def get_destination_class(cls, destination_type: str) -> Type[Destination]:
         """Get the destination class for a given type.
 

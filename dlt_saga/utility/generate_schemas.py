@@ -285,6 +285,23 @@ def dataclass_to_json_schema(
     return result
 
 
+def _profile_prop_schema(annotation: Any, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """The JSON-schema type of one profile field from its annotation.
+
+    ``Optional[T]`` is unwrapped to ``T``; a ``Dict`` field becomes an object
+    with typed values; anything else maps to a primitive, defaulting to string.
+    """
+    import typing
+
+    if typing.get_origin(annotation) is typing.Union:
+        non_none = [a for a in typing.get_args(annotation) if a is not type(None)]
+        annotation = non_none[0] if non_none else str
+    if typing.get_origin(annotation) is dict:
+        return _handle_dict_type(annotation, metadata)
+    type_map = {str: "string", int: "integer", float: "number", bool: "boolean"}
+    return {"type": type_map.get(annotation, "string")}
+
+
 def _destination_profile_props(config_class: type) -> Dict[str, Any]:
     """Build profile-schema props for one destination's specific YAML keys.
 
@@ -309,17 +326,11 @@ def _destination_profile_props(config_class: type) -> Dict[str, Any]:
         hints = typing.get_type_hints(config_class)
     except Exception:
         hints = {}
-    type_map = {str: "string", int: "integer", float: "number", bool: "boolean"}
-
     for f in fields(config_class):
         if not (f.metadata and f.metadata.get("profile_field")):
             continue
         key = f.metadata.get("profile_key", f.name)
-        annotation = hints.get(f.name, str)
-        if typing.get_origin(annotation) is typing.Union:
-            non_none = [a for a in typing.get_args(annotation) if a is not type(None)]
-            annotation = non_none[0] if non_none else str
-        prop: Dict[str, Any] = {"type": type_map.get(annotation, "string")}
+        prop = _profile_prop_schema(hints.get(f.name, str), dict(f.metadata))
         for meta_key in (
             "description",
             "enum",

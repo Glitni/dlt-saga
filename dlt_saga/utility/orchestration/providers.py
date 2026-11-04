@@ -11,7 +11,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 from dlt_saga.utility.env import get_env
 
@@ -45,6 +45,7 @@ class OrchestrationProvider(ABC):
         debug: bool = False,
         force: bool = False,
         worker_concurrency: Optional[int] = None,
+        job_labels: Optional[Dict[str, str]] = None,
     ) -> TriggerResult:
         """Trigger workers to execute an execution plan.
 
@@ -59,6 +60,11 @@ class OrchestrationProvider(ABC):
             worker_concurrency: In-task parallelism cap for each worker,
                 forwarded so that a multi-pipeline ``task_group`` doesn't
                 fan out to as many threads as it has pipelines.
+            job_labels: The orchestrator's project-declared job labels
+                (:func:`dlt_saga.utility.job_labels.user_job_labels`),
+                forwarded so workers tag their warehouse jobs with the values
+                resolved where the run was started (a worker's own
+                environment lacks what the scheduler gave the orchestrator).
 
         Returns:
             TriggerResult with a reference to the triggered execution.
@@ -105,6 +111,7 @@ class CloudRunProvider(OrchestrationProvider):
         debug: bool = False,
         force: bool = False,
         worker_concurrency: Optional[int] = None,
+        job_labels: Optional[Dict[str, str]] = None,
     ) -> TriggerResult:
         from dlt_saga.utility.orchestration.cloud_run_trigger import CloudRunJobTrigger
 
@@ -120,6 +127,7 @@ class CloudRunProvider(OrchestrationProvider):
             worker_command=command,
             force=force,
             worker_concurrency=worker_concurrency,
+            job_labels=job_labels,
         )
         return TriggerResult(execution_reference=execution_name)
 
@@ -187,6 +195,7 @@ class StdoutProvider(OrchestrationProvider):
         debug: bool = False,
         force: bool = False,
         worker_concurrency: Optional[int] = None,
+        job_labels: Optional[Dict[str, str]] = None,
     ) -> TriggerResult:
         output = {
             "execution_id": execution_id,
@@ -194,6 +203,7 @@ class StdoutProvider(OrchestrationProvider):
             "command": command,
             "force": force,
             "worker_concurrency": worker_concurrency,
+            "job_labels": job_labels or {},
         }
         # JSON goes to stdout; status messages go to stderr via logger
         print(json.dumps(output))

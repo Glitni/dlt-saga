@@ -5,6 +5,7 @@ INSERT, or Databricks COPY INTO) without going through dlt's extract/normalize
 pipeline.  Designed for large sources where dlt would be too slow.
 """
 
+import contextvars
 import itertools
 import logging
 import re
@@ -784,8 +785,18 @@ class NativeLoadPipeline(BasePipeline):
         with ThreadPoolExecutor(
             max_workers=concurrency, thread_name_prefix="native-load"
         ) as pool:
+            # Each chunk runs under a copy of this thread's context, so the
+            # log context (and the job labels read from it) names the
+            # pipeline on the pool threads too. One copy per task: a context
+            # can't be entered by two threads at once.
             futures = [
-                pool.submit(self._load_chunk, chunk, chunk_num, total_chunks)
+                pool.submit(
+                    contextvars.copy_context().run,
+                    self._load_chunk,
+                    chunk,
+                    chunk_num,
+                    total_chunks,
+                )
                 for chunk_num, chunk in numbered_chunks
             ]
             try:
