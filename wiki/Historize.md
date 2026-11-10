@@ -709,7 +709,9 @@ The historized table is created from the source's columns on the first run. When
 
 **Column dropped.** The historized table keeps the column and its history. The source is read as if it still had the column, with `NULL` in it, so a key's next version carries `NULL` instead of a value the source no longer delivers; under `scd1` that is the updated row. Keys the source doesn't re-deliver are untouched. The run warns the first time the column is missing (the log records each run's source columns, so the warning doesn't repeat), since a drop is often unintended upstream. A `--full-refresh` rebuilds from the source's current columns, without the dropped one.
 
-**Column type changed.** The run is refused before any write, naming the column and both types, and points at `--full-refresh`, which rebuilds the history with the new type from what the source still holds. A widening the destination would accept is refused too: it changes the change-detection hash of every stored row.
+**Nested field added or removed.** A `STRUCT` column, or an array of them, follows the same two rules one level down, on BigQuery and DuckDB. A field the source gains is added to the historized table's struct (through a schema update, keeping the existing fields as they are), `NULL` on rows written before; a key's next version with a value in it opens as usual, one arriving with `NULL` there is unchanged. A field the source drops stays on the target with its history and is read as `NULL`, warned about once like a dropped column. A change in field order alone is nothing. This holds because the change-detection hash serialises a struct field by field, so a widened struct whose new field is `NULL` on both sides hashes the same. Every read of such a column goes through a reshape to the target's field order, which is also what keeps the hash and the insert aligned when the source's order differs. On Databricks a nested change is still refused as a type change.
+
+**Column type changed.** The run is refused before any write, naming the column (for a nested field, its dotted path) and both types, and points at `--full-refresh`, which rebuilds the history with the new type from what the source still holds. A widening the destination would accept is refused too: it changes the change-detection hash of every stored row.
 
 For sources ingested by saga, only the added case arises: dlt never drops or retypes a raw table's columns (a value that no longer fits its column lands in a variant column such as `price__v_text`, and a column dropped upstream is simply `NULL` from then on). Dropped and retyped columns come from [external deliveries](#external-data-historize-only) whose table someone else maintains, or from [`json_columns`](#columns-from-a-json-source-column) entries you remove or redefine.
 
@@ -757,7 +759,7 @@ Historize state is recorded in `_saga_historize_log` with:
 
 - Which snapshots have been processed (prevents reprocessing)
 - A config fingerprint — detects changes requiring a full refresh
-- The source's columns as each run saw them — a dropped column is warned about once, not every run
+- The source's columns as each run saw them, nested fields as dotted paths — a dropped column or field is warned about once, not every run
 - Timing information per historize run
 
 ---
