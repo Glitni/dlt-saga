@@ -979,15 +979,18 @@ def _dispatch(ctx: SweepContext, dry_run: bool = False) -> str:
     notifier = SlackNotifier(notifications.slack)
     try:
         if dry_run:
-            payload = notifier.build_sweep_payload(ctx)
-            if payload is None:
+            payloads = notifier.build_sweep_payloads(ctx)
+            if not payloads:
                 logger.info(
                     "Nothing would be sent: every failing pipeline is muted "
-                    "(notifications.slack.enabled: false)"
+                    "(notifications.slack.enabled: false) or not yet due for a "
+                    "reminder (repeat_after_hours)"
                 )
-            else:
+            for channel, payload in payloads:
                 logger.info(
-                    "Slack digest that would be sent:\n%s", render_payload_text(payload)
+                    "Slack digest that would be sent to %s:\n%s",
+                    channel or notifications.slack.channel or "the webhook's channel",
+                    render_payload_text(payload),
                 )
             return SWEEP_UNDELIVERED
         delivered = notifier.on_sweep_complete(ctx)

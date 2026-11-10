@@ -195,6 +195,109 @@ def _validate_historize_config(config: PipelineConfig, result: ValidationResult)
         result.errors.append(f"Historize config error: {e}")
 
 
+# The keys a pipeline's own ``notifications.slack`` block may carry. The block
+# is a free dict on the config class (its shape belongs to the notifier), so
+# this is the one place a misspelling or a misplaced ``+channel`` is caught —
+# the notifier itself ignores what it does not know rather than fail a run.
+PIPELINE_SLACK_KEYS = ("enabled", "mentions", "channel", "repeat_after_hours")
+
+
+def _validate_notifications(config: PipelineConfig, result: ValidationResult) -> None:
+    """Check a pipeline's own ``notifications`` block.
+
+    Transport keys are project-level only. ``channel`` additionally needs the
+    project to post through a bot token: a webhook is bound to one channel, so
+    a routed pipeline under a webhook would silently post to the project's.
+    """
+    notifications = config.config_dict.get("notifications")
+    if notifications is None:
+        return
+    if not isinstance(notifications, dict):
+        result.errors.append(
+            f"notifications must be a mapping, got {type(notifications).__name__}"
+        )
+        return
+    slack = notifications.get("slack")
+    if slack is None:
+        return
+    if not isinstance(slack, dict):
+        result.errors.append(
+            f"notifications.slack must be a mapping, got {type(slack).__name__}"
+        )
+        return
+
+    unknown = sorted(k for k in slack if k not in PIPELINE_SLACK_KEYS)
+    if unknown:
+        result.warnings.append(
+            f"notifications.slack has no effect for key(s) {', '.join(unknown)} on a "
+            f"pipeline; valid keys are {', '.join(PIPELINE_SLACK_KEYS)}. Transport "
+            "settings belong in saga_project.yml, and a '+' merge marker works on "
+            "a pipeline's top-level keys only"
+        )
+    result.errors.extend(_pipeline_slack_value_errors(slack))
+    if slack.get("channel") is not None and _valid_channels(slack["channel"]):
+        result.errors.extend(_routing_transport_errors())
+
+
+def _pipeline_slack_value_errors(slack: dict) -> List[str]:
+    """Type and range errors for the keys a pipeline's Slack block may carry."""
+    from dlt_saga.project_config import normalize_mentions
+
+    errors: List[str] = []
+    enabled = slack.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        errors.append(
+            f"notifications.slack.enabled must be true or false, got {enabled!r}"
+        )
+    if "mentions" in slack:
+        try:
+            normalize_mentions(slack["mentions"], "notifications.slack.mentions")
+        except ValueError as exc:
+            errors.append(str(exc))
+    repeat = slack.get("repeat_after_hours")
+    if repeat is not None and (
+        isinstance(repeat, bool) or not isinstance(repeat, (int, float)) or repeat <= 0
+    ):
+        errors.append(
+            "notifications.slack.repeat_after_hours must be a positive number of "
+            f"hours, got {repeat!r}"
+        )
+    channel = slack.get("channel")
+    if channel is not None and not _valid_channels(channel):
+        errors.append(
+            "notifications.slack.channel must be a channel name/ID or a list of "
+            f"them, got {channel!r}"
+        )
+    return errors
+
+
+def _valid_channels(value: object) -> bool:
+    """Whether *value* is a non-empty channel string or a list of them."""
+    channels = [value] if isinstance(value, str) else value
+    return isinstance(channels, list) and all(
+        isinstance(c, str) and c.strip() for c in channels
+    )
+
+
+def _routing_transport_errors() -> List[str]:
+    """The error a routed pipeline gets when the project posts through a webhook."""
+    from dlt_saga.project_config import get_project_config
+
+    try:
+        project_slack = getattr(get_project_config().notifications, "slack", None)
+    except Exception as exc:  # the project config has its own validation
+        logger.debug("Could not load the project config for channel routing: %s", exc)
+        return []
+    if project_slack is None or project_slack.token:
+        return []
+    return [
+        "notifications.slack.channel routes this pipeline to another channel, "
+        "which needs the bot-token transport (notifications.slack.token in "
+        "saga_project.yml): the configured webhook is bound to one channel, so "
+        "the pipeline would post there like every other"
+    ]
+
+
 def validate_pipeline_config(config: PipelineConfig) -> ValidationResult:
     """Validate a pipeline config without executing anything.
 
@@ -217,6 +320,7 @@ def validate_pipeline_config(config: PipelineConfig) -> ValidationResult:
         _validate_adapter(config, result)
         _validate_source_config(config, result)
     _validate_historize_config(config, result)
+    _validate_notifications(config, result)
 
     return result
 
