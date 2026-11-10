@@ -46,6 +46,17 @@ sweep ran — come from ``saga notify``'s own rows (``PipelineOutcome``,
 current failure as before. The per-run ``on_run_complete`` digest is per
 command by design and does not apply it.
 
+A pipeline can be routed to its owners: ``notifications.slack.channel`` on its
+config (a string or a list) is the complete set of channels its lines go to,
+replacing the project channel rather than adding to it — name the project
+channel to keep it. Each sweep or run then posts one digest per distinct
+channel, holding the pipelines routed there; the project channel's digest holds
+everything unrouted. Project-level ``mentions`` are appended only to the project
+channel's digest, a pipeline's own ride on its line wherever it is posted.
+Routing needs the bot token — a webhook is bound to one channel — so under a
+webhook configuration every pipeline posts to the webhook and a warning says
+so once; ``saga validate`` reports the same as an error.
+
 Failures to notify are logged and swallowed. An alerting channel that breaks a
 data load would be worse than the missing alert, and the hook registry already
 treats handler exceptions as non-fatal — this module is explicit about it so
@@ -55,7 +66,7 @@ the warning names Slack rather than surfacing as a generic hook failure.
 import logging
 import math
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from dlt_saga.hooks.registry import HookRegistry, RunContext
@@ -365,6 +376,7 @@ class SlackNotifier:
         # chosen inside _send, which tests substitute at the API-call level.
         self._sender = sender or _post_to_slack
         self._identity_warned = False
+        self._routing_warned = False
 
     # ------------------------------------------------------------------
     # Hook entry points
@@ -381,25 +393,35 @@ class SlackNotifier:
         results = [
             r for r in ctx.results if not self._pipeline_muted(self._config_dict_of(r))
         ]
-        if notify_on == "failure" and all(r.success for r in results):
-            logger.debug("Slack digest skipped: run had no failures to post")
-            return
-        self._send(self._build_run_payload(ctx, results))
+        for channel, routed in self._route_results(results).items():
+            if notify_on == "failure" and all(r.success for r in routed):
+                logger.debug("Slack digest skipped: run had no failures to post")
+                continue
+            if not routed and ctx.results:
+                # Every result went to another channel or was muted; an empty
+                # "complete" digest here would only say so badly.
+                continue
+            self._send(self._build_run_payload(ctx, routed, channel), channel=channel)
 
     # ------------------------------------------------------------------
     # Message construction
     # ------------------------------------------------------------------
 
     def _build_run_payload(
-        self, ctx: "RunContext", results: List[Any]
+        self,
+        ctx: "RunContext",
+        results: List[Any],
+        channel: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build the Slack payload for a completed run.
 
         Args:
             ctx: The completed run.
             results: The run's results as this channel sees them — muted
-                pipelines already removed, so the counts in the headline agree
-                with the lines under it.
+                pipelines removed and only the ones routed here, so the counts
+                in the headline agree with the lines under it.
+            channel: The channel this digest is for; ``None`` is the project
+                channel, the only one that carries the project-level mentions.
         """
         total = len(results)
         failures = [r for r in results if not r.success]
@@ -427,7 +449,7 @@ class SlackNotifier:
             if remaining > 0:
                 lines.append(f"…and {remaining} more")
 
-            mentions = " ".join(self.config.mentions or [])
+            mentions = " ".join(self.config.mentions or []) if channel is None else ""
             if mentions:
                 lines.append("")
                 lines.append(mentions)
@@ -442,24 +464,46 @@ class SlackNotifier:
         ones that ran in containers this process never saw.
 
         Returns:
-            ``True`` when a digest was posted, ``False`` when posting failed,
+            ``True`` when every digest was posted, ``False`` when any failed,
             ``None`` when there was nothing to post: nothing failed, or every
-            pipeline that did is muted for Slack. The sweep claims its
-            executions on ``True`` and ``None`` alike — a muted failure is as
-            reported as this channel will ever make it, and leaving it
-            unclaimed would only resurface it the day the mute is lifted.
+            pipeline that did is muted for Slack or not due for a reminder. The
+            sweep claims its executions on ``True`` and ``None`` alike — a
+            muted failure is as reported as this channel will ever make it,
+            and leaving it unclaimed would only resurface it the day the mute
+            is lifted. One channel failing makes the whole sweep ``False`` and
+            so retried, which can repeat a digest where it did arrive; a
+            duplicate is the right side to err on, a lost alert is not.
         """
-        payload = self.build_sweep_payload(ctx)
-        if payload is None:
+        payloads = self.build_sweep_payloads(ctx)
+        if not payloads:
             logger.debug("Sweep digest skipped: nothing to post")
             return None
-        return self._send(payload)
+        delivered = [
+            self._send(payload, channel=channel) for channel, payload in payloads
+        ]
+        return all(delivered)
 
-    def build_sweep_payload(self, ctx: "SweepContext") -> Optional[Dict[str, Any]]:
-        """Build the Slack message for a sweep across several executions.
+    def build_sweep_payloads(
+        self, ctx: "SweepContext"
+    ) -> List[Tuple[Optional[str], Dict[str, Any]]]:
+        """Build the Slack messages for a sweep, one per channel.
 
-        Public so a dry run can show exactly what would be posted. ``None``
-        when the sweep, with muted pipelines removed, has nothing to report.
+        Public so a dry run can show exactly what would be posted where. Each
+        entry is ``(channel, payload)``, ``None`` standing for the project
+        channel, which comes first; a channel with nothing to report has no
+        entry, so an empty list means the sweep posts nothing.
+        """
+        ctx = self._without_suppressed(self._without_muted(ctx))
+        return [
+            (channel, self._sweep_payload(view, channel))
+            for channel, view in self._route_sweep(ctx)
+            if view.has_anything_to_report
+        ]
+
+    def _sweep_payload(
+        self, ctx: "SweepContext", channel: Optional[str]
+    ) -> Dict[str, Any]:
+        """Build one channel's digest for a sweep.
 
         Structured rather than a block of text: a header states the state, a
         context line attributes the message to saga and names the scope, and a
@@ -471,9 +515,6 @@ class SlackNotifier:
         *failed every attempt* and *failed once* are the difference between an
         outage and a blip.
         """
-        ctx = self._without_suppressed(self._without_muted(ctx))
-        if not ctx.has_anything_to_report:
-            return None
         failing, recovered = ctx.failing, ctx.recovered
         runs = len(ctx.execution_ids)
         window = f"{runs} {'run' if runs == 1 else 'runs'} · last {ctx.since_days}d"
@@ -513,7 +554,9 @@ class SlackNotifier:
         if footer:
             detail.append(_context("  ·  ".join(footer)))
 
-        mentions = " ".join(self.config.mentions or []) if failing else ""
+        mentions = (
+            " ".join(self.config.mentions or []) if failing and channel is None else ""
+        )
         if mentions:
             detail.append(_section(mentions))
 
@@ -524,6 +567,121 @@ class SlackNotifier:
             "blocks": blocks,
             "attachments": [{"color": colour, "blocks": detail}],
         }
+
+    # ------------------------------------------------------------------
+    # Routing
+    # ------------------------------------------------------------------
+
+    def _route_sweep(
+        self, ctx: "SweepContext"
+    ) -> List[Tuple[Optional[str], "SweepContext"]]:
+        """Split a sweep into one view per channel.
+
+        The project channel's view holds every unrouted outcome and keeps the
+        sweep's attempt totals, minus the outcomes that left it, like the muted
+        ones. A routed channel's view holds the outcomes sent there and counts
+        only their attempts — its footer describes what the digest contains,
+        not a sweep its reader never sees the rest of.
+        """
+        from dataclasses import replace
+
+        routed: Dict[str, List[Any]] = {}
+        project: List[Any] = []
+        for outcome in ctx.outcomes:
+            for channel in self._destinations(outcome.config_dict):
+                if channel is None:
+                    project.append(outcome)
+                else:
+                    routed.setdefault(channel, []).append(outcome)
+        project_ids = {id(o) for o in project}
+        left = [o for o in ctx.outcomes if id(o) not in project_ids]
+        views: List[Tuple[Optional[str], "SweepContext"]] = [
+            (
+                None,
+                replace(
+                    ctx,
+                    outcomes=project,
+                    total_attempts=max(
+                        0, ctx.total_attempts - sum(o.attempts for o in left)
+                    ),
+                    failed_attempts=max(
+                        0, ctx.failed_attempts - sum(o.failures for o in left)
+                    ),
+                ),
+            )
+        ]
+        for channel, outcomes in routed.items():
+            views.append(
+                (
+                    channel,
+                    replace(
+                        ctx,
+                        outcomes=outcomes,
+                        total_attempts=sum(o.attempts for o in outcomes),
+                        failed_attempts=sum(o.failures for o in outcomes),
+                    ),
+                )
+            )
+        return views
+
+    def _route_results(self, results: List[Any]) -> Dict[Optional[str], List[Any]]:
+        """Group a run's results by channel; ``None`` (the project) is always present."""
+        routed: Dict[Optional[str], List[Any]] = {None: []}
+        for result in results:
+            for channel in self._destinations(self._config_dict_of(result)):
+                routed.setdefault(channel, []).append(result)
+        return routed
+
+    def _destinations(self, config_dict: Any) -> List[Optional[str]]:
+        """The channels a pipeline posts to; ``[None]`` is the project channel.
+
+        A pipeline's ``channel`` replaces the project channel rather than
+        adding to it. Naming the project channel folds the pipeline back into
+        the project digest instead of posting a second one there. Without the
+        bot token nothing can be routed — a webhook is bound to its channel —
+        so every pipeline posts to the project and this is said once.
+        """
+        channels = self._pipeline_channels(config_dict)
+        if not channels:
+            return [None]
+        if not self.config.token:
+            self._warn_routing_needs_token(channels)
+            return [None]
+        destinations: List[Optional[str]] = []
+        for channel in channels:
+            destination = None if channel == self.config.channel else channel
+            if destination not in destinations:
+                destinations.append(destination)
+        return destinations
+
+    @staticmethod
+    def _pipeline_channels(config_dict: Any) -> List[str]:
+        """``notifications.slack.channel`` on a pipeline, as a list; ``[]`` if unset.
+
+        A string or a list of strings; anything else reads as unset, since a
+        notifier must not fail on a config ``saga validate`` is there to catch.
+        """
+        value = SlackNotifier._slack_settings(config_dict).get("channel")
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        channels: List[str] = []
+        for item in value:
+            if isinstance(item, str) and item.strip() and item.strip() not in channels:
+                channels.append(item.strip())
+        return channels
+
+    def _warn_routing_needs_token(self, channels: List[str]) -> None:
+        if self._routing_warned:
+            return
+        self._routing_warned = True
+        logger.warning(
+            "A pipeline sets notifications.slack.channel (%s), but the project "
+            "posts through a webhook, which is bound to one channel. Posting to "
+            "the webhook's channel instead; routing needs notifications.slack.token.",
+            ", ".join(channels),
+        )
 
     def _outcome_sections(self, failing: list) -> List[Dict[str, Any]]:
         """One section per failing pipeline: what it is, then why.
@@ -757,8 +915,8 @@ class SlackNotifier:
     # Delivery
     # ------------------------------------------------------------------
 
-    def _send(self, payload: Dict[str, Any]) -> bool:
-        """Resolve the credential and post.
+    def _send(self, payload: Dict[str, Any], channel: Optional[str] = None) -> bool:
+        """Resolve the credential and post, to *channel* or the project's.
 
         Returns ``True`` only when the message actually went out. Callers that
         claim state on the strength of a send — ``saga notify`` marks executions
@@ -783,7 +941,7 @@ class SlackNotifier:
                     return False
                 _post_via_token(
                     str(token),
-                    str(self.config.channel),
+                    channel or str(self.config.channel),
                     self._with_identity(payload),
                     self.config.timeout_seconds,
                     on_identity_ignored=self._warn_identity_ignored,

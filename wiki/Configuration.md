@@ -84,7 +84,7 @@ Other ways to avoid repeating yourself: [`dev:` override blocks](#dev-overrides)
 | `adapter` | string | — | Explicit pipeline implementation binding (e.g., `dlt_saga.api.myservice`) |
 | `filters` | list | — | Row-level filters applied during ingest — see [Row Filters](#row-filters) |
 | `meta` | dict | — | Free-form user metadata for documentation/governance — see [Custom Metadata](#custom-metadata) |
-| `notifications` | dict | — | Per-pipeline notification settings — `slack.mentions`, appended to this pipeline's line in a failure digest, and `slack.enabled: false`, which leaves the pipeline out of Slack digests altogether. See [Slack notifications](#slack-notifications) |
+| `notifications` | dict | — | Per-pipeline notification settings — `slack.mentions` (appended to this pipeline's line), `slack.enabled: false` (left out of Slack digests), `slack.channel` (routed to other channels), `slack.repeat_after_hours` (reminder cadence). See [Slack notifications](#slack-notifications) |
 
 ### Recommended property order
 
@@ -660,7 +660,7 @@ notifications:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `token` | — | Slack bot token (`xoxb-…`). Needs `channel`. Takes precedence over `webhook_url` |
-| `channel` | — | Channel for `token` — `#data-alerts` or an ID. Required with `token`, ignored with `webhook_url` |
+| `channel` | — | Channel for `token` — `#data-alerts` or an ID. Required with `token`, ignored with `webhook_url`. A pipeline can route itself elsewhere under the same key, see [Routing a pipeline to its owners](#routing-a-pipeline-to-its-owners) |
 | `webhook_url` | — | Slack incoming-webhook URL. One of this or `token` is required; without either, nothing is registered |
 | `report_url` | — | Public URL of the published [`saga report`](CLI-Reference#saga-report), linked from every digest |
 | `username` | `dlt-saga` | Display name on posted messages. Needs `chat:write.customize` with `token`; without it, saga posts under the app's own name and warns |
@@ -754,9 +754,23 @@ notifications:
 
 A pipeline that was not failing at the previous sweep and fails now is a **new failure**, posted at once. One that was already failing at the previous sweep is **still failing**, posted as a reminder once per interval, counted from when its failures began (`still failing since 2026-11-09 23:00 UTC, 31 attempts`), and left out of the digest in between — a sweep whose only failures are ongoing and not yet due is quiet. A pipeline that was failing at the previous sweep and passes now is **recovered** and always posts, including when it recovered between two sweeps. Unset, every sweep reports every current failure, as before. Nothing is stored for this: the previous state comes from the execution-plan rows the sweep already reads, the time of the previous sweep from `_saga_notify_log`, so the cadence needs the scheduled sweep (a chained `--execution-id` report and `--dry-run` write no sweep row). The `on_run_complete` digest is per command and does not apply it.
 
-Transport settings (`token`, `webhook_url`, `timeout_seconds`) and `on_run_complete` are project-level only — a pipeline chooses who hears about it, whether this channel hears about it at all and how often while it keeps failing, not where or how the notifier posts.
+**Routing a pipeline to its owners.** A mention only reaches someone who is in the channel. When a pipeline's owners sit elsewhere, `channel` on the pipeline's config sends its lines there:
 
-**Routing to several channels** means several webhooks — a webhook is bound to one channel and the notifier takes one. Post to one operational channel and route from there, or write a custom `on_run_complete` hook.
+```yaml
+# configs/shop/orders.yml
+notifications:
+  slack:
+    channel: ["#shop-data", "#data-alerts"]   # a string or a list; a user ID posts a direct message
+    mentions: ["<@U012ABCDEF>"]
+```
+
+The list is the complete set of channels the pipeline posts to: it replaces the project channel rather than adding to it, so name the project channel to keep receiving the pipeline there, and leave it off to route the pipeline away entirely. Each sweep or run then posts one digest per distinct channel, holding the pipelines routed to it; the project channel's digest holds everything unrouted. The project-level `mentions` are appended only to the project channel's digest, a pipeline's own ride on its line wherever it is posted. A routed digest's footer counts its own pipelines' attempts. `enabled` and `repeat_after_hours` apply as usual, whatever the channel. Routing needs the bot token: a webhook is bound to one channel, so under a webhook configuration `saga validate` reports a pipeline `channel` as an error and the notifier posts to the webhook with a warning. Public channels the app joins itself; a private channel needs the app invited once.
+
+`saga validate` also warns about keys under a pipeline's `notifications.slack` that the notifier does not read, including a `+channel:` — the `+` merge marker works on a pipeline's top-level keys and one level into a block (`+notifications:`), not on keys nested below that, where it is stored literally and ignored.
+
+Transport settings (`token`, `webhook_url`, `timeout_seconds`) and `on_run_complete` are project-level only — a pipeline chooses who hears about it, where, whether this notifier hears about it at all and how often while it keeps failing, not how the notifier authenticates or posts.
+
+**Routing to several channels** is per pipeline with the bot token, see [Routing a pipeline to its owners](#routing-a-pipeline-to-its-owners). A webhook is bound to one channel, so with a webhook everything posts there.
 
 > **Orchestrated runs need [`saga notify`](CLI-Reference#saga-notify).** This digest rides the `on_run_complete` event, which fires once per command — and on a fan-out run no container has a view of the whole thing, so none of them posts it. (The per-pipeline events do fire inside workers.) `saga notify` covers the summary by reading recorded state instead, and works for every way of running saga.
 

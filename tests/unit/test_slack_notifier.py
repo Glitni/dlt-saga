@@ -1509,7 +1509,7 @@ class TestMutedPipelinesInSweep:
 
         notifier = _notifier(recorder)
 
-        assert notifier.build_sweep_payload(ctx) is None
+        assert notifier.build_sweep_payloads(ctx) == []
         assert notifier.on_sweep_complete(ctx) is None
         assert recorder.sent == []
 
@@ -1599,7 +1599,7 @@ class TestReminderCadence:
 
         notifier = _notifier(recorder, repeat_after_hours=24)
 
-        assert notifier.build_sweep_payload(ctx) is None
+        assert notifier.build_sweep_payloads(ctx) == []
         assert notifier.on_sweep_complete(ctx) is None
         assert recorder.sent == []
 
@@ -1779,7 +1779,7 @@ class TestDryRunPreview:
 
         recorder = _Recorder()
         notifier = _notifier(recorder, mentions=["<@UOPS>"])
-        payload = notifier.build_sweep_payload(
+        ((_, payload),) = notifier.build_sweep_payloads(
             _sweep(
                 [
                     _outcome("shop__orders", 3, 3, True, error="boom"),
@@ -1800,3 +1800,293 @@ class TestDryRunPreview:
         from dlt_saga.hooks.notifiers.slack import render_payload_text
 
         assert render_payload_text({"text": "plain"}) == "plain"
+
+
+def _token_notifier(**overrides):
+    """Notifier on the bot-token transport, which is what routing needs."""
+    on_run_complete = {
+        k: overrides.pop(k) for k in _RUN_COMPLETE_KEYS if k in overrides
+    }
+    on_run_complete.setdefault("environments", ["prod"])
+    config = SlackNotificationConfig(
+        token="env_secret::SLACK_TOKEN",
+        channel="#ops",
+        username=None,
+        icon_emoji=None,
+        on_run_complete=SlackRunCompleteConfig(**on_run_complete),
+        **overrides,
+    )
+    return SlackNotifier(config)
+
+
+class _ApiRecorder:
+    """Records every chat.postMessage body instead of calling Slack."""
+
+    def __init__(self):
+        self.bodies: List[Dict[str, Any]] = []
+        self._patch = patch(
+            "dlt_saga.hooks.notifiers.slack._slack_api_call", side_effect=self._call
+        )
+
+    def _call(self, method, token, body, timeout):
+        self.bodies.append(body)
+        return {"ok": True}
+
+    def __enter__(self):
+        self._patch.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._patch.stop()
+
+    def channels(self):
+        return [b["channel"] for b in self.bodies]
+
+    def text_for(self, channel):
+        from dlt_saga.hooks.notifiers.slack import render_payload_text
+
+        bodies = [b for b in self.bodies if b["channel"] == channel]
+        assert len(bodies) == 1, self.channels()
+        return render_payload_text(bodies[0])
+
+
+def _routed(name, channel, failing=True, **kwargs):
+    return _outcome(
+        name,
+        kwargs.pop("attempts", 1),
+        kwargs.pop("failures", 1 if failing else 0),
+        failing,
+        config={"notifications": {"slack": {"channel": channel, **kwargs}}},
+    )
+
+
+@pytest.mark.unit
+class TestChannelRouting:
+    """A pipeline's `notifications.slack.channel` is the full set of channels it
+    posts to, replacing the project channel; one digest per distinct channel."""
+
+    def test_routed_pipeline_leaves_the_project_digest(self):
+        with _ApiRecorder() as api:
+            _token_notifier().on_sweep_complete(
+                _sweep(
+                    [
+                        _routed("shop__orders", "#shop"),
+                        _outcome("crm__accounts", 1, 1, True),
+                    ]
+                )
+            )
+
+        assert sorted(api.channels()) == ["#ops", "#shop"]
+        assert "shop__orders" in api.text_for("#shop")
+        assert "crm__accounts" not in api.text_for("#shop")
+        assert "crm__accounts" in api.text_for("#ops")
+        assert "shop__orders" not in api.text_for("#ops")
+
+    def test_a_list_posts_to_every_channel_named(self):
+        with _ApiRecorder() as api:
+            _token_notifier().on_sweep_complete(
+                _sweep([_routed("shop__orders", ["#shop", "#finance"])])
+            )
+
+        assert sorted(api.channels()) == ["#finance", "#shop"]
+        assert "shop__orders" in api.text_for("#finance")
+
+    def test_naming_the_project_channel_keeps_it_in_the_project_digest(self):
+        """Not a second message to the same channel."""
+        with _ApiRecorder() as api:
+            _token_notifier().on_sweep_complete(
+                _sweep(
+                    [
+                        _routed("shop__orders", ["#shop", "#ops"]),
+                        _outcome("crm__accounts", 1, 1, True),
+                    ]
+                )
+            )
+
+        assert sorted(api.channels()) == ["#ops", "#shop"]
+        ops = api.text_for("#ops")
+        assert "shop__orders" in ops and "crm__accounts" in ops
+        assert "2 pipelines failing" in ops
+
+    def test_routed_only_sweep_posts_nothing_to_the_project(self):
+        with _ApiRecorder() as api:
+            _token_notifier().on_sweep_complete(
+                _sweep([_routed("shop__orders", "#shop")])
+            )
+
+        assert api.channels() == ["#shop"]
+
+    def test_project_mentions_stay_in_the_project_digest(self):
+        with _ApiRecorder() as api:
+            _token_notifier(mentions=["<@UOPS>"]).on_sweep_complete(
+                _sweep(
+                    [
+                        _routed("shop__orders", "#shop", mentions=["<@U9>"]),
+                        _outcome("crm__accounts", 1, 1, True),
+                    ]
+                )
+            )
+
+        shop = api.text_for("#shop")
+        assert "<@U9>" in shop
+        assert "<@UOPS>" not in shop
+        assert "<@UOPS>" in api.text_for("#ops")
+
+    def test_routed_digest_counts_only_its_own_attempts(self):
+        with _ApiRecorder() as api:
+            _token_notifier().on_sweep_complete(
+                _sweep(
+                    [
+                        _routed("shop__orders", "#shop", attempts=2, failures=2),
+                        _outcome("crm__accounts", 1, 1, True),
+                    ],
+                    total_attempts=10,
+                    failed_attempts=3,
+                )
+            )
+
+        assert "0 of 2 pipeline attempts succeeded" in api.text_for("#shop")
+        assert "7 of 8 pipeline attempts succeeded" in api.text_for("#ops")
+
+    def test_recoveries_follow_the_route(self):
+        with _ApiRecorder() as api:
+            _token_notifier().on_sweep_complete(
+                _sweep(
+                    [
+                        _routed(
+                            "shop__orders",
+                            "#shop",
+                            failing=False,
+                            attempts=3,
+                            failures=1,
+                        )
+                    ]
+                )
+            )
+
+        assert api.channels() == ["#shop"]
+        assert "failed and recovered" in api.text_for("#shop")
+
+    def test_direct_message_target_passes_through(self):
+        with _ApiRecorder() as api:
+            _token_notifier().on_sweep_complete(
+                _sweep([_routed("shop__orders", "U012ABCDEF")])
+            )
+
+        assert api.channels() == ["U012ABCDEF"]
+
+    def test_payloads_list_the_channels(self):
+        payloads = _token_notifier().build_sweep_payloads(
+            _sweep(
+                [
+                    _routed("shop__orders", "#shop"),
+                    _outcome("crm__accounts", 1, 1, True),
+                ]
+            )
+        )
+
+        assert [channel for channel, _ in payloads] == [None, "#shop"]
+
+    def test_any_channel_failing_makes_the_sweep_undelivered(self):
+        notifier = _token_notifier()
+        ctx = _sweep(
+            [_routed("shop__orders", "#shop"), _outcome("crm__accounts", 1, 1, True)]
+        )
+
+        with patch.object(notifier, "_send", side_effect=[True, False]):
+            assert notifier.on_sweep_complete(ctx) is False
+
+    def test_webhook_configuration_ignores_routing_and_warns_once(self, caplog):
+        """A webhook is bound to its channel; everything posts there."""
+        recorder = _Recorder()
+        notifier = _notifier(recorder)
+        ctx = _sweep([_routed("shop__orders", "#shop")])
+
+        with caplog.at_level(logging.WARNING, logger="dlt_saga.hooks.notifiers.slack"):
+            notifier.on_sweep_complete(ctx)
+            notifier.on_sweep_complete(ctx)
+
+        assert len(recorder.sent) == 2
+        assert "shop__orders" in _rendered(recorder)
+        assert caplog.text.count("routing needs notifications.slack.token") == 1
+
+    @pytest.mark.parametrize("bad", [None, "", [], [42], {"a": 1}, ["  "]])
+    def test_unusable_channel_values_mean_the_project_channel(self, bad):
+        with _ApiRecorder() as api:
+            _token_notifier().on_sweep_complete(_sweep([_routed("shop__orders", bad)]))
+
+        assert api.channels() == ["#ops"]
+
+    def test_muted_pipeline_is_not_routed_anywhere(self):
+        with _ApiRecorder() as api:
+            _token_notifier().on_sweep_complete(
+                _sweep([_routed("shop__orders", "#shop", enabled=False)])
+            )
+
+        assert api.bodies == []
+
+
+@pytest.mark.unit
+class TestRunDigestRouting:
+    """The `on_run_complete` digest routes the same way."""
+
+    @staticmethod
+    def _result(name, success, channel=None):
+        slack = {"channel": channel} if channel else {}
+        return _Result(
+            name,
+            success=success,
+            error=None if success else "boom",
+            config=_Config({"notifications": {"slack": slack}}),
+        )
+
+    def test_failures_are_split_by_channel(self):
+        with _ApiRecorder() as api:
+            _token_notifier().on_run_complete(
+                _run_context(
+                    [
+                        self._result("shop__orders", False, "#shop"),
+                        self._result("crm__accounts", False),
+                    ]
+                )
+            )
+
+        assert sorted(api.channels()) == ["#ops", "#shop"]
+        assert "1 of 1 pipeline(s)" in api.text_for("#shop")
+        assert "shop__orders" not in api.text_for("#ops")
+
+    def test_project_mentions_only_in_the_project_digest(self):
+        with _ApiRecorder() as api:
+            _token_notifier(mentions=["<@UOPS>"]).on_run_complete(
+                _run_context(
+                    [
+                        self._result("shop__orders", False, "#shop"),
+                        self._result("crm__accounts", False),
+                    ]
+                )
+            )
+
+        assert "<@UOPS>" not in api.text_for("#shop")
+        assert "<@UOPS>" in api.text_for("#ops")
+
+    def test_a_routed_channel_without_failures_stays_quiet(self):
+        with _ApiRecorder() as api:
+            _token_notifier().on_run_complete(
+                _run_context(
+                    [
+                        self._result("shop__orders", True, "#shop"),
+                        self._result("crm__accounts", False),
+                    ]
+                )
+            )
+
+        assert api.channels() == ["#ops"]
+
+    def test_always_skips_the_project_when_everything_went_elsewhere(self):
+        with _ApiRecorder() as api:
+            _token_notifier(notify_on="always").on_run_complete(
+                _run_context([self._result("shop__orders", True, "#shop")])
+            )
+
+        assert api.channels() == ["#shop"]
+        assert "complete — 1 pipeline(s)" in api.text_for("#shop")

@@ -581,3 +581,91 @@ class TestValidateConfigsJobLabels:
     def test_no_declaration_adds_nothing(self):
         results = self._run({"database": "p"})
         assert all(r.kind == "pipeline" for r in results)
+
+
+@pytest.mark.unit
+class TestValidateNotifications:
+    """A pipeline's own `notifications.slack` block is a free dict on the
+    config class, so this is where a misspelling or a misplaced `+channel`
+    surfaces; the notifier ignores what it does not know."""
+
+    def _check(self, slack, project_token=True, project=True):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from dlt_saga.project_config import SlackNotificationConfig
+        from dlt_saga.validate import _validate_notifications
+
+        if project:
+            slack_config = (
+                SlackNotificationConfig(token="env_secret::T", channel="#ops")
+                if project_token
+                else SlackNotificationConfig(webhook_url="env_secret::HOOK")
+            )
+            project_config = SimpleNamespace(
+                notifications=SimpleNamespace(slack=slack_config)
+            )
+        else:
+            project_config = SimpleNamespace(notifications=None)
+        config = _make_config(config_dict={"notifications": {"slack": slack}})
+        result = ValidationResult(pipeline_name=config.pipeline_name)
+        with patch(
+            "dlt_saga.project_config.get_project_config", return_value=project_config
+        ):
+            _validate_notifications(config, result)
+        return result
+
+    def test_valid_block_is_clean(self):
+        result = self._check(
+            {
+                "enabled": True,
+                "mentions": ["<@U1>"],
+                "channel": ["#shop"],
+                "repeat_after_hours": 6,
+            }
+        )
+        assert result.is_valid and not result.warnings
+
+    @pytest.mark.parametrize("key", ["+channel", "token", "enabeld"])
+    def test_unknown_key_warns(self, key):
+        result = self._check({key: "x"})
+        assert result.is_valid
+        assert key in result.warnings[0]
+        assert "top-level keys only" in result.warnings[0]
+
+    def test_channel_under_a_webhook_project_is_an_error(self):
+        result = self._check({"channel": "#shop"}, project_token=False)
+        assert not result.is_valid
+        assert "bot-token transport" in result.errors[0]
+
+    def test_channel_under_a_token_project_is_fine(self):
+        assert self._check({"channel": "#shop"}).is_valid
+
+    def test_channel_without_project_notifications_is_fine(self):
+        assert self._check({"channel": "#shop"}, project=False).is_valid
+
+    @pytest.mark.parametrize("channel", [42, [""], ["#a", 1], {"a": 1}])
+    def test_bad_channel_value_is_an_error(self, channel):
+        result = self._check({"channel": channel})
+        assert "notifications.slack.channel must be" in result.errors[0]
+
+    def test_non_bool_enabled_is_an_error(self):
+        result = self._check({"enabled": "false"})
+        assert "enabled must be true or false" in result.errors[0]
+
+    @pytest.mark.parametrize("value", ["24h", 0, True])
+    def test_bad_repeat_after_hours_is_an_error(self, value):
+        result = self._check({"repeat_after_hours": value})
+        assert "repeat_after_hours must be a positive" in result.errors[0]
+
+    def test_bad_mentions_is_an_error(self):
+        result = self._check({"mentions": {"a": 1}})
+        assert "mentions" in result.errors[0]
+
+    def test_non_mapping_blocks_are_errors(self):
+        config = _make_config(config_dict={"notifications": "nope"})
+        result = ValidationResult(pipeline_name=config.pipeline_name)
+        from dlt_saga.validate import _validate_notifications
+
+        _validate_notifications(config, result)
+        assert "notifications must be a mapping" in result.errors[0]
