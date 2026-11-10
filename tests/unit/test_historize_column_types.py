@@ -333,11 +333,20 @@ class TestDuckDBDialect:
         target = parse_type("STRUCT(a VARCHAR, b INTEGER)[]")
         source = parse_type("STRUCT(a VARCHAR)[]")
 
+        body = "struct_pack(a := struct_extract(_e0, 'a'), b := CAST(NULL AS INTEGER))"
         assert dest.reshape_expression('"l"', source, target) == (
-            'list_transform("l", _e0 -> struct_pack(a := struct_extract(_e0, '
-            + "'a'), "
-            "b := CAST(NULL AS INTEGER)))"
+            f'list_transform("l", {dest.lambda_sql("_e0", body)})'
         )
+
+    def test_lambda_syntax_follows_the_installed_version(self, monkeypatch):
+        import duckdb
+
+        from dlt_saga.destinations.duckdb.destination import DuckDBDestination
+
+        monkeypatch.setattr(duckdb, "__version__", "1.2.2")
+        assert DuckDBDestination.lambda_sql("x", "x + 1") == "x -> x + 1"
+        monkeypatch.setattr(duckdb, "__version__", "1.3.0")
+        assert DuckDBDestination.lambda_sql("x", "x + 1") == "lambda x: x + 1"
 
     def test_widen_column_type_alters_with_a_using_clause(self):
         from unittest.mock import MagicMock

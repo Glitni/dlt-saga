@@ -634,8 +634,21 @@ class DuckDBDestination(Destination):
             inner = self.reshape_expression(
                 alias, source_type.element, target_type.element, _depth + 1
             )
-            return f"list_transform({expr}, {alias} -> {inner})"
+            return f"list_transform({expr}, {self.lambda_sql(alias, inner)})"
         return expr
+
+    @staticmethod
+    def lambda_sql(param: str, body: str) -> str:
+        """A one-parameter lambda in the syntax the installed DuckDB accepts.
+
+        DuckDB 1.3 introduced ``lambda x: body`` and deprecated ``x -> body``,
+        which later releases reject by default; earlier releases know only the
+        arrow. Chosen by the installed version so the same SQL binds on both.
+        """
+        major, minor = (int(part) for part in duckdb.__version__.split(".")[:2])
+        if (major, minor) >= (1, 3):
+            return f"lambda {param}: {body}"
+        return f"{param} -> {body}"
 
     def widen_column_type(
         self,

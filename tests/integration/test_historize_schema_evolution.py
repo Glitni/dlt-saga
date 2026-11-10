@@ -399,7 +399,11 @@ class TestNestedFields:
         self._retype_meta(
             dest,
             "STRUCT(a VARCHAR, b INTEGER)[]",
-            "list_transform(meta, e -> struct_pack(a := struct_extract(e, 'a'), b := NULL::INTEGER))",
+            "list_transform(meta, "
+            + DuckDBDestination.lambda_sql(
+                "e", "struct_pack(a := struct_extract(e, 'a'), b := NULL::INTEGER)"
+            )
+            + ")",
         )
         self._insert_meta(
             dest,
