@@ -323,3 +323,185 @@ class TestTypeChange:
         _run(dest, strategy, full_refresh=True)
 
         assert _columns(dest, TARGET_TABLE)["payload"] == "INTEGER"
+
+
+@pytest.mark.integration
+class TestNestedFields:
+    """A struct column's fields come and go the way columns do, one level
+    down: a field the source gains widens the target's struct and opens a
+    version only where a value arrived, a field it loses is read as NULL, a
+    field order change is nothing, a retyped field is refused."""
+
+    def _add_meta(self, dest, type_="STRUCT(a VARCHAR)"):
+        _sql(dest, f"ALTER TABLE {SOURCE} ADD COLUMN meta {type_}")
+
+    def _insert_meta(self, dest, snapshot, rows):
+        """``rows``: ``(id, payload, meta literal)``."""
+        values = ", ".join(
+            f"({i}, {_literal(p)}, {m}, TIMESTAMP '{snapshot}')" for i, p, m in rows
+        )
+        _sql(
+            dest,
+            f"INSERT INTO {SOURCE} (id, payload, meta, snapshot_at) VALUES {values}",
+        )
+
+    def _retype_meta(self, dest, new_type, using):
+        _sql(
+            dest,
+            f"ALTER TABLE {SOURCE} ALTER COLUMN meta SET DATA TYPE {new_type} USING {using}",
+        )
+
+    @pytest.mark.parametrize("strategy", ["scd2", "scd1"])
+    def test_added_field_opens_a_version_only_where_a_value_arrived(
+        self, dest, strategy
+    ):
+        self._add_meta(dest)
+        self._insert_meta(dest, S1, [(1, "a", "{'a': 'x'}"), (2, "b", "{'a': 'y'}")])
+        _run(dest, strategy, full_refresh=True)
+
+        self._retype_meta(
+            dest,
+            "STRUCT(a VARCHAR, b INTEGER)",
+            "struct_pack(a := struct_extract(meta, 'a'), b := NULL::INTEGER)",
+        )
+        self._insert_meta(
+            dest,
+            S2,
+            [
+                (1, "a", "{'a': 'x', 'b': 7}"),
+                (2, "b", "{'a': 'y', 'b': NULL::INTEGER}"),
+            ],
+        )
+        _run(dest, strategy)
+
+        assert _columns(dest, TARGET_TABLE)["meta"] == "STRUCT(a VARCHAR, b INTEGER)"
+        one, two = _versions(dest, 1), _versions(dest, 2)
+        if strategy == "scd2":
+            assert [v["meta"] for v in one] == [
+                {"a": "x", "b": None},
+                {"a": "x", "b": 7},
+            ]
+            assert [v["meta"] for v in two] == [{"a": "y", "b": None}]
+        else:
+            assert one[0]["meta"] == {"a": "x", "b": 7}
+            assert str(one[0]["_dlt_valid_from"]).startswith("2026-01-02")
+            assert str(two[0]["_dlt_valid_from"]).startswith("2026-01-01")
+        fingerprints = {e["fingerprint"] for e in _log(dest)}
+        assert len(fingerprints) == 1
+
+    def test_added_field_inside_an_array_of_structs(self, dest):
+        self._add_meta(dest, "STRUCT(a VARCHAR)[]")
+        self._insert_meta(
+            dest, S1, [(1, "a", "[{'a': 'x'}]"), (2, "b", "[{'a': 'y'}]")]
+        )
+        _run(dest, "scd2", full_refresh=True)
+
+        self._retype_meta(
+            dest,
+            "STRUCT(a VARCHAR, b INTEGER)[]",
+            "list_transform(meta, "
+            + DuckDBDestination.lambda_sql(
+                "e", "struct_pack(a := struct_extract(e, 'a'), b := NULL::INTEGER)"
+            )
+            + ")",
+        )
+        self._insert_meta(
+            dest,
+            S2,
+            [
+                (1, "a", "[{'a': 'x', 'b': 7}]"),
+                (2, "b", "[{'a': 'y', 'b': NULL::INTEGER}]"),
+            ],
+        )
+        _run(dest, "scd2")
+
+        assert _columns(dest, TARGET_TABLE)["meta"] == "STRUCT(a VARCHAR, b INTEGER)[]"
+        assert [v["meta"] for v in _versions(dest, 1)] == [
+            [{"a": "x", "b": None}],
+            [{"a": "x", "b": 7}],
+        ]
+        assert len(_versions(dest, 2)) == 1
+
+    def test_removed_field_is_read_as_null_and_history_is_kept(self, dest, caplog):
+        self._add_meta(dest, "STRUCT(a VARCHAR, b INTEGER)")
+        self._insert_meta(dest, S1, [(1, "a", "{'a': 'x', 'b': 7}")])
+        _run(dest, "scd2", full_refresh=True)
+
+        self._retype_meta(
+            dest, "STRUCT(a VARCHAR)", "struct_pack(a := struct_extract(meta, 'a'))"
+        )
+        self._insert_meta(dest, S2, [(1, "a", "{'a': 'x'}")])
+        with caplog.at_level(logging.WARNING, logger="dlt_saga.historize.runner"):
+            _run(dest, "scd2")
+
+        assert _columns(dest, TARGET_TABLE)["meta"] == "STRUCT(a VARCHAR, b INTEGER)"
+        assert [v["meta"] for v in _versions(dest, 1)] == [
+            {"a": "x", "b": 7},
+            {"a": "x", "b": None},
+        ]
+        assert "no longer has nested field(s) ['meta.b']" in caplog.text
+
+        caplog.clear()
+        self._insert_meta(dest, S3, [(1, "a", "{'a': 'z'}")])
+        with caplog.at_level(logging.WARNING, logger="dlt_saga.historize.runner"):
+            _run(dest, "scd2")
+        assert "no longer has nested field" not in caplog.text
+        assert len(_versions(dest, 1)) == 3
+
+    def test_reordered_fields_open_no_version(self, dest):
+        self._add_meta(dest, "STRUCT(a VARCHAR, b INTEGER)")
+        self._insert_meta(dest, S1, [(1, "a", "{'a': 'x', 'b': 7}")])
+        _run(dest, "scd2", full_refresh=True)
+
+        self._retype_meta(
+            dest,
+            "STRUCT(b INTEGER, a VARCHAR)",
+            "struct_pack(b := struct_extract(meta, 'b'), a := struct_extract(meta, 'a'))",
+        )
+        self._insert_meta(dest, S2, [(1, "a", "{'b': 7, 'a': 'x'}")])
+        _run(dest, "scd2")
+
+        assert _columns(dest, TARGET_TABLE)["meta"] == "STRUCT(a VARCHAR, b INTEGER)"
+        assert len(_versions(dest, 1)) == 1
+
+    def test_retyped_nested_field_is_refused_before_any_write(self, dest):
+        self._add_meta(dest)
+        self._insert_meta(dest, S1, [(1, "a", "{'a': 'x'}")])
+        _run(dest, "scd2", full_refresh=True)
+        before = _target(dest)
+
+        self._retype_meta(dest, "STRUCT(a INTEGER)", "struct_pack(a := NULL::INTEGER)")
+        self._insert_meta(dest, S2, [(1, "a", "{'a': 1}")])
+        stats = _runner(dest, "scd2").run()
+
+        assert stats["status"] == "failed"
+        assert (
+            "meta.a: VARCHAR in the historized table, INTEGER in the source"
+            in stats["error"]
+        )
+        assert "--full-refresh" in stats["error"]
+        assert _target(dest) == before
+
+    def test_partial_refresh_reads_through_the_reshape(self, dest):
+        self._add_meta(dest)
+        self._insert_meta(dest, S1, [(1, "a", "{'a': 'x'}")])
+        _run(dest, "scd2", full_refresh=True)
+        self._insert_meta(dest, S2, [(1, "a", "{'a': 'y'}")])
+        _run(dest, "scd2")
+
+        self._retype_meta(
+            dest,
+            "STRUCT(a VARCHAR, b INTEGER)",
+            "struct_pack(a := struct_extract(meta, 'a'), b := NULL::INTEGER)",
+        )
+        _sql(
+            dest,
+            f"UPDATE {SOURCE} SET meta = {{'a': 'y', 'b': 7}} WHERE snapshot_at = '{S2}'",
+        )
+        stats = _run(dest, "scd2", partial_refresh=True, historize_from=S2)
+
+        assert stats["mode"] == "partial_refresh"
+        assert [v["meta"] for v in _versions(dest, 1)] == [
+            {"a": "x", "b": None},
+            {"a": "y", "b": 7},
+        ]

@@ -5,10 +5,14 @@ and development without requiring cloud credentials.
 """
 
 import logging
+import re
 import threading
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from dlt_saga.historize.column_types import ColumnType
 
 import duckdb
 
@@ -574,4 +578,90 @@ class DuckDBDestination(Destination):
         table_id = self.get_full_table_id(dataset, table)
         self.execute_sql(
             f"ALTER TABLE {table_id} ADD COLUMN {self.quote_identifier(column)} {type_name}"
+        )
+
+    # --- Nested column evolution -------------------------------------------
+
+    def supports_nested_evolution(self) -> bool:
+        return True
+
+    @staticmethod
+    def _field_identifier(name: str) -> str:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            return name
+        return '"' + name.replace('"', '""') + '"'
+
+    def spell_column_type(self, column_type: "ColumnType") -> str:
+        from dlt_saga.historize.column_types import ARRAY, STRUCT
+
+        if column_type.kind == ARRAY and column_type.element is not None:
+            return f"{self.spell_column_type(column_type.element)}[]"
+        if column_type.kind == STRUCT:
+            fields = ", ".join(
+                f"{self._field_identifier(name)} {self.spell_column_type(field_type)}"
+                for name, field_type in column_type.fields
+            )
+            return f"STRUCT({fields})"
+        return column_type.name
+
+    def reshape_expression(
+        self,
+        expr: str,
+        source_type: Optional["ColumnType"],
+        target_type: "ColumnType",
+        _depth: int = 0,
+    ) -> str:
+        from dlt_saga.historize.column_types import ARRAY, STRUCT, types_equal
+
+        if source_type is None:
+            return f"CAST(NULL AS {self.spell_column_type(target_type)})"
+        if types_equal(source_type, target_type, self.normalize_type_name):
+            return expr
+        if target_type.kind == STRUCT:
+            parts = []
+            for name, field_type in target_type.fields:
+                literal = self.escape_string_literal(name)
+                inner = self.reshape_expression(
+                    f"struct_extract({expr}, '{literal}')",
+                    source_type.field(name),
+                    field_type,
+                    _depth,
+                )
+                parts.append(f"{self._field_identifier(name)} := {inner}")
+            return f"struct_pack({', '.join(parts)})"
+        if target_type.kind == ARRAY and target_type.element is not None:
+            alias = f"_e{_depth}"
+            inner = self.reshape_expression(
+                alias, source_type.element, target_type.element, _depth + 1
+            )
+            return f"list_transform({expr}, {self.lambda_sql(alias, inner)})"
+        return expr
+
+    @staticmethod
+    def lambda_sql(param: str, body: str) -> str:
+        """A one-parameter lambda in the syntax the installed DuckDB accepts.
+
+        DuckDB 1.3 introduced ``lambda x: body`` and deprecated ``x -> body``,
+        which later releases reject by default; earlier releases know only the
+        arrow. Chosen by the installed version so the same SQL binds on both.
+        """
+        major, minor = (int(part) for part in duckdb.__version__.split(".")[:2])
+        if (major, minor) >= (1, 3):
+            return f"lambda {param}: {body}"
+        return f"{param} -> {body}"
+
+    def widen_column_type(
+        self,
+        dataset: str,
+        table: str,
+        column: str,
+        current: "ColumnType",
+        widened: "ColumnType",
+    ) -> None:
+        table_id = self.get_full_table_id(dataset, table)
+        quoted = self.quote_identifier(column)
+        self.execute_sql(
+            f"ALTER TABLE {table_id} ALTER COLUMN {quoted} SET DATA TYPE "
+            f"{self.spell_column_type(widened)} USING "
+            f"{self.reshape_expression(quoted, current, widened)}"
         )

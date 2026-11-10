@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from dlt_saga.historize.column_types import parse_type
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.runner import HistorizeRunner
 from dlt_saga.historize.sql import HistorizeSqlBuilder
@@ -27,6 +28,7 @@ def _make_runner(source, target, previous=None, **config_kwargs) -> HistorizeRun
     dest.quote_identifier.side_effect = lambda n: f'"{n}"'
     dest.is_pseudo_column.return_value = False
     dest.normalize_type_name.side_effect = lambda t: " ".join(t.upper().split())
+    dest.supports_nested_evolution.return_value = False
     dest.dlt_type_to_native.side_effect = lambda t: {"text": "VARCHAR"}.get(
         t, t.upper()
     )
@@ -333,3 +335,144 @@ class TestLogSourceColumns:
         mgr = _manager([])
         mgr.destination.execute_sql.side_effect = RuntimeError("Unrecognized name")
         assert mgr.get_last_source_columns("p") is None
+
+
+class TestNestedFields:
+    """A struct column's field drift is taken in place, like column drift,
+    on a destination that supports it; a retyped nested scalar is still
+    refused, with its path."""
+
+    def _nested_runner(self, source_type, target_type, previous=None, supports=True):
+        runner = _make_runner(
+            source=[("id", "INTEGER"), ("snap", "TIMESTAMP"), ("meta", source_type)],
+            target=[("id", "INTEGER"), ("meta", target_type), *SYSTEM],
+            previous=previous,
+        )
+        dest = runner.destination
+        dest.supports_nested_evolution.return_value = supports
+        dest.reshape_expression.side_effect = lambda expr, s, t: f"RESHAPE({expr})"
+        return runner
+
+    def test_added_field_widens_the_target_and_reshapes_the_read(self):
+        runner = self._nested_runner("STRUCT<a STRING, b INT64>", "STRUCT<a STRING>")
+
+        columns = runner._reconcile_target_columns(_value_columns(runner))
+
+        dest = runner.destination
+        args = dest.widen_column_type.call_args[0]
+        assert args[:3] == ("ds", "tbl_historized", "meta")
+        assert args[3] == parse_type("STRUCT<a STRING>")
+        assert args[4] == parse_type("STRUCT<a STRING, b INT64>")
+        assert runner.sql_builder.reshaped_source_columns == {"meta": 'RESHAPE("meta")'}
+        assert columns == ["meta"]
+        dest.add_column.assert_not_called()
+
+    def test_reshape_targets_the_merged_type(self):
+        runner = self._nested_runner("STRUCT<b INT64, a STRING>", "STRUCT<a STRING>")
+
+        runner._reconcile_target_columns(_value_columns(runner))
+
+        _, source_type, target_type = runner.destination.reshape_expression.call_args[0]
+        assert source_type == parse_type("STRUCT<b INT64, a STRING>")
+        assert target_type == parse_type("STRUCT<a STRING, b INT64>")
+
+    def test_reorder_alone_reshapes_without_widening(self):
+        runner = self._nested_runner(
+            "STRUCT<b INT64, a STRING>", "STRUCT<a STRING, b INT64>"
+        )
+
+        runner._reconcile_target_columns(_value_columns(runner))
+
+        runner.destination.widen_column_type.assert_not_called()
+        assert "meta" in runner.sql_builder.reshaped_source_columns
+
+    def test_removed_field_reshapes_and_warns_the_first_time(self, caplog):
+        runner = self._nested_runner(
+            "STRUCT<a STRING>",
+            "STRUCT<a STRING, b INT64>",
+            previous=["meta", "meta.a", "meta.b"],
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="dlt_saga.historize.runner"):
+            runner._reconcile_target_columns(_value_columns(runner))
+
+        runner.destination.widen_column_type.assert_not_called()
+        assert "meta" in runner.sql_builder.reshaped_source_columns
+        assert "no longer has nested field(s) ['meta.b']" in caplog.text
+
+    def test_removed_field_only_debug_once_already_absent(self, caplog):
+        runner = self._nested_runner(
+            "STRUCT<a STRING>", "STRUCT<a STRING, b INT64>", previous=["meta", "meta.a"]
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="dlt_saga.historize.runner"):
+            runner._reconcile_target_columns(_value_columns(runner))
+
+        assert "no longer has nested field" not in caplog.text
+        assert "still absent" in caplog.text
+
+    def test_retyped_nested_scalar_is_refused_with_its_path(self):
+        runner = self._nested_runner("STRUCT<a INT64>", "STRUCT<a STRING>")
+
+        with pytest.raises(ValueError) as excinfo:
+            runner._reconcile_target_columns(_value_columns(runner))
+
+        assert "meta.a: STRING in the historized table, INT64 in the source" in str(
+            excinfo.value
+        )
+        runner.destination.widen_column_type.assert_not_called()
+
+    def test_key_column_is_never_reconciled(self):
+        runner = _make_runner(
+            source=[
+                ("id", "STRUCT<a STRING, b INT64>"),
+                ("snap", "TIMESTAMP"),
+                ("v", "VARCHAR"),
+            ],
+            target=[("id", "STRUCT<a STRING>"), ("v", "VARCHAR"), *SYSTEM],
+        )
+        runner.destination.supports_nested_evolution.return_value = True
+
+        with pytest.raises(ValueError, match="id: STRUCT<a STRING> in the historized"):
+            runner._reconcile_target_columns(_value_columns(runner))
+
+    def test_destination_without_support_refuses_as_before(self):
+        runner = self._nested_runner(
+            "STRUCT<a STRING, b INT64>", "STRUCT<a STRING>", supports=False
+        )
+
+        with pytest.raises(
+            ValueError, match="meta: STRUCT<a STRING> in the historized"
+        ):
+            runner._reconcile_target_columns(_value_columns(runner))
+
+    def test_unparseable_spelling_falls_back_to_refusing(self):
+        runner = self._nested_runner("STRUCT<a STRING, b>", "STRUCT<a STRING>")
+
+        with pytest.raises(
+            ValueError, match="meta: STRUCT<a STRING> in the historized"
+        ):
+            runner._reconcile_target_columns(_value_columns(runner))
+
+    def test_recorded_source_columns_include_nested_paths(self):
+        import json
+
+        runner = self._nested_runner("ARRAY<STRUCT<a STRING, b STRUCT<x BOOL>>>", "X")
+
+        assert json.loads(runner._recorded_source_columns()) == [
+            "id",
+            "snap",
+            "meta",
+            "meta.a",
+            "meta.b",
+            "meta.b.x",
+        ]
+
+    def test_sql_projection_reads_through_the_reshape(self):
+        runner = self._nested_runner("STRUCT<a STRING>", "STRUCT<a STRING>")
+        builder = runner.sql_builder
+        builder.set_reshaped_source_columns({"meta": "STRUCT(x AS a)"})
+
+        assert (
+            builder._source_cols_sql(["meta", "v"]) == 'STRUCT(x AS a) AS "meta", "v"'
+        )

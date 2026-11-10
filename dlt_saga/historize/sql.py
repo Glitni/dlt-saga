@@ -229,6 +229,9 @@ class HistorizeSqlBuilder:
         # Value columns the historized table carries but the source no longer
         # has (name → the target's type); see ``set_absent_source_columns``.
         self._absent_source_columns: Dict[str, str] = {}
+        # Value columns whose source value is reshaped to the target's nested
+        # type on every read (name → SQL); see ``set_reshaped_source_columns``.
+        self._reshaped_source_columns: Dict[str, str] = {}
 
     def set_source_relation(
         self, source_relation: str, source_column_types: Mapping[str, str]
@@ -259,19 +262,41 @@ class HistorizeSqlBuilder:
         """The declared absent columns, for a builder reading the same source."""
         return dict(self._absent_source_columns)
 
+    def set_reshaped_source_columns(self, expressions: Dict[str, str]) -> None:
+        """Declare value columns read through an expression instead of by name.
+
+        A struct column whose source type differs from the target's only in
+        its fields — some added, some removed, or in another order — is read
+        as the destination's reshape of it (``Destination.reshape_expression``
+        over the quoted column), so every source read, and the hash with it,
+        sees the value in the target's shape. ``expressions`` maps the column
+        name to that SQL.
+        """
+        self._reshaped_source_columns = dict(expressions)
+
+    @property
+    def reshaped_source_columns(self) -> Dict[str, str]:
+        """The declared reshaped columns, for a builder reading the same source."""
+        return dict(self._reshaped_source_columns)
+
     def _source_cols_sql(self, cols: List[str]) -> str:
         """Column list for a read of the source table itself.
 
         Like ``_qcols``, except that a column the source no longer has is
-        projected as a typed NULL (see ``set_absent_source_columns``).
+        projected as a typed NULL (see ``set_absent_source_columns``) and a
+        nested column whose shape drifted is projected through its reshape
+        (see ``set_reshaped_source_columns``).
         """
         parts = []
         for col in cols:
             null_type = self._absent_source_columns.get(col)
-            if null_type is None:
-                parts.append(self._q(col))
-            else:
+            reshaped = self._reshaped_source_columns.get(col)
+            if null_type is not None:
                 parts.append(f"CAST(NULL AS {null_type}) AS {self._q(col)}")
+            elif reshaped is not None:
+                parts.append(f"{reshaped} AS {self._q(col)}")
+            else:
+                parts.append(self._q(col))
         return ", ".join(parts)
 
     def _get_hash_columns(self, value_columns: List[str]) -> List[str]:

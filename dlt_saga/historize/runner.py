@@ -10,6 +10,14 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from dlt_saga.historize.column_types import (
+    ColumnType,
+    TypeReconciliation,
+    TypeSpellingError,
+    leaf_paths,
+    parse_type,
+    reconcile_types,
+)
 from dlt_saga.historize.config import HistorizeConfig
 from dlt_saga.historize.sql import (
     HistorizeSqlBuilder,
@@ -806,11 +814,32 @@ class HistorizeRunner:
     def _recorded_source_columns(self) -> Optional[str]:
         """The source's column names as a JSON list, for the log entry.
 
+        A nested column's fields follow as dotted paths (``meta.owner``), so a
+        field the source drops can be warned about once, like a column.
         ``None`` when the run never read them (it failed before doing so).
         """
         if self._source_columns_cache is None:
             return None
-        return json.dumps(self._source_columns())
+        recorded = list(self._source_columns())
+        for column in self._table_columns():
+            parsed = self._parsed_type(self._source_column_types.get(column.lower()))
+            if parsed is not None and parsed.is_nested:
+                recorded.extend(leaf_paths(parsed, column))
+        return json.dumps(recorded)
+
+    @staticmethod
+    def _parsed_type(spelling: Optional[str]) -> Optional[ColumnType]:
+        """A catalog spelling as a type tree, or ``None`` when not parseable.
+
+        Unparseable reads as "not comparable", which the callers treat the
+        way they treated every type before: a different spelling is a change.
+        """
+        if not spelling:
+            return None
+        try:
+            return parse_type(spelling)
+        except TypeSpellingError:
+            return None
 
     def _source_can_reference(self, column: str) -> bool:
         """Whether generated SQL can read ``column`` off the source table.
@@ -1405,9 +1434,19 @@ class HistorizeRunner:
           to ``exclude_columns`` after the target was built goes the same way,
           minus the warning — and minus the hash, so excluding it opens no
           versions.
-        - A column whose type changed is refused: the stored history can't
-          take the new type in place, and a widening the destination would
-          accept still changes the string-serialised hash of every row.
+        - A struct column (or array of structs) that gained or lost fields is
+          the nested form of the two cases above and goes the same way, on a
+          destination that supports it: the target's struct is widened with
+          the new fields (NULL on earlier rows) and every source read
+          reshapes the value to the target's field order, with a field the
+          source dropped read as NULL (``_reconcile_nested_fields``). The row
+          hash serialises a struct field by field, so a widened struct whose
+          new field is NULL on both sides hashes the same, and only a key
+          with a value there opens a version — as for a new column.
+        - A column whose type changed is refused, a nested scalar's included:
+          the stored history can't take the new type in place, and a widening
+          the destination would accept still changes the string-serialised
+          hash of every row.
 
         Returns the value columns to write: the source's, followed by the
         dropped ones. Schema drift is not a config change, so it never trips
@@ -1417,7 +1456,8 @@ class HistorizeRunner:
             self.target_schema, self.target_table_name
         )
         target_types = {name.lower(): (name, dtype) for name, dtype in target_columns}
-        self._guard_column_types(target_types, value_columns)
+        nested = self._guard_column_types(target_types, value_columns)
+        self._reconcile_nested_fields(nested)
 
         added = [c for c in value_columns if c.lower() not in target_types]
         for column in added:
@@ -1460,8 +1500,10 @@ class HistorizeRunner:
         return list(value_columns) + [name for name, _ in absent]
 
     def _guard_column_types(
-        self, target_types: Dict[str, Tuple[str, str]], value_columns: List[str]
-    ) -> None:
+        self,
+        target_types: Dict[str, Tuple[str, str]],
+        value_columns: List[str],
+    ) -> List[Tuple[str, ColumnType, ColumnType, TypeReconciliation]]:
         """Refuse a source column whose type differs from the target's.
 
         A table column's type comes from the destination's own catalog, as the
@@ -1469,33 +1511,137 @@ class HistorizeRunner:
         so the spellings match unless the type really changed. A derived
         column's is the type its ``json_columns`` entry declares, compared
         through the destination's spelling of it.
+
+        A nested type that differs only in its fields is not a change but
+        drift, on a destination that can take it in place; those are returned
+        as ``(column, target type, source type, reconciliation)`` for
+        ``_reconcile_nested_fields``, and a key column is never among them —
+        its value must match the stored key exactly. A nested scalar whose
+        type changed is refused with its dotted path.
         """
         normalize = self.destination.normalize_type_name
-        changed = []
+        changed: List[str] = []
+        nested: List[Tuple[str, ColumnType, ColumnType, TypeReconciliation]] = []
+        keys = {c.lower() for c in self.config.primary_key}
         for column in list(self.config.primary_key) + list(value_columns):
             stored = target_types.get(column.lower())
             source_type = self._source_column_type(column)
             if stored is None or source_type is None:
                 continue
-            if normalize(source_type) != normalize(stored[1]):
-                changed.append((column, stored[1], source_type))
-        if not changed:
-            return
-        lines = [
-            f"Source {self.source_table_id} changed the type of column(s) the "
-            f"historized table {self._target_display} already holds:"
-        ]
-        lines += [
-            f"  - {column}: {stored_type} in the historized table, "
-            f"{source_type} in the source"
-            for column, stored_type, source_type in changed
-        ]
-        lines.append(
-            f"A column's type can't be changed in place. Revert the source, or "
-            f"run '{self._rebuild_command}' to rebuild the history with the new "
-            f"type from what the source still holds."
+            if normalize(source_type) == normalize(stored[1]):
+                continue
+            reconciled = self._reconcile_nested_type(stored[1], source_type)
+            if reconciled is not None and column.lower() not in keys:
+                target_parsed, source_parsed, outcome = reconciled
+                if outcome.compatible:
+                    nested.append((column, target_parsed, source_parsed, outcome))
+                    continue
+                changed.append(f"{column}.{outcome.conflict}")
+                continue
+            changed.append(
+                f"{column}: {stored[1]} in the historized table, "
+                f"{source_type} in the source"
+            )
+        if changed:
+            lines = [
+                f"Source {self.source_table_id} changed the type of column(s) the "
+                f"historized table {self._target_display} already holds:"
+            ]
+            lines += [f"  - {line}" for line in changed]
+            lines.append(
+                f"A column's type can't be changed in place. Revert the source, or "
+                f"run '{self._rebuild_command}' to rebuild the history with the new "
+                f"type from what the source still holds."
+            )
+            raise ValueError("\n".join(lines))
+        return nested
+
+    def _reconcile_nested_type(
+        self, stored_spelling: str, source_spelling: str
+    ) -> Optional[Tuple[ColumnType, ColumnType, TypeReconciliation]]:
+        """Compare two nested spellings field by field, or ``None``.
+
+        ``None`` when the destination does not reconcile nested fields, when
+        either spelling is not parseable, or when neither side is nested —
+        in each case the caller falls back to spelling comparison, which
+        reads a difference as a type change.
+        """
+        if not self.destination.supports_nested_evolution():
+            return None
+        target_parsed = self._parsed_type(stored_spelling)
+        source_parsed = self._parsed_type(source_spelling)
+        if target_parsed is None or source_parsed is None:
+            return None
+        if not (target_parsed.is_nested or source_parsed.is_nested):
+            return None
+        outcome = reconcile_types(
+            target_parsed, source_parsed, self.destination.normalize_type_name
         )
-        raise ValueError("\n".join(lines))
+        return target_parsed, source_parsed, outcome
+
+    def _reconcile_nested_fields(
+        self, nested: List[Tuple[str, ColumnType, ColumnType, TypeReconciliation]]
+    ) -> None:
+        """Take a nested column's field drift in place.
+
+        Fields the source gained widen the target's column; every source read
+        of the column then goes through the destination's reshape to the
+        target's (now merged) type, which puts the fields in the target's
+        order and reads a field the source dropped as NULL — so the hash, the
+        insert and the stored rows all agree on one shape. Reshaping is also
+        what keeps a field order change from reading as a change of value.
+        """
+        if not nested:
+            return
+        expressions: Dict[str, str] = {}
+        removed: List[str] = []
+        for column, target_parsed, source_parsed, outcome in nested:
+            if outcome.added:
+                self.destination.widen_column_type(
+                    self.target_schema,
+                    self.target_table_name,
+                    column,
+                    target_parsed,
+                    outcome.merged,
+                )
+                self.logger.info(
+                    f"Added nested field(s) {[f'{column}.{p}' for p in outcome.added]} "
+                    f"to {self._target_display}: new in {self.source_table_id}; "
+                    f"rows written before now hold NULL there"
+                )
+            removed.extend(f"{column}.{p}" for p in outcome.removed)
+            expressions[column] = self.destination.reshape_expression(
+                self.destination.quote_identifier(column), source_parsed, outcome.merged
+            )
+        if removed:
+            self._warn_removed_nested_fields(removed)
+        self.sql_builder.set_reshaped_source_columns(expressions)
+
+    def _warn_removed_nested_fields(self, removed: List[str]) -> None:
+        """Report nested fields the source no longer has, loudly the first time.
+
+        The log records nested paths next to the column names
+        (``_recorded_source_columns``), so the judgement is the same as for
+        a dropped column: new since the last run warns, already absent then
+        logs at debug.
+        """
+        previous = self.state_manager.get_last_source_columns(self.pipeline_name)
+        previous_lower = None if previous is None else {c.lower() for c in previous}
+        new = [
+            p for p in removed if previous_lower is None or p.lower() in previous_lower
+        ]
+        if new:
+            self.logger.warning(
+                f"Source {self.source_table_id} no longer has nested field(s) "
+                f"{new}. {self._target_display} keeps them with their history; "
+                f"new versions carry NULL there."
+            )
+        old = [p for p in removed if p not in new]
+        if old:
+            self.logger.debug(
+                f"Nested field(s) {old} still absent from {self.source_table_id}; "
+                f"read as NULL"
+            )
 
     def _source_column_type(self, column: str) -> Optional[str]:
         """The destination type ``column`` has in the source relation.
@@ -2021,6 +2167,9 @@ class HistorizeRunner:
             # the reconcile declared them on the main builder.
             staging_builder.set_absent_source_columns(
                 self.sql_builder.absent_source_columns
+            )
+            staging_builder.set_reshaped_source_columns(
+                self.sql_builder.reshaped_source_columns
             )
 
             self._rollback_staging(

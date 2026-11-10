@@ -1,6 +1,7 @@
 """BigQuery destination implementation."""
 
 import logging
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -16,6 +17,7 @@ from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.base import MaterializationHints
+    from dlt_saga.historize.column_types import ColumnType
 
 logger = logging.getLogger(__name__)
 
@@ -1187,6 +1189,173 @@ class BigQueryDestination(BigQueryBaseDestination):
             f"ALTER TABLE {table_id} ADD COLUMN IF NOT EXISTS "
             f"{self.quote_identifier(column)} {type_name}"
         )
+
+    # --- Nested column evolution -------------------------------------------
+
+    def supports_nested_evolution(self) -> bool:
+        return True
+
+    def _field_identifier(self, name: str) -> str:
+        """A struct field name as GoogleSQL accepts it everywhere: backtick-quoted.
+
+        Always quoted, since a field named after a reserved word (``end``,
+        ``interval``) is legal in a schema but not bare in a type or a path.
+        """
+        return self.quote_identifier(name)
+
+    def spell_column_type(self, column_type: "ColumnType") -> str:
+        from dlt_saga.historize.column_types import ARRAY, STRUCT
+
+        if column_type.kind == ARRAY and column_type.element is not None:
+            return f"ARRAY<{self.spell_column_type(column_type.element)}>"
+        if column_type.kind == STRUCT:
+            fields = ", ".join(
+                f"{self._field_identifier(name)} {self.spell_column_type(field_type)}"
+                for name, field_type in column_type.fields
+            )
+            return f"STRUCT<{fields}>"
+        return column_type.name
+
+    def reshape_expression(
+        self,
+        expr: str,
+        source_type: Optional["ColumnType"],
+        target_type: "ColumnType",
+        _depth: int = 0,
+    ) -> str:
+        from dlt_saga.historize.column_types import ARRAY, STRUCT, types_equal
+
+        if source_type is None:
+            return f"CAST(NULL AS {self.spell_column_type(target_type)})"
+        if types_equal(source_type, target_type, self.normalize_type_name):
+            return expr
+        if target_type.kind == STRUCT:
+            parts = []
+            for name, field_type in target_type.fields:
+                ident = self._field_identifier(name)
+                inner = self.reshape_expression(
+                    f"{expr}.{ident}", source_type.field(name), field_type, _depth
+                )
+                parts.append(f"{inner} AS {ident}")
+            return f"STRUCT({', '.join(parts)})"
+        if target_type.kind == ARRAY and target_type.element is not None:
+            # Element by element, in stored order: an ARRAY() subquery has no
+            # order of its own, and the row hash serialises the array as is.
+            alias = f"_e{_depth}"
+            inner = self.reshape_expression(
+                alias, source_type.element, target_type.element, _depth + 1
+            )
+            return (
+                f"IF({expr} IS NULL, NULL, ARRAY(SELECT {inner} FROM UNNEST({expr}) "
+                f"AS {alias} WITH OFFSET AS {alias}_o ORDER BY {alias}_o))"
+            )
+        return expr
+
+    def widen_column_type(
+        self,
+        dataset: str,
+        table: str,
+        column: str,
+        current: "ColumnType",
+        widened: "ColumnType",
+    ) -> None:
+        """Add the new nested fields through a schema update.
+
+        BigQuery takes new fields inside a RECORD as a schema patch (DDL has no
+        statement for it); the existing fields keep their SchemaField objects,
+        descriptions and modes included, and the new ones are appended where
+        the merged type puts them.
+        """
+        client, table_ref = self._description_client_and_ref(dataset, table)
+        tbl = client.get_table(table_ref)
+        new_schema = []
+        found = False
+        for schema_field in tbl.schema:
+            if schema_field.name.lower() == column.lower():
+                new_schema.append(self._widen_schema_field(schema_field, widened))
+                found = True
+            else:
+                new_schema.append(schema_field)
+        if not found:
+            raise ValueError(f"Column {column!r} not found on {table_ref}")
+        tbl.schema = new_schema
+        client.update_table(tbl, ["schema"])
+
+    @classmethod
+    def _widen_schema_field(cls, schema_field: Any, widened: "ColumnType") -> Any:
+        """*schema_field* with the fields *widened* adds, recursively."""
+        from google.cloud import bigquery
+
+        from dlt_saga.historize.column_types import ARRAY, STRUCT
+
+        target = widened
+        if target.kind == ARRAY and target.element is not None:
+            target = target.element  # the REPEATED mode is on the field itself
+        if target.kind != STRUCT:
+            return schema_field
+        existing = {sub.name.lower(): sub for sub in schema_field.fields}
+        subfields = []
+        for name, field_type in target.fields:
+            sub = existing.get(name.lower())
+            if sub is None:
+                subfields.append(cls._schema_field_from_type(name, field_type))
+            else:
+                subfields.append(cls._widen_schema_field(sub, field_type))
+        api_repr = schema_field.to_api_repr()
+        api_repr["fields"] = [sub.to_api_repr() for sub in subfields]
+        return bigquery.SchemaField.from_api_repr(api_repr)
+
+    _API_FIELD_TYPES = {
+        "INT64": "INTEGER",
+        "FLOAT64": "FLOAT",
+        "BOOL": "BOOLEAN",
+        "STRUCT": "RECORD",
+    }
+
+    @classmethod
+    def _schema_field_from_type(cls, name: str, column_type: "ColumnType") -> Any:
+        """A new, nullable SchemaField for a field the source gained."""
+        from google.cloud import bigquery
+
+        from dlt_saga.historize.column_types import ARRAY, STRUCT
+
+        mode = "NULLABLE"
+        if column_type.kind == ARRAY and column_type.element is not None:
+            mode = "REPEATED"
+            column_type = column_type.element
+        if column_type.kind == STRUCT:
+            return bigquery.SchemaField(
+                name,
+                "RECORD",
+                mode=mode,
+                fields=[
+                    cls._schema_field_from_type(sub_name, sub_type)
+                    for sub_name, sub_type in column_type.fields
+                ],
+            )
+        base, params = cls._split_type_params(column_type.name)
+        kwargs: Dict[str, Any] = {}
+        if base in ("STRING", "BYTES") and params:
+            kwargs["max_length"] = params[0]
+        elif base in ("NUMERIC", "BIGNUMERIC") and params:
+            kwargs["precision"] = params[0]
+            if len(params) > 1:
+                kwargs["scale"] = params[1]
+        return bigquery.SchemaField(
+            name, cls._API_FIELD_TYPES.get(base, base), mode=mode, **kwargs
+        )
+
+    @staticmethod
+    def _split_type_params(spelling: str) -> Tuple[str, List[int]]:
+        """``NUMERIC(10, 2)`` → ``("NUMERIC", [10, 2])``; no params → ``[]``."""
+        match = re.fullmatch(r"\s*([A-Za-z0-9_ ]+?)\s*(?:\((.*)\))?\s*", spelling)
+        if match is None:
+            return spelling.upper(), []
+        base = " ".join(match.group(1).upper().split())
+        params = [
+            int(p) for p in (match.group(2) or "").split(",") if p.strip().isdigit()
+        ]
+        return base, params
 
     # --- Column / table description reconciliation -------------------------
 

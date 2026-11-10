@@ -28,6 +28,7 @@ def _json_path_key(key: str) -> str:
 
 if TYPE_CHECKING:
     from dlt_saga.destinations.config import DestinationConfig
+    from dlt_saga.historize.column_types import ColumnType
 
 
 # ---------------------------------------------------------------------------
@@ -1207,6 +1208,60 @@ class Destination(ABC):
         aliases overrides.
         """
         return " ".join(type_name.upper().split())
+
+    # --- Nested column evolution -------------------------------------------
+    #
+    # A struct column that gained or lost a field is the nested form of a
+    # table that gained or lost a column, and the historize layer takes both
+    # in place rather than refusing them. That needs three dialect-specific
+    # pieces: spelling a type tree back as DDL, reshaping a value from the
+    # source's type to the target's (fields reordered to the target's order,
+    # missing ones NULL), and widening a stored column to the merged type. A
+    # destination that implements none keeps refusing nested changes.
+
+    def supports_nested_evolution(self) -> bool:
+        """Whether nested field additions/removals are reconciled in place."""
+        return False
+
+    def spell_column_type(self, column_type: "ColumnType") -> str:
+        """The DDL spelling of a :class:`ColumnType` in this dialect."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement spell_column_type"
+        )
+
+    def reshape_expression(
+        self,
+        expr: str,
+        source_type: Optional["ColumnType"],
+        target_type: "ColumnType",
+    ) -> str:
+        """SQL turning *expr*, a value of *source_type*, into *target_type*.
+
+        Struct fields come out in the target's order, a field the source lacks
+        as a typed NULL, arrays element by element in their original order;
+        ``None`` for *source_type* is a value the source does not have at all.
+        Returns *expr* itself when the types already match. Scalars of
+        different types are never reshaped — the caller refuses those.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement reshape_expression"
+        )
+
+    def widen_column_type(
+        self,
+        dataset: str,
+        table: str,
+        column: str,
+        current: "ColumnType",
+        widened: "ColumnType",
+    ) -> None:
+        """Give a stored column the fields *widened* adds to *current*.
+
+        Existing values keep what they had; the new fields are NULL on them.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement widen_column_type"
+        )
 
     # =========================================================================
     # Column / table description reconciliation
