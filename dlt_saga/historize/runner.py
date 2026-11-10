@@ -479,7 +479,7 @@ class HistorizeRunner:
                 source_table_id=self.source_relation,
                 snapshot_column=self.config.snapshot_column,
                 filter_sql=self._filter_sql,
-                primary_key=self.config.primary_key,
+                primary_key=self.sql_builder.guarded_key_columns,
                 cast_checks=self.sql_builder.failed_cast_checks(),
             )
             new_snapshots = discovery.snapshots
@@ -563,6 +563,8 @@ class HistorizeRunner:
 
         There is no correct NULL-safe answer to "which entity is this", so this
         fails as a config error rather than producing history nobody can trust.
+        A column declared in ``nullable_key_columns`` is the exception: NULL is
+        a key value there, the joins compare it null-safe, and the guard skips it.
 
         Args:
             discovery: An incremental run's snapshot discovery, which already
@@ -614,11 +616,10 @@ class HistorizeRunner:
 
         row = rows[0]
         aliases = self.sql_builder.null_pk_probe_aliases()
+        guarded = self.sql_builder.guarded_key_columns
         return [
-            pk
-            for pk, alias in zip(self.config.primary_key, aliases)
-            if getattr(row, alias, 0)
-        ] or list(self.config.primary_key)
+            pk for pk, alias in zip(guarded, aliases) if getattr(row, alias, 0)
+        ] or guarded
 
     def _apply_late_arrivals(
         self,
@@ -669,7 +670,7 @@ class HistorizeRunner:
             source_table_id=self.source_relation,
             snapshot_column=self.config.snapshot_column,
             filter_sql=self._filter_sql,
-            primary_key=self.config.primary_key,
+            primary_key=self.sql_builder.guarded_key_columns,
             min_snapshot_inclusive=late.min_snapshot,
             cast_checks=self.sql_builder.failed_cast_checks(),
         )

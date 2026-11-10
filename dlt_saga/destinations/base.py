@@ -685,6 +685,17 @@ class Destination(ABC):
         """Return SQL expression to cast a value to string type."""
         return f"CAST({expression} AS {self.type_name('string')})"
 
+    def null_safe_equals(self, left: str, right: str) -> str:
+        """Return a predicate that is TRUE when both sides are equal *or both NULL*.
+
+        Plain ``=`` is never true when either side is NULL. Key comparisons on
+        columns declared in ``nullable_key_columns`` go through this instead, so
+        NULL behaves as one more key value — the reading ``PARTITION BY`` and
+        ``DISTINCT`` already give it. The default is the SQL-standard form;
+        a dialect without it overrides with its own operator.
+        """
+        return f"{left} IS NOT DISTINCT FROM {right}"
+
     def columns_query(self, database: str, schema: str, table: str) -> str:
         """Return SQL to discover a table's data columns from the schema catalog.
 

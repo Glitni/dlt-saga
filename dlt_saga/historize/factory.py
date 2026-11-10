@@ -318,8 +318,13 @@ def resolve_historize_target(
     top_level_pk = config_dict.get("primary_key")
     if isinstance(top_level_pk, str):
         top_level_pk = [top_level_pk]
+    top_level_nullable = config_dict.get("nullable_key_columns")
+    if isinstance(top_level_nullable, str):
+        top_level_nullable = [top_level_nullable]
 
-    historize_config = HistorizeConfig.from_dict(historize_dict, top_level_pk)
+    historize_config = HistorizeConfig.from_dict(
+        historize_dict, top_level_pk, top_level_nullable
+    )
     schema_name = (
         source_schema if source_schema is not None else pipeline_config.schema_name
     )

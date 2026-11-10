@@ -64,7 +64,8 @@ Other ways to avoid repeating yourself: [`dev:` override blocks](#dev-overrides)
 | `enabled` | bool | `true` | Master switch — disables both ingest and historize |
 | `tags` | list | `[]` | Tags for selector filtering (`saga ingest --select "tag:daily"`). Supports schedule values — see [Scheduling tags](#scheduling-tags) |
 | `write_disposition` | string | `"append"` | Controls operations — see below. Always set it explicitly; `saga validate` warns when it is omitted |
-| `primary_key` | string/list | — | Primary key column(s) for merge/historize |
+| `primary_key` | string/list | — | Primary key column(s) for merge/historize. Created NOT NULL at ingest |
+| `nullable_key_columns` | string/list | — | `primary_key` column(s) that may be NULL, for a composite key with a legitimately absent part. Kept nullable at ingest and compared null-safe by historize — see [Composite keys with a NULL part](Historize#composite-keys-with-a-null-part) |
 | `min_rows` | int | — | Minimum rows a load must carry. Checked before anything is written; a short load is abandoned with the target left intact and the run failed. Guards `replace` against emptying the table and scd2 against retiring keys that failed to arrive — see [Guarding against short loads](#guarding-against-short-loads-min_rows) |
 | `partition_column` | string | — | BigQuery partition column |
 | `cluster_columns` | list | — | BigQuery cluster columns (max 4) |
@@ -540,6 +541,7 @@ historize:
 | `order_by` | list | `[snapshot_column]` | `scd1` only: columns ranking a key's versions, highest wins. With `track_deletions: true` it must start with `snapshot_column` |
 | `snapshot_column` | string | `_dlt_ingested_at` | Column identifying each delivery (a complete snapshot under `delivery: full`); its value becomes `_dlt_valid_from` |
 | `primary_key` | list | inherited | Inherits from top-level `primary_key` |
+| `nullable_key_columns` | list | inherited | Inherits from top-level `nullable_key_columns`; `primary_key` columns compared null-safe and exempt from the NULL-key guard |
 | `track_columns` | list | — | Opt-in allowlist for change detection (all columns still in output) |
 | `ignore_columns` | list | `[]` | Columns excluded from change detection (still in output) |
 | `exclude_columns` | list | `[]` | Source columns left out of the historized table (and so out of change detection) |

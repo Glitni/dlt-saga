@@ -216,6 +216,7 @@ starts from what the source still holds.
 | Field | Location | Default | Description |
 |-------|----------|---------|-------------|
 | `primary_key` | top-level | required | Key columns identifying a unique record. Must never be NULL in the source — see [NULL primary keys are rejected](#null-primary-keys-are-rejected) |
+| `nullable_key_columns` | top-level | — | `primary_key` columns that may be NULL — see [Composite keys with a NULL part](#composite-keys-with-a-null-part) |
 | `snapshot_date_regex` | top-level | — | Regex to extract snapshot date from file paths (filesystem only) |
 | `snapshot_date_format` | top-level | — | `strptime` format for the extracted date string |
 | `strategy` | `historize:` | `scd2` | `scd2` keeps every version; `scd1` keeps only the latest version per key. See [SCD1: latest version per key](#scd1-latest-version-per-key) |
@@ -250,7 +251,7 @@ starts from what the source still holds.
 
 The primary key *is* the SCD2 identity, and SQL equality is never true for NULL. Change detection partitions by the key — where `NULL` groups with `NULL`, so change rows are produced — but the MERGE that closes the previously-open row (`ON t.pk = n.pk`) never matches, and neither do the deletion-marker joins. A NULL-keyed row therefore gains another permanently-open history row on every run, breaking the "exactly one open row per key" guarantee the historized table exists to provide.
 
-There is no correct NULL-safe answer to *which entity is this*, so historize refuses to write instead. Before any work, each run checks the rows it is about to read and fails if any primary-key column is NULL. The failure is recorded like any failed run, so it shows in `saga report`, `--select "state:failed"` and `saga notify`:
+There is no correct NULL-safe answer to *which entity is this*, so historize refuses to write instead (a composite key with a part that is meant to be NULL is the exception — see [Composite keys with a NULL part](#composite-keys-with-a-null-part)). Before any work, each run checks the rows it is about to read and fails if any primary-key column is NULL. The failure is recorded like any failed run, so it shows in `saga report`, `--select "state:failed"` and `saga notify`:
 
 ```
 Primary key column(s) 'company_id' contain NULL in project.dataset.raw_companies (snapshot 2026-01-02). ...
@@ -276,6 +277,23 @@ Filtered-out rows are never historized, so their NULL keys don't block the run. 
 The check is scoped to what the run reads: a NULL key that lands in an already-processed snapshot is below the watermark and never blocks later incremental runs. And because it runs before the destructive part of a full refresh, a rejected `--full-refresh` leaves the existing historized table untouched.
 
 If earlier runs already wrote duplicate open rows for a NULL key, rebuild with `--full-refresh` once the source is clean.
+
+### Composite keys with a NULL part
+
+Some composite keys have a part that is legitimately absent: a price keyed by `(customer_id, region)` where the row with no region is the customer's default. For such a column, "NULL is one more key value" is a well-defined identity — it is the reading `PARTITION BY` and `DISTINCT` already give it. Declare the column in `nullable_key_columns` and saga treats it that way on both layers:
+
+```yaml
+primary_key: [customer_id, region]
+nullable_key_columns: [region]
+```
+
+- **Ingest** creates `region` nullable. Key columns are otherwise NOT NULL at ingest — dlt marks every `primary_key` and `merge_key` column non-nullable, for `append` as well as `merge` — so without the declaration a row with a NULL key part fails the load.
+- **Historize** compares `region` with the destination's null-safe equality (`IS NOT DISTINCT FROM`, `<=>` on Databricks) in every key join: closing the previous version, deletion markers, reappearance, the scd1 merge. `(1, NULL)` versions chain like any other key, can be deleted and reappear, and never collide with `(1, 'eu')`.
+- The [NULL-key guard](#null-primary-keys-are-rejected) skips declared columns and still refuses a NULL in any other key column.
+
+`nullable_key_columns` must be a subset of `primary_key`; `saga validate` rejects anything else. It may also be set under `historize:` to apply to the historize layer only, as `primary_key` can. Declaring a column is not a fingerprinted change: rows with a NULL key were refused before, so no existing history depends on it.
+
+Prefer a populated key when the source can provide one. The option exists for keys where NULL carries meaning, not as a way past a source that occasionally drops a key value — those rows are better excluded with a filter, as above.
 
 ### Renaming the SCD2 columns
 
