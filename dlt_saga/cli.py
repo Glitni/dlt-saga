@@ -25,6 +25,7 @@ from dlt_saga.utility.cli.common import (
     discover_and_select_with_auth,
     execute_with_impersonation,
     flatten_configs,
+    get_config_source,
     load_profile_config,
     setup_execution_context,
     setup_logging,
@@ -2334,6 +2335,12 @@ def notify(
     # match each other. Environment is derived and stable.
     environment = profile_target.environment if profile_target is not None else None
 
+    # Per-pipeline notification settings (mentions, enabled) are read from the
+    # current configs, not the copy frozen on each plan row — which is also
+    # empty for local runs. Both sets: a disabled pipeline can still have
+    # recorded failures to report.
+    config_sets = list(get_config_source().discover())
+
     execute_with_impersonation(
         profile_target,
         lambda: run_notify(
@@ -2342,6 +2349,7 @@ def notify(
             execution_id=execution_id,
             force=force,
             dry_run=dry_run,
+            config_sets=config_sets,
         ),
     )
 

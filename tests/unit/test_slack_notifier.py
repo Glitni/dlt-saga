@@ -309,6 +309,117 @@ class TestPerPipelineMentions:
 
 
 @pytest.mark.unit
+class TestMutedPipelines:
+    """`notifications.slack.enabled: false` on a pipeline's config takes it out
+    of this channel entirely — not merely untagged, absent."""
+
+    @staticmethod
+    def _result(name, success, config_dict=None):
+        return _Result(
+            name,
+            success=success,
+            error=None if success else "boom",
+            config=_Config(config_dict or {}),
+        )
+
+    _MUTED = {"notifications": {"slack": {"enabled": False}}}
+
+    def test_muted_failure_is_left_out_of_the_digest(self):
+        recorder = _Recorder()
+
+        _notifier(recorder).on_run_complete(
+            _run_context(
+                [
+                    self._result("shop__orders", False, self._MUTED),
+                    self._result("crm__accounts", False),
+                ]
+            )
+        )
+
+        assert "crm__accounts" in recorder.text
+        assert "shop__orders" not in recorder.text
+
+    def test_counts_agree_with_the_lines(self):
+        recorder = _Recorder()
+
+        _notifier(recorder).on_run_complete(
+            _run_context(
+                [
+                    self._result("shop__orders", False, self._MUTED),
+                    self._result("crm__accounts", False),
+                    self._result("crm__contacts", True),
+                ]
+            )
+        )
+
+        assert "1 of 2 pipeline(s)" in recorder.text
+
+    def test_only_muted_failures_posts_nothing(self):
+        recorder = _Recorder()
+
+        _notifier(recorder).on_run_complete(
+            _run_context(
+                [
+                    self._result("shop__orders", False, self._MUTED),
+                    self._result("crm__accounts", True),
+                ]
+            )
+        )
+
+        assert recorder.sent == []
+
+    def test_always_still_posts_a_success_digest_without_it(self):
+        recorder = _Recorder()
+
+        _notifier(recorder, notify_on="always").on_run_complete(
+            _run_context(
+                [
+                    self._result("shop__orders", False, self._MUTED),
+                    self._result("crm__accounts", True),
+                ]
+            )
+        )
+
+        assert "complete — 1 pipeline(s)" in recorder.text
+        assert "shop__orders" not in recorder.text
+
+    def test_project_mentions_not_pinged_for_a_muted_failure(self):
+        recorder = _Recorder()
+
+        _notifier(recorder, mentions=["<@UOPS>"]).on_run_complete(
+            _run_context([self._result("shop__orders", False, self._MUTED)])
+        )
+
+        assert recorder.sent == []
+
+    @pytest.mark.parametrize(
+        "slack_block",
+        [
+            {},
+            {"enabled": True},
+            {"enabled": None},
+            {"enabled": "false"},
+            {"enabled": 0},
+        ],
+    )
+    def test_only_a_literal_false_mutes(self, slack_block):
+        """A typo must not silence a pipeline."""
+        recorder = _Recorder()
+
+        _notifier(recorder).on_run_complete(
+            _run_context(
+                [
+                    self._result(
+                        "shop__orders", False, {"notifications": {"slack": slack_block}}
+                    )
+                ]
+            )
+        )
+
+        assert "shop__orders" in recorder.text
+
+
+@pytest.mark.unit
 class TestDeliveryIsBestEffort:
     def test_send_failure_is_logged_not_raised(self, caplog):
         """A broken alerting channel must never break the load it reports on."""
@@ -1333,3 +1444,112 @@ class TestUnknownNotificationKeys:
     def test_moved_keys_keep_their_specific_message(self):
         with pytest.raises(ValueError, match="notify_on belongs under"):
             SlackNotificationConfig.from_dict({"notify_on": "failure"})
+
+
+@pytest.mark.unit
+class TestMutedPipelinesInSweep:
+    """The sweep hands the notifier every failure; the notifier drops the ones
+    muted for its channel, so the sweep itself stays sink-agnostic."""
+
+    _MUTED = {"notifications": {"slack": {"enabled": False}}}
+
+    def test_muted_failing_pipeline_is_absent(self):
+        recorder = _Recorder()
+
+        _notifier(recorder).on_sweep_complete(
+            _sweep(
+                [
+                    _outcome("shop__orders", 3, 3, True, config=self._MUTED),
+                    _outcome("crm__accounts", 1, 1, True),
+                ]
+            )
+        )
+
+        body = _rendered(recorder)
+        assert "crm__accounts" in body
+        assert "shop__orders" not in body
+        assert "1 pipeline failing" in body
+
+    def test_muted_recovered_pipeline_is_absent(self):
+        recorder = _Recorder()
+
+        _notifier(recorder).on_sweep_complete(
+            _sweep(
+                [
+                    _outcome("shop__orders", 3, 1, False, config=self._MUTED),
+                    _outcome("crm__accounts", 1, 1, True),
+                ]
+            )
+        )
+
+        assert "shop__orders" not in _rendered(recorder)
+        assert "*Recovered*" not in _rendered(recorder)
+
+    def test_attempt_totals_exclude_the_muted_pipeline(self):
+        """Absent from the digest means absent from its footer too — not
+        counted as an anonymous failure."""
+        recorder = _Recorder()
+
+        _notifier(recorder).on_sweep_complete(
+            _sweep(
+                [
+                    _outcome("shop__orders", 3, 3, True, config=self._MUTED),
+                    _outcome("crm__accounts", 1, 1, True),
+                ],
+                total_attempts=10,
+                failed_attempts=4,
+            )
+        )
+
+        assert "6 of 7 pipeline attempts succeeded" in _rendered(recorder)
+
+    def test_only_muted_failures_posts_nothing_and_says_so(self):
+        recorder = _Recorder()
+        ctx = _sweep([_outcome("shop__orders", 3, 3, True, config=self._MUTED)])
+
+        notifier = _notifier(recorder)
+
+        assert notifier.build_sweep_payload(ctx) is None
+        assert notifier.on_sweep_complete(ctx) is None
+        assert recorder.sent == []
+
+    def test_clean_sweep_is_also_none(self):
+        assert _notifier(_Recorder()).on_sweep_complete(_sweep([])) is None
+
+    def test_delivered_is_true(self):
+        recorder = _Recorder()
+
+        assert (
+            _notifier(recorder).on_sweep_complete(
+                _sweep([_outcome("crm__accounts", 1, 1, True)])
+            )
+            is True
+        )
+
+    def test_project_mentions_not_pinged_when_only_muted_pipelines_fail(self):
+        recorder = _Recorder()
+
+        _notifier(recorder, mentions=["<@UOPS>"]).on_sweep_complete(
+            _sweep(
+                [
+                    _outcome("shop__orders", 3, 3, True, config=self._MUTED),
+                    _outcome("crm__accounts", 3, 1, False),
+                ]
+            )
+        )
+
+        body = _rendered(recorder)
+        assert "<@UOPS>" not in body
+        assert "failed and recovered" in body
+
+    def test_the_sweep_itself_is_not_modified(self):
+        ctx = _sweep(
+            [
+                _outcome("shop__orders", 3, 3, True, config=self._MUTED),
+                _outcome("crm__accounts", 1, 1, True),
+            ]
+        )
+
+        _notifier(_Recorder()).on_sweep_complete(ctx)
+
+        assert len(ctx.outcomes) == 2

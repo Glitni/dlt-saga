@@ -500,8 +500,8 @@ recovered:
 - **The denominator is attempts, not runs.** Consecutive executions may select different pipelines, so "failed in 1 of 3 runs" would imply a pipeline succeeded in two that never attempted it.
 - **Persistence is kept** because *failed 3 of 3 attempts* and *failed once* are the difference between an outage and a blip.
 - **Recovered pipelines are reported too**, as a separate line. A pipeline that fails one run in five and always recovers before the next sweep would otherwise never be reported at all — invisible precisely because it keeps fixing itself.
-- **Per-pipeline mentions still work.** The execution-plan row stores each pipeline's config, so `notifications.slack.mentions` resolves even though no single process ran every pipeline.
-- **Nothing failed, nothing posted.** A clean sweep is silent.
+- **Per-pipeline settings come from the current config.** Each outcome is matched to its pipeline's config by `(pipeline_type, table_name)`, so `notifications.slack.mentions` resolves even though no single process ran every pipeline, and a pipeline muted with `notifications.slack.enabled: false` is left out of the digest — failures recorded before the mute included. A pipeline that is no longer configured falls back to the config stored on its execution-plan row.
+- **Nothing failed, nothing posted.** A clean sweep is silent, and so is one whose only failures belong to muted pipelines.
 
 ### Knowing the notifier ran
 

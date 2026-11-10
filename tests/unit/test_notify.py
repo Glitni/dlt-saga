@@ -9,17 +9,22 @@ is neither reported twice nor silently dropped.
 
 import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from dlt_saga.notify import (
     DEFAULT_SINCE_DAYS,
+    SWEEP_DELIVERED,
+    SWEEP_QUIET,
+    SWEEP_UNDELIVERED,
     PipelineOutcome,
     SweepContext,
+    apply_current_configs,
     collect_unreported,
     mark_reported,
     record_sweep,
+    run_notify,
 )
 
 # A Windows-recorded config path. Built from parts so no editing step can
@@ -516,6 +521,111 @@ class TestConfigCarriedThrough:
 
 
 @pytest.mark.unit
+class TestCurrentConfigWins:
+    """Per-pipeline notification settings are read from the config as it is
+    now, not as it was when the execution was planned.
+
+    The plan row's copy is frozen at plan time and empty for a local run, so a
+    mute added this morning would otherwise leave the morning's failures
+    alerting until a freshly planned execution came through.
+    """
+
+    @staticmethod
+    def _config(group, table, **config_dict):
+        return SimpleNamespace(
+            pipeline_group=group,
+            table_name=table,
+            pipeline_name=f"{group}__{table}",
+            config_dict=config_dict,
+        )
+
+    def test_current_config_replaces_the_stored_copy(self):
+        ctx = collect_unreported(
+            _manager(
+                [
+                    _row(
+                        "e1",
+                        "shop__orders",
+                        "failed",
+                        config={"pipeline_name": "shop__orders"},
+                    )
+                ]
+            )
+        )
+
+        apply_current_configs(
+            ctx,
+            [
+                {
+                    "shop": [
+                        self._config(
+                            "shop",
+                            "orders",
+                            notifications={"slack": {"enabled": False}},
+                        )
+                    ]
+                },
+                {},
+            ],
+        )
+
+        assert ctx.failing[0].config_dict["notifications"] == {
+            "slack": {"enabled": False}
+        }
+        assert ctx.failing[0].config_dict["pipeline_name"] == "shop__orders"
+
+    def test_local_run_without_a_stored_config_is_resolved(self):
+        """`record_local_run` stores `{}`, so this is the only way a local
+        failure reaches its own notification settings."""
+        ctx = collect_unreported(
+            _manager([_row("e1", "shop__orders", "failed", config={})])
+        )
+
+        apply_current_configs(
+            ctx,
+            [{"shop": [self._config("shop", "orders", tags=["daily"])]}],
+        )
+
+        assert ctx.failing[0].config_dict["tags"] == ["daily"]
+        assert ctx.failing[0].pipeline_name == "shop__orders"
+
+    def test_unconfigured_pipeline_keeps_the_stored_copy(self):
+        stored = {"pipeline_name": "shop__orders", "tags": ["old"]}
+        ctx = collect_unreported(
+            _manager([_row("e1", "shop__orders", "failed", config=stored)])
+        )
+
+        apply_current_configs(ctx, [{"crm": [self._config("crm", "accounts")]}])
+
+        assert ctx.failing[0].config_dict == stored
+
+    def test_disabled_configs_count_too(self):
+        """A pipeline switched off after failing still gets its own settings."""
+        ctx = collect_unreported(
+            _manager([_row("e1", "shop__orders", "failed", config={})])
+        )
+
+        apply_current_configs(
+            ctx,
+            [{}, {"shop": [self._config("shop", "orders", enabled=False)]}],
+        )
+
+        assert ctx.failing[0].config_dict["enabled"] is False
+
+    def test_matched_on_normalised_table_name(self):
+        """The same key the report and `state:` selectors use."""
+        ctx = collect_unreported(
+            _manager([_row("e1", "shop__Orders", "failed", config={})])
+        )
+
+        apply_current_configs(
+            ctx, [{"shop": [self._config("shop", "orders", tags=["x"])]}]
+        )
+
+        assert ctx.failing[0].config_dict["tags"] == ["x"]
+
+
+@pytest.mark.unit
 class TestForce:
     """`--force` re-reports what a previous sweep already claimed."""
 
@@ -879,3 +989,157 @@ class TestScopeDescription:
 
         assert scope == "execution 'run-7'"
         assert "14d" not in scope
+
+
+@pytest.mark.unit
+class TestSweepOutcomeDecidesClaiming:
+    """What `run_notify` does with the way the notifier said the sweep ended.
+
+    Delivered and quiet-by-muting both claim the executions; undelivered
+    leaves them for the next sweep, or an outage would lose the digest for good.
+    """
+
+    def _run(self, dispatch_outcome, rows=None, **kwargs):
+        rows = rows if rows is not None else [_row("e1", "shop__orders", "failed")]
+        manager = _manager(rows)
+        with (
+            patch(
+                "dlt_saga.utility.orchestration.execution_plan.ExecutionPlanManager",
+                return_value=manager,
+            ),
+            patch(
+                "dlt_saga.destinations.factory.DestinationFactory.create_from_context"
+            ),
+            patch("dlt_saga.utility.cli.context.get_execution_context"),
+            patch("dlt_saga.utility.naming.get_execution_plan_schema"),
+            patch("dlt_saga.notify._dispatch", return_value=dispatch_outcome),
+            patch("dlt_saga.notify.mark_reported") as mark,
+            patch("dlt_saga.notify.record_sweep") as record,
+        ):
+            ctx = run_notify(environment="prod", **kwargs)
+        return ctx, manager, mark, record
+
+    def test_delivered_claims_and_records(self):
+        ctx, manager, mark, record = self._run(SWEEP_DELIVERED)
+
+        mark.assert_called_once_with(manager, ["e1"])
+        record.assert_called_once_with(manager, ctx, SWEEP_DELIVERED)
+
+    def test_every_failure_muted_still_claims_but_records_quiet(self):
+        """Leaving them unclaimed would resurface them the day the mute is
+        lifted, as a backlog nobody asked about."""
+        ctx, manager, mark, record = self._run(SWEEP_QUIET)
+
+        mark.assert_called_once_with(manager, ["e1"])
+        record.assert_called_once_with(manager, ctx, SWEEP_QUIET)
+
+    def test_undelivered_claims_nothing(self):
+        ctx, manager, mark, record = self._run(SWEEP_UNDELIVERED)
+
+        mark.assert_not_called()
+        record.assert_called_once_with(manager, ctx, SWEEP_UNDELIVERED)
+
+    def test_dry_run_claims_and_records_nothing(self):
+        _, _, mark, record = self._run(SWEEP_QUIET, dry_run=True)
+
+        mark.assert_not_called()
+        record.assert_not_called()
+
+    def test_current_configs_are_applied_before_dispatch(self):
+        config = SimpleNamespace(
+            pipeline_group="shop",
+            table_name="orders",
+            pipeline_name="shop__orders",
+            config_dict={"notifications": {"slack": {"enabled": False}}},
+        )
+
+        ctx, _, _, _ = self._run(SWEEP_QUIET, config_sets=[{"shop": [config]}])
+
+        assert ctx.failing[0].config_dict["notifications"]["slack"]["enabled"] is False
+
+
+@pytest.mark.unit
+class TestDispatchOutcome:
+    """`_dispatch` reports how the notifier ended the sweep, so muting is the
+    sink's decision and the sweep only acts on the answer."""
+
+    def _project(self):
+        from dlt_saga.project_config import SlackNotificationConfig
+
+        return SimpleNamespace(
+            notifications=SimpleNamespace(
+                slack=SlackNotificationConfig(webhook_url="env_secret::HOOK")
+            )
+        )
+
+    def _dispatch(self, ctx, dry_run=False):
+        from dlt_saga.notify import _dispatch
+
+        sent = []
+        with (
+            patch(
+                "dlt_saga.project_config.get_project_config",
+                return_value=self._project(),
+            ),
+            patch(
+                "dlt_saga.hooks.notifiers.slack._post_to_slack",
+                side_effect=lambda url, payload, timeout: sent.append(payload),
+            ),
+            patch(
+                "dlt_saga.utility.secrets.resolve_secret",
+                side_effect=lambda v: f"https://{v}",
+            ),
+        ):
+            outcome = _dispatch(ctx, dry_run=dry_run)
+        return outcome, sent
+
+    @staticmethod
+    def _ctx(*outcomes):
+        return SweepContext(
+            execution_ids=["e1"],
+            outcomes=list(outcomes),
+            total_attempts=sum(o.attempts for o in outcomes),
+            failed_attempts=sum(o.failures for o in outcomes),
+        )
+
+    @staticmethod
+    def _muted(name):
+        return PipelineOutcome(
+            name,
+            name.split("__")[-1],
+            attempts=1,
+            failures=1,
+            currently_failing=True,
+            latest_error="boom",
+            config_dict={"notifications": {"slack": {"enabled": False}}},
+        )
+
+    def test_a_failure_is_delivered(self):
+        outcome, sent = self._dispatch(
+            self._ctx(
+                PipelineOutcome(
+                    "shop__orders",
+                    "orders",
+                    attempts=1,
+                    failures=1,
+                    currently_failing=True,
+                )
+            )
+        )
+
+        assert outcome == SWEEP_DELIVERED
+        assert len(sent) == 1
+
+    def test_only_muted_failures_is_quiet(self):
+        outcome, sent = self._dispatch(self._ctx(self._muted("shop__orders")))
+
+        assert outcome == SWEEP_QUIET
+        assert sent == []
+
+    def test_dry_run_never_delivers(self):
+        outcome, sent = self._dispatch(
+            self._ctx(self._muted("shop__orders")), dry_run=True
+        )
+
+        assert outcome == SWEEP_UNDELIVERED
+        assert sent == []

@@ -27,6 +27,13 @@ pipeline's own config is appended to that pipeline's line. Nothing is derived
 from ``meta``, which stays free-form and uninterpreted as documented, and
 nothing needs a lookup table — the tokens are written where they apply.
 
+A pipeline opts out of this channel with ``notifications.slack.enabled: false``
+on its own config: it is left out of every digest this notifier posts — its
+failures, its recoveries, the attempt totals — and a run or sweep whose only
+failures are muted posts nothing. The mute is this sink's alone: ``saga report``
+and its status summary still show the pipeline's real state, and another
+notifier would read its own block. Only a literal ``false`` mutes.
+
 Failures to notify are logged and swallowed. An alerting channel that breaks a
 data load would be worse than the missing alert, and the hook registry already
 treats handler exceptions as non-fatal — this module is explicit about it so
@@ -320,42 +327,59 @@ class SlackNotifier:
     # ------------------------------------------------------------------
 
     def on_run_complete(self, ctx: "RunContext") -> None:
-        """Post the run digest, if this run's outcome warrants one."""
+        """Post the run digest, if this run's outcome warrants one.
+
+        Muted pipelines are dropped before anything is decided, so a run whose
+        only failures are muted is a run without failures to this notifier.
+        """
         subscription = self.config.on_run_complete
         notify_on = subscription.notify_on if subscription else "failure"
-        if notify_on == "failure" and not ctx.has_failures:
-            logger.debug("Slack digest skipped: run had no failures")
+        results = [
+            r for r in ctx.results if not self._pipeline_muted(self._config_dict_of(r))
+        ]
+        if notify_on == "failure" and all(r.success for r in results):
+            logger.debug("Slack digest skipped: run had no failures to post")
             return
-        self._send(self._build_run_payload(ctx))
+        self._send(self._build_run_payload(ctx, results))
 
     # ------------------------------------------------------------------
     # Message construction
     # ------------------------------------------------------------------
 
-    def _build_run_payload(self, ctx: "RunContext") -> Dict[str, Any]:
-        """Build the Slack payload for a completed run."""
-        total = len(ctx.results)
-        if ctx.has_failures:
+    def _build_run_payload(
+        self, ctx: "RunContext", results: List[Any]
+    ) -> Dict[str, Any]:
+        """Build the Slack payload for a completed run.
+
+        Args:
+            ctx: The completed run.
+            results: The run's results as this channel sees them — muted
+                pipelines already removed, so the counts in the headline agree
+                with the lines under it.
+        """
+        total = len(results)
+        failures = [r for r in results if not r.success]
+        if failures:
             headline = (
-                f":x: saga {ctx.command} failed — {ctx.failed} of {total} pipeline(s)"
+                f":x: saga {ctx.command} failed — {len(failures)} of {total} "
+                "pipeline(s)"
             )
-        elif total == 0:
+        elif not ctx.results:
             # Worth saying out loud: a scheduled run whose selection silently
             # stopped matching looks identical to a healthy no-op.
             headline = f":warning: saga {ctx.command} selected no pipelines"
         else:
             headline = (
-                f":white_check_mark: saga {ctx.command} complete — "
-                f"{ctx.succeeded} pipeline(s)"
+                f":white_check_mark: saga {ctx.command} complete — {total} pipeline(s)"
             )
 
         lines = [headline, self._context_line(ctx)]
 
-        if ctx.has_failures:
+        if failures:
             lines.append("")
-            for result in ctx.failures[:_MAX_LISTED_FAILURES]:
+            for result in failures[:_MAX_LISTED_FAILURES]:
                 lines.append(self._failure_line(result))
-            remaining = ctx.failed - _MAX_LISTED_FAILURES
+            remaining = len(failures) - _MAX_LISTED_FAILURES
             if remaining > 0:
                 lines.append(f"…and {remaining} more")
 
@@ -366,22 +390,32 @@ class SlackNotifier:
 
         return {"text": "\n".join(line for line in lines if line is not None)}
 
-    def on_sweep_complete(self, ctx: "SweepContext") -> bool:
+    def on_sweep_complete(self, ctx: "SweepContext") -> Optional[bool]:
         """Post the digest for a ``saga notify`` sweep.
 
         Unlike the per-run digest this is driven by recorded state rather than a
         finished run, so it can describe several executions at once — including
         ones that ran in containers this process never saw.
-        """
-        if not ctx.has_anything_to_report:
-            logger.debug("Sweep digest skipped: nothing failed")
-            return True
-        return self._send(self.build_sweep_payload(ctx))
 
-    def build_sweep_payload(self, ctx: "SweepContext") -> Dict[str, Any]:
+        Returns:
+            ``True`` when a digest was posted, ``False`` when posting failed,
+            ``None`` when there was nothing to post: nothing failed, or every
+            pipeline that did is muted for Slack. The sweep claims its
+            executions on ``True`` and ``None`` alike — a muted failure is as
+            reported as this channel will ever make it, and leaving it
+            unclaimed would only resurface it the day the mute is lifted.
+        """
+        payload = self.build_sweep_payload(ctx)
+        if payload is None:
+            logger.debug("Sweep digest skipped: nothing to post")
+            return None
+        return self._send(payload)
+
+    def build_sweep_payload(self, ctx: "SweepContext") -> Optional[Dict[str, Any]]:
         """Build the Slack message for a sweep across several executions.
 
-        Public so a dry run can show exactly what would be posted.
+        Public so a dry run can show exactly what would be posted. ``None``
+        when the sweep, with muted pipelines removed, has nothing to report.
 
         Structured rather than a block of text: a header states the state, a
         context line attributes the message to saga and names the scope, and a
@@ -393,6 +427,9 @@ class SlackNotifier:
         *failed every attempt* and *failed once* are the difference between an
         outage and a blip.
         """
+        ctx = self._without_muted(ctx)
+        if not ctx.has_anything_to_report:
+            return None
         failing, recovered = ctx.failing, ctx.recovered
         runs = len(ctx.execution_ids)
         window = f"{runs} {'run' if runs == 1 else 'runs'} · last {ctx.since_days}d"
@@ -512,44 +549,75 @@ class SlackNotifier:
         """Build one bullet describing a failed pipeline."""
         error = _truncate(result.error or "failed", _MAX_ERROR_CHARS)
         line = f"• `{result.pipeline_name}` — {error}"
-        mentions = self._pipeline_mentions(getattr(result, "config", None))
+        mentions = self._pipeline_mentions_from_config(self._config_dict_of(result))
         if mentions:
             line = f"{line} {mentions}"
         return line
 
-    @staticmethod
-    def _pipeline_mentions(config: Any) -> str:
-        """Return a pipeline's own mention tokens, joined, or an empty string.
+    def _without_muted(self, ctx: "SweepContext") -> "SweepContext":
+        """The sweep as this channel sees it: muted pipelines removed outright.
 
-        Reads ``notifications.slack.mentions`` from the pipeline config — the
-        same key the project-level block uses — so ownership of an alert is
-        declared where the pipeline is declared. Malformed values are ignored
-        rather than raised on: a notifier must not fail the run it reports on,
+        Removed from the attempt totals too, so the "N of M attempts succeeded"
+        line agrees with the list above it — a muted pipeline is absent from
+        the digest, not hiding in its footer as an anonymous failure.
+        """
+        from dataclasses import replace
+
+        muted = [o for o in ctx.outcomes if self._pipeline_muted(o.config_dict)]
+        if not muted:
+            return ctx
+        muted_ids = {id(o) for o in muted}
+        return replace(
+            ctx,
+            outcomes=[o for o in ctx.outcomes if id(o) not in muted_ids],
+            total_attempts=max(0, ctx.total_attempts - sum(o.attempts for o in muted)),
+            failed_attempts=max(
+                0, ctx.failed_attempts - sum(o.failures for o in muted)
+            ),
+        )
+
+    @staticmethod
+    def _config_dict_of(result: Any) -> Dict[str, Any]:
+        """The raw config dict behind a run result, or ``{}`` without one."""
+        config = getattr(result, "config", None)
+        config_dict = getattr(config, "config_dict", None)
+        return config_dict if isinstance(config_dict, dict) else {}
+
+    @staticmethod
+    def _slack_settings(config_dict: Any) -> Dict[str, Any]:
+        """A pipeline's own ``notifications.slack`` block, or ``{}``.
+
+        Shared by the hook path (which holds a PipelineConfig) and the sweep
+        (which holds the config resolved for the execution-plan row), so both
+        reach the same keys by the same rules. Malformed values read as absent
+        rather than raising: a notifier must not fail the run it reports on,
         and ``saga validate`` is where a bad config should surface.
         """
-        if config is None:
-            return ""
-        return SlackNotifier._pipeline_mentions_from_config(
-            getattr(config, "config_dict", {})
-        )
+        if not isinstance(config_dict, dict):
+            return {}
+        notifications = config_dict.get("notifications")
+        if not isinstance(notifications, dict):
+            return {}
+        slack = notifications.get("slack")
+        return slack if isinstance(slack, dict) else {}
+
+    @staticmethod
+    def _pipeline_muted(config_dict: Any) -> bool:
+        """Whether a pipeline opted out of Slack with ``enabled: false``.
+
+        Only a literal ``false`` mutes. Absent, ``true`` or anything else leaves
+        the pipeline reported, so a typo silences nothing.
+        """
+        return SlackNotifier._slack_settings(config_dict).get("enabled") is False
 
     @staticmethod
     def _pipeline_mentions_from_config(config_dict: Any) -> str:
         """Resolve ``notifications.slack.mentions`` out of a raw config dict.
 
-        Shared by the hook path (which holds a PipelineConfig) and the sweep
-        (which holds the config stored on the execution-plan row), so both reach
-        the same key by the same rules.
+        Ownership of an alert is declared where the pipeline is declared: the
+        same key the project-level block uses, on the pipeline's own config.
         """
-        if not isinstance(config_dict, dict):
-            return ""
-        notifications = config_dict.get("notifications")
-        if not isinstance(notifications, dict):
-            return ""
-        slack = notifications.get("slack")
-        if not isinstance(slack, dict):
-            return ""
-        mentions = slack.get("mentions")
+        mentions = SlackNotifier._slack_settings(config_dict).get("mentions")
         if isinstance(mentions, str):
             mentions = [mentions]
         if not isinstance(mentions, list):
