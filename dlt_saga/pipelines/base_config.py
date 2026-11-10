@@ -82,13 +82,16 @@ class BaseConfig:
         metadata={
             "description": (
                 "Per-pipeline notification settings, same shape as the "
-                "'notifications:' block in saga_project.yml. Currently "
-                "'slack.mentions' (a string or list of Slack mention tokens), "
-                "appended to this pipeline's line in a failure digest — for "
-                "reaching whoever owns or is on call for it. Transport settings "
-                "(token, webhook_url, on_run_complete) are project-level only. "
-                "Inherits through the usual saga_project.yml 'pipelines:' "
-                "hierarchy."
+                "'notifications:' block in saga_project.yml. 'slack.mentions' "
+                "(a string or list of Slack mention tokens) is appended to this "
+                "pipeline's line in a failure digest — for reaching whoever "
+                "owns or is on call for it. 'slack.enabled: false' leaves the "
+                "pipeline out of Slack digests altogether (saga notify and "
+                "on_run_complete alike); saga report still shows its real "
+                "state. Transport "
+                "settings (token, webhook_url, on_run_complete) are "
+                "project-level only. Inherits through the usual "
+                "saga_project.yml 'pipelines:' hierarchy."
             ),
         },
     )

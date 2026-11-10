@@ -83,7 +83,7 @@ Other ways to avoid repeating yourself: [`dev:` override blocks](#dev-overrides)
 | `adapter` | string | — | Explicit pipeline implementation binding (e.g., `dlt_saga.api.myservice`) |
 | `filters` | list | — | Row-level filters applied during ingest — see [Row Filters](#row-filters) |
 | `meta` | dict | — | Free-form user metadata for documentation/governance — see [Custom Metadata](#custom-metadata) |
-| `notifications` | dict | — | Per-pipeline notification settings — currently `slack.mentions`, appended to this pipeline's line in a failure digest. See [Slack notifications](#slack-notifications) |
+| `notifications` | dict | — | Per-pipeline notification settings — `slack.mentions`, appended to this pipeline's line in a failure digest, and `slack.enabled: false`, which leaves the pipeline out of Slack digests altogether. See [Slack notifications](#slack-notifications) |
 
 ### Recommended property order
 
@@ -724,7 +724,18 @@ pipelines:
         mentions: ["<!subteam^S012ABCDEF>"]
 ```
 
-Transport settings (`token`, `webhook_url`, `timeout_seconds`) and `on_run_complete` are project-level only — a pipeline chooses who hears about it, not where or whether the notifier posts.
+**Muting a pipeline.** Whether a pipeline's failures reach Slack is decided on the pipeline, like who is mentioned for them. It opts out on its own config:
+
+```yaml
+# configs/shop/orders.yml
+notifications:
+  slack:
+    enabled: false
+```
+
+It is then absent from every Slack digest, `saga notify` and `on_run_complete` alike: not listed as failing or recovered, not counted in the attempt totals, and a run or sweep whose only failures are muted posts nothing. Only Slack is muted — [`saga report`](CLI-Reference#saga-report) and its status summary keep showing the pipeline's real state. `saga notify` reads the setting from the pipeline's current config rather than the copy stored with each run, so muting applies to failures already recorded, and the sweep still marks those executions as reported, so lifting the mute later does not replay a backlog. Only a literal `false` mutes; anything else leaves the pipeline reported. Set it for a group through the same `+notifications:` hierarchy as mentions.
+
+Transport settings (`token`, `webhook_url`, `timeout_seconds`) and `on_run_complete` are project-level only — a pipeline chooses who hears about it, and whether this channel hears about it at all, not where or how the notifier posts.
 
 **Routing to several channels** means several webhooks — a webhook is bound to one channel and the notifier takes one. Post to one operational channel and route from there, or write a custom `on_run_complete` hook.
 

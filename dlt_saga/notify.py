@@ -40,13 +40,28 @@ to remove, moved up one layer. Each completed sweep therefore appends one row to
 ``_saga_notify_log``, so whether the notifier *ran* is a query something
 other than the notifier can answer, without adding chat traffic.
 
+Per-pipeline settings come from the current config
+--------------------------------------------------
+A notifier reads a pipeline's own ``notifications`` block — who to mention,
+whether to post about it at all. The plan row stores a copy of the config, but
+it is the config *as planned*: frozen when the execution was created, and empty
+for a local run (``record_local_run``). So each outcome is matched to the
+pipeline's current config by the same ``(pipeline_type, table_name)`` key the
+report and ``state:`` selectors use (:func:`apply_current_configs`), and the
+stored copy only stands in for a pipeline no longer configured. Muting a
+pipeline therefore applies to the failures already recorded, not just to runs
+planned after the change.
+
 The logic here is warehouse-facing and CLI-agnostic (no typer); the command in
 ``cli.py`` is a thin wrapper.
 """
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional
+
+if TYPE_CHECKING:
+    from dlt_saga.pipeline_config.base_config import PipelineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +105,13 @@ class PipelineOutcome:
         failures: How many of those attempts failed or were abandoned.
         currently_failing: Whether the most recent attempt failed.
         latest_error: Error from the most recent failed attempt.
-        config_dict: The pipeline's stored config, used to resolve per-pipeline
-            notification mentions — available even though no single process ran
-            every pipeline, because the plan row stores it.
+        config_dict: The pipeline's config, from which a notifier reads its
+            per-pipeline settings (``notifications.slack.mentions``, ``enabled``).
+            The current config when the pipeline is still configured
+            (:func:`apply_current_configs`), else the copy the plan row stores —
+            available even though no single process ran every pipeline.
+        pipeline_type: The pipeline group as recorded on the plan row; with
+            ``table_name`` it identifies the pipeline across executions.
     """
 
     pipeline_name: str
@@ -102,6 +121,7 @@ class PipelineOutcome:
     currently_failing: bool = False
     latest_error: Optional[str] = None
     config_dict: Dict[str, Any] = field(default_factory=dict)
+    pipeline_type: str = ""
 
     @property
     def recovered(self) -> bool:
@@ -176,11 +196,10 @@ def _pipeline_key(row: Any) -> tuple:
     ``configs/database/asp/customer_state.yml`` — each with its own partial
     attempt count.
     """
-    from dlt_saga.utility.naming import normalize_identifier
+    from dlt_saga.report.collector import pipeline_key
 
-    return (
-        str(getattr(row, "pipeline_type", "") or ""),
-        normalize_identifier(str(row.table_name or "")),
+    return pipeline_key(
+        str(getattr(row, "pipeline_type", "") or ""), str(row.table_name or "")
     )
 
 
@@ -371,6 +390,7 @@ def _aggregate(
             outcome = PipelineOutcome(
                 pipeline_name=_display_name(row, config),
                 table_name=row.table_name or "",
+                pipeline_type=key[0],
             )
             outcomes[key] = outcome
         elif config.get("pipeline_name"):
@@ -398,6 +418,43 @@ def _aggregate(
         total_attempts=total_attempts,
         failed_attempts=failed_attempts,
     )
+
+
+def apply_current_configs(
+    ctx: SweepContext, config_sets: Iterable[Dict[str, List["PipelineConfig"]]]
+) -> None:
+    """Give each outcome its pipeline's current config where one is configured.
+
+    The plan row's copy is the config as planned — frozen at plan time, and
+    empty for a local run — so a notifier reading per-pipeline settings from it
+    would miss a change made since, and miss local runs entirely. Matched by
+    the same key as the report's :func:`~dlt_saga.report.collector.pipeline_key`;
+    a pipeline that is no longer configured keeps the stored copy.
+
+    Args:
+        ctx: The sweep to update in place.
+        config_sets: Discovered configs by pipeline group, as
+            ``ConfigSource.discover()`` returns them — pass both the enabled
+            and the disabled set, since a disabled pipeline can still have
+            recorded failures to report.
+    """
+    from dlt_saga.report.collector import pipeline_key
+
+    by_key = {
+        pipeline_key(c.pipeline_group, c.table_name): c
+        for configs in config_sets
+        for config_list in configs.values()
+        for c in config_list
+    }
+    for outcome in ctx.outcomes:
+        config = by_key.get(pipeline_key(outcome.pipeline_type, outcome.table_name))
+        if config is None:
+            continue
+        outcome.config_dict = {
+            **config.config_dict,
+            "pipeline_name": config.pipeline_name,
+        }
+        outcome.pipeline_name = config.pipeline_name
 
 
 def mark_reported(manager: Any, execution_ids: List[str]) -> int:
@@ -588,6 +645,7 @@ def run_notify(
     execution_id: Optional[str] = None,
     force: bool = False,
     dry_run: bool = False,
+    config_sets: Optional[Iterable[Dict[str, List["PipelineConfig"]]]] = None,
 ) -> SweepContext:
     """Collect unreported outcomes, post a digest, and claim what was reported.
 
@@ -598,6 +656,10 @@ def run_notify(
         execution_id: Report exactly this execution instead of sweeping.
         force: Report even executions already marked as reported.
         dry_run: Build and log the digest without sending or claiming anything.
+        config_sets: The project's discovered configs, enabled and disabled,
+            so per-pipeline notification settings are read from the current
+            config rather than the copy frozen on the plan row
+            (:func:`apply_current_configs`). ``None`` leaves the stored copies.
 
     Returns:
         The :class:`SweepContext` that was (or would have been) reported.
@@ -649,6 +711,9 @@ def run_notify(
         # not read would be the silence this command exists to remove.
         ctx = _collect()
 
+    if config_sets is not None:
+        apply_current_configs(ctx, config_sets)
+
     scope = _describe_scope(
         len(ctx.execution_ids),
         since_days=since_days,
@@ -674,27 +739,39 @@ def run_notify(
         scope,
     )
 
-    delivered = _dispatch(ctx, dry_run=dry_run)
+    outcome = _dispatch(ctx, dry_run=dry_run)
     if dry_run:
         logger.info("Dry run - nothing sent, nothing marked as reported")
         return ctx
 
-    if not delivered:
-        # Claiming an undelivered digest would turn one outage into a
-        # permanently lost alert: the executions would never re-enter a sweep.
+    _settle(manager, ctx, outcome, record=record)
+    return ctx
+
+
+def _settle(manager: Any, ctx: SweepContext, outcome: str, *, record: bool) -> None:
+    """Claim and log the sweep according to how the notifier ended it.
+
+    Delivered and quiet both claim the executions. A quiet outcome here means
+    every failure belongs to a pipeline that opted out of the channel: the
+    notifier has said all it will about them, and leaving them unreported would
+    resurface them the day the mute is lifted, as a backlog nobody asked about.
+    Undelivered claims nothing — that would turn one outage into a permanently
+    lost alert, since the executions would never re-enter a sweep.
+    """
+    if outcome == SWEEP_UNDELIVERED:
         logger.warning(
             "Nothing was delivered, so %d execution(s) stay unreported and the "
             "next sweep will retry them.",
             len(ctx.execution_ids),
         )
-        if record:
-            record_sweep(manager, ctx, SWEEP_UNDELIVERED)
-        return ctx
-
-    mark_reported(manager, ctx.execution_ids)
+    else:
+        if outcome == SWEEP_QUIET:
+            logger.info(
+                "Nothing to post: every failing pipeline is muted for the notifier"
+            )
+        mark_reported(manager, ctx.execution_ids)
     if record:
-        record_sweep(manager, ctx, SWEEP_DELIVERED)
-    return ctx
+        record_sweep(manager, ctx, outcome)
 
 
 def _describe_scope(
@@ -721,12 +798,15 @@ def _describe_scope(
     return f"{count} unreported execution(s) in the last {since_days}d"
 
 
-def _dispatch(ctx: SweepContext, dry_run: bool = False) -> bool:
+def _dispatch(ctx: SweepContext, dry_run: bool = False) -> str:
     """Hand the sweep to every configured notifier.
 
-    Returns whether it was actually delivered. The caller claims executions as
-    reported on the strength of this, so a failure must be visible here rather
-    than swallowed — otherwise an outage loses the digest for good.
+    Returns how the sweep ended: :data:`SWEEP_DELIVERED` when a digest went
+    out, :data:`SWEEP_QUIET` when the notifier found nothing left to post once
+    its muted pipelines were removed, :data:`SWEEP_UNDELIVERED` when a digest
+    was due and nothing accepted it. The caller claims executions as reported
+    on the strength of this, so a failure must be visible here rather than
+    swallowed — otherwise an outage loses the digest for good.
 
     Under ``dry_run`` each notifier renders its message and it is logged instead
     of sent — a preview that showed only a count would not let you check what
@@ -748,7 +828,7 @@ def _dispatch(ctx: SweepContext, dry_run: bool = False) -> bool:
         # Nothing was delivered, so nothing may be claimed: a project that runs
         # the sweep before configuring a notifier would otherwise burn through
         # its backlog silently, and those executions never come back.
-        return False
+        return SWEEP_UNDELIVERED
 
     from dlt_saga.hooks.notifiers.slack import SlackNotifier
 
@@ -756,9 +836,18 @@ def _dispatch(ctx: SweepContext, dry_run: bool = False) -> bool:
     try:
         if dry_run:
             payload = notifier.build_sweep_payload(ctx)
-            logger.info("Slack digest that would be sent:\n%s", payload["text"])
-            return False
-        return notifier.on_sweep_complete(ctx)
+            if payload is None:
+                logger.info(
+                    "Nothing would be sent: every failing pipeline is muted "
+                    "(notifications.slack.enabled: false)"
+                )
+            else:
+                logger.info("Slack digest that would be sent:\n%s", payload["text"])
+            return SWEEP_UNDELIVERED
+        delivered = notifier.on_sweep_complete(ctx)
     except Exception:
         logger.warning("Slack notifier failed on the sweep digest", exc_info=True)
-        return False
+        return SWEEP_UNDELIVERED
+    if delivered is None:
+        return SWEEP_QUIET
+    return SWEEP_DELIVERED if delivered else SWEEP_UNDELIVERED
