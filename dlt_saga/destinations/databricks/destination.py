@@ -689,6 +689,10 @@ class DatabricksDestination(Destination):
     def cast_to_string(self, expression: str) -> str:
         return f"CAST({expression} AS STRING)"
 
+    def null_safe_equals(self, left: str, right: str) -> str:
+        # Spark SQL has no IS [NOT] DISTINCT FROM; <=> is its null-safe equality.
+        return f"{left} <=> {right}"
+
     def escape_string_literal(self, value: str) -> str:
         # Spark SQL uses C-style backslash escapes in single-quoted literals
         # (rejects the ANSI '' doubling of the base default; see base helper).

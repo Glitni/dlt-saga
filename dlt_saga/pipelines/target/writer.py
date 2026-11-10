@@ -11,6 +11,7 @@ class TargetWriter:
         """Apply hints to the data based on the target configuration"""
         # Strip "+historize" for dlt disposition checks — historization is handled separately
         base_disposition = self.config.write_disposition.replace("+historize", "")
+        self._relax_nullable_key_columns(data)
         if base_disposition == "merge":
             # An explicit strategy (scd2, upsert, insert-only, delete-insert) is
             # passed to dlt as a dict config; a bare `write_disposition: merge`
@@ -95,3 +96,14 @@ class TargetWriter:
             merge_config["primary_key"] = self.config.primary_key
 
         return merge_config
+
+    def _relax_nullable_key_columns(self, data: Any) -> None:
+        """Keep ``nullable_key_columns`` nullable under the key hints.
+
+        dlt marks every ``primary_key``/``merge_key`` column ``nullable: false``
+        unless the column already carries an explicit nullability, and the
+        destination then creates it NOT NULL, so a row with a NULL key part
+        fails the load. An explicit ``nullable: true`` is what dlt honours.
+        """
+        for column in self.config.nullable_key_columns or []:
+            data.apply_hints(columns={column: {"nullable": True}})

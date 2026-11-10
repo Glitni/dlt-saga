@@ -62,6 +62,48 @@ def local_pipelines_dir(destination_type: str, database: str, schema_name: str) 
     return os.path.expanduser(f"~/.dlt/pipelines_{suffix}")
 
 
+def build_target_config(config: Dict[str, Any]) -> TargetConfig:
+    """The pipeline's :class:`TargetConfig`: loading behaviour and destination hints.
+
+    Connection settings are not here; they come from the profile's destination
+    config. Every ``TargetConfig`` field a pipeline config can set is named
+    here, so a new field also needs a line below — ``full_refresh`` resets
+    state but leaves ``write_disposition`` alone.
+    """
+    return TargetConfig(
+        # Loading configuration
+        write_disposition=resolve_write_disposition(config),
+        replace_strategy=config.get("replace_strategy"),
+        min_rows=config.get("min_rows"),
+        # Merge configuration
+        merge_key=config.get("merge_key"),
+        merge_strategy=config.get("merge_strategy"),
+        primary_key=config.get("primary_key"),
+        nullable_key_columns=config.get("nullable_key_columns"),
+        # SCD2 configuration
+        valid_from_column=config.get("valid_from_column", "_dlt_valid_from"),
+        valid_to_column=config.get("valid_to_column", "_dlt_valid_to"),
+        active_record_timestamp=config.get("active_record_timestamp"),
+        boundary_timestamp=config.get("boundary_timestamp"),
+        row_version_column_name=config.get("row_version_column_name"),
+        # Deduplication
+        deduplicate=config.get("deduplicate", True),
+        dedup_sort=config.get("dedup_sort"),
+        dedup_sort_column=config.get("dedup_sort_column"),
+        # Hard deletes
+        hard_delete_column=config.get("hard_delete_column"),
+        # Destination hints (partitioning, clustering, etc.)
+        partition_column=config.get("partition_column"),
+        cluster_columns=config.get("cluster_columns"),
+        # Column hints
+        columns=config.get("columns"),
+        # Documentation
+        description=config.get("description"),
+        classification=config.get("classification"),
+        persist_docs=config.get("persist_docs"),
+    )
+
+
 class BasePipeline:
     def __init__(self, config: Dict[str, Any], log_prefix: Optional[str] = None):
         self.config_dict = config or {}
@@ -91,40 +133,7 @@ class BasePipeline:
         context = get_execution_context()
 
         # Initialize TargetConfig with pipeline behavior and destination hints
-        # (NOT connection config - that comes from profiles/destination config)
-        # Note: full_refresh mode resets state but doesn't change write_disposition
-        # After state reset, the pipeline runs normally with its configured disposition/strategy
-        target_config = TargetConfig(
-            # Loading configuration
-            write_disposition=resolve_write_disposition(config),
-            replace_strategy=config.get("replace_strategy"),
-            min_rows=config.get("min_rows"),
-            # Merge configuration
-            merge_key=config.get("merge_key"),
-            merge_strategy=config.get("merge_strategy"),
-            primary_key=config.get("primary_key"),
-            # SCD2 configuration
-            valid_from_column=config.get("valid_from_column", "_dlt_valid_from"),
-            valid_to_column=config.get("valid_to_column", "_dlt_valid_to"),
-            active_record_timestamp=config.get("active_record_timestamp"),
-            boundary_timestamp=config.get("boundary_timestamp"),
-            row_version_column_name=config.get("row_version_column_name"),
-            # Deduplication
-            deduplicate=config.get("deduplicate", True),
-            dedup_sort=config.get("dedup_sort"),
-            dedup_sort_column=config.get("dedup_sort_column"),
-            # Hard deletes
-            hard_delete_column=config.get("hard_delete_column"),
-            # Destination hints (partitioning, clustering, etc.)
-            partition_column=config.get("partition_column"),
-            cluster_columns=config.get("cluster_columns"),
-            # Column hints
-            columns=config.get("columns"),
-            # Documentation
-            description=config.get("description"),
-            classification=config.get("classification"),
-            persist_docs=config.get("persist_docs"),
-        )
+        target_config = build_target_config(config)
 
         self.target_writer = TargetWriter(target_config)
 

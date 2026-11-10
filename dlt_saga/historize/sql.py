@@ -334,10 +334,23 @@ class HistorizeSqlBuilder:
             f"{self._q(self.is_deleted)}"
         )
 
+    def _key_equals(self, pk: str, left_expr: str, right_expr: str) -> str:
+        """Equality predicate on one key column: null-safe for a nullable key column.
+
+        Plain ``=`` never matches a NULL, so a NULL-keyed row would never close
+        its previous version. A column in ``nullable_key_columns`` is compared
+        through the destination's null-safe form, which treats NULL as one more
+        key value — the reading ``PARTITION BY`` already gives it.
+        """
+        if self.config.is_nullable_key(pk):
+            return self.destination.null_safe_equals(left_expr, right_expr)
+        return f"{left_expr} = {right_expr}"
+
     def _pk_join(self, left: str, right: str) -> str:
         """JOIN condition for primary keys between two aliases, destination-quoted."""
         return " AND ".join(
-            f"{left}.{self._q(pk)} = {right}.{self._q(pk)}" for pk in self.primary_key
+            self._key_equals(pk, f"{left}.{self._q(pk)}", f"{right}.{self._q(pk)}")
+            for pk in self.primary_key
         )
 
     @property
@@ -493,7 +506,7 @@ snapshot_sequence AS (
                 for pk, alias in zip(self.primary_key, key_aliases)
             )
             correlated = " AND ".join(
-                f"k.{self._q(alias)} = {self._q(pk)}"
+                self._key_equals(pk, f"k.{self._q(alias)}", self._q(pk))
                 for pk, alias in zip(self.primary_key, key_aliases)
             )
             pk_in_keys = f"EXISTS (SELECT 1 FROM {keys_table} AS k WHERE {correlated})"
@@ -628,8 +641,17 @@ snapshot_sequence AS (
         return and_filter(self.filter_sql, f"{q_snapshot} <= TIMESTAMP '{bound}'")
 
     def null_pk_probe_aliases(self) -> List[str]:
-        """Column aliases returned by :meth:`build_null_pk_probe_sql`, in PK order."""
-        return [null_pk_alias(i) for i in range(len(self.primary_key))]
+        """Column aliases returned by :meth:`build_null_pk_probe_sql`, in PK order.
+
+        One per *guarded* key column: a ``nullable_key_columns`` entry is not
+        probed, so it has no alias.
+        """
+        return [null_pk_alias(i) for i in range(len(self.guarded_key_columns))]
+
+    @property
+    def guarded_key_columns(self) -> List[str]:
+        """The key columns the NULL-key guard checks: all but ``nullable_key_columns``."""
+        return [pk for pk in self.primary_key if not self.config.is_nullable_key(pk)]
 
     def build_null_pk_probe_sql(self) -> Optional[str]:
         """Build a one-row probe for NULL primary-key values across the source.
@@ -647,16 +669,18 @@ snapshot_sequence AS (
         incremental run gets the same answer for free out of
         ``discover_unprocessed_snapshots``.
 
-        Returns ``None`` when there is no primary key to check. Otherwise a
-        ``LIMIT 1`` existence probe reading only the PK columns.
+        Returns ``None`` when there is no key column to check — no primary key,
+        or every column of it is in ``nullable_key_columns``. Otherwise a
+        ``LIMIT 1`` existence probe reading only the guarded key columns.
         """
-        if not self.primary_key:
+        guarded = self.guarded_key_columns
+        if not guarded:
             return None
         flags = ", ".join(
             f"CASE WHEN {self._q(pk)} IS NULL THEN 1 ELSE 0 END AS {alias}"
-            for pk, alias in zip(self.primary_key, self.null_pk_probe_aliases())
+            for pk, alias in zip(guarded, self.null_pk_probe_aliases())
         )
-        any_null = " OR ".join(f"{self._q(pk)} IS NULL" for pk in self.primary_key)
+        any_null = " OR ".join(f"{self._q(pk)} IS NULL" for pk in guarded)
         where = and_filter(self.filter_sql, f"({any_null})")
         return f"SELECT {flags} FROM {self.source_relation} WHERE {where} LIMIT 1"
 

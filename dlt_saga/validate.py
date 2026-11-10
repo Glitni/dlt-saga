@@ -182,9 +182,14 @@ def _validate_historize_config(config: PipelineConfig, result: ValidationResult)
     top_level_pk = config.config_dict.get("primary_key")
     if isinstance(top_level_pk, str):
         top_level_pk = [top_level_pk]
+    top_level_nullable = config.config_dict.get("nullable_key_columns")
+    if isinstance(top_level_nullable, str):
+        top_level_nullable = [top_level_nullable]
 
     try:
-        hist_config = HistorizeConfig.from_dict(historize_dict, top_level_pk)
+        hist_config = HistorizeConfig.from_dict(
+            historize_dict, top_level_pk, top_level_nullable
+        )
         hist_config.validate(config.config_dict)
     except (ValueError, TypeError) as e:
         result.errors.append(f"Historize config error: {e}")

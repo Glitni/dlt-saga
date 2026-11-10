@@ -219,6 +219,18 @@ class HistorizeConfig:
         },
     )
 
+    nullable_key_columns: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "primary_key column(s) that may be NULL. NULL counts as a key value "
+                "for them: key joins compare null-safe and the NULL-key guard skips "
+                "them. Must be a subset of primary_key. Inherited from the top-level "
+                "nullable_key_columns if not set here."
+            )
+        },
+    )
+
     track_columns: Optional[List[str]] = field(
         default=None,
         metadata={
@@ -822,11 +834,16 @@ class HistorizeConfig:
                 f"scalar data_type."
             )
 
+    def is_nullable_key(self, column: str) -> bool:
+        """Whether ``column`` is a key column declared in ``nullable_key_columns``."""
+        return column.lower() in {c.lower() for c in self.nullable_key_columns or []}
+
     @classmethod
     def from_dict(
         cls,
         historize_dict: Optional[Dict[str, Any]],
         top_level_primary_key: Optional[List[str]] = None,
+        top_level_nullable_key_columns: Optional[List[str]] = None,
     ) -> "HistorizeConfig":
         """Create HistorizeConfig from a config dictionary.
 
@@ -835,6 +852,8 @@ class HistorizeConfig:
                 ``None`` when the key is present with an empty/null value
                 (an empty ``historize:`` block in YAML parses to ``None``).
             top_level_primary_key: Primary key from top-level config, used as fallback
+            top_level_nullable_key_columns: Top-level ``nullable_key_columns``,
+                used as fallback the same way
 
         Returns:
             HistorizeConfig instance
@@ -856,6 +875,17 @@ class HistorizeConfig:
             if isinstance(pk, str):
                 pk = [pk]
             config.primary_key = pk
+
+        if (
+            config.nullable_key_columns is None
+            and top_level_nullable_key_columns is not None
+        ):
+            nullable = top_level_nullable_key_columns
+            if isinstance(nullable, str):
+                nullable = [nullable]
+            config.nullable_key_columns = nullable
+        elif isinstance(config.nullable_key_columns, str):
+            config.nullable_key_columns = [config.nullable_key_columns]
 
         return config
 
@@ -885,6 +915,7 @@ class HistorizeConfig:
             )
 
         self._validate_key_columns()
+        self._validate_nullable_key_columns()
 
         if self.merge_key:
             pk_set = set(self.primary_key or [])
@@ -906,6 +937,22 @@ class HistorizeConfig:
                     "External source requires both source_schema and source_table. "
                     "source_schema is missing."
                 )
+
+    def _validate_nullable_key_columns(self) -> None:
+        """``nullable_key_columns`` must name primary_key columns.
+
+        Checked here rather than in ``__post_init__`` because both lists may
+        have been inherited from the top-level config.
+        """
+        if not self.nullable_key_columns:
+            return
+        pk = {c.lower() for c in self.primary_key or []}
+        extras = [c for c in self.nullable_key_columns if c.lower() not in pk]
+        if extras:
+            raise ValueError(
+                f"nullable_key_columns {extras!r} must be a subset of "
+                f"primary_key {list(self.primary_key or [])!r}."
+            )
 
     def _validate_key_columns(self) -> None:
         """Refuse key columns the historized table can't identify a version by.

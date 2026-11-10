@@ -283,6 +283,19 @@ class TargetConfig:
             "$ref": "dlt_common.json#/$defs/string_or_array_of_strings",
         },
     )
+    nullable_key_columns: Optional[Union[str, List[str]]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "primary_key column(s) that may be NULL, for a composite key where "
+                "one part is legitimately absent. NULL then counts as a key value: "
+                "the column is created nullable at ingest (key columns are NOT NULL "
+                "by default) and historize compares it null-safe instead of refusing "
+                "NULL keys. Must be a subset of primary_key."
+            ),
+            "$ref": "dlt_common.json#/$defs/string_or_array_of_strings",
+        },
+    )
 
     # SCD2 specific configuration
     valid_from_column: str = field(
@@ -454,6 +467,7 @@ class TargetConfig:
         self._validate_insert_api()
         self._validate_min_rows()
         self._normalize_keys()
+        self._validate_nullable_key_columns()
         self._normalize_enums()
         self._validate_merge_strategy()
         self._validate_deduplicate()
@@ -596,11 +610,30 @@ class TargetConfig:
             )
 
     def _normalize_keys(self):
-        """Normalize primary_key and merge_key to lists."""
+        """Normalize primary_key, merge_key and nullable_key_columns to lists."""
         if isinstance(self.primary_key, str):
             self.primary_key = [self.primary_key]
         if isinstance(self.merge_key, str):
             self.merge_key = [self.merge_key]
+        if isinstance(self.nullable_key_columns, str):
+            self.nullable_key_columns = [self.nullable_key_columns]
+
+    def _validate_nullable_key_columns(self):
+        """``nullable_key_columns`` names primary_key columns only.
+
+        A column outside the key has nothing to relax: non-key columns are
+        nullable already, so a stray name is a typo or a misread of the key.
+        """
+        if not self.nullable_key_columns:
+            return
+        pk = set(self.primary_key or [])
+        extras = [c for c in self.nullable_key_columns if c not in pk]
+        if extras:
+            raise ValueError(
+                f"nullable_key_columns {extras!r} must be a subset of "
+                f"primary_key {list(self.primary_key or [])!r}. Only key columns "
+                "are NOT NULL by default; every other column is already nullable."
+            )
 
     def _normalize_enums(self):
         """Convert string values to enums if needed."""
