@@ -1,3 +1,17 @@
+## 0.51.0 — 2026-11-10
+
+### Added
+- Take nested struct field additions and removals in place in historize (#663)
+- Route a pipeline's Slack notifications to its own channels with notifications.slack.channel (#661)
+- Support composite keys with a NULL part via nullable_key_columns (#658)
+- Remind about ongoing failures on a cadence with notifications.slack.repeat_after_hours (#657)
+- Mute Slack notifications per pipeline with notifications.slack.enabled (#655)
+- Label every BigQuery job with saga's job context and profile job_labels (#652)
+
+
+### Fixed
+- Bump oauthlib to 4.0.1 for GHSA-3jp2-3mrg-2vxc (#659)
+
 ## 0.50.0 — 2026-11-03
 
 ### Added
