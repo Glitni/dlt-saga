@@ -23,6 +23,7 @@ from dlt_saga.notify import (
     apply_current_configs,
     collect_unreported,
     mark_reported,
+    read_last_sweep,
     record_sweep,
     run_notify,
 )
@@ -42,8 +43,13 @@ def _row(
     command="run",
     environment="prod",
     created_at=None,
+    notified_at=None,
 ):
-    """One plan-view row as the destination hands it back."""
+    """One plan-view row as the destination hands it back.
+
+    A row with ``notified_at`` set belongs to an execution an earlier sweep
+    claimed: read for the pipeline's previous state, not reported again.
+    """
     return SimpleNamespace(
         execution_id=execution_id,
         pipeline_identifier=pipeline,
@@ -56,10 +62,12 @@ def _row(
         command=command,
         environment=environment,
         created_at=created_at,
+        notified_at=notified_at,
+        reportable=notified_at is None,
     )
 
 
-def _manager(rows, excluded=0):
+def _manager(rows, excluded=0, last_swept_at=None):
     """An ExecutionPlanManager double that returns *rows* for the sweep query."""
     manager = MagicMock()
     manager.schema = "dlt_orchestration"
@@ -69,10 +77,13 @@ def _manager(rows, excluded=0):
     d.escape_string_literal.side_effect = lambda s: str(s).replace("'", "''")
     d.timestamp_n_days_ago.side_effect = lambda n: f"CURRENT_TIMESTAMP() - {n} DAY"
     d.current_timestamp_expression.return_value = "CURRENT_TIMESTAMP()"
+    d.get_full_table_id.side_effect = lambda schema, table: f"proj.{schema}.{table}"
 
     def execute(sql, schema=None, **kwargs):
         if "COUNT(*)" in sql:
             return [SimpleNamespace(n=excluded)]
+        if "MAX(swept_at)" in sql:
+            return [SimpleNamespace(last_swept_at=last_swept_at)]
         return rows
 
     d.execute_sql.side_effect = execute
@@ -1143,3 +1154,303 @@ class TestDispatchOutcome:
 
         assert outcome == SWEEP_UNDELIVERED
         assert sent == []
+
+    def test_dry_run_logs_the_full_body(self, caplog):
+        with caplog.at_level(logging.INFO, logger="dlt_saga.notify"):
+            self._dispatch(
+                self._ctx(
+                    PipelineOutcome(
+                        "shop__orders",
+                        "orders",
+                        attempts=1,
+                        failures=1,
+                        currently_failing=True,
+                        latest_error="boom",
+                    )
+                ),
+                dry_run=True,
+            )
+
+        assert "`shop__orders`" in caplog.text
+        assert "boom" in caplog.text
+
+
+def _ts(day, hour=0):
+    """An aware UTC timestamp in November 2026."""
+    from datetime import datetime, timezone
+
+    return datetime(2026, 11, day, hour, tzinfo=timezone.utc)
+
+
+@pytest.mark.unit
+class TestPreviousStateIsDerived:
+    """Whether a failure is new or continuing comes from the rows the sweep
+    already reads, not from a per-pipeline marker: a pipeline's state at the
+    last sweep is the status of its most recent *claimed* row.
+    """
+
+    def test_claimed_rows_are_read_but_not_reported(self):
+        ctx = collect_unreported(
+            _manager(
+                [
+                    _row("e1", "shop__orders", "failed", notified_at=_ts(9)),
+                    _row("e2", "shop__orders", "failed"),
+                ]
+            )
+        )
+
+        assert ctx.execution_ids == ["e2"]
+        assert ctx.failing[0].attempts == 1
+
+    def test_failing_at_the_last_sweep_marks_the_failure_as_ongoing(self):
+        ctx = collect_unreported(
+            _manager(
+                [
+                    _row("e1", "shop__orders", "failed", notified_at=_ts(9)),
+                    _row("e2", "shop__orders", "failed"),
+                ]
+            )
+        )
+
+        assert ctx.failing[0].previously_failing is True
+
+    def test_passing_at_the_last_sweep_marks_the_failure_as_new(self):
+        ctx = collect_unreported(
+            _manager(
+                [
+                    _row("e1", "shop__orders", "completed", notified_at=_ts(9)),
+                    _row("e2", "shop__orders", "failed"),
+                ]
+            )
+        )
+
+        assert ctx.failing[0].previously_failing is False
+
+    def test_never_swept_before_is_unknown(self):
+        ctx = collect_unreported(_manager([_row("e1", "shop__orders", "failed")]))
+
+        assert ctx.failing[0].previously_failing is None
+
+    def test_unreported_rows_of_other_executions_are_not_previous_state(self):
+        """Only a *claimed* row says what an earlier sweep reported."""
+        ctx = collect_unreported(
+            _manager(
+                [
+                    _row("e1", "shop__orders", "failed"),
+                    _row("e2", "shop__orders", "failed"),
+                ]
+            )
+        )
+
+        assert ctx.failing[0].previously_failing is None
+        assert ctx.failing[0].attempts == 2
+
+    def test_recovery_between_sweeps_is_reported(self):
+        """Failed last night, passed this morning, with no failure in this
+        sweep: previously never an outcome at all, so never posted as recovered.
+        """
+        ctx = collect_unreported(
+            _manager(
+                [
+                    _row("e1", "shop__orders", "failed", notified_at=_ts(9)),
+                    _row("e2", "shop__orders", "completed"),
+                ]
+            )
+        )
+
+        assert len(ctx.recovered) == 1
+        assert ctx.recovered[0].failures == 0
+        assert ctx.has_anything_to_report
+
+    def test_a_pipeline_passing_at_both_sweeps_is_not_an_outcome(self):
+        ctx = collect_unreported(
+            _manager(
+                [
+                    _row("e1", "shop__orders", "completed", notified_at=_ts(9)),
+                    _row("e2", "shop__orders", "completed"),
+                ]
+            )
+        )
+
+        assert ctx.outcomes == []
+        assert not ctx.has_anything_to_report
+
+
+@pytest.mark.unit
+class TestFailureStreak:
+    def test_streak_spans_claimed_and_unreported_rows(self):
+        ctx = collect_unreported(
+            _manager(
+                [
+                    _row(
+                        "e1",
+                        "shop__orders",
+                        "completed",
+                        notified_at=_ts(8),
+                        created_at=_ts(8),
+                    ),
+                    _row(
+                        "e2",
+                        "shop__orders",
+                        "failed",
+                        notified_at=_ts(9),
+                        created_at=_ts(9, 1),
+                    ),
+                    _row(
+                        "e3",
+                        "shop__orders",
+                        "failed",
+                        notified_at=_ts(9),
+                        created_at=_ts(9, 2),
+                    ),
+                    _row("e4", "shop__orders", "failed", created_at=_ts(9, 3)),
+                ]
+            )
+        )
+
+        outcome = ctx.failing[0]
+        assert outcome.streak_started_at == _ts(9, 1)
+        assert outcome.streak_attempts == 3
+
+    def test_a_success_resets_the_streak(self):
+        ctx = collect_unreported(
+            _manager(
+                [
+                    _row(
+                        "e1",
+                        "shop__orders",
+                        "failed",
+                        notified_at=_ts(8),
+                        created_at=_ts(8),
+                    ),
+                    _row(
+                        "e2",
+                        "shop__orders",
+                        "completed",
+                        notified_at=_ts(9),
+                        created_at=_ts(9),
+                    ),
+                    _row("e3", "shop__orders", "failed", created_at=_ts(10)),
+                ]
+            )
+        )
+
+        outcome = ctx.failing[0]
+        assert outcome.streak_started_at == _ts(10)
+        assert outcome.streak_attempts == 1
+
+    def test_abandoned_counts_as_failed_in_the_streak(self):
+        ctx = collect_unreported(
+            _manager(
+                [
+                    _row(
+                        "e1",
+                        "shop__orders",
+                        "abandoned",
+                        notified_at=_ts(9),
+                        created_at=_ts(9),
+                    ),
+                    _row("e2", "shop__orders", "failed", created_at=_ts(10)),
+                ]
+            )
+        )
+
+        assert ctx.failing[0].streak_started_at == _ts(9)
+        assert ctx.failing[0].streak_attempts == 2
+
+    def test_no_timestamp_means_no_streak_start(self):
+        ctx = collect_unreported(_manager([_row("e1", "shop__orders", "failed")]))
+
+        assert ctx.failing[0].streak_started_at is None
+        assert ctx.failing[0].streak_attempts == 1
+
+
+@pytest.mark.unit
+class TestLastSweepTime:
+    def test_read_from_the_notify_log(self):
+        ctx = collect_unreported(_manager([], last_swept_at=_ts(9, 6)))
+
+        assert ctx.last_swept_at == _ts(9, 6)
+
+    def test_naive_timestamp_is_taken_as_utc(self):
+        from datetime import datetime
+
+        ctx = collect_unreported(_manager([], last_swept_at=datetime(2026, 11, 9, 6)))
+
+        assert ctx.last_swept_at == _ts(9, 6)
+
+    def test_missing_log_is_none(self):
+        manager = _manager([])
+        plain = manager.destination.execute_sql.side_effect
+
+        def execute(sql, schema=None, **kwargs):
+            if "swept_at" in sql:
+                raise RuntimeError("Not found: Table proj.ds._saga_notify_log")
+            return plain(sql, schema, **kwargs)
+
+        manager.destination.execute_sql.side_effect = execute
+
+        assert read_last_sweep(manager, "prod") is None
+
+    def test_unreadable_log_is_none_with_a_warning(self, caplog):
+        manager = _manager([])
+        plain = manager.destination.execute_sql.side_effect
+
+        def execute(sql, schema=None, **kwargs):
+            if "swept_at" in sql:
+                raise RuntimeError("permission denied")
+            return plain(sql, schema, **kwargs)
+
+        manager.destination.execute_sql.side_effect = execute
+
+        with caplog.at_level(logging.WARNING, logger="dlt_saga.notify"):
+            assert read_last_sweep(manager, "prod") is None
+        assert "previous sweep time" in caplog.text
+
+    def test_scoped_like_the_sweep(self):
+        manager = _manager([])
+
+        read_last_sweep(manager, "prod")
+
+        sql = manager.destination.execute_sql.call_args_list[-1][0][0]
+        assert "environment = 'prod' OR environment IS NULL" in sql
+
+    def test_read_before_the_plan_rows(self):
+        """The plan query stays the last statement a test can inspect."""
+        manager = _manager([])
+
+        collect_unreported(manager)
+
+        statements = [c.args[0] for c in manager.destination.execute_sql.call_args_list]
+        assert "swept_at" in statements[0]
+        assert "FROM proj.ds.plans_view" in statements[-1]
+
+
+@pytest.mark.unit
+class TestHistoryRead:
+    def test_window_rows_are_read_regardless_of_reported_state(self):
+        """The predicate decides what is reported, the window what is read."""
+        manager = _manager([])
+
+        collect_unreported(manager, since_days=3)
+
+        sql = manager.destination.execute_sql.call_args_list[-1][0][0]
+        assert "WHERE e.created_at >= CURRENT_TIMESTAMP() - 3 DAY" in sql
+        assert "(e.notified_at IS NULL)      AS reportable" in sql
+
+    def test_stored_config_is_only_fetched_for_reportable_rows(self):
+        manager = _manager([])
+
+        collect_unreported(manager)
+
+        sql = manager.destination.execute_sql.call_args_list[-1][0][0]
+        assert "CASE WHEN e.notified_at IS NULL THEN p.config_json ELSE NULL END" in sql
+
+    def test_execution_id_still_reads_the_window_for_state(self):
+        manager = _manager([])
+
+        collect_unreported(manager, execution_id="abc-123")
+
+        sql = manager.destination.execute_sql.call_args_list[-1][0][0]
+        assert "(e.execution_id = 'abc-123' OR e.created_at >=" in sql
+        assert "(e.execution_id = 'abc-123')      AS reportable" in sql

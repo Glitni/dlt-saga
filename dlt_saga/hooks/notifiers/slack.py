@@ -34,6 +34,18 @@ failures are muted posts nothing. The mute is this sink's alone: ``saga report``
 and its status summary still show the pipeline's real state, and another
 notifier would read its own block. Only a literal ``false`` mutes.
 
+A sweep digest reports state changes, not every sweep's worth of the same
+failure. ``notifications.slack.repeat_after_hours`` (project level, overridable
+per pipeline under the same key) turns a failure that was already failing at
+the last sweep into a reminder posted once per interval, counted from when the
+streak began; between reminders the pipeline is absent from the digest. A new
+failure and a recovery always post. The facts this needs — whether the
+pipeline was failing at the last sweep, when the streak began, when the last
+sweep ran — come from ``saga notify``'s own rows (``PipelineOutcome``,
+``SweepContext``); nothing is stored for it. Unset, every sweep reports every
+current failure as before. The per-run ``on_run_complete`` digest is per
+command by design and does not apply it.
+
 Failures to notify are logged and swallowed. An alerting channel that breaks a
 data load would be worse than the missing alert, and the hook registry already
 treats handler exceptions as non-fatal — this module is explicit about it so
@@ -41,6 +53,8 @@ the warning names Slack rather than surfacing as a generic hook failure.
 """
 
 import logging
+import math
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
@@ -261,6 +275,11 @@ _COLOUR_OK = "#2eb67d"
 _MAX_SECTION_CHARS = 2900
 
 
+def _utc(value: datetime) -> datetime:
+    """An aware UTC datetime; a naive one (DuckDB) is taken as UTC."""
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 def _s(items: Any) -> str:
     """'s' unless there is exactly one — '1 pipelines' reads as a bug."""
     return "" if len(items) == 1 else "s"
@@ -294,6 +313,31 @@ def _section(text: str) -> Dict[str, Any]:
         "type": "section",
         "text": {"type": "mrkdwn", "text": _clip(text, _MAX_SECTION_CHARS)},
     }
+
+
+def render_payload_text(payload: Dict[str, Any]) -> str:
+    """Flatten a Block Kit payload to plain lines, for a ``--dry-run`` preview.
+
+    The payload's own ``text`` is only the fallback Slack shows in notification
+    banners; the per-pipeline lines live in the blocks and the coloured
+    attachment, so a preview that printed ``text`` alone showed the headline
+    and nothing a reader would check the wording of.
+    """
+    lines: List[str] = []
+
+    def walk(blocks: Any) -> None:
+        for block in blocks or []:
+            text = block.get("text")
+            if isinstance(text, dict) and text.get("text"):
+                lines.append(str(text["text"]))
+            for element in block.get("elements") or []:
+                if isinstance(element, dict) and element.get("text"):
+                    lines.append(str(element["text"]))
+
+    walk(payload.get("blocks"))
+    for attachment in payload.get("attachments") or []:
+        walk(attachment.get("blocks"))
+    return "\n".join(lines) if lines else str(payload.get("text", ""))
 
 
 def _code(text: str) -> str:
@@ -427,7 +471,7 @@ class SlackNotifier:
         *failed every attempt* and *failed once* are the difference between an
         outage and a blip.
         """
-        ctx = self._without_muted(ctx)
+        ctx = self._without_suppressed(self._without_muted(ctx))
         if not ctx.has_anything_to_report:
             return None
         failing, recovered = ctx.failing, ctx.recovered
@@ -506,10 +550,90 @@ class SlackNotifier:
 
     @staticmethod
     def _persistence(outcome: Any) -> str:
-        """How persistent a failure is — an outage reads differently to a blip."""
+        """How persistent a failure is — an outage reads differently to a blip.
+
+        A failure the last sweep already reported says how long it has been
+        going instead of repeating this sweep's count: the reader has seen the
+        failure, what is new is its duration.
+        """
+        if getattr(outcome, "previously_failing", None):
+            since = getattr(outcome, "streak_started_at", None)
+            if since is not None:
+                attempts = getattr(outcome, "streak_attempts", 0)
+                return (
+                    f"still failing since {_utc(since):%Y-%m-%d %H:%M} UTC, "
+                    f"{attempts} attempt{_s(range(attempts))}"
+                )
+            return f"still failing, {outcome.failures} of {outcome.attempts} attempts"
         if outcome.attempts > 1:
             return f"failed {outcome.failures} of {outcome.attempts} attempts"
         return "failed"
+
+    def _without_suppressed(self, ctx: "SweepContext") -> "SweepContext":
+        """Drop ongoing failures that are not due for a reminder.
+
+        A failure the last sweep already saw failing is posted again only when
+        a whole ``repeat_after_hours`` interval, counted from the start of its
+        streak, has elapsed since the last sweep — one reminder per interval,
+        however often the sweep runs. New failures and recoveries are never
+        dropped. Without an interval, nothing is.
+        """
+        from dataclasses import replace
+
+        dropped = [
+            o
+            for o in ctx.outcomes
+            if o.currently_failing
+            and o.previously_failing is True
+            and not self._reminder_due(o, ctx)
+        ]
+        if not dropped:
+            return ctx
+        dropped_ids = {id(o) for o in dropped}
+        return replace(
+            ctx,
+            outcomes=[o for o in ctx.outcomes if id(o) not in dropped_ids],
+            total_attempts=max(
+                0, ctx.total_attempts - sum(o.attempts for o in dropped)
+            ),
+            failed_attempts=max(
+                0, ctx.failed_attempts - sum(o.failures for o in dropped)
+            ),
+        )
+
+    def _reminder_due(self, outcome: Any, ctx: "SweepContext") -> bool:
+        """Whether an ongoing failure gets posted by this sweep.
+
+        Reminder k is due when ``streak_started_at + k * interval`` falls after
+        the last sweep and at or before this one. Missing facts — no interval
+        configured, no previous sweep on record, a streak with no timestamp —
+        all resolve to *due*: the noisy direction to be wrong in, not the
+        silent one.
+        """
+        interval = self._repeat_after(outcome.config_dict)
+        start = getattr(outcome, "streak_started_at", None)
+        last = getattr(ctx, "last_swept_at", None)
+        if interval is None or start is None or last is None:
+            return True
+        now = _utc(getattr(ctx, "swept_at", None) or datetime.now(timezone.utc))
+        k_last = math.floor((_utc(last) - _utc(start)) / interval)
+        k_now = math.floor((now - _utc(start)) / interval)
+        return k_now > max(k_last, 0)
+
+    def _repeat_after(self, config_dict: Any) -> Optional[timedelta]:
+        """The reminder interval for a pipeline, its own value over the project's.
+
+        A pipeline's own ``repeat_after_hours`` must be a positive number;
+        anything else is ignored in favour of the project value, since a
+        notifier must not fail on a config ``saga validate`` is there to catch.
+        """
+        own = self._slack_settings(config_dict).get("repeat_after_hours")
+        hours: Optional[float] = None
+        if isinstance(own, (int, float)) and not isinstance(own, bool) and own > 0:
+            hours = float(own)
+        elif self.config.repeat_after_hours:
+            hours = float(self.config.repeat_after_hours)
+        return timedelta(hours=hours) if hours else None
 
     def _recovered_text(self, recovered: list) -> str:
         """Pipelines that failed in the window but have since passed.
@@ -519,8 +643,13 @@ class SlackNotifier:
         this is collapsed into a comma-joined line.
         """
         lines = [
-            f"• `{o.pipeline_name}` — {o.failures} of {o.attempts} attempts failed, "
-            "latest OK"
+            (
+                f"• `{o.pipeline_name}` — {o.failures} of {o.attempts} attempts "
+                "failed, latest OK"
+                if o.failures
+                # Was failing at the last sweep; every attempt since passed.
+                else f"• `{o.pipeline_name}` — recovered, latest OK"
+            )
             for o in recovered[:_MAX_LISTED_FAILURES]
         ]
         remaining = len(recovered) - _MAX_LISTED_FAILURES
