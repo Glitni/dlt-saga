@@ -1553,3 +1553,250 @@ class TestMutedPipelinesInSweep:
         _notifier(_Recorder()).on_sweep_complete(ctx)
 
         assert len(ctx.outcomes) == 2
+
+
+def _at(day, hour=0):
+    from datetime import datetime, timezone
+
+    return datetime(2026, 11, day, hour, tzinfo=timezone.utc)
+
+
+def _ongoing(name, *, since, attempts=5, config=None):
+    """A failure the previous sweep already saw failing."""
+    outcome = _outcome(name, 1, 1, True, config=config)
+    outcome.previously_failing = True
+    outcome.streak_started_at = since
+    outcome.streak_attempts = attempts
+    return outcome
+
+
+@pytest.mark.unit
+class TestReminderCadence:
+    """With `repeat_after_hours`, an ongoing failure is a reminder posted once
+    per interval from the start of its streak, not a repeat every sweep."""
+
+    def _sweep_at(self, outcomes, *, now, last, **overrides):
+        return _sweep(outcomes, swept_at=now, last_swept_at=last, **overrides)
+
+    def test_without_an_interval_every_sweep_reports_it(self):
+        recorder = _Recorder()
+        ctx = self._sweep_at(
+            [_ongoing("shop__orders", since=_at(9, 23))], now=_at(10, 1), last=_at(10)
+        )
+
+        _notifier(recorder).on_sweep_complete(ctx)
+
+        assert "shop__orders" in _rendered(recorder)
+
+    def test_ongoing_failure_is_dropped_between_reminders(self):
+        """Started 23:00, reported; hourly sweeps through the night post nothing."""
+        recorder = _Recorder()
+        ctx = self._sweep_at(
+            [_ongoing("shop__orders", since=_at(9, 23))],
+            now=_at(10, 3),
+            last=_at(10, 2),
+        )
+
+        notifier = _notifier(recorder, repeat_after_hours=24)
+
+        assert notifier.build_sweep_payload(ctx) is None
+        assert notifier.on_sweep_complete(ctx) is None
+        assert recorder.sent == []
+
+    def test_reminder_is_due_once_the_interval_has_elapsed(self):
+        recorder = _Recorder()
+        ctx = self._sweep_at(
+            [_ongoing("shop__orders", since=_at(9, 23), attempts=25)],
+            now=_at(10, 23),
+            last=_at(10, 22),
+        )
+
+        _notifier(recorder, repeat_after_hours=24).on_sweep_complete(ctx)
+
+        assert "still failing since 2026-11-09 23:00 UTC, 25 attempts" in _rendered(
+            recorder
+        )
+
+    def test_reminder_is_posted_once_per_interval(self):
+        """The sweep right after the reminder is quiet again."""
+        recorder = _Recorder()
+        ctx = self._sweep_at(
+            [_ongoing("shop__orders", since=_at(9, 23))], now=_at(11), last=_at(10, 23)
+        )
+
+        assert _notifier(recorder, repeat_after_hours=24).on_sweep_complete(ctx) is None
+
+    def test_a_long_gap_between_sweeps_posts_one_reminder_not_several(self):
+        recorder = _Recorder()
+        ctx = self._sweep_at(
+            [_ongoing("shop__orders", since=_at(1))], now=_at(10), last=_at(2)
+        )
+
+        _notifier(recorder, repeat_after_hours=24).on_sweep_complete(ctx)
+
+        assert len(recorder.sent) == 1
+
+    def test_new_failure_always_posts(self):
+        recorder = _Recorder()
+        fresh = _outcome("shop__orders", 1, 1, True)
+        fresh.previously_failing = False
+        ctx = self._sweep_at([fresh], now=_at(10, 3), last=_at(10, 2))
+
+        _notifier(recorder, repeat_after_hours=24).on_sweep_complete(ctx)
+
+        assert "shop__orders" in _rendered(recorder)
+        assert "failed" in _rendered(recorder)
+
+    def test_recovery_always_posts(self):
+        recorder = _Recorder()
+        recovered = _outcome("shop__orders", 1, 0, False)
+        recovered.previously_failing = True
+        ctx = self._sweep_at([recovered], now=_at(10, 3), last=_at(10, 2))
+
+        _notifier(recorder, repeat_after_hours=24).on_sweep_complete(ctx)
+
+        assert "• `shop__orders` — recovered, latest OK" in _rendered(recorder)
+
+    def test_pipeline_interval_overrides_the_project_one(self):
+        recorder = _Recorder()
+        ctx = self._sweep_at(
+            [
+                _ongoing(
+                    "shop__orders",
+                    since=_at(9, 23),
+                    config={"notifications": {"slack": {"repeat_after_hours": 2}}},
+                )
+            ],
+            now=_at(
+                10,
+                1,
+            ),
+            last=_at(10),
+        )
+
+        _notifier(recorder, repeat_after_hours=24).on_sweep_complete(ctx)
+
+        assert "shop__orders" in _rendered(recorder)
+
+    @pytest.mark.parametrize("bad", ["6", 0, -1, True, None])
+    def test_unusable_pipeline_interval_falls_back_to_the_project(self, bad):
+        recorder = _Recorder()
+        ctx = self._sweep_at(
+            [
+                _ongoing(
+                    "shop__orders",
+                    since=_at(9, 23),
+                    config={"notifications": {"slack": {"repeat_after_hours": bad}}},
+                )
+            ],
+            now=_at(10, 3),
+            last=_at(10, 2),
+        )
+
+        assert _notifier(recorder, repeat_after_hours=24).on_sweep_complete(ctx) is None
+
+    def test_no_previous_sweep_on_record_means_due(self):
+        """Noisy beats silent when the facts are missing."""
+        recorder = _Recorder()
+        ctx = self._sweep_at(
+            [_ongoing("shop__orders", since=_at(9, 23))], now=_at(10, 3), last=None
+        )
+
+        _notifier(recorder, repeat_after_hours=24).on_sweep_complete(ctx)
+
+        assert "shop__orders" in _rendered(recorder)
+
+    def test_no_streak_start_means_due(self):
+        recorder = _Recorder()
+        ctx = self._sweep_at(
+            [_ongoing("shop__orders", since=None)], now=_at(10, 3), last=_at(10, 2)
+        )
+
+        _notifier(recorder, repeat_after_hours=24).on_sweep_complete(ctx)
+
+        assert "still failing, 1 of 1 attempts" in _rendered(recorder)
+
+    def test_dropped_pipeline_leaves_the_totals(self):
+        recorder = _Recorder()
+        ctx = self._sweep_at(
+            [
+                _ongoing("shop__orders", since=_at(9, 23)),
+                _outcome("crm__accounts", 1, 1, True),
+            ],
+            now=_at(10, 3),
+            last=_at(10, 2),
+            total_attempts=10,
+            failed_attempts=2,
+        )
+
+        _notifier(recorder, repeat_after_hours=24).on_sweep_complete(ctx)
+
+        body = _rendered(recorder)
+        assert "shop__orders" not in body
+        assert "1 pipeline failing" in body
+        assert "8 of 9 pipeline attempts succeeded" in body
+
+    def test_the_sweep_itself_is_not_modified(self):
+        ctx = self._sweep_at(
+            [_ongoing("shop__orders", since=_at(9, 23))],
+            now=_at(10, 3),
+            last=_at(10, 2),
+        )
+
+        _notifier(_Recorder(), repeat_after_hours=24).on_sweep_complete(ctx)
+
+        assert len(ctx.outcomes) == 1
+
+
+@pytest.mark.unit
+class TestRepeatAfterConfig:
+    def _parse(self, slack):
+        from dlt_saga.project_config import NotificationsConfig
+
+        return NotificationsConfig.from_dict({"slack": {"webhook_url": "x", **slack}})
+
+    def test_unset_by_default(self):
+        assert self._parse({}).slack.repeat_after_hours is None
+
+    @pytest.mark.parametrize("value", [24, 6.5])
+    def test_positive_number_accepted(self, value):
+        assert self._parse(
+            {"repeat_after_hours": value}
+        ).slack.repeat_after_hours == float(value)
+
+    @pytest.mark.parametrize("value", ["24h", 0, -3, True])
+    def test_anything_else_rejected(self, value):
+        with pytest.raises(ValueError, match="repeat_after_hours must be a positive"):
+            self._parse({"repeat_after_hours": value})
+
+
+@pytest.mark.unit
+class TestDryRunPreview:
+    """`--dry-run` shows the body a reader would check, not only the fallback."""
+
+    def test_renders_every_block_including_the_attachment(self):
+        from dlt_saga.hooks.notifiers.slack import render_payload_text
+
+        recorder = _Recorder()
+        notifier = _notifier(recorder, mentions=["<@UOPS>"])
+        payload = notifier.build_sweep_payload(
+            _sweep(
+                [
+                    _outcome("shop__orders", 3, 3, True, error="boom"),
+                    _outcome("crm__accounts", 4, 1, False),
+                ]
+            )
+        )
+
+        text = render_payload_text(payload)
+
+        assert "1 pipeline failing" in text
+        assert "*dlt-saga*" in text
+        assert "`shop__orders`" in text and "boom" in text
+        assert "`crm__accounts` — 1 of 4 attempts failed, latest OK" in text
+        assert "<@UOPS>" in text
+
+    def test_falls_back_to_the_text_field(self):
+        from dlt_saga.hooks.notifiers.slack import render_payload_text
+
+        assert render_payload_text({"text": "plain"}) == "plain"

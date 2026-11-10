@@ -52,12 +52,28 @@ stored copy only stands in for a pipeline no longer configured. Muting a
 pipeline therefore applies to the failures already recorded, not just to runs
 planned after the change.
 
+A pipeline's previous state is derived, not stored
+----------------------------------------------------
+A notifier that reminds about an ongoing failure every N hours rather than
+every sweep needs to know whether a failure is new or continuing, and since
+when. Both are reconstructed from rows this sweep already reads: the window
+query returns every terminal row in the window, claimed ones included, and a
+pipeline's state at the last sweep that saw it is the status of its most recent
+claimed row (:func:`_derive_state`). Claimed means "a sweep considered it",
+which stays true for a failure the notifier chose not to repeat, so no
+per-pipeline marker is needed. The streak start is the first failed row after
+the pipeline's last completed one; the previous sweep's time is the newest row
+of the notify log. The reminder itself is the notifier's arithmetic over those
+three facts — see ``hooks/notifiers/slack.py``. Within the window only: a
+streak older than ``--since-days`` reads as starting at the window's edge.
+
 The logic here is warehouse-facing and CLI-agnostic (no typer); the command in
 ``cli.py`` is a thin wrapper.
 """
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional
 
 if TYPE_CHECKING:
@@ -112,6 +128,16 @@ class PipelineOutcome:
             available even though no single process ran every pipeline.
         pipeline_type: The pipeline group as recorded on the plan row; with
             ``table_name`` it identifies the pipeline across executions.
+        previously_failing: The pipeline's state at the last sweep that saw it:
+            ``True`` if its most recent claimed row failed, ``False`` if it
+            completed, ``None`` when no earlier sweep saw it in the window. A
+            failure with ``True`` is ongoing rather than new; a success with
+            ``True`` is a recovery even when this sweep holds no failure.
+        streak_started_at: When the current run of failures began — the first
+            failed row after the pipeline's last completed one, claimed rows
+            included. ``None`` when the pipeline is not failing or the rows
+            carry no timestamp.
+        streak_attempts: Failed attempts in that run, claimed rows included.
     """
 
     pipeline_name: str
@@ -122,11 +148,16 @@ class PipelineOutcome:
     latest_error: Optional[str] = None
     config_dict: Dict[str, Any] = field(default_factory=dict)
     pipeline_type: str = ""
+    previously_failing: Optional[bool] = None
+    streak_started_at: Optional[datetime] = None
+    streak_attempts: int = 0
 
     @property
     def recovered(self) -> bool:
-        """Failed at least once in the window but its latest attempt passed."""
-        return self.failures > 0 and not self.currently_failing
+        """Was failing — in this sweep or at the last one — and now passes."""
+        if self.currently_failing:
+            return False
+        return self.failures > 0 or self.previously_failing is True
 
     @property
     def failed_every_attempt(self) -> bool:
@@ -150,6 +181,12 @@ class SweepContext:
             of *failing* pipelines as its denominator and read as far more
             systemic than it is.
         failed_attempts: How many of those attempts failed.
+        swept_at: When this sweep ran (UTC).
+        last_swept_at: When the previous real sweep for this environment ran,
+            from the notify log; ``None`` when there is none to be found. With
+            ``swept_at`` and each outcome's ``streak_started_at`` it is what a
+            notifier needs to remind about an ongoing failure on a cadence
+            instead of every sweep.
     """
 
     environment: Optional[str] = None
@@ -159,6 +196,8 @@ class SweepContext:
     command: Optional[str] = None
     total_attempts: int = 0
     failed_attempts: int = 0
+    swept_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_swept_at: Optional[datetime] = None
 
     @property
     def failing(self) -> List[PipelineOutcome]:
@@ -284,19 +323,29 @@ def collect_unreported(
     """
     d = manager.destination
 
+    # Every terminal row in the window is read, not only the ones to report:
+    # the claimed ones are what tells a continuing failure from a new one
+    # (see "A pipeline's previous state is derived, not stored" above). Which
+    # rows are *reported* is still decided by the SQL predicate, returned per
+    # row as `reportable`, and the stored config — the one wide column — is
+    # only fetched for those.
+    cutoff = d.timestamp_n_days_ago(since_days)
+    where = f"e.created_at >= {cutoff}"
     if execution_id:
-        where = f"e.execution_id = '{d.escape_string_literal(execution_id)}'"
+        reportable = f"e.execution_id = '{d.escape_string_literal(execution_id)}'"
+        where = f"({reportable} OR {where})"
+    elif force:
+        reportable = "TRUE"
     else:
-        cutoff = d.timestamp_n_days_ago(since_days)
-        where = f"e.created_at >= {cutoff}"
-        if not force:
-            where = f"e.notified_at IS NULL AND {where}"
+        reportable = "e.notified_at IS NULL"
     if environment:
         # NULL is included deliberately: a row that never recorded an
         # environment is not evidence that it belongs to a different one, and
         # excluding it would drop it from every sweep forever.
         env = d.escape_string_literal(environment)
         where += f" AND (e.environment = '{env}' OR e.environment IS NULL)"
+
+    last_swept_at = read_last_sweep(manager, environment)
 
     rows = list(
         d.execute_sql(
@@ -308,11 +357,13 @@ def collect_unreported(
                 p.table_name        AS table_name,
                 p.status            AS status,
                 p.error_message     AS error_message,
-                p.config_json       AS config_json,
+                CASE WHEN {reportable} THEN p.config_json ELSE NULL END
+                                    AS config_json,
                 p.log_timestamp     AS log_timestamp,
                 e.command           AS command,
                 e.environment       AS environment,
-                e.created_at        AS created_at
+                e.created_at        AS created_at,
+                ({reportable})      AS reportable
             FROM {manager.plans_view_id} AS p
             JOIN {manager.executions_table_id} AS e
               ON p.execution_id = e.execution_id
@@ -325,7 +376,51 @@ def collect_unreported(
 
     rows = _drop_in_flight(rows)
 
-    return _aggregate(rows, environment=environment, since_days=since_days)
+    ctx = _aggregate(
+        [r for r in rows if getattr(r, "reportable", True)],
+        history=rows,
+        environment=environment,
+        since_days=since_days,
+    )
+    ctx.last_swept_at = last_swept_at
+    return ctx
+
+
+def read_last_sweep(manager: Any, environment: Optional[str]) -> Optional[datetime]:
+    """When the previous real sweep for *environment* ran, from the notify log.
+
+    ``None`` when the log does not exist yet or holds no sweep for the
+    environment — and, deliberately, when it cannot be read: a notifier that
+    cannot tell when it last ran falls back to reporting every ongoing failure,
+    which is the noisy direction to be wrong in, not the silent one.
+    """
+    from dlt_saga.project_config import get_notify_log_table_name
+    from dlt_saga.utility.sql import looks_like_missing_table
+
+    d = manager.destination
+    table_id = d.get_full_table_id(manager.schema, get_notify_log_table_name())
+    where = ""
+    if environment:
+        env = d.escape_string_literal(environment)
+        where = f"WHERE environment = '{env}' OR environment IS NULL"
+    try:
+        rows = list(
+            d.execute_sql(
+                f"SELECT MAX(swept_at) AS last_swept_at FROM {table_id} {where}",
+                manager.schema,
+            )
+        )
+    except Exception as exc:
+        if not looks_like_missing_table(exc):
+            logger.warning(
+                "Could not read the previous sweep time from the notify log; "
+                "ongoing failures will be reported as if due: %s",
+                exc,
+            )
+        return None
+    if not rows:
+        return None
+    return _as_utc(getattr(rows[0], "last_swept_at", None))
 
 
 def _drop_in_flight(rows: List[Any]) -> List[Any]:
@@ -351,13 +446,45 @@ def _drop_in_flight(rows: List[Any]) -> List[Any]:
     return [r for r in rows if r.execution_id not in unfinished]
 
 
-def _as_utc(value: Any) -> Any:
+def _as_utc(value: Any) -> Optional[datetime]:
     """Coerce a destination timestamp cell to an aware UTC datetime, or None."""
-    from datetime import datetime, timezone
-
     if not isinstance(value, datetime):
         return None
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _derive_state(history: List[Any]) -> Dict[tuple, tuple]:
+    """Per pipeline, its state at the last sweep and the current failure streak.
+
+    Walks every terminal row in the window in recorded order. The state at the
+    last sweep is the status of the most recent *claimed* row (``None`` when
+    no earlier sweep saw the pipeline). The streak is the run of failed rows
+    since the pipeline's last completed one, claimed or not: its start is the
+    first such row's ``created_at`` and its length the number of them. A
+    pipeline whose latest row completed has no streak.
+
+    Returns:
+        ``{key: (previously_failing, streak_started_at, streak_attempts)}``.
+    """
+    previous: Dict[tuple, Optional[bool]] = {}
+    streak_start: Dict[tuple, Optional[datetime]] = {}
+    streak_attempts: Dict[tuple, int] = {}
+    for row in history:
+        key = _pipeline_key(row)
+        failed = (row.status or "").lower() in _FAILED
+        if getattr(row, "notified_at", None) is not None:
+            previous[key] = failed
+        if failed:
+            if streak_attempts.get(key, 0) == 0:
+                streak_start[key] = _as_utc(getattr(row, "created_at", None))
+            streak_attempts[key] = streak_attempts.get(key, 0) + 1
+        else:
+            streak_start[key] = None
+            streak_attempts[key] = 0
+    return {
+        key: (previous.get(key), streak_start.get(key), streak_attempts.get(key, 0))
+        for key in set(previous) | set(streak_attempts)
+    }
 
 
 def _aggregate(
@@ -365,12 +492,20 @@ def _aggregate(
     *,
     environment: Optional[str],
     since_days: int,
+    history: Optional[List[Any]] = None,
 ) -> SweepContext:
     """Fold per-execution plan rows into one outcome per pipeline.
 
     Rows arrive oldest-first, so the last one seen for a pipeline is its most
     recent attempt — which decides ``currently_failing`` and the error shown.
+
+    Args:
+        rows: The rows to report.
+        history: Every terminal row in the window, *rows* included, from
+            which each pipeline's previous state and failure streak are
+            derived (:func:`_derive_state`). Defaults to *rows*.
     """
+    state = _derive_state(rows if history is None else history)
     outcomes: Dict[tuple, PipelineOutcome] = {}
     execution_ids: List[str] = []
     commands = set()
@@ -387,10 +522,16 @@ def _aggregate(
         key = _pipeline_key(row)
         outcome = outcomes.get(key)
         if outcome is None:
+            previously_failing, streak_started_at, streak_attempts = state.get(
+                key, (None, None, 0)
+            )
             outcome = PipelineOutcome(
                 pipeline_name=_display_name(row, config),
                 table_name=row.table_name or "",
                 pipeline_type=key[0],
+                previously_failing=previously_failing,
+                streak_started_at=streak_started_at,
+                streak_attempts=streak_attempts,
             )
             outcomes[key] = outcome
         elif config.get("pipeline_name"):
@@ -413,7 +554,10 @@ def _aggregate(
         environment=environment,
         since_days=since_days,
         execution_ids=execution_ids,
-        outcomes=[o for o in outcomes.values() if o.failures],
+        # A pipeline with only successes here still matters when the last
+        # sweep saw it failing: that is a recovery, and the only way one that
+        # recovered between sweeps is ever reported.
+        outcomes=[o for o in outcomes.values() if o.failures or o.previously_failing],
         command=commands.pop() if len(commands) == 1 else None,
         total_attempts=total_attempts,
         failed_attempts=failed_attempts,
@@ -830,7 +974,7 @@ def _dispatch(ctx: SweepContext, dry_run: bool = False) -> str:
         # its backlog silently, and those executions never come back.
         return SWEEP_UNDELIVERED
 
-    from dlt_saga.hooks.notifiers.slack import SlackNotifier
+    from dlt_saga.hooks.notifiers.slack import SlackNotifier, render_payload_text
 
     notifier = SlackNotifier(notifications.slack)
     try:
@@ -842,7 +986,9 @@ def _dispatch(ctx: SweepContext, dry_run: bool = False) -> str:
                     "(notifications.slack.enabled: false)"
                 )
             else:
-                logger.info("Slack digest that would be sent:\n%s", payload["text"])
+                logger.info(
+                    "Slack digest that would be sent:\n%s", render_payload_text(payload)
+                )
             return SWEEP_UNDELIVERED
         delivered = notifier.on_sweep_complete(ctx)
     except Exception:

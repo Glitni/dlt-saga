@@ -664,6 +664,7 @@ notifications:
 | `username` | `dlt-saga` | Display name on posted messages. Needs `chat:write.customize` with `token`; without it, saga posts under the app's own name and warns |
 | `icon_emoji` | `:satellite_antenna:` | Icon shown in place of the app's avatar. Same scope requirement as `username` |
 | `mentions` | — | Mention tokens appended to a failure digest. A string or list |
+| `repeat_after_hours` | — | How often `saga notify` reminds about a pipeline that keeps failing, in hours. Unset: every sweep reports it. See [Reminders instead of repeats](#reminders-instead-of-repeats) |
 | `timeout_seconds` | `10` | HTTP timeout per Slack request |
 | `on_run_complete` | — | Also post when each command finishes. See below |
 
@@ -735,7 +736,23 @@ notifications:
 
 It is then absent from every Slack digest, `saga notify` and `on_run_complete` alike: not listed as failing or recovered, not counted in the attempt totals, and a run or sweep whose only failures are muted posts nothing. Only Slack is muted — [`saga report`](CLI-Reference#saga-report) and its status summary keep showing the pipeline's real state. `saga notify` reads the setting from the pipeline's current config rather than the copy stored with each run, so muting applies to failures already recorded, and the sweep still marks those executions as reported, so lifting the mute later does not replay a backlog. Only a literal `false` mutes; anything else leaves the pipeline reported. Set it for a group through the same `+notifications:` hierarchy as mentions.
 
-Transport settings (`token`, `webhook_url`, `timeout_seconds`) and `on_run_complete` are project-level only — a pipeline chooses who hears about it, and whether this channel hears about it at all, not where or how the notifier posts.
+**Reminders instead of repeats.** `saga notify` runs on its own schedule, and a pipeline that keeps failing is otherwise in every digest that schedule produces — hourly sweeps mean an hourly message about the same failure all night. `repeat_after_hours` makes the digest report state changes instead:
+
+```yaml
+# saga_project.yml
+notifications:
+  slack:
+    repeat_after_hours: 24
+
+# configs/shop/orders.yml — override for one pipeline
+notifications:
+  slack:
+    repeat_after_hours: 6
+```
+
+A pipeline that was not failing at the previous sweep and fails now is a **new failure**, posted at once. One that was already failing at the previous sweep is **still failing**, posted as a reminder once per interval, counted from when its failures began (`still failing since 2026-11-09 23:00 UTC, 31 attempts`), and left out of the digest in between — a sweep whose only failures are ongoing and not yet due is quiet. A pipeline that was failing at the previous sweep and passes now is **recovered** and always posts, including when it recovered between two sweeps. Unset, every sweep reports every current failure, as before. Nothing is stored for this: the previous state comes from the execution-plan rows the sweep already reads, the time of the previous sweep from `_saga_notify_log`, so the cadence needs the scheduled sweep (a chained `--execution-id` report and `--dry-run` write no sweep row). The `on_run_complete` digest is per command and does not apply it.
+
+Transport settings (`token`, `webhook_url`, `timeout_seconds`) and `on_run_complete` are project-level only — a pipeline chooses who hears about it, whether this channel hears about it at all and how often while it keeps failing, not where or how the notifier posts.
 
 **Routing to several channels** means several webhooks — a webhook is bound to one channel and the notifier takes one. Post to one operational channel and route from there, or write a custom `on_run_complete` hook.
 

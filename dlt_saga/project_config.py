@@ -578,6 +578,22 @@ class SlackNotificationConfig:
             "minimum": 1,
         },
     )
+    repeat_after_hours: Optional[float] = field(
+        default=None,
+        metadata={
+            "description": (
+                "How often `saga notify` reminds about a pipeline that was "
+                "already failing at the previous sweep, in hours, counted from "
+                "when its failures began. Between reminders the pipeline is "
+                "left out of the digest; a new failure and a recovery always "
+                "post. Unset, every sweep reports every current failure. A "
+                "pipeline can set its own under the same key in its config. "
+                "Not applied by the on_run_complete digest, which is per "
+                "command."
+            ),
+            "exclusiveMinimum": 0,
+        },
+    )
 
     @classmethod
     def from_dict(cls, data: dict) -> "SlackNotificationConfig":
@@ -623,6 +639,16 @@ class SlackNotificationConfig:
                 "chat.postMessage has no channel of its own, unlike an "
                 "incoming webhook."
             )
+        repeat_after_hours = data.get("repeat_after_hours")
+        if repeat_after_hours is not None and (
+            isinstance(repeat_after_hours, bool)
+            or not isinstance(repeat_after_hours, (int, float))
+            or repeat_after_hours <= 0
+        ):
+            raise ValueError(
+                "notifications.slack.repeat_after_hours must be a positive "
+                f"number of hours, got {repeat_after_hours!r}"
+            )
         return cls(
             token=token,
             channel=channel,
@@ -637,6 +663,9 @@ class SlackNotificationConfig:
                 else None
             ),
             timeout_seconds=float(data.get("timeout_seconds", 10.0)),
+            repeat_after_hours=(
+                float(repeat_after_hours) if repeat_after_hours is not None else None
+            ),
         )
 
 
