@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from dlt_saga.destinations.config import DestinationConfig
+from dlt_saga.utility.gcp import dataset_labels as bq_dataset_labels
 from dlt_saga.utility.gcp import job_labels as bq_job_labels
 
 if TYPE_CHECKING:
@@ -91,6 +92,22 @@ class BigQueryDestinationConfig(DestinationConfig):
             ),
         },
     )
+    # Labels on every dataset saga creates for this target, over saga's default
+    # `app`. Set at creation only; an existing dataset keeps what it has.
+    dataset_labels: Dict[str, str] = field(
+        default_factory=dict,
+        metadata={
+            "profile_field": True,
+            "description": (
+                "BigQuery only. Labels set on every dataset saga creates for this "
+                "target, so storage costs are attributable in the billing export. "
+                "'app' defaults to 'dlt-saga' and can be overridden here. Applied "
+                "when a dataset is created; an existing dataset is never "
+                "relabelled. Same key and value rules as job_labels, except that "
+                "'app' is not reserved."
+            ),
+        },
+    )
 
     @property
     def database(self) -> str:
@@ -125,11 +142,19 @@ class BigQueryDestinationConfig(DestinationConfig):
             )
 
         self.job_labels = self.validate_job_labels(self.job_labels, "job_labels")
+        self.dataset_labels = self.validate_dataset_labels(
+            self.dataset_labels, "dataset_labels"
+        )
 
     @classmethod
     def validate_job_labels(cls, labels: Any, where: str) -> Dict[str, str]:
         """BigQuery label rules: validated keys, cleaned values, at most 64 per job."""
         return bq_job_labels.validate_job_labels(labels, where)
+
+    @classmethod
+    def validate_dataset_labels(cls, labels: Any, where: str) -> Dict[str, str]:
+        """BigQuery label rules, for the labels on datasets saga creates."""
+        return bq_dataset_labels.validate_dataset_labels(labels, where)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> BigQueryDestinationConfig:
@@ -153,6 +178,7 @@ class BigQueryDestinationConfig(DestinationConfig):
             storage_path=data.get("storage_path"),
             partition_expiration_days=data.get("partition_expiration_days"),
             job_labels=data.get("job_labels") or {},
+            dataset_labels=data.get("dataset_labels") or {},
         )
 
     @classmethod
@@ -171,6 +197,7 @@ class BigQueryDestinationConfig(DestinationConfig):
             storage_path: context (profile) — required for iceberg
             schema_access: config_dict (from saga_project.yml)
             job_labels: context (profile) — one set per target, never per pipeline
+            dataset_labels: context (profile) — one set per target, never per pipeline
         """
         from dlt_saga.utility.env import get_env
 
@@ -211,10 +238,15 @@ class BigQueryDestinationConfig(DestinationConfig):
             )
 
         job_labels: Dict[str, str] = {}
+        dataset_labels: Dict[str, str] = {}
         if context.profile_target:
             job_labels = cls.validate_job_labels(
                 context.profile_target.destination_config.get("job_labels"),
                 f"profile target '{context.profile_target.name}': job_labels",
+            )
+            dataset_labels = cls.validate_dataset_labels(
+                context.profile_target.destination_config.get("dataset_labels"),
+                f"profile target '{context.profile_target.name}': dataset_labels",
             )
 
         return cls(
@@ -229,4 +261,5 @@ class BigQueryDestinationConfig(DestinationConfig):
             storage_path=storage_path,
             partition_expiration_days=partition_expiration_days,
             job_labels=job_labels,
+            dataset_labels=dataset_labels,
         )

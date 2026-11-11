@@ -941,3 +941,5 @@ class TestDestinationProfileProps:
         props = _destination_profile_props(BigQueryDestinationConfig)
         assert props["job_labels"]["type"] == "object"
         assert props["job_labels"]["additionalProperties"] == {"type": "string"}
+        assert props["dataset_labels"]["type"] == "object"
+        assert props["dataset_labels"]["additionalProperties"] == {"type": "string"}

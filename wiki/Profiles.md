@@ -83,6 +83,7 @@ prod:
 | `location` | No | `EU` | BigQuery location |
 | `partition_expiration_days` | No | — | Default partition expiration (in days) for partitioned tables created by pipelines targeting this profile. Maps to BigQuery's `time_partitioning.expiration_ms`. Honored on `CREATE TABLE` and reconciled on every subsequent run (changing or unsetting the value ALTERs the existing table); can be overridden per-pipeline. Only applies to native tables — Iceberg ignores it. |
 | `job_labels` | No | — | Labels added to every BigQuery job saga issues for this target, beside saga's built-in ones. See [BigQuery job labels](#bigquery-job-labels). |
+| `dataset_labels` | No | — | Labels set on every dataset saga creates for this target, over saga's default `app: dlt-saga`. See [BigQuery dataset labels](#bigquery-dataset-labels). |
 
 #### BigQuery job labels
 
@@ -113,6 +114,27 @@ prod:
 Keys must be valid BigQuery label keys (lowercase letters, digits, `_` or `-`, starting with a letter, at most 63 characters); `app` and `saga-*` are reserved, and `saga validate` reports a key saga can't use. On a destination that doesn't tag its jobs (DuckDB, Databricks today) the key has no effect, and `saga validate` warns. Values are cleaned the way BigQuery requires — lowercased, any character outside `[a-z0-9_-]` replaced by `-`, cut at 63 — so a value like `scheduled__2026-11-04T10:00:00+00:00` becomes `scheduled__2026-11-04t10-00-00-00-00`, the same rewrite other tools apply, and the label matches across them.
 
 With `--orchestrate`, the labels resolved on the orchestrator are forwarded to the workers it starts (as `SAGA_JOB_LABELS`, a JSON object merged over the worker's own `job_labels`), so a worker labels its jobs with the run that started it rather than with its own, emptier, environment. A worker started any other way renders its own profile.
+
+#### BigQuery dataset labels
+
+Job labels attribute query costs; storage is billed per dataset, and the billing export breaks it down by the dataset's labels. Every dataset saga creates — a pipeline's dataset and its `_staging` companion, a historized dataset, the `_saga_*` state dataset, native_load staging — is created with `app: dlt-saga`, plus whatever the target declares in `dataset_labels`. Unlike on jobs, `app` here is a default: a project that uses `app` for something else declares its own value and that one is set instead.
+
+```yaml
+prod:
+  type: bigquery
+  database: your-gcp-project
+  environment: prod
+  dataset_labels:
+    team: data-platform
+```
+
+Labels are set when saga creates the dataset and never afterwards. A dataset that already exists — created by an earlier saga version, by Terraform, or by hand — keeps the labels it has, and changing `dataset_labels` doesn't relabel datasets created before the change. Label those yourself:
+
+```bash
+bq update --set_label app:dlt-saga your-gcp-project:dlt_google_sheets
+```
+
+Keys and values follow the same rules as `job_labels` (values are lowercased and cleaned), except that only `saga-*` is reserved. `dataset_labels` is separate from `job_labels` because job labels often carry per-run values that mean nothing on a long-lived dataset. On another destination the key has no effect, and `saga validate` warns.
 
 ### Databricks Fields
 

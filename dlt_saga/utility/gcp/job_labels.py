@@ -86,38 +86,76 @@ def validate_job_labels(labels: Any, where: str) -> Dict[str, str]:
         ValueError: On a non-mapping value, an invalid or reserved key, a
             non-scalar value, or more labels than a job can carry.
     """
+    return validate_labels(
+        labels,
+        where,
+        scope="job",
+        limit=MAX_LABELS_PER_JOB,
+        built_in=BUILT_IN_LABEL_COUNT,
+    )
+
+
+def validate_labels(
+    labels: Any,
+    where: str,
+    *,
+    scope: str,
+    limit: int,
+    built_in: int,
+    reserved_keys: frozenset = RESERVED_LABEL_KEYS,
+) -> Dict[str, str]:
+    """Check a user-declared ``<scope>_labels`` mapping and return it cleaned.
+
+    The rules BigQuery applies to labels on any resource, plus saga's reserved
+    keys; see :func:`validate_job_labels`.
+
+    Args:
+        labels: The raw declared value (``None`` for none).
+        where: Where it was declared, for the error message.
+        scope: The resource the labels go on (``job``, ``dataset``).
+        limit: How many labels BigQuery allows on that resource.
+        built_in: How many of those saga's own labels take.
+        reserved_keys: Keys a declaration may not set, beside the ``saga-``
+            prefix.
+
+    Raises:
+        ValueError: On a non-mapping value, an invalid or reserved key, a
+            non-scalar value, or more labels than the resource can carry.
+    """
     if labels is None:
         return {}
     if not isinstance(labels, Mapping):
         raise ValueError(
-            f"{where}: job_labels must be a mapping of label key to value, "
+            f"{where}: {scope}_labels must be a mapping of label key to value, "
             f"got {type(labels).__name__}"
         )
     cleaned: Dict[str, str] = {}
     for key, value in labels.items():
         if not isinstance(key, str) or not _KEY_RE.match(key):
             raise ValueError(
-                f"{where}: job label key {key!r} is invalid. Keys are 1-63 "
+                f"{where}: {scope} label key {key!r} is invalid. Keys are 1-63 "
                 "characters of lowercase letters, digits, '_' or '-', starting "
                 "with a letter"
             )
-        if key in RESERVED_LABEL_KEYS or key.startswith(RESERVED_LABEL_PREFIX):
+        if key in reserved_keys or key.startswith(RESERVED_LABEL_PREFIX):
+            names = [*sorted(reserved_keys), f"{RESERVED_LABEL_PREFIX}*"]
             raise ValueError(
-                f"{where}: job label key {key!r} is reserved for saga's built-in "
-                f"labels ('app' and '{RESERVED_LABEL_PREFIX}*')"
+                f"{where}: {scope} label key {key!r} is reserved for saga's "
+                f"built-in labels ({' and '.join(repr(name) for name in names)})"
             )
         if value is None or isinstance(value, (Mapping, list, tuple, set)):
             raise ValueError(
-                f"{where}: job label {key!r} must have a scalar value, got "
+                f"{where}: {scope} label {key!r} must have a scalar value, got "
                 f"{type(value).__name__}"
             )
         text = clean_label_value(value)
         if text:
             cleaned[key] = text
-    if len(cleaned) > MAX_USER_LABELS:
+    if len(cleaned) > limit - built_in:
         raise ValueError(
-            f"{where}: {len(cleaned)} job labels declared, at most {MAX_USER_LABELS} "
-            f"fit beside saga's own (BigQuery allows {MAX_LABELS_PER_JOB} per job)"
+            f"{where}: {len(cleaned)} {scope} labels declared, at most "
+            f"{limit - built_in} fit beside saga's own (BigQuery allows {limit} "
+            f"per {scope})"
         )
     return cleaned
 

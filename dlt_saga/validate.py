@@ -16,7 +16,7 @@ import logging
 import os
 import types
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type
 
 from dlt_saga.pipeline_config import ConfigSource, PipelineConfig
 from dlt_saga.pipeline_config.base_config import (
@@ -507,40 +507,57 @@ def _validate_task_concurrency(
 
 
 def _validate_profile_job_labels() -> List[ValidationResult]:
-    """Check the active target's ``job_labels`` against its destination's rules.
+    """Check the active target's ``job_labels`` and ``dataset_labels`` against
+    its destination's rules.
 
     The same check the destination config applies at run time, surfaced
     offline so a reserved or malformed key is caught before a scheduled run
-    fails on it. A destination that doesn't tag jobs gets a warning that the
-    key has no effect. Returns one ``kind="project"`` result, or none.
+    fails on it. A destination that doesn't use a key gets a warning that it
+    has no effect. Returns a ``kind="project"`` result per finding.
     """
-    from dlt_saga.destinations.factory import DestinationFactory
     from dlt_saga.utility.cli.context import get_execution_context
 
     target = get_execution_context().profile_target
     if target is None:
         return []
-    declared = target.destination_config.get("job_labels")
+    checks = (
+        ("job_labels", "this destination doesn't tag its warehouse jobs"),
+        ("dataset_labels", "it is a BigQuery setting"),
+    )
+    results = [_check_profile_labels(target, key, why) for key, why in checks]
+    return [result for result in results if result is not None]
+
+
+def _check_profile_labels(
+    target: Any, key: str, unsupported: str
+) -> Optional[ValidationResult]:
+    """Check one label key of *target* with its destination's ``validate_<key>``.
+
+    A destination config class without that validator, or whose validator
+    returns ``None``, doesn't use the key: a warning saying *unsupported*.
+    """
+    from dlt_saga.destinations.factory import DestinationFactory
+
+    declared = target.destination_config.get(key)
     if not declared:
-        return []
+        return None
     name = f"profile target '{target.name}'"
     try:
         config_class = DestinationFactory.get_config_class(target.destination_type)
-        supported = config_class.validate_job_labels(declared, "job_labels")
+        validator = getattr(config_class, f"validate_{key}", None)
+        supported = validator(declared, key) if validator else None
     except ValueError as exc:
-        return [ValidationResult(pipeline_name=name, errors=[str(exc)], kind="project")]
+        return ValidationResult(pipeline_name=name, errors=[str(exc)], kind="project")
     if supported is None:
-        return [
-            ValidationResult(
-                pipeline_name=name,
-                warnings=[
-                    f"job_labels has no effect on a {target.destination_type} "
-                    "target: this destination doesn't tag its warehouse jobs"
-                ],
-                kind="project",
-            )
-        ]
-    return []
+        return ValidationResult(
+            pipeline_name=name,
+            warnings=[
+                f"{key} has no effect on a {target.destination_type} target: "
+                f"{unsupported}"
+            ],
+            kind="project",
+        )
+    return None
 
 
 def _validate_legacy_keys(
