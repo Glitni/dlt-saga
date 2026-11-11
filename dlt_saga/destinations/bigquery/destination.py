@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional,
 from dlt_saga.destinations.base import TableLayout
 from dlt_saga.destinations.bigquery.base import BigQueryBaseDestination
 from dlt_saga.destinations.bigquery.config import BigQueryDestinationConfig
+from dlt_saga.utility.gcp.dataset_labels import dataset_labels
 from dlt_saga.utility.naming import normalize_identifier
 from dlt_saga.utility.sql import looks_like_missing_table
 from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS
@@ -746,6 +747,7 @@ class BigQueryDestination(BigQueryBaseDestination):
 
         dataset = bigquery.Dataset(dataset_ref)
         dataset.location = self.config.location
+        dataset.labels = dataset_labels()
         try:
             client.create_dataset(dataset, exists_ok=True)
         except Conflict:
@@ -1563,6 +1565,7 @@ class BigQueryDestination(BigQueryBaseDestination):
         client = self._client(location)
         ds = bigquery.Dataset(f"{self.config.project_id}.{dataset}")
         ds.location = location
+        ds.labels = dataset_labels()
         client.create_dataset(ds, exists_ok=True)
 
     def create_external_table(

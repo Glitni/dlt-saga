@@ -10,6 +10,7 @@ import os
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from dlt_saga.destinations.base import Destination
+from dlt_saga.utility.gcp.dataset_labels import dataset_labels
 from dlt_saga.utility.gcp.job_labels import (
     attach_job_labels_to_dlt_destination,
     current_job_labels,
@@ -606,6 +607,7 @@ class BigQueryBaseDestination(Destination):
 
         dataset = bigquery.Dataset(f"{project_id}.{dataset_name}")
         dataset.location = location
+        dataset.labels = dataset_labels()
         if access_entries:
             dataset.access_entries = access_entries
             logger.debug(

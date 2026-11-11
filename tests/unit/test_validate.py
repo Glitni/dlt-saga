@@ -582,6 +582,30 @@ class TestValidateConfigsJobLabels:
         results = self._run({"database": "p"})
         assert all(r.kind == "pipeline" for r in results)
 
+    def test_reserved_dataset_label_key_is_a_project_error(self):
+        results = self._run({"database": "p", "dataset_labels": {"saga-x": "x"}})
+        project = [r for r in results if r.kind == "project"]
+        assert len(project) == 1
+        assert not project[0].is_valid
+        assert "dataset label key 'saga-x' is reserved" in project[0].errors[0]
+
+    def test_valid_dataset_labels_add_nothing(self):
+        results = self._run({"database": "p", "dataset_labels": {"team": "t"}})
+        assert all(r.kind == "pipeline" for r in results)
+
+    def test_dataset_labels_on_another_destination_warn(self):
+        results = self._run(
+            {"database_path": "x.duckdb", "dataset_labels": {"team": "t"}},
+            destination_type="duckdb",
+        )
+        project = [r for r in results if r.kind == "project"]
+        assert len(project) == 1
+        assert project[0].is_valid
+        assert (
+            "dataset_labels has no effect on a duckdb target"
+            in (project[0].warnings[0])
+        )
+
 
 @pytest.mark.unit
 class TestValidateNotifications:

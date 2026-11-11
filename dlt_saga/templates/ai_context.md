@@ -467,6 +467,8 @@ default:
       job_labels:                      # BigQuery job labels beside saga's own (app, saga-command, saga-pipeline, saga-environment, ...)
         team: data-platform
         scheduler-run: "{{ env_var('SCHEDULER_RUN_ID', '') }}"   # empty value = label left out
+      dataset_labels:                  # BigQuery labels on datasets saga creates, over saga's default `app: dlt-saga` (set at creation only; existing datasets are never relabelled)
+        team: data-platform
 ```
 
 Switch targets with `--target prod`. Environment affects naming:

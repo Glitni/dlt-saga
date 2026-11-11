@@ -469,6 +469,19 @@ class TestJobLabels:
         cfg = BigQueryDestinationConfig.from_context(ctx, {"job_labels": {"a": "b"}})
         assert cfg.job_labels == {}
 
+    def test_from_context_reads_dataset_labels_cleaned(self):
+        ctx = self._make_context()
+        ctx.profile_target.destination_config = {"dataset_labels": {"team": "Data"}}
+        cfg = BigQueryDestinationConfig.from_context(ctx, {})
+        assert cfg.dataset_labels == {"team": "data"}
+        assert cfg.job_labels == {}
+
+    def test_from_context_rejects_reserved_dataset_label_naming_the_target(self):
+        ctx = self._make_context()
+        ctx.profile_target.destination_config = {"dataset_labels": {"saga-x": "x"}}
+        with pytest.raises(ValueError, match="profile target 'prod': dataset_labels"):
+            BigQueryDestinationConfig.from_context(ctx, {})
+
     def test_from_dict_validates(self):
         cfg = BigQueryDestinationConfig.from_dict(
             {"project_id": "p", "job_labels": {"team": "T"}}
