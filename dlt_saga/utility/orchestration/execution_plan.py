@@ -50,6 +50,33 @@ PLANS_STALE_REASONS = {
 }
 
 
+def encode_stored_config(config: Dict[str, Any]) -> str:
+    """Serialise a pipeline config for the plans table's ``config_json`` cell.
+
+    The cell holds the config's JSON text as a JSON *string*, not as an object:
+    a native JSON column may reorder an object's members (BigQuery returns them
+    sorted), and a config's key order is meaningful — ``columns:`` is the
+    positional schema of a headerless CSV. A string comes back byte for byte.
+    """
+    return json.dumps(json.dumps(config))
+
+
+def decode_stored_config(value: Any) -> Dict[str, Any]:
+    """Read a ``config_json`` cell back into a config dict.
+
+    Accepts every shape a destination hands back: the JSON string written by
+    :func:`encode_stored_config` (already unwrapped to the config's JSON text by
+    drivers that parse JSON cells, still wrapped where the column is text), and
+    the object that plan rows written before it hold.
+
+    Raises:
+        ValueError: If the cell holds text that is not valid JSON.
+    """
+    while isinstance(value, str):
+        value = json.loads(value)
+    return value if isinstance(value, dict) else {}
+
+
 def _group_into_task_units(
     pipeline_configs: List[PipelineConfig],
 ) -> List[List[PipelineConfig]]:
@@ -151,7 +178,8 @@ class ExecutionPlanManager:
         - pipeline_type: Pipeline group (google_sheets, filesystem, etc.)
         - pipeline_identifier: Unique identifier (file path, etc.)
         - table_name: Derived table name
-        - config_json: Full configuration as JSON
+        - config_json: Full configuration, as a JSON string (see
+          ``encode_stored_config``)
         - status: pending/running/completed/failed
         - started_at: When execution started
         - completed_at: When execution completed
@@ -430,7 +458,9 @@ class ExecutionPlanManager:
                         "pipeline_type": config.pipeline_group,
                         "pipeline_identifier": config.identifier,
                         "table_name": config.table_name,
-                        "config_json": json.dumps(_build_stored_config(config)),
+                        "config_json": encode_stored_config(
+                            _build_stored_config(config)
+                        ),
                         "status": "pending",
                     }
                 )
@@ -648,10 +678,7 @@ class ExecutionPlanManager:
 
             pipeline_configs = []
             for row in results:
-                # config_json may come back as dict (BigQuery JSON) or string
-                config_dict = row.config_json
-                if isinstance(config_dict, str):
-                    config_dict = json.loads(config_dict)
+                config_dict = decode_stored_config(row.config_json)
 
                 pipeline_group = row.pipeline_type
                 pipeline_configs.append(
@@ -840,12 +867,12 @@ class ExecutionPlanManager:
         else:
             completed_at_sql = "NULL"
 
-        # config_json may be dict or string depending on destination
-        config_json_raw = current_data.config_json
-        if not isinstance(config_json_raw, str):
-            config_json_raw = json.dumps(config_json_raw)
-
-        parse_json = d.parse_json_expression(self._format_sql_value(config_json_raw))
+        # Re-encoded rather than passed through: the cell reads back as the
+        # config's JSON text, which parsed as-is would be stored as an object.
+        stored_config = encode_stored_config(
+            decode_stored_config(current_data.config_json)
+        )
+        parse_json = d.parse_json_expression(self._format_sql_value(stored_config))
 
         return f"""(
             {now},

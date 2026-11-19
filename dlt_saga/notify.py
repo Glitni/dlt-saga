@@ -261,21 +261,13 @@ def _display_name(row: Any, config: Dict[str, Any]) -> str:
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
-    """Coerce a stored ``config_json`` cell to a dict.
+    """Coerce a stored ``config_json`` cell to a dict; unreadable cells are empty."""
+    from dlt_saga.utility.orchestration.execution_plan import decode_stored_config
 
-    Destinations hand it back as a dict (BigQuery JSON) or a string.
-    """
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str) and value:
-        import json
-
-        try:
-            parsed = json.loads(value)
-            return parsed if isinstance(parsed, dict) else {}
-        except ValueError:
-            return {}
-    return {}
+    try:
+        return decode_stored_config(value)
+    except ValueError:
+        return {}
 
 
 def collect_unreported(

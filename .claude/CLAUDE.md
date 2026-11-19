@@ -83,6 +83,8 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
 2. Orchestrator mode: Create execution plan and trigger remote workers (e.g. Cloud Run Jobs)
 3. Worker mode: Execute assigned tasks from an execution plan
 
+A plan row's `config_json` holds the config's JSON text as a JSON *string* (`encode_stored_config` / `decode_stored_config` in `utility/orchestration/execution_plan.py`), never as an object: BigQuery's `JSON` type returns object members sorted, and config key order is meaningful (`columns:` is the positional schema of a headerless CSV in `native_load`). Every reader goes through `decode_stored_config`, which also reads the object cells of rows written before it; the status rewrite re-encodes, since parsing the read-back text as-is would store an object again
+
 **Task-group concurrency** (`utility/task_groups.py`)
 - `task_group` co-locates pipelines in one orchestrated task; `task_concurrency` caps how many of a group's pipelines run at once (for sources limiting concurrent requests), in local runs (`Session`) and worker mode alike, for ingest and historize
 - Scheduled as `cap` lanes draining the group's queue (`submit_with_group_caps`), so waiting members never hold a pool slot other pipelines could use
