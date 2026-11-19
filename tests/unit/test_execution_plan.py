@@ -8,6 +8,8 @@ from dlt_saga.pipeline_config.base_config import PipelineConfig
 from dlt_saga.utility.orchestration.execution_plan import (
     ExecutionMetadata,
     ExecutionPlanManager,
+    decode_stored_config,
+    encode_stored_config,
 )
 
 
@@ -81,8 +83,8 @@ def _make_config(name: str, schema_name: str = "dlt_api", **extra) -> PipelineCo
     )
 
 
-def _extract_stored_configs(sql_calls: list[str]) -> list[dict]:
-    """Pull every embedded JSON literal out of captured INSERT statements."""
+def _extract_json_literals(sql_calls: list[str]) -> list[str]:
+    """Pull the text of every embedded JSON literal out of captured SQL."""
     marker = "PARSE_JSON('"
     found = []
     for sql in sql_calls:
@@ -92,13 +94,19 @@ def _extract_stored_configs(sql_calls: list[str]) -> list[dict]:
             end = chunk.find("')")
             if end < 0:
                 continue
-            payload = chunk[:end]
-            # Un-escape the SQL single-quote doubling done by _escape
-            payload = payload.replace("''", "'").replace("\\\\", "\\")
-            try:
-                found.append(json.loads(payload))
-            except json.JSONDecodeError:
-                continue
+            # Un-escape the SQL string literal written by _format_sql_value
+            found.append(chunk[:end].replace("''", "'").replace("\\\\", "\\"))
+    return found
+
+
+def _extract_stored_configs(sql_calls: list[str]) -> list[dict]:
+    """Decode every config embedded in captured INSERT statements."""
+    found = []
+    for payload in _extract_json_literals(sql_calls):
+        try:
+            found.append(decode_stored_config(payload))
+        except json.JSONDecodeError:
+            continue
     return found
 
 
@@ -865,3 +873,124 @@ class TestRecordPipelineOutcomes:
 
         (insert,) = self._inserts(dest)
         assert insert.count("'running'") == 2
+
+
+def _sort_members(value):
+    """A JSON value as a store that does not keep object member order returns it."""
+    if isinstance(value, dict):
+        return {key: _sort_members(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_sort_members(item) for item in value]
+    return value
+
+
+class _ReorderingJsonDestination(_RecordingDestination):
+    """A plans table whose JSON column sorts object members, for one pipeline.
+
+    Serves the most recently inserted ``config_json`` cell back the way a driver
+    that parses JSON cells does: an object as a dict with its members sorted, a
+    JSON string as a ``str``.
+    """
+
+    def __init__(self, config: PipelineConfig):
+        super().__init__()
+        self._config = config
+        self._cell = None
+
+    def execute_sql(self, sql: str, schema: str = ""):
+        from types import SimpleNamespace
+
+        self.sql_calls.append(sql)
+        if not sql.lstrip().startswith("SELECT"):
+            literals = _extract_json_literals([sql])
+            if literals:
+                self._cell = _sort_members(json.loads(literals[-1]))
+            return []
+        return [
+            SimpleNamespace(
+                pipeline_type=self._config.pipeline_group,
+                pipeline_identifier=self._config.identifier,
+                table_name=self._config.table_name,
+                config_json=self._cell,
+                started_at=None,
+                completed_at=None,
+            )
+        ]
+
+
+@pytest.mark.unit
+class TestStoredConfigKeyOrder:
+    """A worker must read a config with its keys in the order they were written.
+
+    ``columns:`` is a positional schema for a headerless CSV, so a store that
+    reorders object members would load every field into the wrong column.
+    """
+
+    COLUMNS = {"zeta": {"data_type": "text"}, "app_id": {"data_type": "bigint"}}
+
+    def _plan(self):
+        config = _make_config("events", zulu=1, columns=self.COLUMNS, alpha=2)
+        dest = _ReorderingJsonDestination(config)
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+        execution_id = manager.create_execution_plan([config])
+        return manager, execution_id
+
+    def _assigned(self, manager, execution_id) -> dict:
+        (assigned,) = manager.get_task_assignment(execution_id, 0)
+        return assigned.config_dict
+
+    def test_worker_reads_keys_in_written_order(self):
+        manager, execution_id = self._plan()
+
+        config_dict = self._assigned(manager, execution_id)
+
+        assert list(config_dict["columns"]) == ["zeta", "app_id"]
+        assert list(config_dict)[:4] == [
+            "write_disposition",
+            "zulu",
+            "columns",
+            "alpha",
+        ]
+
+    def test_order_survives_a_status_update(self):
+        """A retried task reads the row its own status update wrote."""
+        manager, execution_id = self._plan()
+
+        manager.update_task_status(execution_id, 0, "running")
+        manager.update_task_status(execution_id, 0, "failed", "boom")
+
+        config_dict = self._assigned(manager, execution_id)
+        assert list(config_dict["columns"]) == ["zeta", "app_id"]
+
+    def test_object_cell_written_before_the_encoding_is_still_read(self):
+        manager, execution_id = self._plan()
+        manager.destination._cell = {"columns": {"a": {}}, "pipeline_name": "api__x"}
+
+        assert self._assigned(manager, execution_id)["pipeline_name"] == "api__x"
+
+
+@pytest.mark.unit
+class TestDecodeStoredConfig:
+    CONFIG = {"zeta": 1, "app_id": {"b": 1, "a": 2}}
+
+    def test_round_trip_keeps_order(self):
+        decoded = decode_stored_config(encode_stored_config(self.CONFIG))
+
+        assert list(decoded) == ["zeta", "app_id"]
+        assert list(decoded["app_id"]) == ["b", "a"]
+
+    def test_cell_already_unwrapped_by_the_driver(self):
+        cell = json.loads(encode_stored_config(self.CONFIG))
+
+        assert decode_stored_config(cell) == self.CONFIG
+
+    def test_object_cell(self):
+        assert decode_stored_config(self.CONFIG) == self.CONFIG
+
+    @pytest.mark.parametrize("cell", [None, "[1, 2]", "null", 3])
+    def test_non_object_cell_is_empty(self, cell):
+        assert decode_stored_config(cell) == {}
+
+    def test_invalid_json_raises(self):
+        with pytest.raises(ValueError):
+            decode_stored_config("{not json")
