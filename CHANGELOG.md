@@ -1,3 +1,12 @@
+## 0.52.0 — 2026-11-19
+
+### Added
+- Label the BigQuery datasets saga creates with app and dataset_labels (#666)
+
+
+### Fixed
+- Preserve config key order in orchestrated runs by storing the plan config as a JSON string (#669)
+
 ## 0.51.0 — 2026-11-10
 
 ### Added
