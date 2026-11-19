@@ -122,6 +122,23 @@ class TestFileHandlerLifecycle:
         cli_logging.set_console_verbose(False)
         assert cli_logging._console_handler.level == logging.INFO
 
+    def test_aws_sdk_debug_stays_out_of_the_log_file(self, monkeypatch):
+        # botocore logs every S3 response body at DEBUG; a native_load S3
+        # listing wrote hundreds of MB of XML into one log file.
+        _force_enable(monkeypatch)
+        cli_logging.configure_cli_logging()
+
+        logging.getLogger("botocore.parsers").debug("aws-debug-marker")
+        logging.getLogger("botocore.parsers").warning("aws-warning-marker")
+        for h in logging.getLogger().handlers:
+            h.flush()
+
+        path = cli_logging.get_log_file_path()
+        assert path is not None
+        contents = path.read_text(encoding="utf-8")
+        assert "aws-debug-marker" not in contents
+        assert "aws-warning-marker" in contents
+
     def test_file_only_record_skips_the_console(self, monkeypatch, capsys):
         _force_enable(monkeypatch)
         cli_logging.configure_cli_logging()

@@ -508,6 +508,10 @@ def configure_cli_logging() -> None:
         "azure.identity",
         "azure.storage",
         "msal",
+        # AWS SDK — every request, signature and full response body at DEBUG
+        "botocore",
+        "boto3",
+        "s3transfer",
         # Filesystem layers — feature/cache setup notices on every file source
         "gcsfs",
         "fsspec",
