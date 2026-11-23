@@ -172,7 +172,10 @@ class HistorizeConfig:
                 "in that delivery (new, changed or re-sent), so a missing record "
                 "means nothing — deletion detection, gap-driven reappearance and "
                 "merge_key don't apply, and scd2 opens a version only when a "
-                "record's values change. Changing it requires a full refresh."
+                "record's values change. Set it from what each snapshot holds, "
+                "not from incremental ingest: rows fetched past a cursor are "
+                "'incremental', new files that are each a complete export are "
+                "'full'. Changing it requires a full refresh."
             ),
             "enum": list(DELIVERIES),
         },
@@ -369,7 +372,10 @@ class HistorizeConfig:
             "description": (
                 "When True, rows that disappear from the source produce a deletion marker row "
                 "(_dlt_is_deleted=True) in the historized table. "
-                "When False, only value changes are tracked. Defaults to True for "
+                "When False, no deletion markers are written, but under scd2 with "
+                "delivery: full a record returning unchanged after missing snapshots still "
+                "opens a version; use delivery: incremental when snapshots hold "
+                "only the records sent. Defaults to True for "
                 "strategy: scd2 with delivery: full. Opt-in for strategy: scd1, "
                 "where a deleted key keeps its row with _dlt_is_deleted=True "
                 "(order_by must then start with snapshot_column). Not "
