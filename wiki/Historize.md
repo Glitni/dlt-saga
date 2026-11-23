@@ -122,6 +122,10 @@ Under `incremental`, SCD2 opens a new version only when a record's values change
 
 Setting `full` on an incremental source is what to avoid: every record not re-sent in a batch would get a deletion marker, and every unchanged re-send after a gap would open a redundant version.
 
+Incremental ingest (`incremental: true`) doesn't decide `delivery`: what matters is what each snapshot holds, not how the rows were selected. Rows fetched past a cursor are a delta, so they need `delivery: incremental`. New files picked up incrementally that are each a complete export are full snapshots, so `full` stays right for them.
+
+`track_deletions: false` is not a substitute for `delivery: incremental`. It stops the deletion markers, but under `scd2` with `full` a record that is missing from one snapshot and comes back unchanged still opens a new version. On an incremental source, set `delivery: incremental`.
+
 Each snapshot should hold at most one row per key, under either setting. When one delivery carries several versions of a key under the same `snapshot_column` value, historize keeps one of them, and which one is not defined — give each version its own snapshot value (e.g. a per-row load or event timestamp).
 
 `delivery` is part of the config fingerprint for `scd2`, so changing it requires `--full-refresh`. Under `scd1` it only decides whether `track_deletions` is allowed, which is fingerprinted itself.
