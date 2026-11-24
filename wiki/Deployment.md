@@ -104,6 +104,8 @@ saga plan --command ingest --select "tag:daily" --target prod
 # Use --dry-run to preview without persisting
 ```
 
+If the selection matches nothing, the plan is created with `task_count` 0 (in the output and in `_saga_executions`): skip step 2.
+
 **Step 2 — run each worker:**
 
 ```bash

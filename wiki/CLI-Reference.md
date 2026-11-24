@@ -224,6 +224,8 @@ saga plan [OPTIONS]
 | `--profile TEXT` | `default` | Profile name |
 | `--target TEXT` | — | Target within profile |
 
+When the selection matches no pipeline, the plan is still created with `"task_count": 0`: its execution row is written to `_saga_executions` (no task rows), so the execution id resolves either way, and the command exits 0. Skip the worker fan-out when `task_count` is 0.
+
 ---
 
 ## saga worker
@@ -665,6 +667,8 @@ selector fails the command instead of silently selecting nothing. Values behind
 saga list --select "tags:daily"   # error: Unknown selector 'tags:daily'
 saga list --select "tag:nosuch"   # warning: matched no pipelines
 ```
+
+A selection that matches no pipeline is not a failure: every command that runs pipelines (`ingest`, `historize`, `run`, with or without `--orchestrate`, and `plan`) does nothing and exits 0. `state:new` and `state:failed` match nothing on most runs, and a schedule tag can be empty for a while.
 
 ### Excluding pipelines
 

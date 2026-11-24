@@ -491,15 +491,18 @@ class ExecutionPlanManager:
                 f"NULL, NULL, NULL, TRUE)"
             )
 
-        insert_sql = f"""
-            INSERT INTO {self.plans_table_id}
-            (log_timestamp, execution_id, task_index, pipeline_type,
-             pipeline_identifier, table_name, config_json, status,
-             started_at, completed_at, error_message, is_orchestrated)
-            VALUES
-            {",".join(value_clauses)}
-        """
-        d.execute_sql(insert_sql, self.schema)
+        # An empty selection is still a plan: only its execution row is written,
+        # so the id resolves to task_count 0 rather than to nothing.
+        if value_clauses:
+            insert_sql = f"""
+                INSERT INTO {self.plans_table_id}
+                (log_timestamp, execution_id, task_index, pipeline_type,
+                 pipeline_identifier, table_name, config_json, status,
+                 started_at, completed_at, error_message, is_orchestrated)
+                VALUES
+                {",".join(value_clauses)}
+            """
+            d.execute_sql(insert_sql, self.schema)
 
         # Insert execution-level metadata (meta was already initialized above)
         meta_sql = f"""

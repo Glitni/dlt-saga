@@ -55,6 +55,11 @@ dlt-saga is a config-driven data ingestion and historization framework built on 
   rather than falling through to the name/glob match, where a typo was indistinguishable from a
   valid selector matching nothing (a scheduled run would do nothing and report success). Values
   behind `tag:`/`group:` stay open-ended and still just warn when they match nothing
+- An empty selection is a successful no-op on every running command (`ingest`/`historize`/`run`,
+  local and `--orchestrate`, `plan`): info log, exit 0, since `state:` selectors are empty on most
+  runs. `saga plan` still persists the execution row (`task_count` 0, no plan rows), so an id an
+  orchestrator generated resolves to an empty plan rather than to nothing; orchestrators skip the
+  fan-out on 0. A worker task with no pipelines stays an error (a broken plan, not an empty selection)
 
 **State Selectors** (`utility/cli/pipeline_state.py`)
 - `state:new` = the target table doesn't exist yet; `state:failed` = the pipeline's most recent
