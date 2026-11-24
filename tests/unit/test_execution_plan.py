@@ -399,6 +399,19 @@ class TestExecutionsTaskCount:
 
         assert _executions_task_count(dest.sql_calls) == 2
 
+    def test_empty_plan_records_execution_without_plan_rows(self):
+        dest = _RecordingDestination()
+        manager = ExecutionPlanManager(destination=dest, schema="dlt_orch")
+
+        execution_id = manager.create_execution_plan([], execution_id="empty-run")
+
+        assert execution_id == "empty-run"
+        assert _executions_task_count(dest.sql_calls) == 0
+        assert not any(
+            "INSERT INTO" in sql and "_saga_execution_plans" in sql
+            for sql in dest.sql_calls
+        )
+
 
 @pytest.mark.unit
 class TestForcePropagation:

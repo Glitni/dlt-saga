@@ -405,8 +405,8 @@ def run_orchestrator_mode(
         all_configs.extend(pipeline_configs)
 
     if not all_configs:
-        logger.error("No pipelines to execute")
-        raise typer.Exit(1)
+        logger.info("No pipelines to execute")
+        return
 
     # Fail the whole plan before any worker is triggered if two pipelines
     # resolve to the same target (both layers — the plan spans ingest+historize).

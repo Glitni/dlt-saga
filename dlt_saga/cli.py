@@ -651,10 +651,10 @@ def ingest(
                 select, filter_fn=_is_ingest_enabled, layer="ingest", exclude=exclude
             )
             if not selected_configs:
-                logger.error(
+                logger.info(
                     "No ingest-enabled pipelines matched the selection criteria"
                 )
-                raise typer.Exit(1)
+                return
             run_orchestrator_mode(
                 selected_configs,
                 debug_logging=verbose,
@@ -793,11 +793,10 @@ def historize(
                 exclude=exclude,
             )
             if not selected_configs:
-                logger.error(
-                    "No historize-enabled pipelines matched the selection criteria. "
-                    "Use write_disposition 'append+historize' or 'historize' in pipeline config."
+                logger.info(
+                    "No historize-enabled pipelines matched the selection criteria"
                 )
-                raise typer.Exit(1)
+                return
             run_orchestrator_mode(
                 selected_configs,
                 debug_logging=verbose,
@@ -1045,8 +1044,8 @@ def _run_orchestrate(
             exclude=exclude,
         )
         if not ingest_configs and not historize_configs:
-            logger.error("No pipelines matched the selection criteria")
-            raise typer.Exit(1)
+            logger.info("No pipelines matched the selection criteria")
+            return
         refresh_ingest, _ = _confirm_run_full_refresh(
             full_refresh,
             in_cloud_run,
@@ -1254,8 +1253,8 @@ def _run_phases(
     historize_cfgs = [c for c in all_cfgs if c.historize_enabled]
 
     if not ingest_cfgs and not historize_cfgs:
-        logger.error("No pipelines matched the selection criteria")
-        raise typer.Exit(1)
+        logger.info("No pipelines matched the selection criteria")
+        return
 
     logger.info(
         "Selected %d ingest + %d historize pipeline(s)",
@@ -1523,8 +1522,7 @@ def plan(
         select, profile_target, filter_fn=filter_fn, layer=layer, exclude=exclude
     )
     if not selected_configs:
-        logger.error("No pipelines matched the selection criteria")
-        raise typer.Exit(1)
+        logger.info("No pipelines matched the selection criteria")
 
     all_configs = flatten_configs(selected_configs)
     tasks = _build_task_assignments(all_configs)
