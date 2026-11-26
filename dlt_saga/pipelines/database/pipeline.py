@@ -104,22 +104,26 @@ class DatabasePipeline(BasePipeline):
             # so reuse the client's already-resolved, cached string — this also
             # avoids re-hitting the secret backend for a secret-URI value.
             db_type = self.client.get_connection_string().split("://")[0]
-            if self.source_config.source_table:
-                return f"{db_type} table: {self.source_config.source_table}"
-            return f"{db_type} query"
-
-        # Use configured database type and name
-        db_type = self.source_config.database_type
-        db_name = (
-            self.source_config.source_database
-            if isinstance(self.source_config.source_database, str)
-            else None
-        )
+            db_name = None
+        else:
+            db_type = self.source_config.database_type
+            db_name = (
+                self.source_config.source_database
+                if isinstance(self.source_config.source_database, str)
+                else None
+            )
 
         if self.source_config.source_table:
-            table = self.source_config.source_table
-            if self.source_config.source_schema:
-                table = f"{self.source_config.source_schema}.{table}"
-            return f"{db_type} database {db_name}, table: {table}"
-
-        return f"{db_type} database {db_name}, custom query"
+            qualified = ".".join(
+                part
+                for part in (
+                    db_name,
+                    self.source_config.source_schema,
+                    self.source_config.source_table,
+                )
+                if part
+            )
+            return f"{db_type} table {qualified}"
+        if db_name:
+            return f"{db_type} query on database {db_name}"
+        return f"{db_type} query"

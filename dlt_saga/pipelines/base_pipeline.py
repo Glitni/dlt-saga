@@ -791,28 +791,39 @@ class BasePipeline:
         value resolved during the run (so it matches what dlt wrote at create).
         Best-effort: never fails a successful load.
         """
-        if not self.destination.supports_description_reconcile():
-            return
         if self.table_name not in loaded_tables:
             return
+        self._reconcile_table_docs(
+            self.pipeline.dataset_name,
+            self.target_writer.config,
+            self._resolved_table_description,
+        )
 
-        cfg = self.target_writer.config
-        column_descriptions = cfg.get_column_description_map()
-        if not column_descriptions and self._resolved_table_description is None:
+    def _reconcile_table_docs(
+        self,
+        schema: str,
+        target_config: TargetConfig,
+        table_description: Optional[str],
+    ) -> None:
+        """Reconcile the main table's column docs and the given table description."""
+        if not self.destination.supports_description_reconcile():
             return
 
-        dataset = self.pipeline.dataset_name
+        column_descriptions = target_config.get_column_description_map()
+        if not column_descriptions and table_description is None:
+            return
+
         try:
             self.destination.reconcile_descriptions(
-                dataset,
+                schema,
                 self.table_name,
                 descriptions=column_descriptions,
-                table_description=self._resolved_table_description,
+                table_description=table_description,
             )
         except Exception as exc:
             logger.warning(
                 "Failed to reconcile descriptions for %s.%s: %s",
-                dataset,
+                schema,
                 self.table_name,
                 exc,
             )

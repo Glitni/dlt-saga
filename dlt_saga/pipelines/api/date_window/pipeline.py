@@ -89,8 +89,7 @@ class DateWindowApiPipeline(DateWindowResolver, BaseApiPipeline):
             max_table_nesting=self.window_config.max_table_nesting,
         )
         description = (
-            f"Data from {self.window_config.base_url}{self.window_config.endpoint} "
-            f"[{start} -> {end}]"
+            f"Data from {self.window_config.base_url}{self.window_config.endpoint}"
         )
         return [(resource, description)]
 

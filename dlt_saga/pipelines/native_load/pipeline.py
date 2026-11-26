@@ -23,6 +23,7 @@ from dlt_saga.pipelines.native_load.config import (
 from dlt_saga.pipelines.native_load.state import NativeLoadStateManager, make_load_id
 from dlt_saga.pipelines.native_load.storage import get_storage_client
 from dlt_saga.pipelines.native_load.storage.matching import PatternMatcher
+from dlt_saga.pipelines.target.config import TargetConfig
 from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
 from dlt_saga.utility.naming import normalize_identifier
 
@@ -257,6 +258,7 @@ class NativeLoadPipeline(BasePipeline):
                 if total_rows > 0:
                     self._write_load_info(total_rows, first_run)
                 self._sync_target_table_options()
+                self._reconcile_target_docs()
 
             # Built from the recorded phases rather than a fixed format, so the
             # breakdown always sums to the reported total — an optional phase
@@ -1317,6 +1319,40 @@ class NativeLoadPipeline(BasePipeline):
                 self.table_name,
                 exc,
             )
+
+    def _reconcile_target_docs(self) -> None:
+        """Write the configured descriptions/classification onto the target table.
+
+        The target is created by native DDL rather than dlt, so this reconcile is
+        its only source of docs. Best-effort, like the dlt-based path.
+        """
+        target_config = TargetConfig(
+            columns=self.config_dict.get("columns"),
+            description=self.config_dict.get("description"),
+            classification=self.config_dict.get("classification"),
+            persist_docs=self.config_dict.get("persist_docs"),
+        )
+        self._reconcile_table_docs(
+            self._schema,
+            target_config,
+            target_config.resolve_table_description(self._generated_description()),
+        )
+
+    def _generated_description(self) -> str:
+        """Table description used when none is configured: the files loaded."""
+        source_uri = self.native_config.source_uri
+        # file_pattern is relative to each partition folder the walk lists.
+        if (
+            self._date_mode
+            and self._incremental
+            and self.native_config.partition_prefix_pattern
+        ):
+            source_uri += self.native_config.partition_prefix_pattern
+        source_uri = source_uri.rstrip("/")
+        pattern = self.native_config.file_pattern
+        patterns = [pattern] if isinstance(pattern, str) else list(pattern or [])
+        locations = ", ".join(f"{source_uri}/{p}" for p in patterns) or source_uri
+        return f"Data from {locations} ({self.native_config.file_type})"
 
     def _build_load_info_entry(self, loaded: int) -> dict:
         t = self._phase_timings
