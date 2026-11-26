@@ -469,6 +469,7 @@ class HistorizeRunner:
 
         # Init phase: fetch state (creates log table on first access if needed)
         t = time.time()
+        self._ensure_target_schema()
         state = self.state_manager.get_pipeline_state(self.pipeline_name)
 
         self._check_config_changes(state)
@@ -1680,6 +1681,18 @@ class HistorizeRunner:
                 f"read as NULL"
             )
 
+    def _ensure_target_schema(self) -> None:
+        """Create the schema holding the historize log and target if missing.
+
+        Historize has no dlt load to create it, as ingest does. Destinations
+        with schema-level access management (BigQuery) sync it with its
+        access; a failed sync falls back to a plain create.
+        """
+        sync_with_access = getattr(self.destination, "sync_dataset_and_access", None)
+        if callable(sync_with_access) and sync_with_access(self.target_schema):
+            return
+        self.destination.ensure_schema_exists(self.target_schema)
+
     def _create_target_table(
         self, value_columns: List[str], replace: bool = False
     ) -> None:
@@ -1689,21 +1702,6 @@ class HistorizeRunner:
             # when the new spec changes partitioning or clustering.
             drop_sql = self.sql_builder.build_drop_target_table_sql()
             self.destination.execute_sql(drop_sql, self.schema)
-
-        # Ensure the target schema exists when it differs from the source schema
-        # (happens when placement=schema_suffix or when schema_name is set explicitly).
-        # On destinations that expose schema-level access management (BigQuery
-        # today), route through it so historize_schema_access is reconciled on
-        # the historize schema.  Falls back to the destination-agnostic
-        # ensure_schema_exists when access-aware sync is unavailable.
-        if self.target_schema != self.schema:
-            sync_with_access = getattr(
-                self.destination, "sync_dataset_and_access", None
-            )
-            if callable(sync_with_access):
-                sync_with_access(self.target_schema)
-            else:
-                self.destination.ensure_schema_exists(self.target_schema)
 
         sql = self.sql_builder.build_create_target_table_sql(
             value_columns,

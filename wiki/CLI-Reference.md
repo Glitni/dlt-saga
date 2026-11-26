@@ -187,6 +187,8 @@ saga update-access [OPTIONS]
 | `--profile TEXT` | `default` | Profile name |
 | `--target TEXT` | — | Target within profile |
 
+An `AUTHORIZED_DATASET` or `AUTHORIZED_VIEW` entry whose target doesn't exist yet is skipped with a warning, and the other entries are applied. It is granted on the first sync after the target is created. The same applies when a run creates or syncs a dataset.
+
 ---
 
 ## saga init

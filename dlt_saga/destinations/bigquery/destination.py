@@ -333,15 +333,15 @@ class BigQueryDestination(BigQueryBaseDestination):
                     list(schema_access_tuple) if schema_access_tuple else None
                 )
 
-                # Use static method to sync dataset and access
-                cls._sync_dataset_and_access_static(
+                # A failed sync stays uncached so the pipeline's own sync retries it
+                if cls._sync_dataset_and_access_static(
                     project_id=project,
                     location=location,
                     dataset_name=dataset_name,
                     schema_access=schema_access,
                     client=client,
-                )
-                cls._synced_datasets.add((project, dataset_name))
+                ):
+                    cls._synced_datasets.add((project, dataset_name))
 
     def run_pipeline(self, pipeline: Any, data: Any, guard: Any = None) -> Any:
         """Run pipeline, ensuring datasets exist first to prevent race conditions.
