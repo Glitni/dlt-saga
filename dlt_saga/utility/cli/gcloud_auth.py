@@ -115,9 +115,6 @@ def patch_google_auth_default():
             # Return cached credentials if available for this (SA, scopes) pair
             if cache_key in _cached_credentials:
                 credentials, project_id = _cached_credentials[cache_key]
-                logger.debug(
-                    f"google.auth.default() returning cached impersonated credentials for {service_account}"
-                )
                 return credentials, project_id
 
             # Get source credentials from the profile identity (gcloud /
@@ -208,9 +205,6 @@ class ImpersonationManager:
     def _activate_impersonation(self, service_account: str) -> None:
         """Activate impersonation by setting env var and patching google.auth."""
         os.environ["GOOGLE_IMPERSONATE_SERVICE_ACCOUNT"] = service_account
-        logger.debug(
-            f"Set GOOGLE_IMPERSONATE_SERVICE_ACCOUNT environment variable to {service_account}"
-        )
         patch_google_auth_default()
         self.active_impersonation = service_account
 
