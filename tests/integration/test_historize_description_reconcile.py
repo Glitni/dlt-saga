@@ -150,3 +150,28 @@ class TestHistorizeDescriptionReconcile:
         # columns:false suppresses both source-column docs and SCD2 descriptions.
         assert cols.get("email", "") == ""
         assert cols.get("_dlt_valid_from", "") == ""
+
+    def test_generated_table_description_without_configured_one(self, dest):
+        _seed(dest)
+        _runner(dest, {"write_disposition": "historize", "primary_key": ["id"]}).run()
+
+        assert (
+            dest.get_table_description(SCHEMA, TARGET_TABLE)
+            == f"Version history of {SCHEMA}.{SOURCE_TABLE} (SCD2)"
+        )
+
+    def test_generated_table_description_scd1(self, dest):
+        _seed(dest)
+        _runner(
+            dest,
+            {
+                "write_disposition": "historize",
+                "primary_key": ["id"],
+                "historize": {"strategy": "scd1", "track_deletions": False},
+            },
+        ).run()
+
+        assert (
+            dest.get_table_description(SCHEMA, TARGET_TABLE)
+            == f"Latest version of each key in {SCHEMA}.{SOURCE_TABLE} (SCD1)"
+        )

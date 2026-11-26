@@ -105,6 +105,7 @@ class HistorizeRunner:
             self.source_table_id = destination.get_full_table_id(
                 self._src_schema, src_table, database=configured_db
             )
+            name_parts = [configured_db, self._src_schema, src_table]
         else:
             self._src_database = database
             self._src_schema = schema
@@ -112,6 +113,9 @@ class HistorizeRunner:
             self.source_table_id = destination.get_full_table_id(
                 schema, source_table_name
             )
+            name_parts = [schema, source_table_name]
+        # Unquoted, for the generated table description.
+        self._source_name = ".".join(p for p in name_parts if p)
 
         # Every source read selects from this: the table, or the derived
         # relation adding historize.json_columns, bound once the source's
@@ -306,13 +310,20 @@ class HistorizeRunner:
             ),
         }
 
+    def _generated_table_description(self) -> str:
+        """Table description used when none is configured."""
+        if self.config.is_scd1:
+            return f"Latest version of each key in {self._source_name} (SCD1)"
+        return f"Version history of {self._source_name} (SCD2)"
+
     def _reconcile_descriptions(self) -> None:
         """Reconcile column/table descriptions onto the historized table.
 
         The historized table is built by saga SQL (dlt never sees it), so this
         is its only source of descriptions. Source-column docs come from the
         pipeline config (reusing ``TargetConfig`` so composition matches the
-        ingest table exactly); SCD2 system columns get canned descriptions.
+        ingest table exactly); SCD2 system columns get canned descriptions, and
+        the table a generated one unless a description is configured.
         Columns left out by ``exclude_columns`` simply aren't in the table, so
         the reconcile skips them. Best-effort — never fails the historize run.
         """
@@ -335,7 +346,9 @@ class HistorizeRunner:
                 **self._system_column_descriptions(),
                 **column_descriptions,
             }
-        table_description = cfg.resolve_table_description(None)
+        table_description = cfg.resolve_table_description(
+            self._generated_table_description()
+        )
 
         if not column_descriptions and table_description is None:
             return

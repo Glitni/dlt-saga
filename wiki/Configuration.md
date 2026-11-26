@@ -126,7 +126,7 @@ dlt splits CamelCase on word boundaries: `TargetAmount` → `target_amount`, `So
 
 saga writes human descriptions and lightweight data classification to the warehouse, so documentation and governance labels live in your config (one source of truth in git) and appear on the tables.
 
-- **Table description** — top-level `description:` (overrides the pipeline's auto-generated description).
+- **Table description** — top-level `description:` (overrides the pipeline's auto-generated description). The generated one names the source the table is loaded from, for example `Data from gs://my-bucket/exports/*.csv (csv)` or `Data from postgres table analytics.public.orders`.
 - **Column description** — `columns.<col>.description:`.
 - **Classification** — a list of governance labels (e.g. `[pii]`), at table level (`classification:`) and per column (`columns.<col>.classification:`). This is **distinct from `tags:`**: `tags` is for pipeline selection (`--select`) and is never written to the warehouse; `classification` is warehouse metadata and is never used for selection.
 
@@ -162,7 +162,7 @@ pipelines:
     columns: true
 ```
 
-**How it reaches the warehouse.** On BigQuery and Databricks, dlt writes descriptions at table-creation time; saga additionally **reconciles** them after each load, so later edits to a description/classification propagate to existing tables (dlt only writes them when a column is first created), and DuckDB — which dlt doesn't document at all — is covered too. The reconcile is idempotent: an unchanged config performs a single metadata read and no writes.
+**How it reaches the warehouse.** On BigQuery and Databricks, dlt writes descriptions at table-creation time; saga additionally **reconciles** them after each load, so later edits to a description/classification propagate to existing tables (dlt only writes them when a column is first created), and DuckDB — which dlt doesn't document at all — is covered too. `native_load` tables are created by saga's own DDL, so the reconcile is their only source of docs. The reconcile is idempotent: an unchanged config performs a single metadata read and no writes.
 
 ### Custom Metadata
 

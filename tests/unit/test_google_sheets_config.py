@@ -78,7 +78,7 @@ class TestExtractDataSingleTable:
         p = self._pipeline(sheet_id=1234)
         _resource, description = p.extract_data()[0]
         p.client.get_sheet_data.assert_called_once_with("abc", "Renamed tab", None)
-        assert "Sheet: Renamed tab" in description
+        assert 'sheet "Renamed tab"' in description
 
     def test_unknown_sheet_id_lists_available_tabs(self):
         p = self._pipeline(sheet_id=99)

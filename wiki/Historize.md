@@ -374,7 +374,7 @@ The historized table gets column and table descriptions/classification too — s
 Because the historized table is built by saga's own SQL (dlt never sees it), the reconcile is its
 *only* source of descriptions; they're applied after each historize run.
 
-By default it inherits the pipeline's top-level `description`, `classification`, and `columns`.
+By default it inherits the pipeline's top-level `description`, `classification`, and `columns`. Without a configured description, the table gets a generated one naming its source: `Version history of <schema>.<table> (SCD2)`, or `Latest version of each key in <schema>.<table> (SCD1)`.
 Override any of them for the historized table specifically under `historize:` — `columns` merges
 per column, per key (override only what you set, inherit the rest):
 

@@ -31,7 +31,7 @@ class TestSourceDescription:
         # connection_string is coerced to SecretStr — the old code crashed here.
         pipeline = _pipeline_for(config)
 
-        assert pipeline._get_source_description() == "postgresql table: orders"
+        assert pipeline._get_source_description() == "postgresql table orders"
 
     def test_connection_string_scheme_only_when_no_table(self):
         config = DatabaseConfig(
@@ -68,5 +68,20 @@ class TestSourceDescription:
 
         assert (
             pipeline._get_source_description()
-            == "postgres database analytics, table: public.orders"
+            == "postgres table analytics.public.orders"
+        )
+
+    def test_component_based_query_names_database(self):
+        config = DatabaseConfig(
+            database_type="postgres",
+            host="db.example.com",
+            source_database="analytics",
+            query="SELECT 1",
+            username="u",
+            password="p",
+        )
+        pipeline = _pipeline_for(config)
+
+        assert (
+            pipeline._get_source_description() == "postgres query on database analytics"
         )

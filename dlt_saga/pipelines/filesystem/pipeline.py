@@ -30,25 +30,11 @@ class FilesystemPipeline(BasePipeline):
         super().__init__(config, log_prefix)
 
     def _table_description(self) -> str:
-        """Table description"""
-        description_parts = [
-            f"Data extracted from: {self.source_config.filesystem_type}",
-            f"File type: {self.source_config.file_type}",
-        ]
-
-        # Add file glob information
-        if self.source_config.file_glob:
-            description_parts.append(f"File glob: {self.source_config.file_glob}")
-
-        # Add incremental information if enabled
-        incremental = self.config_dict.get("incremental")
-        if incremental:
-            description_parts.append("Incremental mode: enabled")
-            incremental_column = self.config_dict.get("incremental_column")
-            if incremental_column:
-                description_parts.append(f"Incremental column: {incremental_column}")
-
-        return " | ".join(description_parts)
+        """Generated table description: the files the table is loaded from."""
+        location = self.client.fs_url
+        if self.source_config.file_glob and not self.source_config.file_id:
+            location = f"{location.rstrip('/')}/{self.source_config.file_glob}"
+        return f"Data from {location} ({self.source_config.file_type})"
 
     def _extract_config_defaults(self) -> Dict[str, Any]:
         """Extract columns with default values from config.

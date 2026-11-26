@@ -28,15 +28,23 @@ class GoogleSheetsPipeline(BasePipeline):
         # Initialize pipeline with optional log prefix
         super().__init__(config, log_prefix)
 
-    def _table_description(self, spreadsheet_title: str, sheet_name: str) -> str:
-        """Table description with optional sheet name parameter."""
-        description_parts = [
-            f"Data extracted from Google Sheet: {spreadsheet_title}",
-            f"Sheet: {sheet_name}",
-            f"Range: {self.source_config.range or 'full sheet'}",
-        ]
-
-        return " | ".join(description_parts)
+    def _table_description(
+        self, spreadsheet_title: str, sheet_name: str, sheets: Dict[int, str]
+    ) -> str:
+        """Generated table description: the sheet the table is loaded from, with a link."""
+        description = (
+            f'Data from Google Sheet "{spreadsheet_title}", sheet "{sheet_name}"'
+        )
+        if self.source_config.range:
+            description += f", range {self.source_config.range}"
+        url = (
+            "https://docs.google.com/spreadsheets/d/"
+            f"{self.source_config.spreadsheet_id}/edit"
+        )
+        gid = next((gid for gid, name in sheets.items() if name == sheet_name), None)
+        if gid is not None:
+            url += f"#gid={gid}"
+        return f"{description}: {url}"
 
     def _should_skip_extraction(self) -> bool:
         """Check if extraction should be skipped based on modification time.
@@ -124,6 +132,6 @@ class GoogleSheetsPipeline(BasePipeline):
         )
         resource = dlt.resource(data, name=self.table_name)
         description = self._table_description(
-            sheet_name=sheet_name, spreadsheet_title=spreadsheet_title
+            sheet_name=sheet_name, spreadsheet_title=spreadsheet_title, sheets=sheets
         )
         return [(resource, description)]

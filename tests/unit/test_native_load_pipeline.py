@@ -185,6 +185,60 @@ class TestSyncTargetTableOptions:
 
 
 @pytest.mark.unit
+class TestReconcileTargetDocs:
+    def test_generated_description_names_files(self):
+        p = _make_pipeline(file_pattern="**/*.parquet")
+        p.destination.supports_description_reconcile.return_value = True
+        p._reconcile_target_docs()
+        p.destination.reconcile_descriptions.assert_called_once_with(
+            "my_dataset",
+            "test__my_table",
+            descriptions={},
+            table_description="Data from gs://bucket/prefix/**/*.parquet (parquet)",
+        )
+
+    def test_generated_description_includes_partition_layout(self):
+        p = _make_pipeline(
+            incremental=True,
+            filename_date_regex=r"/(\d{10})/",
+            filename_date_format="%Y%m%d%H",
+            partition_prefix_pattern="{year}{month}{day}{hour}/orders/",
+        )
+        assert p._generated_description() == (
+            "Data from gs://bucket/prefix/{year}{month}{day}{hour}/orders/*.parquet "
+            "(parquet)"
+        )
+
+    def test_configured_docs_win(self):
+        p = _make_pipeline(
+            description="Orders",
+            classification=["pii"],
+            persist_docs={"columns": True},
+            columns={"email": {"data_type": "text", "description": "Contact"}},
+        )
+        p.destination.supports_description_reconcile.return_value = True
+        p._reconcile_target_docs()
+        p.destination.reconcile_descriptions.assert_called_once_with(
+            "my_dataset",
+            "test__my_table",
+            descriptions={"email": "Contact"},
+            table_description="Orders [saga:classification=pii]",
+        )
+
+    def test_skipped_when_destination_cannot_reconcile(self):
+        p = _make_pipeline()
+        p.destination.supports_description_reconcile.return_value = False
+        p._reconcile_target_docs()
+        p.destination.reconcile_descriptions.assert_not_called()
+
+    def test_swallows_errors(self):
+        p = _make_pipeline()
+        p.destination.supports_description_reconcile.return_value = True
+        p.destination.reconcile_descriptions.side_effect = RuntimeError("boom")
+        p._reconcile_target_docs()
+
+
+@pytest.mark.unit
 class TestBuildFormatOptions:
     def test_empty_for_parquet(self):
         p = _make_pipeline(file_type="parquet")

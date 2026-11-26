@@ -92,13 +92,18 @@ class SharePointPipeline(BasePipeline):
         )
 
         resource = dlt.resource(records, name=self.table_name)
+        return [(resource, self._table_description())]
+
+    def _table_description(self) -> str:
+        """Generated table description: the file the table is loaded from."""
         description = (
-            f"SharePoint file: {self.source_config.file_path}"
-            f" ({self.source_config.file_type})"
+            "Data from SharePoint "
+            f"{self.source_config.site_url.rstrip('/')}/"
+            f"{self.source_config.file_path.lstrip('/')}"
         )
         if (
             self.source_config.file_type.lower() == "xlsx"
             and self.source_config.sheet_name
         ):
-            description += f" | Sheet: {self.source_config.sheet_name}"
-        return [(resource, description)]
+            description += f', sheet "{self.source_config.sheet_name}"'
+        return description
