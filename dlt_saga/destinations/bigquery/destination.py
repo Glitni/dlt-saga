@@ -243,7 +243,6 @@ class BigQueryDestination(BigQueryBaseDestination):
             from dlt_saga.utility.gcp.client_pool import bigquery_pool
 
             self._client_pool = bigquery_pool
-            logger.debug("Retrieved BigQuery client pool")
 
         return self._client_pool
 

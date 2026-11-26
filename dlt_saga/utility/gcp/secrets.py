@@ -1,9 +1,6 @@
 """Google Cloud Secret Manager utilities."""
 
-import logging
 from typing import Optional
-
-logger = logging.getLogger(__name__)
 
 
 def get_secret(
@@ -64,10 +61,7 @@ def get_secret(
             response = client.access_secret_version(request={"name": name})
             return response.payload.data.decode("UTF-8")
 
-        secret_value = _fetch_secret()
-
-        logger.debug(f"Successfully fetched secret: {secret_name}")
-        return secret_value
+        return _fetch_secret()
 
     except Exception as e:
         raise ValueError(

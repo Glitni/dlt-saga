@@ -16,7 +16,6 @@ Custom providers can be registered via SecretResolver.register_provider().
 
 from __future__ import annotations
 
-import logging
 import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -24,8 +23,6 @@ from dlt_saga.utility.secrets.redaction import register_secret
 
 if TYPE_CHECKING:
     from dlt_saga.utility.secrets.providers import SecretsProvider
-
-logger = logging.getLogger(__name__)
 
 # Thread-safe cache for resolved secret values
 # Prevents redundant Secret Manager calls when multiple threads need the same secret
@@ -153,7 +150,6 @@ class SecretResolver:
 
         # Fast path: check cache without lock
         if value in _secret_cache:
-            logger.debug("Using cached secret: %s", value)
             return _secret_cache[value]
 
         # Slow path: resolve with lock to prevent thundering herd
