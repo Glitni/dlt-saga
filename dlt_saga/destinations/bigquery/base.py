@@ -68,6 +68,22 @@ def _format_access_key(key: tuple) -> str:
     return f"{role}:{entity_type}:{entity_id}"
 
 
+def _authorized_target(entry: Any) -> Optional[str]:
+    """The ``AUTHORIZED_DATASET:``/``AUTHORIZED_VIEW:`` config form of an
+    authorized entry, or None for a role-based entry."""
+    entity_type = _normalize_entity_type(entry.entity_type)
+    entity_id = entry.entity_id
+    if entity_type == "dataset" and isinstance(entity_id, dict):
+        ref = entity_id.get("dataset", {})
+        return f"AUTHORIZED_DATASET:{ref.get('projectId')}.{ref.get('datasetId')}"
+    if entity_type == "view" and isinstance(entity_id, dict):
+        return (
+            f"AUTHORIZED_VIEW:{entity_id.get('projectId')}."
+            f"{entity_id.get('datasetId')}.{entity_id.get('tableId')}"
+        )
+    return None
+
+
 def _running_principal_email() -> Optional[str]:
     """Identify the principal whose credentials will be used for the
     BigQuery API calls in this run.
@@ -428,7 +444,7 @@ class BigQueryBaseDestination(Destination):
             ]
         return access_entries
 
-    def sync_dataset_and_access(self, dataset_name: str) -> None:
+    def sync_dataset_and_access(self, dataset_name: str) -> bool:
         """Sync BigQuery dataset existence and access controls with configuration.
 
         Creates dataset if needed and synchronizes access controls with config (in prod).
@@ -436,11 +452,15 @@ class BigQueryBaseDestination(Destination):
 
         Args:
             dataset_name: Name of the dataset to ensure exists
+
+        Returns:
+            True when the dataset is synced, False when the sync failed and the
+            dataset may not exist.
         """
         cache_key = (self.config.project_id, dataset_name)
         if cache_key in BigQueryBaseDestination._synced_datasets:
             logger.debug(f"Dataset {dataset_name} already synced, skipping")
-            return
+            return True
 
         synced = self._sync_dataset_and_access_static(
             project_id=self.config.project_id,
@@ -454,6 +474,7 @@ class BigQueryBaseDestination(Destination):
         # drift from a "synced" marker that never actually synced.
         if synced:
             BigQueryBaseDestination._synced_datasets.add(cache_key)
+        return synced
 
     @staticmethod
     def _sync_dataset_and_access_static(
@@ -505,6 +526,12 @@ class BigQueryBaseDestination(Destination):
                 existing_dataset = client.get_dataset(f"{project_id}.{dataset_name}")
                 logger.debug(f"BigQuery dataset {dataset_name} exists")
             except NotFound:
+                if access_entries:
+                    access_entries = (
+                        BigQueryBaseDestination._drop_missing_authorized_entries(
+                            client, access_entries, dataset_name
+                        )
+                    )
                 BigQueryBaseDestination._create_dataset_with_access(
                     client, project_id, location, dataset_name, access_entries
                 )
@@ -570,6 +597,48 @@ class BigQueryBaseDestination(Destination):
         return BigQueryBaseDestination._filter_staging_access_entries(
             entries, dataset_name
         )
+
+    @staticmethod
+    def _drop_missing_authorized_entries(
+        client: Any,
+        access_entries: List[Any],
+        dataset_name: str,
+        present_keys: frozenset = frozenset(),
+    ) -> List[Any]:
+        """Leave out authorized dataset/view entries whose target doesn't exist.
+
+        BigQuery rejects a whole create or access update when one authorized
+        target is missing, which would withhold every other grant until it
+        exists. Entries already on the dataset (``present_keys``) are kept
+        unchecked, so a missing target is never revoked here. A target whose
+        existence can't be read (e.g. no permission on its project) is kept,
+        leaving the decision to BigQuery.
+        """
+        from google.cloud.exceptions import NotFound
+
+        kept = []
+        for entry in access_entries:
+            target = _authorized_target(entry)
+            if target is None or _stable_entry_key(entry) in present_keys:
+                kept.append(entry)
+                continue
+            ref = target.split(":", 1)[1]
+            try:
+                if target.startswith("AUTHORIZED_VIEW:"):
+                    client.get_table(ref)
+                else:
+                    client.get_dataset(ref)
+            except NotFound:
+                logger.warning(
+                    f"Skipping {target} on dataset {dataset_name}: {ref} does "
+                    f"not exist yet. It is granted on the first sync after it "
+                    f"is created."
+                )
+                continue
+            except Exception as e:
+                logger.debug(f"Could not check whether {ref} exists: {e}")
+            kept.append(entry)
+        return kept
 
     @staticmethod
     def _create_dataset_with_access(
@@ -767,6 +836,12 @@ class BigQueryBaseDestination(Destination):
             for e in existing_dataset.access_entries
             if _is_managed_entry(e)
         }
+        access_entries = BigQueryBaseDestination._drop_missing_authorized_entries(
+            client,
+            access_entries,
+            dataset_name,
+            present_keys=frozenset(existing_managed_keys),
+        )
         desired_keys = {_stable_entry_key(e) for e in access_entries}
 
         if existing_managed_keys == desired_keys:
