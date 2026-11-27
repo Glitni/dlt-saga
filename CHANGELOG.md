@@ -1,3 +1,21 @@
+## 0.53.0 — 2026-11-27
+
+### Added
+- Select an array element in a JSON path (#684)
+- Add insert_only historize strategy (#682)
+
+
+### Changed
+- Remove redundant debug log lines (#676)
+
+
+### Fixed
+- Stop warning about partitioning on a table with default clustering (#685)
+- Make generated table descriptions stable and name their source (#680)
+- Create a missing schema for historize-only pipelines and skip missing authorized targets (#678)
+- Treat a selection that matches no pipeline as a successful no-op (#675)
+- Keep AWS SDK debug output out of the CLI log file (#672)
+
 ## 0.52.0 — 2026-11-19
 
 ### Added
