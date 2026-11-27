@@ -529,7 +529,7 @@ Each entry maps an output column name to:
 | Key | Default | Description |
 |---|---|---|
 | `column` | required | Source column holding the JSON: a JSON-typed column, or a string containing JSON |
-| `path` | required | Keys from the root to the value, as a dotted string (`meta.tenant`) or a list (`[meta, tenant]`). Parsed the same way as a filter's `path`; a key that isn't a plain identifier (`content-type`, `zip code`) is quoted for the destination, and a key containing a `.` needs the list form (`[headers, "a.b"]`) |
+| `path` | required | Keys from the root to the value, as a dotted string (`meta.tenant`) or a list (`[meta, tenant]`). Parsed the same way as a filter's `path`; a key that isn't a plain identifier (`content-type`, `zip code`) is quoted for the destination, and a key containing a `.` needs the list form (`[headers, "a.b"]`). In the list form an item may be a selector that picks an element of an array (see [below](#picking-an-element-of-an-array)) |
 | `data_type` | `text` | `text`, `bigint`, `double`, `bool`, `timestamp`, `date` or `json` |
 
 **`text` is the value as text, whatever it is**: a scalar unquoted (`hi`, `5`, `true`), an object or array as its JSON text. The other scalar types convert that text, so an object under `bigint` is a failed conversion (`NULL`, warned about — see below), never a silent one. **`json` keeps the value as a JSON document** — object, array or scalar — in the destination's JSON type: `JSON` on BigQuery and DuckDB, `STRING` on Databricks — where it is the same as `text`: an object or array is its JSON text, but a scalar at the path is unquoted (`x`, not `"x"`), so parse the column only where the path leads to a document. Use it to carry a sub-document as its own column, typically with the envelope in [`exclude_columns`](#leaving-columns-out) so that change detection sees only that part of the payload:
@@ -541,6 +541,52 @@ historize:
     event_type: { column: payload, path: type }
   exclude_columns: [payload]     # a volatile field elsewhere in the payload opens no versions
 ```
+
+### Picking an element of an array
+
+Some JSON columns hold an array of tagged objects, where each element says what it is and carries its own payload (`[{"schema": "...", "data": {...}}]`, `[{"key": "...", "value": "..."}]`). The element you want sits at a different position from row to row, so a key path can't reach it. In the list form of `path`, a **selector** takes the place of a key: a mapping that picks one element of the array at that position, after which the path continues inside that element.
+
+```yaml
+historize:
+  json_columns:
+    article_id:
+      column: contexts
+      path:
+        - data
+        - { path: schema, op: matches, value: "^vendor/article/" }
+        - data
+        - article_id
+    page_title:
+      column: event_params
+      path: [params, { path: key, value: page_title }, value]
+    is_paywalled:
+      column: contexts
+      path: [data, { path: schema, value: vendor/page/1 }, data, paywall]
+      data_type: bool
+```
+
+| Selector key | Default | Description |
+|---|---|---|
+| `path` | required | Keys inside each element to the value compared, as a dotted string or a list of keys |
+| `op` | `eq` | Any [filter operator](Configuration#row-filters) |
+| `value` | | As for a filter: required for `eq`/`ne`/`in`/`not_in`/`matches`, omitted for `is_null`/`is_not_null` |
+
+- **The first match wins.** The element selected is the first one in array order that satisfies the comparison. A row where several elements match is not reported.
+- **Compared as text**, like a path-based filter: `value: 5` matches the JSON number `5` and the string `"5"`.
+- **No match is `NULL`**, and so is a value at that position that isn't an array.
+- **A path may end at a selector.** The value is then the matched element itself: its JSON text under `text`, the document under `json`.
+- **Selectors nest.** A path can hold more than one, each applied inside the element the previous one picked.
+- **Filters take the same paths.** A filter whose path ends at a selector tests whether an element matches, with `is_null`/`is_not_null`:
+
+```yaml
+historize:
+  filters:
+    - column: contexts
+      path: [data, { path: schema, op: matches, value: "^vendor/article/" }]
+      op: is_not_null
+```
+
+Every entry reads the array once per row, so many entries on one large array add up; a selector is otherwise a `json_columns` entry like any other, including that changing it requires a full refresh.
 
 **They are added columns.** The derived columns come after the source's own, and the JSON column itself is still carried into the historized table, so fields you haven't extracted stay available in the history. Adding one later is a schema change on the historized table (see below). If the extracted fields are all you need, list the JSON column in [`exclude_columns`](#leaving-columns-out) — the derived columns still read it from the source.
 

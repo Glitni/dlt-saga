@@ -463,6 +463,10 @@ class DuckDBDestination(Destination):
         canonical = super().normalize_type_name(type_name)
         return self.TYPE_NAME_ALIASES.get(canonical, canonical)
 
+    def _render_regex_match(self, col_sql: str, pattern: str) -> str:
+        # SIMILAR TO must match the whole value; a filter's regex is a search.
+        return f"regexp_matches({col_sql}, '{self.escape_string_literal(pattern)}')"
+
     def json_extract_scalar(self, column_sql: str, path: Tuple[str, ...]) -> str:
         # DuckDB's JSON_VALUE returns the scalar JSON-encoded ('"x"'), and every
         # JSON function raises on malformed input rather than returning NULL.
@@ -493,6 +497,22 @@ class DuckDBDestination(Destination):
             f"CASE WHEN json_valid({column_sql}) "
             f"AND json_type({column_sql}, '{path_literal}') <> 'NULL' "
             f"THEN json_extract({column_sql}, '{path_literal}') END"
+        )
+
+    def json_array_first(
+        self,
+        column_sql: str,
+        path: Tuple[str, ...],
+        element: str,
+        predicate_sql: str,
+        value_sql: str,
+    ) -> str:
+        # A wildcard path returns the elements as a list of JSON values, empty
+        # for anything but an array; indexing past the end of a list is NULL.
+        elements = f"json_extract({column_sql}, '{self._json_path_literal(path)}[*]')"
+        return (
+            f"CASE WHEN json_valid({column_sql}) THEN "
+            f"([{value_sql} for {element} in {elements} if {predicate_sql}])[1] END"
         )
 
     def columns_query(self, database: str, schema: str, table: str) -> str:

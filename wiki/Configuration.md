@@ -217,6 +217,15 @@ filters:
 
 **JSON path access.** When `path` is set, the filter drills into a nested object on the column's value. Columns that hold a JSON-encoded string (common with Sheets / API sources) are parsed automatically — no extra config. Path access returns NULL when any intermediate key is missing, so the row is dropped under `eq`/`ne`/`in`/`not_in`/`matches` and counted as null under `is_null`/`is_not_null`. The path is a dotted string or a list of keys (`[headers, content-type]`); a key that isn't a plain identifier is quoted for the destination, and a key containing a `.` needs the list form.
 
+**Arrays of tagged objects.** In the list form, an item may be a selector: a mapping with a filter's own `path`/`op`/`value` that picks the first element of the array at that position whose value satisfies the comparison. The path then continues inside that element; no match is NULL. A path that ends at a selector takes only `is_null`/`is_not_null` and tests whether such an element exists.
+
+```yaml
+filters:
+  - column: event_params
+    path: [params, { path: key, value: page_type }, value]
+    value: article
+```
+
 **Path comparisons are STRING.** Path-based JSON access returns a string scalar on every destination, so both the extracted leaf and the configured `value:` are coerced to STRING before comparison. Booleans use lowercase `"true"`/`"false"` to match JSON wire form; integers and floats are stringified. This keeps Python and SQL evaluation identical — `value: 5` matches a JSON leaf `5` whether the pipeline runs in-process or pushes down to the warehouse. For typed numeric comparisons on a path leaf, use a top-level typed column (or open a follow-up for an explicit `cast:` knob).
 
 **Prefer source-level pushdown when available.** For sources that filter natively — `database` (use a `WHERE` in the SQL query), `api` (use a query parameter) — apply the filter there. `filters:` is the fallback for sources that don't support native filtering (Sheets, filesystem, SharePoint) and for keeping the predicate visible in YAML for stacks where that matters. With `native_load` the filter pushes down to the warehouse engine, so `filters:` is the right place for that adapter regardless of source.

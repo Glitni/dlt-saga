@@ -733,6 +733,25 @@ class BigQueryDestination(BigQueryBaseDestination):
             f"SAFE.PARSE_JSON(NULLIF({document}, 'null'), wide_number_mode => 'round')"
         )
 
+    def json_array_first(
+        self,
+        column_sql: str,
+        path: Tuple[str, ...],
+        element: str,
+        predicate_sql: str,
+        value_sql: str,
+    ) -> str:
+        # JSON_QUERY_ARRAY keeps the input's type per element (JSON from a JSON
+        # column, JSON text from a string) and is NULL for anything but an
+        # array, which UNNEST reads as no rows.
+        array = f"JSON_QUERY_ARRAY({column_sql}, '{self._json_path_literal(path)}')"
+        position = f"{element}_pos"
+        return (
+            f"(SELECT {value_sql} FROM UNNEST({array}) AS {element} "
+            f"WITH OFFSET AS {position} WHERE {predicate_sql} "
+            f"ORDER BY {position} LIMIT 1)"
+        )
+
     def _is_json_typed(self, column_type: str) -> bool:
         return self.normalize_type_name(column_type) == "JSON"
 

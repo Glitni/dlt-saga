@@ -9,7 +9,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -838,43 +838,136 @@ class Destination(ABC):
         return " AND ".join(parts)
 
     def _render_filter_one(self, spec: Any, resolve: Any) -> str:
-        col_sql = self._render_filter_column(spec, resolve)
-        op = spec.op
-        # Path-based JSON access returns STRING on every supported destination.
-        # Render values as quoted strings so the comparison is STRING-STRING —
-        # avoids type-mismatch errors and keeps semantics identical to the
-        # Python-side coercion in filters._eval.
-        render_val = (
-            self._render_path_literal if spec.path else self._render_sql_literal
+        return self._render_comparison(
+            self._render_filter_column(spec, resolve),
+            spec.op,
+            spec.value,
+            as_text=bool(spec.path),
         )
+
+    def _render_comparison(
+        self, value_sql: str, op: str, value: Any, as_text: bool
+    ) -> str:
+        """Render ``value_sql <op> value`` for a filter or an element selector.
+
+        ``as_text`` is set for a value read from inside JSON, which is a
+        string on every supported destination: the compared values are
+        rendered as quoted strings, matching the coercion in ``filters._eval``.
+        """
+        render_val = self._render_path_literal if as_text else self._render_sql_literal
         if op == "is_null":
-            return f"{col_sql} IS NULL"
+            return f"{value_sql} IS NULL"
         if op == "is_not_null":
-            return f"{col_sql} IS NOT NULL"
+            return f"{value_sql} IS NOT NULL"
         if op == "eq":
-            return f"{col_sql} = {render_val(spec.value)}"
+            return f"{value_sql} = {render_val(value)}"
         if op == "ne":
-            return f"{col_sql} <> {render_val(spec.value)}"
+            return f"{value_sql} <> {render_val(value)}"
         if op == "in":
-            literals = ", ".join(render_val(v) for v in spec.value)
-            return f"{col_sql} IN ({literals})"
+            literals = ", ".join(render_val(v) for v in value)
+            return f"{value_sql} IN ({literals})"
         if op == "not_in":
-            literals = ", ".join(render_val(v) for v in spec.value)
-            return f"{col_sql} NOT IN ({literals})"
+            literals = ", ".join(render_val(v) for v in value)
+            return f"{value_sql} NOT IN ({literals})"
         if op == "matches":
-            return self._render_regex_match(col_sql, str(spec.value))
+            return self._render_regex_match(value_sql, str(value))
         raise ValueError(f"Unsupported filter op {op!r}")
 
     def _render_filter_column(self, spec: Any, resolve: Any) -> str:
         """Render the column reference part of a filter.
 
         Plain column → ``resolve(col)``; with a path, the scalar at that path
-        via :meth:`json_extract_scalar`.
+        via :meth:`json_extract_scalar`. A path that ends at a selector is the
+        selected element itself, which such a filter only tests for NULL.
         """
         col = resolve(spec.column)
         if not spec.path:
             return col
-        return self.json_extract_scalar(col, spec.path)
+        return self.json_path_expression(
+            col,
+            spec.path,
+            lambda value_sql, keys: (
+                self.json_extract_scalar(value_sql, keys) if keys else value_sql
+            ),
+        )
+
+    def json_path_expression(
+        self,
+        column_sql: str,
+        path: Tuple[Any, ...],
+        extract: Callable[[str, Tuple[str, ...]], str],
+        _depth: int = 0,
+    ) -> str:
+        """Return SQL for the value at ``path``, which may hold element selectors.
+
+        A path of keys is ``extract(column_sql, path)``. A selector
+        (:class:`~dlt_saga.utility.filters.ElementSelector`) splits it: the
+        keys before it lead to an array, :meth:`json_array_first` picks its
+        first matching element, and the rest of the path is read from that
+        element the same way, so ``extract`` runs once, on the innermost
+        selected element.
+
+        Args:
+            column_sql: SQL expression holding the JSON.
+            path: Keys and selectors from the root.
+            extract: One of the extract primitives, as
+                ``(value_sql, keys) -> sql``; ``keys`` is empty when the path
+                ends at a selector.
+        """
+        from dlt_saga.utility.filters import ElementSelector
+
+        for position, segment in enumerate(path):
+            if not isinstance(segment, ElementSelector):
+                continue
+            element = f"_saga_el{_depth}"
+            predicate = self._render_comparison(
+                self.json_extract_scalar(element, segment.path),
+                segment.op,
+                segment.value,
+                as_text=True,
+            )
+            value = self.json_path_expression(
+                element, path[position + 1 :], extract, _depth + 1
+            )
+            return self.json_array_first(
+                column_sql, path[:position], element, predicate, value
+            )
+        return extract(column_sql, path)
+
+    def json_array_first(
+        self,
+        column_sql: str,
+        path: Tuple[str, ...],
+        element: str,
+        predicate_sql: str,
+        value_sql: str,
+    ) -> str:
+        """Return SQL for ``value_sql`` on the first matching element of a JSON array.
+
+        The array is the value at ``path`` inside ``column_sql``. Its elements
+        are visited in array order under the name ``element``, which
+        ``predicate_sql`` and ``value_sql`` reference and which reads like the
+        column itself: the extract primitives take it in place of a column,
+        with the column's catalog type. The result is ``value_sql`` for the
+        first element where ``predicate_sql`` is true, and NULL when none is,
+        when the value at ``path`` is not an array, or when the column isn't
+        valid JSON.
+
+        No portable form exists, so each destination that supports selectors
+        implements it.
+
+        Args:
+            column_sql: SQL expression holding the JSON.
+            path: Object keys from the root to the array; empty when the
+                value itself is the array.
+            element: Identifier to bind each element to.
+            predicate_sql: Condition on ``element``.
+            value_sql: Expression on ``element`` to return.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support selecting an array element "
+            f"in a JSON path"
+        )
 
     def json_extract_scalar(self, column_sql: str, path: Tuple[str, ...]) -> str:
         """Return SQL extracting the scalar at ``path`` inside a JSON value, as text.

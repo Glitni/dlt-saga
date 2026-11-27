@@ -20,6 +20,10 @@ YAML schema::
         path: aid.legal_entity     # optional: dotted JSON path inside column
         op: eq                     # default: eq
         value: bm                  # required for eq/ne/in/not_in/matches
+
+A path in list form may hold a selector in place of a key: a mapping
+(``{path, op, value}``) that picks the first element of the array at that
+position whose value at ``path`` satisfies the comparison.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,61 @@ logger = logging.getLogger(__name__)
 ALLOWED_OPS = {"eq", "ne", "in", "not_in", "is_null", "is_not_null", "matches"}
 OPS_REQUIRING_VALUE = {"eq", "ne", "in", "not_in", "matches"}
 OPS_REQUIRING_LIST = {"in", "not_in"}
+
+_VALUE_SCHEMA: Dict[str, Any] = {
+    "description": "Comparison value. Required for eq/ne/in/not_in/matches; omit for is_null/is_not_null. List required for in/not_in.",
+    "oneOf": [
+        {"type": "string"},
+        {"type": "number"},
+        {"type": "boolean"},
+        {"type": "null"},
+        {
+            "type": "array",
+            "items": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "number"},
+                    {"type": "boolean"},
+                ]
+            },
+        },
+    ],
+}
+
+_OP_SCHEMA: Dict[str, Any] = {
+    "type": "string",
+    "enum": list(sorted(ALLOWED_OPS)),
+    "default": "eq",
+    "description": "Comparison operator.",
+}
+
+# One item of a path in list form that is not a key: picks an array element.
+JSON_PATH_SELECTOR_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "description": "Selects the first element of the array at this position whose value at 'path' satisfies the comparison.",
+    "properties": {
+        "path": {
+            "description": "Keys from the element to the value compared, as a dotted string or a list of keys.",
+            "oneOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}},
+            ],
+        },
+        "op": _OP_SCHEMA,
+        "value": _VALUE_SCHEMA,
+    },
+    "required": ["path"],
+    "additionalProperties": False,
+}
+
+# The ``path`` key of a filter or a ``historize.json_columns`` entry.
+JSON_PATH_SCHEMA: List[Dict[str, Any]] = [
+    {"type": "string"},
+    {
+        "type": "array",
+        "items": {"oneOf": [{"type": "string"}, JSON_PATH_SELECTOR_SCHEMA]},
+    },
+]
 
 # Shared JSON-schema fragment describing one ``filters:`` entry.  Both the
 # top-level ``filters:`` (ingest stage) and ``historize.filters:`` reference
@@ -48,37 +107,11 @@ FILTER_ENTRY_SCHEMA: Dict[str, Any] = {
             "description": "Source column name (case-sensitive for most paths).",
         },
         "path": {
-            "description": "Optional JSON path inside the column's value, as a dotted string ('aid.legal_entity') or a list of keys. Keys that aren't plain identifiers ('content-type') are quoted for the destination; a key containing '.' needs the list form.",
-            "oneOf": [
-                {"type": "string"},
-                {"type": "array", "items": {"type": "string"}},
-            ],
+            "description": "Optional JSON path inside the column's value, as a dotted string ('aid.legal_entity') or a list of keys. Keys that aren't plain identifiers ('content-type') are quoted for the destination; a key containing '.' needs the list form. In the list form an item may be a selector ({path, op, value}) picking the first matching element of the array at that position; a path that ends at a selector takes only is_null/is_not_null.",
+            "oneOf": JSON_PATH_SCHEMA,
         },
-        "op": {
-            "type": "string",
-            "enum": list(sorted(ALLOWED_OPS)),
-            "default": "eq",
-            "description": "Comparison operator.",
-        },
-        "value": {
-            "description": "Comparison value. Required for eq/ne/in/not_in/matches; omit for is_null/is_not_null. List required for in/not_in.",
-            "oneOf": [
-                {"type": "string"},
-                {"type": "number"},
-                {"type": "boolean"},
-                {"type": "null"},
-                {
-                    "type": "array",
-                    "items": {
-                        "oneOf": [
-                            {"type": "string"},
-                            {"type": "number"},
-                            {"type": "boolean"},
-                        ]
-                    },
-                },
-            ],
-        },
+        "op": _OP_SCHEMA,
+        "value": _VALUE_SCHEMA,
     },
     "required": ["column"],
     "additionalProperties": False,
@@ -116,6 +149,53 @@ def and_filter(filter_sql: Optional[str], where_body: str) -> str:
 
 
 @dataclass(frozen=True)
+class ElementSelector:
+    """A path segment that picks one element of the array at its position.
+
+    The first element, in array order, whose value at ``path`` satisfies
+    ``op``/``value`` under the rules of a path-based filter (compared as text).
+    """
+
+    path: Tuple[str, ...]
+    op: str = "eq"
+    value: Any = None
+
+    def definition(self) -> Dict[str, Any]:
+        """The selector as its config mapping, with defaults spelled out."""
+        value = list(self.value) if isinstance(self.value, tuple) else self.value
+        return {"path": list(self.path), "op": self.op, "value": value}
+
+    def __str__(self) -> str:
+        condition = f"{'.'.join(self.path)} {self.op}"
+        if self.op in OPS_REQUIRING_VALUE:
+            condition += f" {self.definition()['value']!r}"
+        return f"[{condition}]"
+
+
+JsonPathSegment = Union[str, ElementSelector]
+JsonPath = Tuple[JsonPathSegment, ...]
+
+
+def format_json_path(path: JsonPath) -> str:
+    """A path as text for messages: keys dotted, a selector in brackets."""
+    text = ""
+    for segment in path:
+        if isinstance(segment, ElementSelector):
+            text += str(segment)
+        else:
+            text += f".{segment}" if text else segment
+    return text
+
+
+def json_path_definition(path: JsonPath) -> List[Any]:
+    """A path as JSON-serialisable config: keys as written, selectors as mappings."""
+    return [
+        segment.definition() if isinstance(segment, ElementSelector) else segment
+        for segment in path
+    ]
+
+
+@dataclass(frozen=True)
 class FilterSpec:
     """One declarative row filter.
 
@@ -125,13 +205,13 @@ class FilterSpec:
     """
 
     column: str
-    path: Optional[Tuple[str, ...]] = None
+    path: Optional[JsonPath] = None
     op: str = "eq"
     value: Any = None
 
     @property
     def path_str(self) -> Optional[str]:
-        return ".".join(self.path) if self.path else None
+        return format_json_path(self.path) if self.path else None
 
 
 def parse_filters(raw: Any, context: Optional[str] = None) -> List[FilterSpec]:
@@ -175,38 +255,47 @@ def _parse_one(entry: Any, i: int) -> FilterSpec:
         raise ValueError(
             f"filters[{i}]: 'column' is required and must be a non-empty string"
         )
-    op = entry.get("op", "eq")
-    if op not in ALLOWED_OPS:
-        raise ValueError(
-            f"filters[{i}]: unknown op {op!r}. Valid: {sorted(ALLOWED_OPS)}"
-        )
+    label = f"filters[{i}]"
+    op = _parse_op(entry, label)
     path = _parse_path(entry.get("path"), i)
-    value = _parse_value(entry, op, i)
+    value = _parse_value(entry, op, label)
+    if path and isinstance(path[-1], ElementSelector) and op in OPS_REQUIRING_VALUE:
+        raise ValueError(
+            f"{label}: 'path' ends at a selector, which yields the matched "
+            f"element rather than a value to compare. Use is_null/is_not_null "
+            f"to test whether an element matches, or continue the path to a "
+            f"key inside the element"
+        )
     return FilterSpec(column=column, path=path, op=op, value=value)
 
 
-def _parse_value(entry: dict, op: str, i: int) -> Any:
+def _parse_op(entry: dict, label: str) -> str:
+    op = entry.get("op", "eq")
+    if op not in ALLOWED_OPS:
+        raise ValueError(f"{label}: unknown op {op!r}. Valid: {sorted(ALLOWED_OPS)}")
+    return op
+
+
+def _parse_value(entry: dict, op: str, label: str) -> Any:
     if op not in OPS_REQUIRING_VALUE:
         if "value" in entry:
-            raise ValueError(f"filters[{i}]: op {op!r} does not take 'value'")
+            raise ValueError(f"{label}: op {op!r} does not take 'value'")
         return None
     if "value" not in entry:
-        raise ValueError(f"filters[{i}]: op {op!r} requires 'value'")
+        raise ValueError(f"{label}: op {op!r} requires 'value'")
     value = entry["value"]
     if op in OPS_REQUIRING_LIST and (not isinstance(value, list) or not value):
-        raise ValueError(
-            f"filters[{i}]: op {op!r} requires 'value' to be a non-empty list"
-        )
+        raise ValueError(f"{label}: op {op!r} requires 'value' to be a non-empty list")
     return value
 
 
-def _parse_path(raw: Any, index: int) -> Optional[Tuple[str, ...]]:
+def _parse_path(raw: Any, index: int) -> Optional[JsonPath]:
     if raw is None:
         return None
     return parse_json_path(raw, f"filters[{index}]")
 
 
-def parse_json_path(raw: Any, label: str) -> Tuple[str, ...]:
+def parse_json_path(raw: Any, label: str) -> JsonPath:
     """Parse a JSON path given as a dotted string or a list of segments.
 
     The one parser for every config key that addresses a value inside a JSON
@@ -214,24 +303,74 @@ def parse_json_path(raw: Any, label: str) -> Tuple[str, ...]:
     same thing everywhere.
 
     Args:
-        raw: ``"a.b"`` or ``["a", "b"]``.
+        raw: ``"a.b"``, or a list whose items are keys or selector mappings
+            (``{path, op, value}``, see :class:`ElementSelector`).
         label: Config location prefixed to error messages.
 
     Raises:
-        ValueError: The path is empty or not a string/list of strings.
+        ValueError: The path is empty or holds anything but keys and selectors.
     """
+    if isinstance(raw, str):
+        return _parse_key_path(raw, label)
+    if isinstance(raw, list) and raw:
+        return tuple(
+            _parse_segment(segment, f"{label}: path[{position}]")
+            for position, segment in enumerate(raw)
+        )
+    raise ValueError(
+        f"{label}: 'path' must be a dotted string or a non-empty list of keys "
+        f"and selectors"
+    )
+
+
+def _parse_key_path(raw: Any, label: str) -> Tuple[str, ...]:
+    """Parse a path of plain keys: a dotted string or a list of strings."""
     if isinstance(raw, str):
         segments = [seg for seg in raw.split(".") if seg]
         if not segments:
             raise ValueError(f"{label}: 'path' is empty")
         return tuple(segments)
-    if isinstance(raw, list):
-        if not raw or not all(isinstance(s, str) and s for s in raw):
-            raise ValueError(
-                f"{label}: 'path' must be a non-empty list of non-empty strings"
-            )
+    if isinstance(raw, list) and raw and all(isinstance(s, str) and s for s in raw):
         return tuple(raw)
-    raise ValueError(f"{label}: 'path' must be a dotted string or list of strings")
+    raise ValueError(
+        f"{label}: 'path' must be a dotted string or a non-empty list of "
+        f"non-empty strings"
+    )
+
+
+def _parse_segment(raw: Any, label: str) -> JsonPathSegment:
+    if isinstance(raw, str) and raw:
+        return raw
+    if isinstance(raw, dict):
+        return _parse_selector(raw, label)
+    raise ValueError(
+        f"{label}: must be a key (non-empty string) or a selector mapping "
+        f"({{path, op, value}})"
+    )
+
+
+_SELECTOR_KEYS = {"path", "op", "value"}
+
+
+def _parse_selector(entry: dict, label: str) -> ElementSelector:
+    unknown = sorted(set(entry) - _SELECTOR_KEYS)
+    if unknown:
+        raise ValueError(
+            f"{label}: unknown key(s) {unknown} in selector. "
+            f"Valid: {sorted(_SELECTOR_KEYS)}"
+        )
+    if entry.get("path") is None:
+        raise ValueError(
+            f"{label}: a selector needs 'path', the key(s) inside each array "
+            f"element holding the value to compare"
+        )
+    op = _parse_op(entry, label)
+    value = _parse_value(entry, op, label)
+    return ElementSelector(
+        path=_parse_key_path(entry["path"], label),
+        op=op,
+        value=tuple(value) if isinstance(value, list) else value,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +384,8 @@ def _extract_value(row: Any, spec: FilterSpec) -> Any:
     Returns ``None`` if the column is absent, the value is None, or the
     JSON path can't be walked.  Path access auto-parses JSON-encoded
     strings so users can filter into a stringified JSON column without
-    extra config.
+    extra config.  A selector segment takes the first matching element of
+    the list at its position.
     """
     if not isinstance(row, dict):
         return None
@@ -260,13 +400,30 @@ def _extract_value(row: Any, spec: FilterSpec) -> Any:
         except (json.JSONDecodeError, TypeError):
             return None
     for seg in spec.path:
-        if isinstance(cur, dict):
+        if isinstance(seg, ElementSelector):
+            cur = _first_matching_element(cur, seg)
+        elif isinstance(cur, dict):
             cur = cur.get(seg)
         else:
             return None
         if cur is None:
             return None
     return cur
+
+
+def _first_matching_element(value: Any, selector: ElementSelector) -> Any:
+    if not isinstance(value, list):
+        return None
+    for element in value:
+        candidate = element
+        for key in selector.path:
+            candidate = candidate.get(key) if isinstance(candidate, dict) else None
+        # A comparison with a missing value is never true in SQL.
+        if candidate is None and selector.op != "is_null":
+            continue
+        if _eval(candidate, selector):
+            return element
+    return None
 
 
 def _coerce_for_path(value: Any) -> Optional[str]:
@@ -287,7 +444,7 @@ def _coerce_for_path(value: Any) -> Optional[str]:
     return str(value)
 
 
-def _coerce_compare_value(spec: FilterSpec) -> Any:
+def _coerce_compare_value(spec: Union[FilterSpec, ElementSelector]) -> Any:
     """Coerce ``spec.value`` when path is set; pass through otherwise."""
     if spec.path is None:
         return spec.value
@@ -298,7 +455,7 @@ def _coerce_compare_value(spec: FilterSpec) -> Any:
     return spec.value  # 'matches' regex pattern, 'is_null'/'is_not_null' no value
 
 
-def _eval(value: Any, spec: FilterSpec) -> bool:
+def _eval(value: Any, spec: Union[FilterSpec, ElementSelector]) -> bool:
     op = spec.op
     if spec.path is not None:
         value = _coerce_for_path(value)

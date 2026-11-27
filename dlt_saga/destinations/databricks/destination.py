@@ -1166,6 +1166,8 @@ class DatabricksDestination(Destination):
         # object or array at the path as JSON text rather than NULL. A key that
         # isn't a plain identifier goes in backticks, which keep the bare
         # form's case-insensitive match (brackets would make it case-sensitive).
+        if not path:
+            return column_sql
         return column_sql + ":" + ".".join(map(self._json_path_segment, path))
 
     @staticmethod
@@ -1190,6 +1192,24 @@ class DatabricksDestination(Destination):
         # unquotes a scalar at the path, so only an object or array comes out
         # as parseable JSON — the same reading as text, as documented.
         return f"TRY_CAST({self.json_extract_scalar(column_sql, path)} AS STRING)"
+
+    def json_array_first(
+        self,
+        column_sql: str,
+        path: Tuple[str, ...],
+        element: str,
+        predicate_sql: str,
+        value_sql: str,
+    ) -> str:
+        # Parsed as array<string>, each element is its own JSON text, which
+        # colon notation reads like a JSON string column; anything but an array
+        # parses to NULL. get() is NULL past the end where indexing would raise.
+        array_text = self.json_extract_scalar(column_sql, path)
+        elements = f"from_json(TRY_CAST({array_text} AS STRING), 'array<string>')"
+        return (
+            f"get(transform(filter({elements}, {element} -> {predicate_sql}), "
+            f"{element} -> {value_sql}), 0)"
+        )
 
     # dlt logical types → Databricks SQL types.
     DLT_TO_DATABRICKS_TYPE = {

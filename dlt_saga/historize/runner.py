@@ -34,7 +34,11 @@ from dlt_saga.historize.state import (
 )
 from dlt_saga.pipeline_config.base_config import resolve_write_disposition
 from dlt_saga.utility.cli.logging import YELLOW, PrefixedLoggerAdapter, colorize
-from dlt_saga.utility.filters import and_filter, filter_where_clause
+from dlt_saga.utility.filters import (
+    and_filter,
+    filter_where_clause,
+    format_json_path,
+)
 from dlt_saga.utility.sql import looks_like_missing_table
 
 if TYPE_CHECKING:
@@ -1003,7 +1007,7 @@ class HistorizeRunner:
         specs = {spec.name: spec for spec in self.config.json_column_specs}
         for name in failed:
             spec = specs[name]
-            location = f"{spec.column}.{'.'.join(spec.path)}"
+            location = f"{spec.column}.{format_json_path(spec.path)}"
             self.logger.warning(
                 f"{self.pipeline_name}: json_columns '{name}' has values at "
                 f"'{location}' that don't convert to {spec.data_type}; they are "
