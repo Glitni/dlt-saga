@@ -510,6 +510,27 @@ class Destination(ABC):
             f"{self.__class__.__name__} does not support direct SQL execution"
         )
 
+    def execute_dml(self, sql: str, schema_name: Optional[str] = None) -> int:
+        """Execute one INSERT, UPDATE, DELETE or MERGE and return the rows it affected.
+
+        For a caller that needs the count of what a statement wrote: taking it
+        from the statement's own result costs nothing, where counting the rows
+        afterwards (or staging them first to count them) reads them again.
+
+        Args:
+            sql: A single DML statement
+            schema_name: Optional schema context for the statement
+
+        Returns:
+            Number of rows inserted, updated or deleted
+
+        Raises:
+            NotImplementedError: If destination doesn't support direct SQL execution
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support direct SQL execution"
+        )
+
     def supports_transactions(self) -> bool:
         """Return True if destination supports multi-statement transactions.
 

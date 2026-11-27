@@ -247,6 +247,11 @@ class DuckDBDestination(Destination):
         with self._lock:
             return self._execute_sql(sql, schema_name)
 
+    def execute_dml(self, sql: str, schema_name: Optional[str] = None) -> int:
+        # DuckDB answers a DML statement with one row holding the affected count.
+        rows = self.execute_sql(sql, schema_name)
+        return int(rows[0][0]) if rows else 0
+
     def _execute_sql(self, sql: str, schema_name: Optional[str]) -> Any:
         from dlt_saga.utility.sql import split_sql_statements
 

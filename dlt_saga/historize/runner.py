@@ -278,6 +278,13 @@ class HistorizeRunner:
     def _system_column_descriptions(self) -> Dict[str, str]:
         """Canned descriptions for the historize system columns (auto-documentation)."""
         c = self.config
+        if c.is_insert_only:
+            return {
+                c.valid_from_column: (
+                    "The snapshot the row was first delivered in; the row is "
+                    "never updated afterwards."
+                ),
+            }
         if c.is_scd1:
             descriptions = {
                 c.valid_from_column: (
@@ -312,6 +319,8 @@ class HistorizeRunner:
 
     def _generated_table_description(self) -> str:
         """Table description used when none is configured."""
+        if self.config.is_insert_only:
+            return f"Each key in {self._source_name} as first delivered (insert-only)"
         if self.config.is_scd1:
             return f"Latest version of each key in {self._source_name} (SCD1)"
         return f"Version history of {self._source_name} (SCD2)"
@@ -487,6 +496,9 @@ class HistorizeRunner:
 
         self._check_config_changes(state)
 
+        if self.config.is_insert_only:
+            return self._execute_insert_only(state, started_at, t)
+
         is_partial = self.partial_refresh or self.historize_from is not None
 
         # Early exit for incremental with no new snapshots.
@@ -622,13 +634,14 @@ class HistorizeRunner:
             f"'saga historize -s \"{self.pipeline_name}\" --full-refresh'."
         )
 
-    def _probe_null_primary_keys(self) -> List[str]:
+    def _probe_null_primary_keys(self, scope_sql: Optional[str] = None) -> List[str]:
         """Return the primary-key columns holding NULL anywhere in the source.
 
         The full/partial-refresh fallback: those paths read the whole filtered
         source and have no earlier scan of it to fold the check into.
+        ``scope_sql`` narrows it to the rows a run reads.
         """
-        probe_sql = self.sql_builder.build_null_pk_probe_sql()
+        probe_sql = self.sql_builder.build_null_pk_probe_sql(scope_sql)
         if probe_sql is None:
             return []
 
@@ -794,6 +807,8 @@ class HistorizeRunner:
             arrival_column=cfg.arrival_column,
             filter_sql=self._filter_sql,
             window_days=cfg.late_arrival_window_days,
+            # Detection runs on every insert_only run, so its read is bounded.
+            bound_by_window=cfg.is_insert_only,
         )
 
     def _source_columns(self) -> List[str]:
@@ -996,10 +1011,13 @@ class HistorizeRunner:
                 f"data_type (text keeps the raw value)."
             )
 
-    def _probe_failed_casts(self) -> List[str]:
-        """Names of the ``json_columns`` with unconvertible values in the source."""
+    def _probe_failed_casts(self, scope_sql: Optional[str] = None) -> List[str]:
+        """Names of the ``json_columns`` with unconvertible values in the source.
+
+        ``scope_sql`` narrows the probe to the rows a run reads.
+        """
         probe_sql = self.sql_builder.build_failed_cast_probe_sql(
-            snapshot_from=self.historize_from
+            snapshot_from=self.historize_from, scope_sql=scope_sql
         )
         if probe_sql is None:
             return []
@@ -1188,7 +1206,7 @@ class HistorizeRunner:
             return list(self.config.cluster_columns) or None
         if not self.destination.supports_clustering() or self._is_databricks_iceberg():
             return None
-        if self.config.is_scd1:
+        if not self.config.has_validity_end:
             # One row per key: valid_from is what "changed since T" reads filter on.
             return [self.config.valid_from_column]
         return [self.config.valid_to_column, self.config.valid_from_column]
@@ -2015,6 +2033,267 @@ class HistorizeRunner:
         deleted = (rows[0].deleted_rows or 0) if self.config.track_deletions else 0
         return changed, deleted
 
+    def _execute_insert_only(
+        self,
+        state: "HistorizeStateManager.PipelineState",
+        started_at: datetime,
+        init_start: float,
+    ) -> Dict[str, Any]:
+        """Insert each key not yet stored (``strategy: insert_only``).
+
+        Every kind of run is the same statement over different source rows
+        (see ``build_insert_only_sql``): a full reprocess recreates the
+        target and reads every snapshot, a partial refresh deletes the stored
+        rows from its boundary and reads the snapshots from there, an
+        incremental run reads the snapshots above the watermark. Snapshots
+        are processed in batches of ``batch_max_rows``, each recorded as it
+        completes, so the watermark advances batch by batch.
+
+        An incremental run first inserts the rows that arrived late, at or
+        below the watermark. Those are read by the predicate that detected
+        them rather than by replaying their snapshots: every other row down
+        there has been through the insert already. They go first because
+        the predicate is anchored on the last recorded run, which the first
+        recorded batch replaces.
+        """
+        timings: Dict[str, float] = {}
+        is_partial = self.partial_refresh or self.historize_from is not None
+        needs_full = self.full_refresh or not state.has_successful_run
+        mode = (
+            "full_reprocess"
+            if needs_full
+            else "partial_refresh"
+            if is_partial
+            else "incremental"
+        )
+
+        boundary: Optional[str] = None
+        late_scope: Optional[str] = None
+        late_snapshots = 0
+        if needs_full:
+            discovery = self._discover_with_row_counts(
+                self.state_manager.PipelineState()
+            )
+        elif is_partial:
+            boundary = self._resolve_partial_boundary()
+            discovery = self._discover_with_row_counts(state, from_snapshot=boundary)
+        else:
+            discovery = self._discover_with_row_counts(state)
+            late_scope, late_snapshots = self._late_rows_scope(state)
+
+        if not needs_full and not discovery.snapshots and late_scope is None:
+            timings["init"] = time.time() - init_start
+            self.logger.info(f"No new snapshots to historize for {self.pipeline_name}")
+            return {**self._empty_stats(mode), "timings": timings}
+
+        self._guard_null_primary_keys(discovery)
+        if late_scope is not None:
+            # Discovery checked the snapshots above the watermark; the late
+            # rows sit below it, so they get the same two checks here.
+            offending = self._probe_null_primary_keys(late_scope)
+            if offending:
+                self._guard_null_primary_keys(
+                    SnapshotDiscovery(snapshots=[], null_pk_columns=offending)
+                )
+            late_failed = self._probe_failed_casts(late_scope)
+            discovery.failed_casts = sorted(
+                set(discovery.failed_casts) | set(late_failed)
+            )
+        self._warn_failed_casts(discovery)
+
+        value_columns = self._discover_value_columns()
+        if self.config.dedup_window_days is not None:
+            # Before any write: the bound needs a date or timestamp column.
+            self.sql_builder.build_stored_scope_sql([], self._partition_column_type())
+        value_columns = self._prepare_existing_target(needs_full, value_columns)
+        timings["init"] = time.time() - init_start
+
+        t = time.time()
+        if needs_full:
+            self._setup_full_reprocess(value_columns, is_partial, state)
+        elif boundary is not None:
+            self.destination.execute_sql(
+                self.sql_builder.build_delete_from_sql(boundary), self.schema
+            )
+            self.state_manager.clear_log_entries_from(self.pipeline_name, boundary)
+        timings["setup"] = time.time() - t
+
+        t = time.time()
+        inserted = 0
+        if late_scope is not None:
+            inserted += self._insert_only_late_rows(
+                value_columns, late_scope, state, started_at
+            )
+        inserted += self._insert_only_snapshots(
+            value_columns, discovery, started_at, needs_full
+        )
+        timings["execute"] = time.time() - t
+
+        return {
+            "mode": mode,
+            "snapshots_processed": "all"
+            if needs_full
+            else len(discovery.snapshots) + late_snapshots,
+            "new_or_changed_rows": inserted,
+            "deleted_rows": 0,
+            "timings": timings,
+        }
+
+    def _discover_with_row_counts(
+        self,
+        state: "HistorizeStateManager.PipelineState",
+        from_snapshot: Optional[str] = None,
+    ) -> SnapshotDiscovery:
+        """Snapshots to process with their row counts, plus the key/cast checks."""
+        return self.state_manager.discover_unprocessed_snapshots(
+            state=state,
+            source_table_id=self.source_relation,
+            snapshot_column=self.config.snapshot_column,
+            filter_sql=self._filter_sql,
+            primary_key=self.sql_builder.guarded_key_columns,
+            min_snapshot_inclusive=from_snapshot,
+            cast_checks=self.sql_builder.failed_cast_checks(),
+            with_row_counts=self.config.batch_max_rows is not None,
+        )
+
+    def _late_rows_scope(
+        self, state: "HistorizeStateManager.PipelineState"
+    ) -> Tuple[Optional[str], int]:
+        """WHERE body selecting the late rows to insert, and how many snapshots hold them.
+
+        ``(None, 0)`` when there are none. Detection reads no further back
+        than ``late_arrival_window_days``, so late snapshots older than that
+        are neither inserted nor reported.
+        """
+        late = self._find_late_arrivals(state)
+        if not late or not late.min_snapshot:
+            return None, 0
+        self.logger.info(
+            f"{self.pipeline_name}: {late.snapshot_count} snapshot(s) at or "
+            f"below the watermark hold late-arriving rows "
+            f"(earliest: {late.min_snapshot}); inserting those rows"
+        )
+        scope = self.state_manager.late_rows_predicate(
+            state,
+            self.config.snapshot_column,
+            self.config.arrival_column,
+            min_snapshot=late.min_snapshot,
+        )
+        return scope, late.snapshot_count
+
+    def _partition_column_type(self) -> str:
+        """Catalog type of ``partition_column`` in the source relation."""
+        return self._source_column_type(self.config.partition_column or "") or ""
+
+    def _insert_only_late_rows(
+        self,
+        value_columns: List[str],
+        late_scope: str,
+        state: "HistorizeStateManager.PipelineState",
+        started_at: datetime,
+    ) -> int:
+        """Insert the late rows and record the run at the unchanged watermark."""
+        inserted = self._run_insert_only_batch(
+            value_columns,
+            self.sql_builder.insert_only_source_filter(scope_sql=late_scope),
+        )
+        self._log_completed_run(
+            state.last_snapshot_value,
+            inserted,
+            0,
+            started_at,
+            is_full_reprocess=False,
+        )
+        self.logger.info(
+            f"{self.pipeline_name}: {inserted} late-arriving row(s) inserted"
+        )
+        return inserted
+
+    def _insert_only_snapshots(
+        self,
+        value_columns: List[str],
+        discovery: SnapshotDiscovery,
+        started_at: datetime,
+        is_full_reprocess: bool,
+    ) -> int:
+        """Insert the discovered snapshots batch by batch; return rows written."""
+        if not discovery.snapshots:
+            if is_full_reprocess:
+                self.logger.info(
+                    f"Source for {self.pipeline_name} is empty; nothing to "
+                    "historize. No baseline recorded."
+                )
+            return 0
+        batches = self._snapshot_batches(discovery)
+        self.logger.info(
+            f"Historizing {self.pipeline_name} → {self._target_display}: "
+            f"{len(discovery.snapshots)} snapshot(s) in {len(batches)} batch(es) "
+            "(insert_only)"
+        )
+        inserted = 0
+        for index, batch in enumerate(batches, start=1):
+            written = self._run_insert_only_batch(
+                value_columns,
+                self.sql_builder.insert_only_source_filter(snapshots=batch),
+            )
+            self._log_completed_run(
+                batch[-1], written, 0, started_at, is_full_reprocess=is_full_reprocess
+            )
+            if len(batches) > 1:
+                self.logger.info(
+                    f"Batch {index}/{len(batches)} done: {len(batch)} snapshot(s) "
+                    f"through {batch[-1]}, {written} row(s) inserted"
+                )
+            inserted += written
+        return inserted
+
+    def _snapshot_batches(self, discovery: SnapshotDiscovery) -> List[List[str]]:
+        """Group consecutive snapshots into batches of at most ``batch_max_rows``.
+
+        A snapshot larger than the limit is a batch of its own. Without a
+        limit every snapshot is in one batch.
+        """
+        limit = self.config.batch_max_rows
+        if limit is None:
+            return [list(discovery.snapshots)]
+        batches: List[List[str]] = []
+        rows_in_batch = 0
+        for snapshot, rows in zip(discovery.snapshots, discovery.row_counts):
+            if batches and rows_in_batch + rows <= limit:
+                batches[-1].append(snapshot)
+                rows_in_batch += rows
+            else:
+                batches.append([snapshot])
+                rows_in_batch = rows
+        return batches
+
+    def _run_insert_only_batch(
+        self, value_columns: List[str], source_filter: str
+    ) -> int:
+        """Insert one batch's new keys; return the number of rows written.
+
+        With ``dedup_window_days`` the stored-key check is bounded by the days
+        of ``partition_column`` the batch holds, read first so the bound is a
+        constant the destination can prune by.
+        """
+        stored_scope = None
+        if self.config.dedup_window_days is not None:
+            days_sql = self.sql_builder.build_batch_days_sql(source_filter)
+            days = [
+                None if row.batch_day is None else str(row.batch_day)
+                for row in self.destination.execute_sql(days_sql, self.schema)
+            ]
+            stored_scope = self.sql_builder.build_stored_scope_sql(
+                days, self._partition_column_type()
+            )
+            if stored_scope is None:
+                return 0
+        sql = self.sql_builder.build_insert_only_sql(
+            value_columns, source_filter, stored_scope
+        )
+        self.logger.debug(f"Insert-only SQL ({len(sql)} chars)")
+        return self.destination.execute_dml(sql, self.schema)
+
     def _log_completed_run(
         self,
         snapshot_value: str,
@@ -2107,17 +2386,7 @@ class HistorizeRunner:
             ``snapshots_to_reprocess`` is empty (and logged) when nothing sits
             at or above the boundary.
         """
-        effective_from_date, clamped = self._resolve_effective_from_date()
-        if effective_from_date is None:
-            raise ValueError(
-                f"No raw snapshots found in {self.source_table_id}; "
-                "cannot determine reprocessing boundary."
-            )
-        if clamped:
-            self.logger.warning(
-                f"--historize-from {self.historize_from} predates earliest raw snapshot "
-                f"({effective_from_date}). Using {effective_from_date} as effective start date."
-            )
+        effective_from_date = self._resolve_partial_boundary()
 
         # Discover snapshots to reprocess before cloning (avoids clone cost on early exit)
         snapshots_to_reprocess, lag_reference = self._discover_reprocess_snapshots(
@@ -2129,6 +2398,25 @@ class HistorizeRunner:
                 f"{self.pipeline_name}; nothing to do."
             )
         return effective_from_date, snapshots_to_reprocess, lag_reference
+
+    def _resolve_partial_boundary(self) -> str:
+        """The snapshot a partial refresh reprocesses from, clamped to the source.
+
+        Raises:
+            ValueError: The source holds no snapshots.
+        """
+        effective_from_date, clamped = self._resolve_effective_from_date()
+        if effective_from_date is None:
+            raise ValueError(
+                f"No raw snapshots found in {self.source_table_id}; "
+                "cannot determine reprocessing boundary."
+            )
+        if clamped:
+            self.logger.warning(
+                f"--historize-from {self.historize_from} predates earliest raw snapshot "
+                f"({effective_from_date}). Using {effective_from_date} as effective start date."
+            )
+        return effective_from_date
 
     def _execute_clone_and_swap(
         self,

@@ -537,7 +537,9 @@ historize:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `strategy` | string | `scd2` | `scd2` keeps every version; `scd1` keeps only the latest version per key |
+| `strategy` | string | `scd2` | `scd2` keeps every version; `scd1` keeps only the latest version per key; `insert_only` stores each key once, as first delivered (see [Historize](Historize#insert-only-each-key-once)) |
+| `dedup_window_days` | int | unset | `insert_only` only: check for a stored key only within this many days of the processed rows' `partition_column` values. Unset checks the whole table |
+| `batch_max_rows` | int | unset | `insert_only` only: most source rows processed per statement; a larger run is split into recorded batches. Unset processes a run in one statement |
 | `order_by` | list | `[snapshot_column]` | `scd1` only: columns ranking a key's versions, highest wins. With `track_deletions: true` it must start with `snapshot_column` |
 | `snapshot_column` | string | `_dlt_ingested_at` | Column identifying each delivery (a complete snapshot under `delivery: full`); its value becomes `_dlt_valid_from` |
 | `primary_key` | list | inherited | Inherits from top-level `primary_key` |

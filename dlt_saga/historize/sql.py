@@ -10,6 +10,7 @@ Adapts patterns from:
 """
 
 import logging
+from datetime import date, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from dlt_saga.destinations.base import MaterializationHints
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 # any real snapshot, never written to the target.
 SCD1_BASELINE_SNAPSHOT = "0001-01-01 00:00:00"
 SCD1_FINAL_DELETION_RANK = "9999-12-31 23:59:59"
+
+# Most date ranges one insert_only stored-key check is bounded by.
+STORED_SCOPE_MAX_RANGES = 50
 
 
 def snapshot_range_filter(destination: Any, column: str, snapshots: List[str]) -> str:
@@ -54,6 +58,32 @@ def snapshot_range_filter(destination: Any, column: str, snapshots: List[str]) -
     lower = destination.escape_string_literal(snapshots[0])
     upper = destination.escape_string_literal(snapshots[-1])
     return f"{column} >= TIMESTAMP '{lower}' AND {column} <= TIMESTAMP '{upper}'"
+
+
+def coalesce_day_ranges(
+    days: Sequence[date], window_days: int, max_ranges: int = STORED_SCOPE_MAX_RANGES
+) -> List[Tuple[date, date]]:
+    """Merge days, each widened by ``window_days``, into half-open date ranges.
+
+    Returns ``[(first_day, day_after_last), ...]`` in order. Ranges that touch
+    or overlap are merged; when more than ``max_ranges`` remain, the ones
+    separated by the smallest gaps are merged too, so a statement built from
+    them stays bounded however scattered the days are. Merging only ever
+    widens what is covered.
+    """
+    ranges: List[Tuple[date, date]] = []
+    for day in sorted(set(days)):
+        start = day - timedelta(days=window_days)
+        end = day + timedelta(days=window_days + 1)
+        if ranges and start <= ranges[-1][1]:
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
+        else:
+            ranges.append((start, end))
+    while len(ranges) > max_ranges:
+        gaps = [ranges[i + 1][0] - ranges[i][1] for i in range(len(ranges) - 1)]
+        i = gaps.index(min(gaps))
+        ranges[i : i + 2] = [(ranges[i][0], ranges[i + 1][1])]
+    return ranges
 
 
 def null_pk_alias(index: int) -> str:
@@ -580,7 +610,7 @@ snapshot_sequence AS (
     @property
     def _has_deleted_column(self) -> bool:
         """Whether the target carries the deleted flag (always for scd2)."""
-        return not self.config.is_scd1 or bool(self.config.track_deletions)
+        return self.config.has_validity_end or bool(self.config.track_deletions)
 
     def build_drop_target_table_sql(self) -> str:
         """DROP TABLE IF EXISTS for the historized target table."""
@@ -613,11 +643,11 @@ snapshot_sequence AS (
         ts_type = self.destination.type_name("timestamp")
         bool_type = self.destination.type_name("bool")
 
-        # scd1 keeps one row per key, so it has no validity end — only when
-        # the current version took effect, plus a deleted flag when deletions
+        # A strategy keeping one row per key has no validity end — only when
+        # the row's values took effect, plus a deleted flag when deletions
         # are tracked.
         system_cols = [f"CAST(NULL AS {ts_type}) AS {self.valid_from}"]
-        if not self.config.is_scd1:
+        if self.config.has_validity_end:
             system_cols.append(f"CAST(NULL AS {ts_type}) AS {self.valid_to}")
         if self._has_deleted_column:
             system_cols.append(f"CAST(NULL AS {bool_type}) AS {self.is_deleted}")
@@ -640,7 +670,7 @@ snapshot_sequence AS (
                 for spec in self.config.json_column_specs
             ],
             valid_from_column=self.valid_from,
-            valid_to_column=None if self.config.is_scd1 else self.valid_to,
+            valid_to_column=self.valid_to if self.config.has_validity_end else None,
             is_deleted_column=self.is_deleted if self._has_deleted_column else None,
         )
 
@@ -678,8 +708,11 @@ snapshot_sequence AS (
         """The key columns the NULL-key guard checks: all but ``nullable_key_columns``."""
         return [pk for pk in self.primary_key if not self.config.is_nullable_key(pk)]
 
-    def build_null_pk_probe_sql(self) -> Optional[str]:
+    def build_null_pk_probe_sql(self, scope_sql: Optional[str] = None) -> Optional[str]:
         """Build a one-row probe for NULL primary-key values across the source.
+
+        ``scope_sql`` (a WHERE body) narrows the probe to the rows a run reads
+        when that isn't the whole filtered source.
 
         SCD2 identity is the primary key, and SQL equality is never true for NULL:
         the change-detection window functions treat ``NULL = NULL`` as one group
@@ -707,6 +740,8 @@ snapshot_sequence AS (
         )
         any_null = " OR ".join(f"{self._q(pk)} IS NULL" for pk in guarded)
         where = and_filter(self.filter_sql, f"({any_null})")
+        if scope_sql:
+            where = f"{where} AND ({scope_sql})"
         return f"SELECT {flags} FROM {self.source_relation} WHERE {where} LIMIT 1"
 
     def failed_cast_checks(self) -> List[Tuple[str, str]]:
@@ -735,7 +770,7 @@ snapshot_sequence AS (
         return checks
 
     def build_failed_cast_probe_sql(
-        self, snapshot_from: Optional[str] = None
+        self, snapshot_from: Optional[str] = None, scope_sql: Optional[str] = None
     ) -> Optional[str]:
         """One-row aggregate flagging ``json_columns`` whose values didn't convert.
 
@@ -743,7 +778,8 @@ snapshot_sequence AS (
         to fold the check into (an incremental run gets it from
         ``discover_unprocessed_snapshots``). Reads the filtered source, from
         ``snapshot_from`` on when given, so a ``--historize-from`` run probes
-        only the window it rewrites. Flags are aliased by position
+        only the window it rewrites; ``scope_sql`` (a WHERE body) narrows it
+        to the rows a run reads otherwise. Flags are aliased by position
         (:func:`failed_cast_alias`), in :meth:`failed_cast_checks` order.
         ``None`` when nothing is converted.
         """
@@ -758,6 +794,8 @@ snapshot_sequence AS (
         if snapshot_from is not None:
             safe_from = self.destination.escape_string_literal(snapshot_from)
             where = and_filter(where, f"{self._snap_src} >= TIMESTAMP '{safe_from}'")
+        if scope_sql:
+            where = and_filter(where, scope_sql)
         return f"SELECT {flags} FROM {self.source_relation}{filter_where_clause(where)}"
 
     def build_full_reprocess_sql(
@@ -1175,6 +1213,162 @@ INSERT INTO {tgt} ({all_columns_sql})
 SELECT {all_columns_sql} FROM _historize_incremental;
 
 """
+
+    def insert_only_source_filter(
+        self,
+        snapshots: Optional[List[str]] = None,
+        scope_sql: Optional[str] = None,
+    ) -> str:
+        """WHERE body selecting the source rows of one insert_only batch.
+
+        A batch is a snapshot range, or the rows ``scope_sql`` names (late
+        rows, which aren't a whole snapshot range); the configured filter is
+        applied to either.
+        """
+        scope = scope_sql or snapshot_range_filter(
+            self.destination, self._snap_src, list(snapshots or [])
+        )
+        return and_filter(self.filter_sql, scope)
+
+    def build_batch_days_sql(self, source_filter: str) -> str:
+        """SQL listing the distinct days of ``partition_column`` in a batch.
+
+        One row per day (NULL when the column is NULL), as text. What the
+        stored-key check of a windowed insert_only batch is bounded by.
+        """
+        day = f"CAST({self._q(self.config.partition_column)} AS DATE)"
+        return (
+            f"SELECT DISTINCT {self.destination.cast_to_string(day)} AS batch_day "
+            f"FROM {self.source_relation} WHERE {source_filter}"
+        )
+
+    def build_stored_scope_sql(
+        self, batch_days: Sequence[Optional[str]], column_type: str
+    ) -> Optional[str]:
+        """Predicate limiting the stored-key check to where a batch's keys can be.
+
+        ``batch_days`` are the days of ``partition_column`` the batch holds
+        (see :meth:`build_batch_days_sql`); the predicate covers them widened
+        by ``dedup_window_days``, as constant ranges on the column of target
+        alias ``t`` so the destination can prune by them. A NULL day adds the
+        stored rows where the column is NULL. ``column_type`` is the column's
+        catalog type, which decides the literal the ranges are written in.
+        ``None`` when the batch holds no rows.
+
+        Raises:
+            ValueError: ``partition_column`` is neither a date nor a timestamp.
+        """
+        column = f"t.{self._q(self.config.partition_column)}"
+        literal = self._day_literal_keyword(column_type)
+        days = [date.fromisoformat(d[:10]) for d in batch_days if d is not None]
+        parts = [
+            f"({column} >= {literal} '{start.isoformat()}' "
+            f"AND {column} < {literal} '{end.isoformat()}')"
+            for start, end in coalesce_day_ranges(
+                days, self.config.dedup_window_days or 0
+            )
+        ]
+        if any(d is None for d in batch_days):
+            parts.append(f"{column} IS NULL")
+        return " OR ".join(parts) or None
+
+    def _day_literal_keyword(self, column_type: str) -> str:
+        """The literal keyword a day bound on ``partition_column`` is written with."""
+        kind = (column_type or "").strip().upper()
+        if kind == "DATE":
+            return "DATE"
+        if kind == "DATETIME":
+            return "DATETIME"
+        if kind.startswith("TIMESTAMP"):
+            return "TIMESTAMP"
+        raise ValueError(
+            f"historize.dedup_window_days needs a date or timestamp "
+            f"partition_column, but '{self.config.partition_column}' is "
+            f"{column_type or 'of unknown type'}. Use such a column, or remove "
+            f"dedup_window_days to check the whole table."
+        )
+
+    def build_insert_only_sql(
+        self,
+        value_columns: List[str],
+        source_filter: str,
+        stored_scope_sql: Optional[str] = None,
+    ) -> str:
+        """Build SQL inserting each new key once (``strategy: insert_only``).
+
+        One row per key in the batch is kept: the one from the earliest
+        snapshot, then by value hash so the choice doesn't depend on scan
+        order. It is inserted unless the key is already stored; a stored row
+        always wins and is never read beyond its key columns. Because of
+        that, a batch run twice inserts nothing the second time, and
+        splitting the source into batches doesn't change which row a key
+        gets.
+
+        One statement, so the batch's rows are read once: the runner takes
+        the number written from the statement's own result
+        (``Destination.execute_dml``) rather than staging the rows to count
+        them, which would bill the batch a second time.
+
+        Args:
+            value_columns: Non-PK columns carried into the target.
+            source_filter: WHERE body selecting the batch's source rows (see
+                :meth:`insert_only_source_filter`).
+            stored_scope_sql: Predicate over target alias ``t`` limiting which
+                stored rows the key check reads; ``None`` checks every row.
+        """
+        pk_cols = self._pk_cols_sql()
+        data_cols = list(self.primary_key) + list(value_columns)
+        all_cols_sql = self._qcols(data_cols + [self.valid_from])
+        q_vf = self._q(self.valid_from)
+        hash_expr = self.destination.hash_expression(list(value_columns))
+        stored_scope = f"\n      AND ({stored_scope_sql})" if stored_scope_sql else ""
+
+        return f"""
+-- Insert-only Historization
+-- Inserts each key not yet stored, as first delivered
+
+INSERT INTO {self.target_table_id} ({all_cols_sql})
+WITH
+-- Source rows in scope; the snapshot value becomes the row's valid_from.
+batch AS (
+  SELECT {self._source_cols_sql(data_cols)}, {self._snap_src} AS {q_vf}
+  FROM {self.source_relation}
+  WHERE {source_filter}
+),
+
+hashed AS (
+  SELECT b.*, {hash_expr} AS _saga_hash
+  FROM batch b
+),
+
+-- A key delivered more than once in the batch: the earliest delivery is kept.
+ranked AS (
+  SELECT h.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY {pk_cols} ORDER BY {q_vf}, _saga_hash
+    ) AS _saga_rn
+  FROM hashed h
+)
+SELECT {all_cols_sql}
+FROM ranked r
+WHERE _saga_rn = 1
+  AND NOT EXISTS (
+    SELECT 1 FROM {self.target_table_id} t
+    WHERE {self._pk_join("t", "r")}{stored_scope}
+  )
+"""
+
+    def build_delete_from_sql(self, boundary: str) -> str:
+        """SQL deleting stored rows first delivered at or after ``boundary``.
+
+        What a partial refresh of an insert_only table removes before
+        re-inserting the window from the source.
+        """
+        safe = self.destination.escape_string_literal(boundary)
+        return (
+            f"DELETE FROM {self.target_table_id} "
+            f"WHERE {self._q(self.valid_from)} >= TIMESTAMP '{safe}'"
+        )
 
     def _scd1_rank_sql(self, descending: bool, snapshot_ref: str) -> str:
         """``ORDER BY`` terms ranking a key's versions (scd1).

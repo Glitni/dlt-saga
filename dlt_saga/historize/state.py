@@ -122,6 +122,8 @@ class SnapshotDiscovery:
     null_pk_columns: List[str]
     null_pk_snapshot: Optional[str] = None
     failed_casts: List[str] = field(default_factory=list)
+    # Source rows per snapshot, aligned with ``snapshots``; empty unless asked for.
+    row_counts: List[int] = field(default_factory=list)
 
 
 class HistorizeStateManager:
@@ -289,7 +291,7 @@ class HistorizeStateManager:
             # doesn't depend on it (its deletion tracking, the one place it
             # would, requires full), so it is pinned there: describing the
             # source differently must not force a rebuild that changes nothing.
-            "delivery": "full" if config.is_scd1 else config.delivery,
+            "delivery": config.delivery if config.has_validity_end else "full",
             # Each derived column's definition, by output name. An entry present
             # on both sides with another definition redefines what a stored
             # column holds, so it blocks (see fingerprint_changes); an entry on
@@ -615,6 +617,7 @@ class HistorizeStateManager:
         primary_key: Optional[List[str]] = None,
         min_snapshot_inclusive: Optional[str] = None,
         cast_checks: Optional[Sequence[Tuple[str, str]]] = None,
+        with_row_counts: bool = False,
     ) -> SnapshotDiscovery:
         """Discover snapshot values in the raw table that haven't been historized yet.
 
@@ -638,6 +641,8 @@ class HistorizeStateManager:
             cast_checks: ``(json column name, condition)`` pairs; the same scan
                 reports the names whose condition held on some row (see
                 ``HistorizeSqlBuilder.failed_cast_checks``).
+            with_row_counts: Also report each snapshot's row count, for a
+                caller that sizes its work by it.
 
         Returns:
             A :class:`SnapshotDiscovery` whose ``snapshots`` are ordered
@@ -665,8 +670,9 @@ class HistorizeStateManager:
             f", MAX(CASE WHEN {condition} THEN 1 ELSE 0 END) AS {failed_cast_alias(i)}"
             for i, (_, condition) in enumerate(checks)
         )
-        projection = f"{cast_expr} AS snapshot_val{null_flags}{cast_flags}"
-        grouped = bool(pk_cols or checks)
+        count = ", COUNT(*) AS row_count" if with_row_counts else ""
+        projection = f"{cast_expr} AS snapshot_val{null_flags}{cast_flags}{count}"
+        grouped = bool(pk_cols or checks or with_row_counts)
         grouping = f"GROUP BY {cast_expr}" if grouped else ""
 
         if min_snapshot_inclusive is not None:
@@ -714,6 +720,7 @@ class HistorizeStateManager:
             null_pk_columns=null_pk_columns,
             null_pk_snapshot=null_pk_snapshot,
             failed_casts=failed_casts,
+            row_counts=[int(row.row_count) for row in rows] if with_row_counts else [],
         )
 
     def find_late_arrivals(
@@ -724,6 +731,7 @@ class HistorizeStateManager:
         arrival_column: str,
         filter_sql: Optional[str] = None,
         window_days: Optional[int] = None,
+        bound_by_window: bool = False,
     ) -> Optional[LateArrivals]:
         """Find snapshots at or below the watermark that arrived after the last run.
 
@@ -748,6 +756,12 @@ class HistorizeStateManager:
         offered for replay. Split with conditional aggregation so bounded and
         unbounded detection cost the same single scan.
 
+        ``bound_by_window`` instead makes the window a lower bound on the
+        snapshot in the WHERE, so the read prunes to the window on a source
+        laid out by snapshot. Older late snapshots are then not seen at all:
+        for a caller that runs detection on every run of a large source and
+        would rather bound the read than be told about them.
+
         Returns None when there are no late arrivals (or no prior run to
         compare against).
         """
@@ -757,21 +771,14 @@ class HistorizeStateManager:
         from dlt_saga.utility.filters import and_filter
 
         q_snapshot = self.destination.quote_identifier(snapshot_column)
-        q_arrival = self.destination.quote_identifier(arrival_column)
         cast_expr = self.destination.cast_to_string(q_snapshot)
-        safe_wm = self.destination.escape_string_literal(state.last_snapshot_value)
-        started = state.last_started_at
-        started_iso = (
-            started.isoformat() if hasattr(started, "isoformat") else str(started)
-        )
-        safe_started = self.destination.escape_string_literal(started_iso)
-
-        base_where = (
-            f"{q_snapshot} <= TIMESTAMP '{safe_wm}' "
-            f"AND {q_arrival} > TIMESTAMP '{safe_started}'"
-        )
+        base_where = self.late_rows_predicate(state, snapshot_column, arrival_column)
 
         window_bound = self._window_lower_bound(state.last_snapshot_value, window_days)
+        if window_bound is not None and bound_by_window:
+            safe_bound = self.destination.escape_string_literal(window_bound)
+            base_where = f"{q_snapshot} >= TIMESTAMP '{safe_bound}' AND {base_where}"
+            window_bound = None
         if window_bound is None:
             projection = f"""MIN({cast_expr}) AS min_snapshot,
                    COUNT(DISTINCT {cast_expr}) AS snapshot_count,
@@ -802,6 +809,37 @@ class HistorizeStateManager:
             ignored_count=int(row.ignored_count or 0),
             ignored_min=row.ignored_min,
         )
+
+    def late_rows_predicate(
+        self,
+        state: "HistorizeStateManager.PipelineState",
+        snapshot_column: str,
+        arrival_column: str,
+        min_snapshot: Optional[str] = None,
+    ) -> str:
+        """WHERE body matching rows at or below the watermark that arrived late.
+
+        The one definition of a late row, shared by detection
+        (:meth:`find_late_arrivals`) and by a run that processes those rows
+        directly. ``min_snapshot`` adds a lower bound on the snapshot, which
+        lets the read prune to where detection found them.
+        """
+        q_snapshot = self.destination.quote_identifier(snapshot_column)
+        q_arrival = self.destination.quote_identifier(arrival_column)
+        safe_wm = self.destination.escape_string_literal(state.last_snapshot_value)
+        started = state.last_started_at
+        started_iso = (
+            started.isoformat() if hasattr(started, "isoformat") else str(started)
+        )
+        safe_started = self.destination.escape_string_literal(started_iso)
+        predicate = (
+            f"{q_snapshot} <= TIMESTAMP '{safe_wm}' "
+            f"AND {q_arrival} > TIMESTAMP '{safe_started}'"
+        )
+        if min_snapshot is not None:
+            safe_min = self.destination.escape_string_literal(min_snapshot)
+            predicate = f"{q_snapshot} >= TIMESTAMP '{safe_min}' AND {predicate}"
+        return predicate
 
     def _window_lower_bound(
         self, watermark: Optional[str], window_days: Optional[int]

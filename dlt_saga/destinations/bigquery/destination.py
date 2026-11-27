@@ -625,6 +625,19 @@ class BigQueryDestination(BigQueryBaseDestination):
         # recorded failure for a statement that then committed — a partial-failure hazard.
         return client.query(sql, job_config=job_config).result()
 
+    def execute_dml(self, sql: str, schema_name: Optional[str] = None) -> int:
+        from google.cloud import bigquery
+
+        job_config = bigquery.QueryJobConfig()
+        if schema_name:
+            job_config.default_dataset = f"{self.config.project_id}.{schema_name}"
+
+        logger.debug(f"Executing DML ({len(sql)} chars) in schema={schema_name}")
+        job = self._client(None).query(sql, job_config=job_config)
+        # No client-side timeout, for the same reason as execute_sql.
+        job.result()
+        return int(job.num_dml_affected_rows or 0)
+
     # -------------------------------------------------------------------------
     # SQL dialect overrides
     # -------------------------------------------------------------------------

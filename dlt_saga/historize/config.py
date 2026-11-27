@@ -1,8 +1,9 @@
 """Configuration for the historize command.
 
 Defines HistorizeConfig which controls how snapshot data is historized:
-into SCD2 tables with _dlt_valid_from/_dlt_valid_to periods, or into SCD1
-tables holding only the latest version per key.
+into SCD2 tables with _dlt_valid_from/_dlt_valid_to periods, into SCD1
+tables holding only the latest version per key, or into insert-only tables
+holding each key as first delivered.
 """
 
 import re
@@ -18,7 +19,7 @@ from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS, SNAPSHOT_A
 # config value can't inject SQL or silently break unquoted interpolation.
 _SQL_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
-STRATEGIES = ("scd2", "scd1")
+STRATEGIES = ("scd2", "scd1", "insert_only")
 DELIVERIES = ("full", "incremental")
 
 # dlt logical types a json_columns entry may take. The scalar types convert
@@ -153,7 +154,10 @@ class HistorizeConfig:
                 "is kept, with _dlt_valid_from/_dlt_valid_to validity periods. "
                 "'scd1': only the latest version per key is kept — a newer "
                 "version overwrites the stored row, so superseded values do not "
-                "survive in the historized table. Changing it requires a full "
+                "survive in the historized table. 'insert_only': each key is "
+                "inserted once, as first delivered, and never updated — for "
+                "sources whose records don't change, such as events delivered "
+                "with occasional duplicates. Changing it requires a full "
                 "refresh, and moving from scd1 to scd2 can't recover the "
                 "versions scd1 already overwrote."
             ),
@@ -195,6 +199,44 @@ class HistorizeConfig:
                 "one on every column replaces it, so re-processing a corrected "
                 "source row takes effect."
             )
+        },
+    )
+
+    dedup_window_days: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "strategy: insert_only only. Bounds the check for whether a key "
+                "is already stored. Unset (default): every key is checked "
+                "against the whole historized table, so a key is never stored "
+                "twice. Set to N (requires partition_column, a date or "
+                "timestamp): only rows whose partition_column falls on a day "
+                "the processed rows touch, widened by N days each way, are "
+                "checked — the read no longer grows with the table, and a "
+                "duplicate whose stored copy lies further away is stored "
+                "again. 0 is exact when duplicates always share the "
+                "partition_column value; otherwise size it from how far apart "
+                "duplicates occur in that column."
+            ),
+            "minimum": 0,
+        },
+    )
+
+    batch_max_rows: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "strategy: insert_only only. Upper bound on the source rows "
+                "processed per statement. Unset (default): a run processes "
+                "all its snapshots in one statement. Set: a run with more to "
+                "process (a first run, a full refresh, a backlog) splits its "
+                "snapshots into consecutive batches of at most this many "
+                "rows, each recorded when it completes, so an interrupted run "
+                "resumes after the last finished batch. A single snapshot "
+                "larger than this is one batch. Size it from what one "
+                "statement handles on the destination for rows of this width."
+            ),
+            "minimum": 1,
         },
     )
 
@@ -412,7 +454,10 @@ class HistorizeConfig:
                 "replay history from the earliest late snapshot (refused with a "
                 "warning if raw no longer contains every historized snapshot in "
                 "the rewind window, e.g. after partition expiration). false: "
-                "skip detection entirely (silences the warning). Detection "
+                "skip detection entirely (silences the warning). Under "
+                "strategy: insert_only nothing is rewound, so unset and true "
+                "both process the late rows themselves (only those rows, not "
+                "the snapshots since) and false skips detection. Detection "
                 "compares arrival_column against the previous run's start time, "
                 "so it only engages when snapshot_column differs from "
                 "arrival_column and the source retains snapshot history (append "
@@ -431,7 +476,10 @@ class HistorizeConfig:
                 "them manually with --historize-from). Bounds the worst-case "
                 "rewind: without it, a stray very old file triggers a "
                 "correspondingly large replay. Only meaningful with "
-                "detect_late_arrivals: true; omit for no bound."
+                "detect_late_arrivals: true; omit for no bound. Under "
+                "strategy: insert_only it bounds the detection read itself: "
+                "late rows are looked for only this many days behind the "
+                "watermark, and older ones are neither inserted nor reported."
             )
         },
     )
@@ -613,6 +661,16 @@ class HistorizeConfig:
         return self.strategy == "scd1"
 
     @property
+    def is_insert_only(self) -> bool:
+        """Whether each key is inserted once and never updated."""
+        return self.strategy == "insert_only"
+
+    @property
+    def has_validity_end(self) -> bool:
+        """Whether a key has several versions, each closed by ``valid_to``."""
+        return self.strategy == "scd2"
+
+    @property
     def effective_order_by(self) -> List[str]:
         """Version ranking for scd1: ``order_by`` plus the snapshot tiebreaker.
 
@@ -663,6 +721,10 @@ class HistorizeConfig:
         Refused rather than ignored, so a config never reads as doing something
         it doesn't.
         """
+        if self.is_insert_only:
+            self._validate_insert_only_options()
+            return
+        self._reject_insert_only_options()
         if not self.is_scd1:
             if self.order_by:
                 raise ValueError(
@@ -726,6 +788,52 @@ class HistorizeConfig:
                 raise ValueError(
                     f"historize.{key} is not supported with strategy: scd1 — {reason}"
                 )
+
+    def _reject_insert_only_options(self) -> None:
+        """Reject the keys that only tune an insert_only run."""
+        for key in ("dedup_window_days", "batch_max_rows"):
+            if getattr(self, key) is not None:
+                raise ValueError(
+                    f"historize.{key} only applies to strategy: insert_only. "
+                    f"Remove it, or set strategy: insert_only."
+                )
+
+    def _validate_insert_only_options(self) -> None:
+        """Reject options that have no meaning when keys are never updated."""
+        defaults = self.__dataclass_fields__
+        reason = "a stored key is never compared or updated"
+        unsupported = {
+            "order_by": self.order_by is not None,
+            "track_columns": self.track_columns is not None,
+            "ignore_columns": bool(self.ignore_columns),
+            "track_deletions": self.track_deletions is True,
+            "merge_key": bool(self.merge_key),
+            "valid_to_column": self.valid_to_column
+            != defaults["valid_to_column"].default,
+            "is_deleted_column": self.is_deleted_column
+            != defaults["is_deleted_column"].default,
+        }
+        for key, is_set in unsupported.items():
+            if is_set:
+                raise ValueError(
+                    f"historize.{key} is not supported with strategy: "
+                    f"insert_only — {reason}. Remove it, or use another strategy."
+                )
+        for key, minimum in (("dedup_window_days", 0), ("batch_max_rows", 1)):
+            value = getattr(self, key)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(
+                    f"historize.{key} must be an integer of at least {minimum}, "
+                    f"got {value!r}"
+                )
+        if self.dedup_window_days is not None and not self.partition_column:
+            raise ValueError(
+                "historize.dedup_window_days bounds the stored-key check by "
+                "partition_column, which isn't set. Set partition_column, or "
+                "remove dedup_window_days to check the whole table."
+            )
 
     def _validate_column_identifiers(self):
         """Validate SQL identifier format for column name fields.

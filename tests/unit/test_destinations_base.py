@@ -430,3 +430,7 @@ class TestNativeLoadContractDefaults:
     def test_execute_sql_with_job_raises_not_implemented(self):
         with pytest.raises(NotImplementedError):
             _ConcreteDestination().execute_sql_with_job("SELECT 1")
+
+    def test_execute_dml_raises_not_implemented(self):
+        with pytest.raises(NotImplementedError):
+            _ConcreteDestination().execute_dml("DELETE FROM t")
