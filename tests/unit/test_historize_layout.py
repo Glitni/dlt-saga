@@ -236,6 +236,24 @@ class TestReconcileLayout:
             runner._reconcile_layout()
         assert caplog.text == ""
 
+    def test_partition_dropped_for_default_clustering_is_not_a_mismatch(self, caplog):
+        runner, dest = _runner({"partition_column": "snapshot_dt"})
+        dest.supports_clustering_on_partitioned_table.return_value = False
+        dest.get_table_layout.return_value = TableLayout(
+            cluster_columns=["_dlt_valid_to", "_dlt_valid_from"]
+        )
+        with caplog.at_level(logging.WARNING):
+            runner._reconcile_layout()
+        assert caplog.text == ""
+
+    def test_unclustered_table_still_warns_where_the_two_cannot_combine(self, caplog):
+        runner, dest = _runner({"partition_column": "snapshot_dt"})
+        dest.supports_clustering_on_partitioned_table.return_value = False
+        dest.get_table_layout.return_value = TableLayout()
+        with caplog.at_level(logging.WARNING):
+            runner._reconcile_layout()
+        assert "partitioned by nothing" in caplog.text
+
     def test_failure_is_a_warning(self, caplog):
         runner, dest = _runner({"cluster_columns": ["id"]})
         dest.get_table_layout.side_effect = RuntimeError("boom")

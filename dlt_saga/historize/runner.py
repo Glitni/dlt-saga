@@ -1260,11 +1260,11 @@ class HistorizeRunner:
         if not desired:
             return
         # Destinations that can't combine the two create the table clustered
-        # and unpartitioned when both are set, so that's not a mismatch.
+        # and unpartitioned whenever it has clustering, configured or the
+        # create-time default, so that's not a mismatch.
         if (
-            self.config.cluster_columns
-            and not self.destination.supports_clustering_on_partitioned_table()
-        ):
+            self.config.cluster_columns or layout.cluster_columns
+        ) and not self.destination.supports_clustering_on_partitioned_table():
             return
         current = layout.partition_column
         if current is not None and current.lower() == desired.lower():
