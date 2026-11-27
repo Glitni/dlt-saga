@@ -864,6 +864,17 @@ class DatabricksDestination(Destination):
             f"ALTER TABLE {table_id} ADD COLUMNS ({self.quote_identifier(column)} {type_name})"
         )
 
+    def execute_dml(self, sql: str, schema_name: Optional[str] = None) -> int:
+        # A DML statement on a Delta table answers with one row of metrics,
+        # num_affected_rows first.
+        rows = self.execute_sql(sql, schema_name)
+        if not rows:
+            return 0
+        try:
+            return int(rows[0].num_affected_rows or 0)
+        except AttributeError:
+            return int(rows[0][0] or 0)
+
     def execute_sql_with_job(self, sql: str, schema: Optional[str] = None) -> tuple:
         """Execute SQL and return (rows, job_id) using databricks-sql-connector."""
         conn = self._get_connection()

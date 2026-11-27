@@ -1,6 +1,6 @@
 # Historize (SCD2 / SCD1)
 
-The historize engine transforms raw snapshot tables into [Slowly Changing Dimension Type 2 (SCD2)](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_2:_add_new_row) tables that track the full history of every record — or, with `strategy: scd1`, into [Type 1](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_1:_overwrite) tables that keep only the latest version of each record. See [SCD1: latest version per key](#scd1-latest-version-per-key). Everything else on this page describes SCD2 unless it says otherwise.
+The historize engine transforms raw snapshot tables into [Slowly Changing Dimension Type 2 (SCD2)](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_2:_add_new_row) tables that track the full history of every record — or, with `strategy: scd1`, into [Type 1](https://en.wikipedia.org/wiki/Slowly_changing_dimension#Type_1:_overwrite) tables that keep only the latest version of each record. See [SCD1: latest version per key](#scd1-latest-version-per-key). For records that never change, `strategy: insert_only` stores each key once: see [Insert-only: each key once](#insert-only-each-key-once). Everything else on this page describes SCD2 unless it says otherwise.
 
 ---
 
@@ -215,6 +215,48 @@ starts from what the source still holds.
 
 ---
 
+## Insert-only: each key once
+
+`strategy: insert_only` is for sources whose records never change, such as an event table delivered in batches with occasional duplicates. Each key is inserted once, as first delivered, and the stored row is never updated, closed or deleted.
+
+```yaml
+write_disposition: append+historize
+primary_key: [event_key]
+
+historize:
+  strategy: insert_only
+  snapshot_column: delivered_at
+  partition_column: event_time
+  dedup_window_days: 1
+```
+
+**Output columns:** the primary key, the value columns and `_dlt_valid_from` (the snapshot the row was first delivered in). There is no `_dlt_valid_to` or `_dlt_is_deleted`.
+
+**Which row is kept:**
+
+- A row is inserted when its key is not already stored. Only keys are compared, so duplicates may differ in any other column.
+- A key delivered more than once in the rows a run processes together keeps the row from the earliest snapshot.
+- Across runs the stored row wins. When older deliveries are loaded after newer ones, the row processed first is the one kept.
+
+**Bounding the stored-key check (`dedup_window_days`):**
+
+- Unset: every key is checked against the whole historized table, so a key is never stored twice. The read grows with the table (key columns only).
+- Set to N (requires `partition_column`, a date or timestamp): only stored rows whose `partition_column` falls on a day the processed rows touch, widened by N days each way, are checked. A duplicate whose stored copy lies further away is stored again.
+- `0` is exact when duplicates always share the `partition_column` value (a timestamp that is part of the record). For a column that differs between duplicates, size the window from how far apart they occur.
+- The bound is a range on the column's values, so it applies whatever the partition granularity.
+
+**Batches (`batch_max_rows`):** unset, a run processes all its snapshots in one statement. Set, a run with much to process (a first run, a `--full-refresh`, a backlog) splits its snapshots into consecutive batches of at most that many source rows. Each batch is recorded when it completes, so an interrupted run resumes after the last finished batch. A single snapshot larger than the limit is one batch. Size it from what one statement handles on your destination for rows of your width.
+
+**Late rows:** rows that land at or below the watermark are inserted by the next run. Only those rows are read, not the snapshots since. Nothing is rewound, so this is on unless `detect_late_arrivals: false`. The conditions for detection are the same as in [Late-arriving snapshots](#late-arriving-snapshots). Detection runs on every run, so set `late_arrival_window_days` on a large source: late rows are then looked for only that many days behind the watermark, which bounds the read. Older late rows are neither inserted nor reported.
+
+**Partial refresh:** `--historize-from` deletes the stored rows first delivered at or after the boundary and inserts that window again from the source.
+
+**Source layout:** every batch reads a `snapshot_column` range, so lay the source table out to prune by it. Partition it on that column, and where a run's batch is smaller than a partition (frequent runs over daily partitions), cluster on it as well, or each run reads the whole current partition.
+
+**Not supported with `insert_only`:** `order_by`, `track_columns`, `ignore_columns`, `track_deletions: true`, `merge_key`, and a renamed `valid_to_column` or `is_deleted_column`. `delivery` has no effect. `dedup_window_days` and `batch_max_rows` are rejected under the other strategies, and changing them needs no rebuild.
+
+---
+
 ## Config reference
 
 | Field | Location | Default | Description |
@@ -223,7 +265,9 @@ starts from what the source still holds.
 | `nullable_key_columns` | top-level | — | `primary_key` columns that may be NULL — see [Composite keys with a NULL part](#composite-keys-with-a-null-part) |
 | `snapshot_date_regex` | top-level | — | Regex to extract snapshot date from file paths (filesystem only) |
 | `snapshot_date_format` | top-level | — | `strptime` format for the extracted date string |
-| `strategy` | `historize:` | `scd2` | `scd2` keeps every version; `scd1` keeps only the latest version per key. See [SCD1: latest version per key](#scd1-latest-version-per-key) |
+| `strategy` | `historize:` | `scd2` | `scd2` keeps every version; `scd1` keeps only the latest version per key; `insert_only` stores each key once, as first delivered. See [SCD1: latest version per key](#scd1-latest-version-per-key) and [Insert-only: each key once](#insert-only-each-key-once) |
+| `dedup_window_days` | `historize:` | unset | `insert_only` only: check for a stored key only within this many days of the processed rows' `partition_column` values. Unset checks the whole table |
+| `batch_max_rows` | `historize:` | unset | `insert_only` only: most source rows processed per statement; a larger run is split into recorded batches. Unset processes a run in one statement |
 | `order_by` | `historize:` | `[snapshot_column]` | `scd1` only: columns ranking a key's versions, highest wins. With `track_deletions: true` it must start with `snapshot_column` |
 | `snapshot_column` | `historize:` | `_dlt_ingested_at` | Column identifying each delivery (a complete snapshot under `delivery: full`); its value becomes `_dlt_valid_from` |
 | `track_columns` | `historize:` | — | Opt-in allowlist: only these columns drive change detection (all columns still appear in output) |
@@ -234,8 +278,8 @@ starts from what the source still holds.
 | `delivery` | `historize:` | `full` | `full`: each snapshot is a complete copy of the source; `incremental`: each holds only the records sent in it. See [Delivery: full vs incremental](#delivery-full-vs-incremental) |
 | `track_deletions` | `historize:` | `true` (`scd2`, `full`) | Emit deletion marker rows when a key disappears (`scd1`: opt-in, flags the key's row). Requires `delivery: full` |
 | `merge_key` | `historize:` | — | Subset of `primary_key` that scopes deletion / reappearance detection. Requires `delivery: full`; under `scd1` also `track_deletions: true`. See [Scoping deletion detection (`merge_key`)](#scoping-deletion-detection-merge_key) |
-| `detect_late_arrivals` | `historize:` | unset | Late snapshots below the watermark: unset = detect + warn, `true` = detect + rewind-and-replay, `false` = skip detection. See [Late-arriving snapshots](#late-arriving-snapshots) |
-| `late_arrival_window_days` | `historize:` | — | How many days behind the watermark a late snapshot may be and still replay automatically; older ones are ignored with a warning. Omit for no bound |
+| `detect_late_arrivals` | `historize:` | unset | Late snapshots below the watermark: unset = detect + warn, `true` = detect + rewind-and-replay, `false` = skip detection (`insert_only`: unset and `true` both insert the late rows). See [Late-arriving snapshots](#late-arriving-snapshots) |
+| `late_arrival_window_days` | `historize:` | — | How many days behind the watermark a late snapshot may be and still replay automatically; older ones are ignored with a warning. Omit for no bound. Under `insert_only` it bounds the detection read: older late rows are neither inserted nor reported |
 | `arrival_column` | `historize:` | `_dlt_ingested_at` | Column holding each row's warehouse arrival time, used for late-arrival detection |
 | `valid_from_column` | `historize:` | `_dlt_valid_from` | Name of the SCD2 valid-from column in the output table |
 | `valid_to_column` | `historize:` | `_dlt_valid_to` | Name of the SCD2 valid-to column in the output table |

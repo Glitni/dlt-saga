@@ -240,6 +240,22 @@ class TestBigQueryExecuteSqlNoClientTimeout:
         assert (rows, job_id) == (["row"], "job-1")
         query_job.result.assert_called_once_with()
 
+    def test_execute_dml_returns_the_jobs_affected_rows(self):
+        dest = self._make_dest()
+        with patch("google.cloud.bigquery.Client") as mock_client_cls:
+            query_job = mock_client_cls.return_value.query.return_value
+            query_job.num_dml_affected_rows = 42
+            affected = dest.execute_dml("INSERT INTO t SELECT 1", schema_name="ds")
+        assert affected == 42
+        query_job.result.assert_called_once_with()
+
+    def test_execute_dml_counts_no_reported_rows_as_zero(self):
+        dest = self._make_dest()
+        with patch("google.cloud.bigquery.Client") as mock_client_cls:
+            query_job = mock_client_cls.return_value.query.return_value
+            query_job.num_dml_affected_rows = None
+            assert dest.execute_dml("INSERT INTO t SELECT 1") == 0
+
 
 @pytest.mark.unit
 class TestApplyNativeHintsPartitionExpiration:
