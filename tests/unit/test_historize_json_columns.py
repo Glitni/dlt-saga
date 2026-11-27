@@ -331,6 +331,9 @@ def _stub_destination():
     dest.json_extract_document.side_effect = lambda col, path, col_type: (
         f"DOC({col}, {'.'.join(path)}, {col_type})"
     )
+    dest.json_path_expression.side_effect = lambda col, path, extract: extract(
+        col, path
+    )
     dest.safe_cast.side_effect = lambda expr, t: f"SAFE({expr} AS {t})"
     dest.dlt_type_to_native.side_effect = lambda t: t.upper()
     dest.type_name.side_effect = lambda t: t.upper()

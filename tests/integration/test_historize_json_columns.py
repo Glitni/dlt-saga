@@ -262,6 +262,130 @@ class TestKeysThatAreNotIdentifiers:
         assert (row["content_type"], row["dotted"]) == ("text/csv", 2)
 
 
+def _tagged(*elements):
+    """A payload holding an array of ``(schema, data)`` tagged objects."""
+    return {"data": [{"schema": schema, "data": data} for schema, data in elements]}
+
+
+_ARTICLE = {"path": "schema", "op": "matches", "value": "^vendor/article/"}
+SELECTOR_COLUMNS = {
+    "article_id": {"column": "payload", "path": ["data", _ARTICLE, "data", "id"]},
+    "words": {
+        "column": "payload",
+        "path": ["data", _ARTICLE, "data", "words"],
+        "data_type": "bigint",
+    },
+    "page": {
+        "column": "payload",
+        "path": ["data", {"path": "schema", "value": "vendor/page/1"}, "data"],
+        "data_type": "json",
+    },
+}
+
+
+@pytest.mark.integration
+class TestArrayElementSelector:
+    """A selector in a path reads from the first matching element of an array."""
+
+    @pytest.mark.parametrize("source_table", [SOURCE_TABLE, JSON_SOURCE_TABLE])
+    def test_values_from_the_matching_element(self, dest, source_table):
+        _insert(
+            dest,
+            [
+                (
+                    1,
+                    _tagged(
+                        ("vendor/page/1", {"url": "/a"}),
+                        ("vendor/article/1", {"id": "a1", "words": 120}),
+                        ("vendor/article/2", {"id": "a2", "words": 5}),
+                    ),
+                    "2026-01-01",
+                    1,
+                ),
+                (2, _tagged(("vendor/page/1", {"url": "/b"})), "2026-01-01", 2),
+                (3, {"data": {"schema": "vendor/article/1"}}, "2026-01-01", 3),
+                (4, "not json", "2026-01-01", 4),
+            ],
+            source_table,
+        )
+        _run(dest, json_columns=SELECTOR_COLUMNS, source_table=source_table)
+
+        rows = _rows(dest)
+        assert [r["article_id"] for r in rows] == ["a1", None, None, None]
+        assert [r["words"] for r in rows] == [120, None, None, None]
+        pages = [json.loads(r["page"]) if r["page"] else None for r in rows]
+        assert pages == [{"url": "/a"}, {"url": "/b"}, None, None]
+        assert _target_types(dest)["words"] == "BIGINT"
+
+    def test_derived_key_and_filter(self, dest):
+        _insert(
+            dest,
+            [
+                (1, _tagged(("vendor/article/1", {"id": "a1"})), "2026-01-01", 1),
+                (2, _tagged(("vendor/article/1", {"id": "a1"})), "2026-01-02", 2),
+                (3, _tagged(("vendor/page/1", {"url": "/b"})), "2026-01-02", 3),
+            ],
+        )
+        _run(
+            dest,
+            primary_key=["article_id"],
+            json_columns={"article_id": SELECTOR_COLUMNS["article_id"]},
+            ignore_columns=["landing_key", "landing_offset"],
+            filters=[
+                {"column": "payload", "path": ["data", _ARTICLE], "op": "is_not_null"}
+            ],
+        )
+        (row,) = _rows(dest, order_by="article_id")
+        assert row["article_id"] == "a1"
+
+    def test_unconvertible_value_is_warned_about(self, dest, caplog):
+        _insert(
+            dest,
+            [(1, _tagged(("vendor/article/1", {"words": "many"})), "2026-01-01", 1)],
+        )
+        with caplog.at_level(logging.WARNING):
+            _run(dest, json_columns=SELECTOR_COLUMNS)
+        assert any(
+            "'words'" in r.getMessage()
+            and "payload.data[schema matches '^vendor/article/'].data.words"
+            in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_changing_the_selector_needs_full_refresh(self, dest):
+        _insert(
+            dest, [(1, _tagged(("vendor/article/1", {"id": "a1"})), "2026-01-01", 1)]
+        )
+        columns = {"article_id": SELECTOR_COLUMNS["article_id"]}
+        _run(dest, json_columns=columns)
+        _insert(
+            dest, [(1, _tagged(("vendor/article/1", {"id": "a1"})), "2026-01-02", 2)]
+        )
+        other = {"path": "schema", "value": "vendor/page/1"}
+        stats = _runner(
+            dest,
+            json_columns={
+                "article_id": {
+                    "column": "payload",
+                    "path": ["data", other, "data", "id"],
+                }
+            },
+        ).run()
+        assert stats["status"] == "failed"
+        assert "--full-refresh" in stats["error"]
+        # Restating the selector's default op is not a change.
+        _run(
+            dest,
+            json_columns={
+                "article_id": {
+                    "column": "payload",
+                    "path": ["data", {**_ARTICLE}, "data", "id"],
+                    "data_type": "text",
+                }
+            },
+        )
+
+
 DOCUMENT_COLUMNS = {
     "meta": {"column": "payload", "path": "meta", "data_type": "json"},
     "user_id": {"column": "payload", "path": "user_id"},

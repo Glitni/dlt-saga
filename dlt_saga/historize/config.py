@@ -10,8 +10,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from dlt_saga.utility.filters import (
+    JsonPath,
+    json_path_definition,
+    parse_filters,
+    parse_json_path,
+)
 from dlt_saga.utility.filters import filter_field_metadata as _filter_field_metadata
-from dlt_saga.utility.filters import parse_filters, parse_json_path
 from dlt_saga.utility.system_columns import HISTORIZE_SYSTEM_COLUMNS, SNAPSHOT_ALIAS
 
 # Bare SQL identifier: letters/underscore start, then letters/digits/underscore.
@@ -36,7 +41,7 @@ class JsonColumn:
 
     name: str
     column: str
-    path: Tuple[str, ...]
+    path: JsonPath
     data_type: str = "text"
 
     @property
@@ -54,7 +59,7 @@ class JsonColumn:
         The config fingerprint stores it per output name, so redefining an
         entry is told apart from adding or removing one.
         """
-        return [self.column, list(self.path), self.data_type]
+        return [self.column, json_path_definition(self.path), self.data_type]
 
 
 def parse_json_columns(
@@ -120,8 +125,8 @@ def _parse_json_column(name: str, entry: Any, label: str) -> JsonColumn:
         )
     if entry.get("path") is None:
         raise ValueError(
-            f"{label}: 'path' is required — the dotted path (or list of keys) "
-            f"to the value inside '{column}'"
+            f"{label}: 'path' is required — the dotted path (or list of keys "
+            f"and selectors) to the value inside '{column}'"
         )
     path = parse_json_path(entry["path"], label)
     data_type = entry.get("data_type", "text")
@@ -535,7 +540,11 @@ class HistorizeConfig:
                 "Typed columns extracted from a JSON column of the source, keyed "
                 "by output column name: {column, path, data_type}. 'column' "
                 "and 'path' (dotted string or list, as in filters) are required; "
-                "'data_type' defaults to text. text holds the value as text — a "
+                "'data_type' defaults to text. A path in list form may hold a "
+                "selector ({path, op, value}) in place of a key: it picks the "
+                "first element of the array at that position whose value at the "
+                "selector's path satisfies the comparison, and the rest of the "
+                "path is read from that element. text holds the value as text — a "
                 "scalar unquoted, an object or array as its JSON text; bigint, "
                 "double, bool, timestamp and date convert that text; json keeps "
                 "the value as a JSON document in the destination's JSON type "

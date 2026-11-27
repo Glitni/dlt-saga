@@ -156,10 +156,41 @@
           "description": "Source column holding the JSON (a JSON-typed column or a string containing JSON)."
         },
         "path": {
-          "description": "JSON path to the value inside the column, as a dotted string ('meta.tenant') or a list of keys. Keys that aren't plain identifiers ('content-type') are quoted for the destination; a key containing '.' needs the list form.",
+          "description": "JSON path to the value inside the column, as a dotted string ('meta.tenant') or a list of keys. Keys that aren't plain identifiers ('content-type') are quoted for the destination; a key containing '.' needs the list form. In the list form an item may be a selector ({path, op, value}) picking the first element of the array at that position whose value at the selector's path satisfies the comparison; the rest of the path is read from that element.",
           "oneOf": [
             {"type": "string"},
-            {"type": "array", "items": {"type": "string"}}
+            {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {"type": "string"},
+                  {
+                    "type": "object",
+                    "description": "Selects the first element of the array at this position whose value at 'path' satisfies the comparison.",
+                    "properties": {
+                      "path": {
+                        "description": "Keys from the element to the value compared, as a dotted string or a list of keys.",
+                        "oneOf": [
+                          {"type": "string"},
+                          {"type": "array", "items": {"type": "string"}}
+                        ]
+                      },
+                      "op": {
+                        "type": "string",
+                        "enum": ["eq", "in", "is_not_null", "is_null", "matches", "ne", "not_in"],
+                        "default": "eq",
+                        "description": "Comparison operator."
+                      },
+                      "value": {
+                        "description": "Comparison value. Required for eq/ne/in/not_in/matches; omit for is_null/is_not_null. List required for in/not_in."
+                      }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
           ]
         },
         "data_type": {

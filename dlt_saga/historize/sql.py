@@ -118,8 +118,12 @@ def json_column_text(destination: Any, spec: JsonColumn, column_type: str) -> st
     ``column_type`` is the source column's catalog type, which decides how
     the destination reads it.
     """
-    return destination.json_extract_text(
-        destination.quote_identifier(spec.column), spec.path, column_type
+    return destination.json_path_expression(
+        destination.quote_identifier(spec.column),
+        spec.path,
+        lambda value_sql, keys: destination.json_extract_text(
+            value_sql, keys, column_type
+        ),
     )
 
 
@@ -130,8 +134,12 @@ def json_column_expression(destination: Any, spec: JsonColumn, column_type: str)
     is the value's text converted to the declared type.
     """
     if spec.is_document:
-        return destination.json_extract_document(
-            destination.quote_identifier(spec.column), spec.path, column_type
+        return destination.json_path_expression(
+            destination.quote_identifier(spec.column),
+            spec.path,
+            lambda value_sql, keys: destination.json_extract_document(
+                value_sql, keys, column_type
+            ),
         )
     return destination.safe_cast(
         json_column_text(destination, spec, column_type), spec.data_type

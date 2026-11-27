@@ -386,6 +386,9 @@ historize:
   #   event_time: { column: payload, path: eventTime, data_type: timestamp }
   #   tenant: { column: payload, path: meta.tenant }
   #   identity: { column: payload, path: identity, data_type: json }
+  #   # A selector in a list path picks the first matching element of an array
+  #   # ({path, op, value}, a filter's vocabulary); the path continues inside it.
+  #   title: { column: params, path: [items, { path: key, value: title }, value] }
 ```
 
 Renaming an SCD2 column or changing `merge_key` (or redefining a `json_columns` entry: its `column`, `path` or `data_type`) after the historized table exists is part of the config fingerprint — the framework will refuse the run and prompt for `saga historize --full-refresh`. Narrowing change detection (a column added to `ignore_columns` or `exclude_columns`, one dropped from `track_columns`) is exempt and applies from the next run; widening still prompts. Source schema changes are not config changes: a column the source gains (or a new `json_columns` entry) is added to the historized table (earlier rows `NULL`), a column it drops is kept with its history and read as `NULL` from then on (warned once), and a changed type is refused with a pointer at `--full-refresh`. A column added to `exclude_columns` after the table exists goes the dropped-column way (kept with its history, `NULL` in new versions, no versions opened by the exclusion); `--full-refresh` or a hand `DROP COLUMN` removes it.
